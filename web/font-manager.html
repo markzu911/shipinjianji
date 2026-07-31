@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="上传、预览和管理可用于视频艺术字的 TTF 与 OTF 字体。"
+    />
+    <title>字体管理 · 视频文字剪辑</title>
+    <link rel="stylesheet" href="/styles.css?v=20260730-08" />
+    <script src="https://code.iconify.design/iconify-icon/3.0.0/iconify-icon.min.js" defer></script>
+    <script src="/ui-feedback.js?v=20260729-03" defer></script>
+    <script src="/font-manager.js?v=20260729-03" defer></script>
+  </head>
+  <body class="font-library-body">
+    <a class="skip-link" href="#main">跳到主要内容</a>
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="brand" href="/" aria-label="返回视频文字剪辑">
+          <span class="brand-mark" aria-hidden="true">
+            <iconify-icon icon="ph:waveform-bold"></iconify-icon>
+          </span>
+          <span>视频文字剪辑</span>
+        </a>
+        <div class="header-actions">
+          <span class="mvp-badge">字体管理</span>
+          <a class="header-restart-button header-link-button" href="/fonts">
+            艺术字模板库
+          </a>
+          <a class="header-restart-button header-link-button" href="/">
+            返回视频编辑
+          </a>
+        </div>
+      </div>
+    </header>
+
+    <main id="main" class="font-library-shell">
+      <section class="font-library-heading" aria-labelledby="font-page-title">
+        <div>
+          <p class="eyebrow">可编辑艺术字素材</p>
+          <h1 id="font-page-title">艺术字字体管理</h1>
+          <p>上传 TTF 或 OTF 字体，统一预览后直接用于视频艺术字。</p>
+        </div>
+        <div class="font-library-stats" aria-label="字体库统计">
+          <span id="builtinFontCount">系统字体 0</span>
+          <span id="uploadedFontCount">我的字体 0</span>
+        </div>
+      </section>
+
+      <section class="panel font-preview-toolbar" aria-label="字体统一预览设置">
+        <label class="field" for="fontPreviewText">
+          <span>预览文字</span>
+          <input
+            id="fontPreviewText"
+            type="text"
+            maxlength="30"
+            value="新征程新赶考"
+          />
+        </label>
+        <label class="field" for="fontPreviewSize">
+          <span>预览字号 <output id="fontPreviewSizeValue">42</output></span>
+          <input id="fontPreviewSize" type="range" min="24" max="72" value="42" />
+        </label>
+        <label class="field color-field" for="fontPreviewColor">
+          <span>预览颜色</span>
+          <input id="fontPreviewColor" type="color" value="#f4f8fb" />
+        </label>
+        <label class="field" for="fontSearch">
+          <span>搜索字体</span>
+          <input id="fontSearch" type="search" placeholder="输入字体名称" />
+        </label>
+      </section>
+
+      <div class="font-library-workspace">
+        <aside class="panel font-upload-panel" aria-labelledby="font-upload-title">
+          <div class="font-panel-heading">
+            <div>
+              <p class="step-label">01 · 上传字体</p>
+              <h2 id="font-upload-title">添加我的字体</h2>
+            </div>
+            <span class="result-chip">TTF / OTF</span>
+          </div>
+
+          <form id="fontUploadForm" novalidate>
+            <label id="fontDropZone" class="font-drop-zone" for="fontFile" tabindex="0">
+              <input id="fontFile" type="file" accept=".ttf,.otf,font/ttf,font/otf" />
+              <span class="font-upload-icon" aria-hidden="true">
+                <iconify-icon icon="ph:upload-simple-bold"></iconify-icon>
+              </span>
+              <strong>拖入字体文件或点击选择</strong>
+              <small>单个文件不超过 20MB</small>
+            </label>
+            <div id="fontFileSummary" class="font-file-summary" hidden>
+              <strong id="fontFileName"></strong>
+              <span id="fontFileSize"></span>
+            </div>
+            <p id="fontUploadError" class="form-error" role="alert" hidden></p>
+            <button id="uploadFontButton" class="primary-button" type="submit" disabled>
+              上传并加入字体库
+            </button>
+          </form>
+
+          <div class="font-upload-note">
+            <strong>上传说明</strong>
+            <p>请确认拥有字体使用权。系统会验证字体能否正常读取，损坏文件不会加入字体库。</p>
+          </div>
+        </aside>
+
+        <section class="panel font-catalog-panel" aria-labelledby="font-catalog-title">
+          <div class="font-panel-heading font-catalog-heading">
+            <div>
+              <p class="step-label">02 · 字体库</p>
+              <h2 id="font-catalog-title">选择和管理字体</h2>
+            </div>
+            <div class="font-source-filters" role="group" aria-label="筛选字体来源">
+              <button type="button" data-font-filter="all" aria-pressed="true">全部</button>
+              <button type="button" data-font-filter="builtin" aria-pressed="false">系统</button>
+              <button type="button" data-font-filter="uploaded" aria-pressed="false">我的</button>
+            </div>
+          </div>
+
+          <div id="fontLibraryLoading" class="font-library-loading" aria-live="polite">
+            <span class="loading-spinner" aria-hidden="true"></span>
+            <strong>正在读取字体库…</strong>
+          </div>
+          <div id="fontLibraryEmpty" class="font-library-empty" hidden>
+            <strong>没有找到符合条件的字体</strong>
+            <span>可以修改搜索条件，或上传一个新的字体文件。</span>
+          </div>
+          <div id="fontCardGrid" class="font-card-grid" aria-live="polite"></div>
+        </section>
+
+        <aside class="panel font-detail-panel" aria-labelledby="font-detail-title">
+          <div class="font-panel-heading">
+            <div>
+              <p class="step-label">03 · 字体详情</p>
+              <h2 id="font-detail-title">查看字体</h2>
+            </div>
+          </div>
+
+          <div id="fontDetailEmpty" class="font-detail-empty">
+            <strong>选择一张字体卡片</strong>
+            <p>可以查看完整预览、设置默认字体，或管理自己上传的字体。</p>
+          </div>
+
+          <div id="fontDetailContent" class="font-detail-content" hidden>
+            <div id="fontDetailPreview" class="font-detail-preview">新征程新赶考</div>
+            <label class="field" for="fontDetailName">
+              <span>字体名称</span>
+              <input id="fontDetailName" type="text" maxlength="80" />
+            </label>
+            <dl class="font-metadata">
+              <div>
+                <dt>来源</dt>
+                <dd id="fontDetailSource"></dd>
+              </div>
+              <div>
+                <dt>字体样式</dt>
+                <dd id="fontDetailStyle"></dd>
+              </div>
+              <div>
+                <dt>文件大小</dt>
+                <dd id="fontDetailSize"></dd>
+              </div>
+            </dl>
+            <p id="fontDetailError" class="form-error" role="alert" hidden></p>
+            <div class="font-detail-actions">
+              <button id="useFontButton" class="primary-button" type="button">
+                设为默认字体
+              </button>
+              <button id="saveFontNameButton" class="secondary-button" type="button">
+                保存名称
+              </button>
+              <a id="downloadFontButton" class="secondary-button" href="#">
+                下载字体
+              </a>
+              <button id="deleteFontButton" class="text-danger-button" type="button">
+                删除字体
+              </button>
+            </div>
+          </div>
+        </aside>
+      </div>
+
+      <p id="fontLibraryStatus" class="sr-only" aria-live="polite"></p>
+    </main>
+  </body>
+</html>

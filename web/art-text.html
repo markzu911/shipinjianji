@@ -1,0 +1,789 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="为视频添加可自定义样式、位置和时间的艺术字。"
+    />
+    <title>添加艺术字 · 视频文字剪辑</title>
+    <link rel="stylesheet" href="/styles.css?v=20260730-08" />
+    <script src="https://code.iconify.design/iconify-icon/3.0.0/iconify-icon.min.js" defer></script>
+    <script src="/ui-feedback.js?v=20260729-03" defer></script>
+    <script src="/art-text.js?v=20260730-09" defer></script>
+  </head>
+  <body class="art-editor-body">
+    <a class="skip-link" href="#main">跳到主要内容</a>
+    <header class="site-header">
+      <div class="header-inner">
+        <a id="brandLink" class="brand" href="/" aria-label="返回视频文字剪辑">
+          <span class="brand-mark" aria-hidden="true">
+            <iconify-icon icon="ph:waveform-bold"></iconify-icon>
+          </span>
+          <span>视频文字剪辑</span>
+        </a>
+        <div class="header-actions">
+          <a
+            id="templateLibraryLink"
+            class="header-restart-button header-link-button"
+            href="/fonts"
+          >
+            艺术字模板库
+          </a>
+          <span class="mvp-badge">MVP · 艺术字</span>
+          <button
+            id="restartProjectButton"
+            class="header-restart-button"
+            type="button"
+          >
+            重新开始
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main id="main" class="art-page-shell">
+      <nav class="workflow-steps" aria-label="视频制作进度">
+        <span class="workflow-step is-complete">
+          <span class="workflow-index">1</span>
+          上传与转写
+        </span>
+        <span class="workflow-line" aria-hidden="true"></span>
+        <span class="workflow-step is-complete">
+          <span class="workflow-index">2</span>
+          视频剪辑（可选）
+        </span>
+        <span class="workflow-line" aria-hidden="true"></span>
+        <span class="workflow-step is-active" aria-current="step">
+          <span class="workflow-index">3</span>
+          添加艺术字
+        </span>
+        <span class="workflow-line" aria-hidden="true"></span>
+        <span class="workflow-step">
+          <span class="workflow-index">4</span>
+          插入画中画
+        </span>
+      </nav>
+
+      <section class="art-page-heading" aria-labelledby="art-page-title">
+        <div>
+          <p class="eyebrow">视频制作的下一步</p>
+          <h1 id="art-page-title">为重点内容添加艺术字</h1>
+          <p>从保留文案中选择一句，或输入自定义文字。可以添加多条并分别设置出现时间。</p>
+        </div>
+        <a id="directDownload" class="secondary-button compact-button" href="#">
+          下载当前视频
+        </a>
+      </section>
+
+      <section id="pageLoading" class="panel art-loading" aria-live="polite">
+        <span class="loading-spinner" aria-hidden="true"></span>
+        <strong>正在读取视频…</strong>
+      </section>
+
+      <section id="pageError" class="panel art-error" role="alert" hidden>
+        <p class="step-label">无法打开艺术字编辑器</p>
+        <h2 id="pageErrorText">视频不存在或尚未准备完成。</h2>
+        <a id="backToEdit" class="primary-button compact-button" href="/">返回文字剪辑</a>
+      </section>
+
+      <div id="artWorkspace" hidden>
+        <div class="workbench-tabbar" role="tablist" aria-label="艺术字编辑功能">
+          <button
+            id="settingsTab"
+            class="workbench-tab"
+            type="button"
+            role="tab"
+            aria-selected="true"
+            aria-controls="settingsPanel"
+            data-workbench-tab="settings"
+          >
+            艺术字设置
+          </button>
+          <button
+            id="aiTab"
+            class="workbench-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="aiPanel"
+            data-workbench-tab="ai"
+            tabindex="-1"
+          >
+            AI 推荐
+          </button>
+          <button
+            id="transcriptTab"
+            class="workbench-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="transcriptPanel"
+            data-workbench-tab="transcript"
+            tabindex="-1"
+          >
+            视频文案
+          </button>
+          <button
+            id="outputTab"
+            class="workbench-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="outputPanel"
+            data-workbench-tab="output"
+            tabindex="-1"
+          >
+            生成下载
+          </button>
+        </div>
+
+        <section class="art-editor-grid">
+          <div class="panel preview-panel">
+            <div class="art-section-heading">
+              <div>
+                <p class="step-label">01 · 视频预览</p>
+                <h2>拖动画面中的文字调整位置</h2>
+              </div>
+              <span id="videoTime" class="result-chip">00:00 / 00:00</span>
+            </div>
+
+            <div id="artVideoPlayer" class="media-player-shell">
+              <div id="videoStage" class="video-stage">
+                <video id="artVideo" preload="metadata" playsinline></video>
+                <div id="overlayLayer" class="overlay-layer" aria-label="艺术字预览"></div>
+              </div>
+              <div
+                class="external-video-controls"
+                data-media-controls
+                data-video-id="artVideo"
+                data-fullscreen-id="artVideoPlayer"
+                aria-label="视频预览播放控制"
+              >
+                <button class="media-control-button" type="button" data-media-play aria-label="播放">
+                  <iconify-icon data-media-play-icon icon="ph:play-fill" aria-hidden="true"></iconify-icon>
+                  <iconify-icon data-media-pause-icon icon="ph:pause-fill" aria-hidden="true" hidden></iconify-icon>
+                </button>
+                <input
+                  class="media-seek"
+                  data-media-seek
+                  type="range"
+                  min="0"
+                  max="0"
+                  step="0.01"
+                  value="0"
+                  aria-label="视频进度"
+                />
+                <output class="media-time" data-media-time>00:00 / 00:00</output>
+                <button class="media-control-button" type="button" data-media-mute aria-label="静音">
+                  <iconify-icon data-media-volume-icon icon="ph:speaker-high-fill" aria-hidden="true"></iconify-icon>
+                  <iconify-icon data-media-muted-icon icon="ph:speaker-slash-fill" aria-hidden="true" hidden></iconify-icon>
+                </button>
+                <input
+                  class="media-volume"
+                  data-media-volume
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value="1"
+                  aria-label="音量"
+                />
+                <button class="media-control-button" type="button" data-media-fullscreen aria-label="进入全屏">
+                  <iconify-icon icon="ph:corners-out-bold" aria-hidden="true"></iconify-icon>
+                </button>
+              </div>
+              <div id="frameTimeline" class="frame-timeline" aria-label="艺术字时间轴" hidden>
+                <div class="frame-timeline-heading">
+                  <strong>艺术字时间轴</strong>
+                  <div class="frame-timeline-jump">
+                    <label class="sr-only" for="frameTimelineJumpInput">定位到指定时间</label>
+                    <input
+                      id="frameTimelineJumpInput"
+                      type="text"
+                      inputmode="decimal"
+                      maxlength="12"
+                      placeholder="00:14 或 14.5"
+                      aria-describedby="frameTimelineStatus"
+                    />
+                    <button id="frameTimelineJumpButton" type="button">定位</button>
+                    <output id="frameTimelineTime">00:00 / 00:00</output>
+                  </div>
+                </div>
+                <div class="frame-timeline-track">
+                  <div id="frameTimelineRuler" class="frame-timeline-ruler" aria-hidden="true"></div>
+                  <div id="frameTimelineThumbnails" class="frame-timeline-thumbnails" aria-hidden="true"></div>
+                  <div id="frameTimelineSegments" class="frame-timeline-segments" aria-hidden="true"></div>
+                  <span id="frameTimelinePlayhead" class="frame-timeline-playhead" aria-hidden="true"></span>
+                  <input
+                    id="frameTimelineSeek"
+                    class="frame-timeline-seek"
+                    type="range"
+                    min="0"
+                    max="0"
+                    step="0.033"
+                    value="0"
+                    aria-label="逐帧定位艺术字预览时间"
+                  />
+                </div>
+                <p id="frameTimelineStatus" class="frame-timeline-status" role="status" aria-live="polite"></p>
+              </div>
+            </div>
+            <p class="section-helper">播放或拖动视频进度，可检查每条艺术字出现的时间。</p>
+          </div>
+
+          <aside
+            id="settingsPanel"
+            class="panel art-control-panel workbench-panel"
+            role="tabpanel"
+            aria-labelledby="settingsTab"
+            data-workbench-panel="settings"
+          >
+            <div class="art-section-heading">
+              <div>
+                <p class="step-label">02 · 艺术字设置</p>
+                <h2 id="controls-title">添加并调整文字</h2>
+              </div>
+              <span id="overlayCount" class="result-chip">0 / 20</span>
+            </div>
+
+            <div class="custom-text-row">
+              <label for="customText">自定义文字</label>
+              <div class="inline-input-action">
+                <input id="customText" type="text" maxlength="60" placeholder="例如：今天分享三个重点" />
+                <button id="addCustomText" class="secondary-button" type="button">添加</button>
+              </div>
+            </div>
+
+            <div id="emptyControlState" class="empty-control-state">
+              添加一条文字后，即可设置字体、颜色、位置和显示时间。
+            </div>
+
+            <fieldset id="overlayControls" class="overlay-controls" disabled>
+              <legend class="sr-only">当前艺术字设置</legend>
+
+              <div class="art-style-picker full-field">
+                <span class="field-label">艺术字模板</span>
+                <div id="artStyleGrid" class="art-style-grid" role="radiogroup" aria-label="选择艺术字模板">
+                  <button class="art-style-option" type="button" data-art-style="impact" aria-pressed="true">
+                    <span class="art-style-sample style-impact">热血</span>
+                    <span>
+                      <strong>热血立体</strong>
+                      <small>双层描边与厚重投影</small>
+                    </span>
+                  </button>
+                  <button class="art-style-option" type="button" data-art-style="neon" aria-pressed="false">
+                    <span class="art-style-sample style-neon">霓虹</span>
+                    <span>
+                      <strong>霓虹发光</strong>
+                      <small>高亮文字与彩色光晕</small>
+                    </span>
+                  </button>
+                  <button class="art-style-option" type="button" data-art-style="metal" aria-pressed="false">
+                    <span class="art-style-sample style-metal">金属</span>
+                    <span>
+                      <strong>金属渐变</strong>
+                      <small>渐变高光与立体侧边</small>
+                    </span>
+                  </button>
+                  <button class="art-style-option" type="button" data-art-style="sticker" aria-pressed="false">
+                    <span class="art-style-sample style-sticker">贴纸</span>
+                    <span>
+                      <strong>标签贴纸</strong>
+                      <small>圆角底板与白色边框</small>
+                    </span>
+                  </button>
+                  <button class="art-style-option" type="button" data-art-style="clean" aria-pressed="false">
+                    <span class="art-style-sample style-clean">清爽</span>
+                    <span>
+                      <strong>清爽描边</strong>
+                      <small>适合字幕和简洁标题</small>
+                    </span>
+                  </button>
+                  <button class="art-style-option" type="button" data-art-style="gradient" aria-pressed="false">
+                    <span class="art-style-sample style-gradient">元气</span>
+                    <span>
+                      <strong>元气渐变</strong>
+                      <small>橙粉渐变与柔和投影</small>
+                    </span>
+                  </button>
+                  <button class="art-style-option" type="button" data-art-style="comic" aria-pressed="false">
+                    <span class="art-style-sample style-comic">漫画</span>
+                    <span>
+                      <strong>漫画标题</strong>
+                      <small>红黑双描边与硬投影</small>
+                    </span>
+                  </button>
+                  <button class="art-style-option" type="button" data-art-style="ice" aria-pressed="false">
+                    <span class="art-style-sample style-ice">冰晶</span>
+                    <span>
+                      <strong>冰晶高光</strong>
+                      <small>蓝白渐变与清透光晕</small>
+                    </span>
+                  </button>
+                  <button class="art-style-option" type="button" data-art-style="ink" aria-pressed="false">
+                    <span class="art-style-sample style-ink">国风</span>
+                    <span>
+                      <strong>国风水墨</strong>
+                      <small>宣纸底板与朱砂点缀</small>
+                    </span>
+                  </button>
+                  <button class="art-style-option" type="button" data-art-style="ribbon" aria-pressed="false">
+                    <span class="art-style-sample style-ribbon">彩带</span>
+                    <span>
+                      <strong>彩带标题</strong>
+                      <small>异形色块与醒目白字</small>
+                    </span>
+                  </button>
+                  <button class="art-style-option" type="button" data-art-style="luxury" aria-pressed="false">
+                    <span class="art-style-sample style-luxury">黑金</span>
+                    <span>
+                      <strong>黑金质感</strong>
+                      <small>深色底板与双层金边</small>
+                    </span>
+                  </button>
+                </div>
+              </div>
+
+              <label class="field full-field" for="overlayText">
+                <span>文字内容</span>
+                <textarea id="overlayText" rows="2" maxlength="60"></textarea>
+                <small
+                  id="transcriptTrackHint"
+                  class="transcript-track-hint"
+                  role="status"
+                  hidden
+                >
+                  全文轨道已由 AI 按语气和停顿分句，每行最多 10 字，并锁定统一字号、单行和词级时间。修改模板、字体、字号、颜色或位置，会同步到整条轨道。
+                </small>
+              </label>
+
+              <label class="field" for="fontSelect">
+                <span>字体</span>
+                <select id="fontSelect">
+                  <option value="modern">现代黑体</option>
+                  <option value="bold">醒目粗体</option>
+                  <option value="classic">经典黑体</option>
+                  <option value="song">宋体</option>
+                  <option value="kai">楷体</option>
+                  <option value="fang">仿宋</option>
+                </select>
+              </label>
+
+              <label class="field" for="fontSize">
+                <span>字号 <output id="fontSizeValue">54</output></span>
+                <input id="fontSize" type="range" min="20" max="180" value="54" />
+              </label>
+
+              <section class="layout-settings full-field" aria-labelledby="layout-settings-title">
+                <div class="layout-settings-heading">
+                  <strong id="layout-settings-title">排版方式</strong>
+                  <small>支持手动换行，0 表示不自动换行</small>
+                </div>
+
+                <label class="field" for="directionSelect">
+                  <span>文字方向</span>
+                  <select id="directionSelect">
+                    <option value="horizontal">横向排版</option>
+                    <option value="vertical">竖向排版</option>
+                  </select>
+                </label>
+
+                <label class="field" for="textAlignSelect">
+                  <span>对齐方式</span>
+                  <select id="textAlignSelect">
+                    <option value="left">左对齐</option>
+                    <option value="center">居中对齐</option>
+                    <option value="right">右对齐</option>
+                  </select>
+                </label>
+
+                <label class="field" for="charsPerLine">
+                  <span id="charsPerLineLabel">每行字数</span>
+                  <input id="charsPerLine" type="number" min="0" max="20" value="10" />
+                </label>
+
+                <label class="field" for="letterSpacing">
+                  <span>字间距 <output id="letterSpacingValue">0</output></span>
+                  <input id="letterSpacing" type="range" min="0" max="20" value="0" />
+                </label>
+
+                <label class="field" for="lineSpacing">
+                  <span>行间距 <output id="lineSpacingValue">8</output></span>
+                  <input id="lineSpacing" type="range" min="0" max="40" value="8" />
+                </label>
+              </section>
+
+              <label class="field color-field" for="textColor">
+                <span>文字颜色</span>
+                <input id="textColor" type="color" value="#ffd84d" />
+              </label>
+
+              <label class="field color-field" for="strokeColor">
+                <span>描边颜色</span>
+                <input id="strokeColor" type="color" value="#071018" />
+              </label>
+
+              <label class="field" for="strokeWidth">
+                <span>描边 <output id="strokeWidthValue">3</output></span>
+                <input id="strokeWidth" type="range" min="0" max="12" value="3" />
+              </label>
+
+              <label class="toggle-field" for="shadowToggle">
+                <span>
+                  <strong>文字阴影</strong>
+                  <small>增强文字与背景的层次</small>
+                </span>
+                <input id="shadowToggle" type="checkbox" checked />
+              </label>
+
+              <label class="field" for="startTime">
+                <span>开始时间（秒）</span>
+                <input id="startTime" type="number" min="0" step="0.1" />
+              </label>
+
+              <label class="field" for="endTime">
+                <span>结束时间（秒）</span>
+                <input id="endTime" type="number" min="0.1" step="0.1" />
+              </label>
+
+              <div class="caption-time-action full-field">
+                <span>
+                  <strong>文案时间匹配</strong>
+                  <small>按艺术字内容匹配文案，匹配不到时使用当前时间附近的文案</small>
+                </span>
+                <button
+                  id="fitArtToTranscript"
+                  class="secondary-button compact-button"
+                  type="button"
+                  disabled
+                >
+                  一键贴合文案时间
+                </button>
+                <p id="artTimeFitMessage" role="status" aria-live="polite" hidden></p>
+              </div>
+
+              <div class="apply-all-settings full-field">
+                <span>
+                  <strong>统一所有艺术字设置</strong>
+                  <small id="applyAllSettingsHint">保留每条文案与出现时间</small>
+                </span>
+                <button
+                  id="applyCurrentSettingsToAll"
+                  class="secondary-button compact-button"
+                  type="button"
+                  aria-describedby="applyAllSettingsHint"
+                  disabled
+                >
+                  应用当前设置到全部
+                </button>
+                <p
+                  id="applyAllSettingsMessage"
+                  role="status"
+                  aria-live="polite"
+                  hidden
+                ></p>
+              </div>
+
+              <button id="deleteOverlay" class="text-danger-button full-field" type="button">
+                删除当前艺术字
+              </button>
+            </fieldset>
+
+            <div class="overlay-list-heading">
+              <strong>已添加的艺术字</strong>
+              <span>点击切换编辑</span>
+            </div>
+            <ol id="overlayList" class="overlay-list"></ol>
+          </aside>
+        </section>
+
+        <section
+          id="aiPanel"
+          class="panel ai-art-panel workbench-panel"
+          role="tabpanel"
+          aria-labelledby="aiTab"
+          data-workbench-panel="ai"
+          hidden
+        >
+          <div class="art-section-heading">
+            <div>
+              <p class="step-label">03 · AI 自动添加艺术字</p>
+              <h2 id="ai-art-title">让 AI 推荐时间、位置和艺术字文案</h2>
+            </div>
+            <span class="result-chip">确认后才会添加</span>
+          </div>
+          <p class="ai-art-description">
+            AI 会结合口播文案和低清关键帧拼图寻找内容重点与画面留白。关键帧仅临时上传到阿里云百炼，用于本次分析。
+          </p>
+
+          <div class="ai-art-request">
+            <label class="field ai-count-field" for="aiSuggestionCount">
+              <span>本次新增数量</span>
+              <input id="aiSuggestionCount" type="number" min="1" max="20" value="3" inputmode="numeric" />
+            </label>
+            <button id="generateAiSuggestions" class="primary-button" type="button">
+              AI 分析并推荐
+            </button>
+            <small id="aiSuggestionLimit">最多还可新增 20 条</small>
+          </div>
+
+          <p id="aiSuggestionError" class="form-error" role="alert" hidden></p>
+          <div id="aiSuggestionProgress" class="cut-progress" hidden>
+            <div class="cut-progress-heading">
+              <strong id="aiSuggestionStatus">正在分析视频内容…</strong>
+              <span id="aiSuggestionProgressPercent">0%</span>
+            </div>
+            <div
+              id="aiSuggestionProgressTrack"
+              class="progress-track"
+              role="progressbar"
+              aria-label="AI 艺术字分析进度"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow="0"
+            >
+              <span id="aiSuggestionProgressBar" class="progress-bar"></span>
+            </div>
+          </div>
+
+          <section id="aiSuggestionReview" class="ai-suggestion-review" aria-labelledby="ai-review-title" hidden>
+            <div class="ai-review-heading">
+              <div>
+                <h3 id="ai-review-title">审核 AI 艺术字草稿</h3>
+                <p>可修改文案、时间、位置和模板，也可取消勾选不需要的项目。</p>
+              </div>
+              <span id="aiSuggestionReviewCount" class="result-chip"></span>
+            </div>
+            <ol id="aiSuggestionList" class="ai-suggestion-list"></ol>
+            <div class="ai-review-actions">
+              <button id="cancelAiSuggestions" class="secondary-button" type="button">
+                取消这批草稿
+              </button>
+              <button id="confirmAiSuggestions" class="primary-button" type="button">
+                确认并添加
+              </button>
+            </div>
+          </section>
+        </section>
+
+        <section
+          id="transcriptPanel"
+          class="panel retained-panel workbench-panel"
+          role="tabpanel"
+          aria-labelledby="transcriptTab"
+          data-workbench-panel="transcript"
+          hidden
+        >
+          <div class="art-section-heading">
+            <div>
+              <p class="step-label">04 · 视频文案</p>
+              <h2 id="retained-title">修改文案并添加到视频</h2>
+            </div>
+            <span id="retainedMeta" class="result-chip"></span>
+          </div>
+          <div class="retained-transcript-editor">
+            <label for="retainedText">可修改视频文案</label>
+            <textarea
+              id="retainedText"
+              class="retained-full-text"
+              rows="6"
+              spellcheck="false"
+              aria-describedby="retainedEditHelper retainedEditStatus"
+            ></textarea>
+            <div class="retained-edit-actions">
+              <small id="retainedEditHelper">
+                可修正错字和标点；保存后会保留原词级时间，并同步已添加的全文艺术字。
+              </small>
+              <button
+                id="saveRetainedText"
+                class="secondary-button compact-button"
+                type="button"
+                disabled
+              >
+                保存修改
+              </button>
+            </div>
+            <p
+              id="retainedEditStatus"
+              class="retained-edit-status"
+              role="status"
+              aria-live="polite"
+              hidden
+            ></p>
+          </div>
+          <div class="retained-bulk-toolbar" aria-label="批量添加艺术字">
+            <label class="retained-select-all" for="selectAllRetainedSegments">
+              <input
+                id="selectAllRetainedSegments"
+                type="checkbox"
+                aria-label="全选可添加文案"
+                aria-describedby="retainedSelectionStatus"
+              />
+              <span>全选可添加文案</span>
+              <small id="retainedSelectionStatus" role="status">已选 0 / 0</small>
+            </label>
+            <div class="retained-bulk-actions">
+              <button
+                id="addSelectedRetainedSegments"
+                class="primary-button compact-button"
+                type="button"
+                disabled
+              >
+                添加所选（0）
+              </button>
+              <button
+                id="addAllRetainedSegments"
+                class="secondary-button compact-button"
+                type="button"
+              >
+                AI 分句生成艺术字字幕
+              </button>
+            </div>
+            <p
+              id="retainedBulkMessage"
+              class="retained-bulk-message"
+              role="status"
+              aria-live="polite"
+              hidden
+            ></p>
+          </div>
+          <ol id="retainedSegments" class="retained-segments"></ol>
+        </section>
+
+        <div
+          id="outputPanel"
+          class="workbench-output-panel workbench-panel"
+          role="tabpanel"
+          aria-labelledby="outputTab"
+          data-workbench-panel="output"
+          hidden
+        >
+        <section class="panel generate-panel" aria-labelledby="generate-title">
+          <div>
+            <p class="step-label">05 · 生成视频</p>
+            <h2 id="generate-title">确认预览后生成最终视频</h2>
+            <p>生成后仍可返回修改参数，再次输出新版本。</p>
+          </div>
+          <label class="history-save-name" for="artHistoryName">
+            <span>保存名称 <small>可选，留空将自动生成安全名称</small></span>
+            <input
+              id="artHistoryName"
+              type="text"
+              maxlength="80"
+              autocomplete="off"
+              placeholder="例如：重点艺术字确认版"
+            />
+          </label>
+          <button id="generateArtVideo" class="primary-button" type="button" disabled>
+            生成艺术字视频
+          </button>
+          <p id="artFormError" class="form-error full-row" role="alert" hidden></p>
+          <div id="artProgress" class="cut-progress art-generation-progress full-row" hidden>
+            <div class="art-progress-field" aria-hidden="true">
+              <span class="art-progress-orbit art-progress-orbit-a"></span>
+              <span class="art-progress-orbit art-progress-orbit-b"></span>
+              <span class="art-progress-scan"></span>
+              <span class="art-particle art-particle-1"></span>
+              <span class="art-particle art-particle-2"></span>
+              <span class="art-particle art-particle-3"></span>
+              <span class="art-particle art-particle-4"></span>
+              <span class="art-particle art-particle-5"></span>
+              <span class="art-particle art-particle-6"></span>
+              <span class="art-particle art-particle-7"></span>
+              <span class="art-particle art-particle-8"></span>
+            </div>
+            <div class="cut-progress-heading">
+              <strong>
+                <iconify-icon icon="ph:atom-bold" aria-hidden="true"></iconify-icon>
+                <span id="artStatus">正在生成艺术字视频…</span>
+              </strong>
+              <span id="artProgressPercent">0%</span>
+            </div>
+            <div
+              id="artProgressTrack"
+              class="progress-track"
+              role="progressbar"
+              aria-label="艺术字视频生成进度"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow="0"
+            >
+              <span id="artProgressBar" class="progress-bar"></span>
+            </div>
+            <div class="art-progress-stages" aria-hidden="true">
+              <span>解析时间轴</span>
+              <span>渲染艺术字</span>
+              <span>写入成片</span>
+            </div>
+          </div>
+        </section>
+
+        <section id="artResult" class="panel art-result-panel" aria-labelledby="art-result-title" hidden>
+          <div class="cut-result-heading">
+            <div>
+              <p class="step-label success-label">06 · 制作完成</p>
+              <h2 id="art-result-title" tabindex="-1">艺术字视频已经生成</h2>
+            </div>
+            <span id="artResultDuration" class="result-chip"></span>
+          </div>
+          <div id="finalVideoPlayer" class="media-player-shell result-video-player">
+            <div class="final-video-viewport">
+              <video id="finalVideo" preload="metadata" playsinline></video>
+            </div>
+            <div
+              class="external-video-controls"
+              data-media-controls
+              data-video-id="finalVideo"
+              data-fullscreen-id="finalVideoPlayer"
+              aria-label="成品视频播放控制"
+            >
+              <button class="media-control-button" type="button" data-media-play aria-label="播放">
+                <iconify-icon data-media-play-icon icon="ph:play-fill" aria-hidden="true"></iconify-icon>
+                <iconify-icon data-media-pause-icon icon="ph:pause-fill" aria-hidden="true" hidden></iconify-icon>
+              </button>
+              <input
+                class="media-seek"
+                data-media-seek
+                type="range"
+                min="0"
+                max="0"
+                step="0.01"
+                value="0"
+                aria-label="视频进度"
+              />
+              <output class="media-time" data-media-time>00:00 / 00:00</output>
+              <button class="media-control-button" type="button" data-media-mute aria-label="静音">
+                <iconify-icon data-media-volume-icon icon="ph:speaker-high-fill" aria-hidden="true"></iconify-icon>
+                <iconify-icon data-media-muted-icon icon="ph:speaker-slash-fill" aria-hidden="true" hidden></iconify-icon>
+              </button>
+              <input
+                class="media-volume"
+                data-media-volume
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                value="1"
+                aria-label="音量"
+              />
+              <button class="media-control-button" type="button" data-media-fullscreen aria-label="进入全屏">
+                <iconify-icon icon="ph:corners-out-bold" aria-hidden="true"></iconify-icon>
+              </button>
+            </div>
+          </div>
+          <div class="result-actions">
+            <a id="downloadFinalVideo" class="secondary-button compact-button" href="#">
+              下载艺术字视频
+            </a>
+            <a id="continuePictureInPicture" class="primary-button compact-button" href="#">
+              继续插入画中画
+            </a>
+          </div>
+        </section>
+        </div>
+      </div>
+    </main>
+  </body>
+</html>

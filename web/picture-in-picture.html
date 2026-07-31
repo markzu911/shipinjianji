@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="选择视频文案片段，使用 AI 生成并插入与口播时间同步的画中画。"
+    />
+    <title>插入画中画 · 视频文字剪辑</title>
+    <link rel="stylesheet" href="/styles.css?v=20260730-08" />
+    <script src="https://code.iconify.design/iconify-icon/3.0.0/iconify-icon.min.js" defer></script>
+    <script src="/ui-feedback.js?v=20260729-03" defer></script>
+    <script src="/picture-in-picture.js?v=20260730-01" defer></script>
+  </head>
+  <body class="pip-editor-body">
+    <a class="skip-link" href="#main">跳到主要内容</a>
+    <header class="site-header">
+      <div class="header-inner">
+        <a id="brandLink" class="brand" href="/" aria-label="返回视频文字剪辑">
+          <span class="brand-mark" aria-hidden="true">
+            <iconify-icon icon="ph:waveform-bold"></iconify-icon>
+          </span>
+          <span>视频文字剪辑</span>
+        </a>
+        <div class="header-actions">
+          <a id="backToArtText" class="header-restart-button header-link-button" href="#">
+            返回艺术字编辑
+          </a>
+          <span class="pip-model-badge" title="画中画图片与视频生成模型">
+            Seedream · Seedance
+          </span>
+          <button id="restartProjectButton" class="header-restart-button" type="button">
+            重新开始
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main id="main" class="pip-page-shell">
+      <nav class="workflow-steps" aria-label="视频制作进度">
+        <span class="workflow-step is-complete">
+          <span class="workflow-index">1</span>
+          上传与转写
+        </span>
+        <span class="workflow-line" aria-hidden="true"></span>
+        <span id="pipEditWorkflowStep" class="workflow-step is-complete">
+          <span class="workflow-index">2</span>
+          视频剪辑（可选）
+        </span>
+        <span class="workflow-line" aria-hidden="true"></span>
+        <span id="pipArtWorkflowStep" class="workflow-step is-complete">
+          <span class="workflow-index">3</span>
+          艺术字（可选）
+        </span>
+        <span class="workflow-line" aria-hidden="true"></span>
+        <span class="workflow-step is-active" aria-current="step">
+          <span class="workflow-index">4</span>
+          插入画中画
+        </span>
+      </nav>
+
+      <section class="pip-page-heading" aria-labelledby="pip-page-title">
+        <div>
+          <p class="eyebrow">AI 画中画</p>
+          <h1 id="pip-page-title">让画面跟随重点文案出现</h1>
+          <p>选择一段口播文字，生成对应画面；图片会在该段文字的时长内自动显示。</p>
+        </div>
+        <div class="pip-heading-chips">
+          <span id="pipSourceLabel" class="pip-time-chip">艺术字视频</span>
+          <span id="pipCount" class="result-chip">0 / 20</span>
+        </div>
+      </section>
+
+      <section id="pageLoading" class="panel art-loading" aria-live="polite">
+        <span class="loading-spinner" aria-hidden="true"></span>
+        <strong>正在读取艺术字视频…</strong>
+      </section>
+
+      <section id="pageError" class="panel art-error" role="alert" hidden>
+        <p class="step-label">无法打开画中画编辑器</p>
+        <h2 id="pageErrorText">请先生成艺术字视频。</h2>
+        <a id="pageErrorBack" class="primary-button compact-button" href="#">
+          返回艺术字编辑
+        </a>
+      </section>
+
+      <div id="pipWorkspace" class="pip-workspace" hidden>
+        <section class="panel pip-preview-panel" aria-labelledby="pip-preview-title">
+          <div class="art-section-heading">
+            <div>
+              <p class="step-label">01 · 实时预览</p>
+              <h2 id="pip-preview-title">播放到对应时间，拖动画中画调整位置</h2>
+            </div>
+            <span id="videoTime" class="result-chip">00:00 / 00:00</span>
+          </div>
+
+          <div id="pipVideoPlayer" class="media-player-shell pip-media-player">
+            <div id="pipVideoStage" class="video-stage pip-video-stage">
+              <video id="pipVideo" preload="metadata" playsinline></video>
+              <div id="pipOverlayLayer" class="pip-overlay-layer" aria-label="画中画实时预览"></div>
+            </div>
+            <div
+              class="external-video-controls"
+              data-media-controls
+              data-video-id="pipVideo"
+              data-fullscreen-id="pipVideoPlayer"
+              aria-label="画中画视频播放控制"
+            >
+              <button class="media-control-button" type="button" data-media-play aria-label="播放">
+                <iconify-icon data-media-play-icon icon="ph:play-fill" aria-hidden="true"></iconify-icon>
+                <iconify-icon data-media-pause-icon icon="ph:pause-fill" aria-hidden="true" hidden></iconify-icon>
+              </button>
+              <input class="media-seek" data-media-seek type="range" min="0" max="0" step="0.01" value="0" aria-label="视频进度" />
+              <output class="media-time" data-media-time>00:00 / 00:00</output>
+              <button class="media-control-button" type="button" data-media-mute aria-label="静音">
+                <iconify-icon data-media-volume-icon icon="ph:speaker-high-fill" aria-hidden="true"></iconify-icon>
+                <iconify-icon data-media-muted-icon icon="ph:speaker-slash-fill" aria-hidden="true" hidden></iconify-icon>
+              </button>
+              <input class="media-volume" data-media-volume type="range" min="0" max="1" step="0.05" value="1" aria-label="音量" />
+              <button class="media-control-button" type="button" data-media-fullscreen aria-label="进入全屏">
+                <iconify-icon icon="ph:corners-out-bold" aria-hidden="true"></iconify-icon>
+              </button>
+            </div>
+          </div>
+
+          <div class="pip-timeline" aria-label="画中画时间轴">
+            <div class="pip-timeline-heading">
+              <strong>画中画时间</strong>
+              <output id="timelineTime">00:00 / 00:00</output>
+            </div>
+            <div id="pipTimelineTrack" class="pip-timeline-track">
+              <div id="pipTimelineRuler" class="pip-timeline-ruler" aria-hidden="true"></div>
+              <div id="pipTimelineThumbnails" class="frame-timeline-thumbnails pip-timeline-thumbnails" aria-hidden="true"></div>
+              <div id="pipTimelineSegments" class="pip-timeline-segments" aria-label="已添加的画中画片段"></div>
+              <span id="pipTimelinePlayhead" class="pip-timeline-playhead" aria-hidden="true"></span>
+              <input id="pipTimelineSeek" class="pip-timeline-seek" type="range" min="0" max="0" step="0.033" value="0" aria-label="定位视频时间" />
+            </div>
+          </div>
+          <p id="previewHint" class="section-helper">画中画出现后可直接按住拖动摆放；下拉位置可用于快速定位。</p>
+        </section>
+
+        <aside class="panel pip-control-panel" aria-labelledby="pip-controls-title">
+          <div class="art-section-heading pip-control-heading">
+            <div>
+              <p class="step-label">02 · 选择和生成</p>
+              <h2 id="pip-controls-title">选择要插入画面的文字</h2>
+            </div>
+          </div>
+
+          <section class="pip-control-section" aria-labelledby="segment-title">
+            <div class="pip-section-title-row">
+              <h3 id="segment-title">1. 选择文字片段</h3>
+              <span id="selectedSegmentTime" class="pip-time-chip">尚未选择</span>
+            </div>
+            <div id="segmentList" class="pip-segment-list" role="radiogroup" aria-label="选择文字片段"></div>
+          </section>
+
+          <section class="pip-control-section" aria-labelledby="generation-title">
+            <h3 id="generation-title">2. 选择素材并描述画面</h3>
+            <fieldset class="pip-asset-type-field">
+              <legend>画中画类型</legend>
+              <div class="pip-generation-modes" role="radiogroup" aria-label="画中画素材类型">
+                <label class="pip-mode-option is-selected">
+                  <input type="radio" name="assetType" value="image" checked />
+                  <span><strong>生成图片</strong><small>Seedream 静态画面</small></span>
+                </label>
+                <label class="pip-mode-option">
+                  <input type="radio" name="assetType" value="video" />
+                  <span><strong>生成视频</strong><small>Seedance 动态镜头</small></span>
+                </label>
+              </div>
+            </fieldset>
+            <div class="pip-generation-modes" role="radiogroup" aria-label="画中画生成方式">
+              <label class="pip-mode-option is-selected">
+                <input type="radio" name="generationMode" value="custom" checked />
+                <span><strong>自己输入提示词</strong><small>由你描述具体内容</small></span>
+              </label>
+              <label class="pip-mode-option">
+                <input type="radio" name="generationMode" value="auto" />
+                <span><strong>AI 智能生成</strong><small>根据所选文字自动构思</small></span>
+              </label>
+            </div>
+            <fieldset class="pip-aspect-ratio-field">
+              <legend id="aspectRatioLegend">生成图片尺寸</legend>
+              <div id="pipAspectRatioOptions" class="pip-aspect-ratio-options">
+                <label class="pip-aspect-ratio-option" data-ratio="1:1">
+                  <input type="radio" name="imageAspectRatio" value="1:1" />
+                  <span class="pip-ratio-shape" aria-hidden="true"></span>
+                  <strong>1:1</strong>
+                </label>
+                <label class="pip-aspect-ratio-option" data-ratio="3:4">
+                  <input type="radio" name="imageAspectRatio" value="3:4" />
+                  <span class="pip-ratio-shape" aria-hidden="true"></span>
+                  <strong>3:4</strong>
+                </label>
+                <label class="pip-aspect-ratio-option" data-ratio="4:3">
+                  <input type="radio" name="imageAspectRatio" value="4:3" />
+                  <span class="pip-ratio-shape" aria-hidden="true"></span>
+                  <strong>4:3</strong>
+                </label>
+                <label class="pip-aspect-ratio-option is-selected" data-ratio="16:9">
+                  <input type="radio" name="imageAspectRatio" value="16:9" checked />
+                  <span class="pip-ratio-shape" aria-hidden="true"></span>
+                  <strong>16:9</strong>
+                </label>
+                <label class="pip-aspect-ratio-option" data-ratio="9:16">
+                  <input type="radio" name="imageAspectRatio" value="9:16" />
+                  <span class="pip-ratio-shape" aria-hidden="true"></span>
+                  <strong>9:16</strong>
+                </label>
+              </div>
+            </fieldset>
+            <div class="pip-time-settings" aria-labelledby="pipTimeSettingsLabel">
+              <div class="pip-time-settings-heading">
+                <strong id="pipTimeSettingsLabel">画中画显示时间</strong>
+                <button id="fitPipToTranscript" class="secondary-button compact-button" type="button" disabled>
+                  一键贴合文案时间
+                </button>
+              </div>
+              <div class="pip-time-inputs">
+                <label for="pipStartTime">
+                  <span>开始时间（秒）</span>
+                  <input id="pipStartTime" type="number" min="0" step="0.1" inputmode="decimal" disabled />
+                </label>
+                <label for="pipEndTime">
+                  <span>结束时间（秒）</span>
+                  <input id="pipEndTime" type="number" min="0.1" step="0.1" inputmode="decimal" disabled />
+                </label>
+              </div>
+              <small id="pipTimeMessage" role="status" aria-live="polite">
+                默认使用当前所选文案片段的起止时间，也可以手动修改。
+              </small>
+            </div>
+            <div id="promptField" class="pip-prompt-field">
+              <div class="pip-prompt-heading">
+                <label id="pipPromptLabel" for="pipPrompt">图片提示词</label>
+                <button id="writePipPrompt" class="secondary-button pip-prompt-ai-button" type="button">
+                  <iconify-icon icon="ph:sparkle-fill" aria-hidden="true"></iconify-icon>
+                  <span>AI 一键编写提示词</span>
+                </button>
+              </div>
+              <textarea id="pipPrompt" maxlength="800" rows="3" placeholder="例如：清晨城市天际线，阳光穿过云层，电影感，蓝金色调"></textarea>
+              <small id="pipPromptHelp">AI 会参考当前视频画面的色调、光线和质感；画面中不会生成文字。</small>
+              <small id="promptWriterStatus" class="pip-prompt-writer-status" role="status" aria-live="polite" hidden></small>
+            </div>
+            <button id="generatePipImage" class="primary-button pip-generate-button" type="button">
+              使用 AI 生成画中画
+            </button>
+            <div id="imageProgress" class="pip-inline-progress pip-tech-progress" role="status" aria-live="polite" hidden>
+              <span class="pip-tech-field" aria-hidden="true">
+                <span class="pip-tech-orbit pip-tech-orbit-a"></span>
+                <span class="pip-tech-orbit pip-tech-orbit-b"></span>
+                <span class="pip-tech-scan"></span>
+                <span class="pip-tech-particle pip-tech-particle-1"></span>
+                <span class="pip-tech-particle pip-tech-particle-2"></span>
+                <span class="pip-tech-particle pip-tech-particle-3"></span>
+                <span class="pip-tech-particle pip-tech-particle-4"></span>
+                <span class="pip-tech-particle pip-tech-particle-5"></span>
+              </span>
+              <span class="loading-spinner" aria-hidden="true"></span>
+              <span id="assetProgressText">Seedream 正在参考视频风格并生成图片，通常需要几十秒…</span>
+            </div>
+            <p id="imageError" class="form-error pip-form-message" role="alert" hidden></p>
+          </section>
+
+          <section class="pip-control-section pip-generated-section" aria-labelledby="generated-title">
+            <div class="pip-section-title-row">
+              <h3 id="generated-title">3. 确认画中画</h3>
+              <span id="generatedCount">0 个</span>
+            </div>
+            <div id="generatedEmpty" class="pip-empty-state">
+              选择文字并生成图片或视频后，可在预览画面拖动摆放，并在这里调整大小。
+            </div>
+            <div id="generatedList" class="pip-generated-list"></div>
+          </section>
+
+          <section class="pip-output-section" aria-labelledby="output-title">
+            <div class="pip-section-title-row">
+              <h3 id="output-title">4. 生成最终视频</h3>
+              <span id="outputStatusChip" class="pip-time-chip" hidden></span>
+            </div>
+            <button id="generatePipVideo" class="primary-button" type="button" disabled>
+              生成画中画视频
+            </button>
+            <div id="outputProgress" class="pip-output-progress pip-tech-progress" aria-live="polite" hidden>
+              <span class="pip-tech-field" aria-hidden="true">
+                <span class="pip-tech-orbit pip-tech-orbit-a"></span>
+                <span class="pip-tech-orbit pip-tech-orbit-b"></span>
+                <span class="pip-tech-scan"></span>
+                <span class="pip-tech-particle pip-tech-particle-1"></span>
+                <span class="pip-tech-particle pip-tech-particle-2"></span>
+                <span class="pip-tech-particle pip-tech-particle-3"></span>
+                <span class="pip-tech-particle pip-tech-particle-4"></span>
+                <span class="pip-tech-particle pip-tech-particle-5"></span>
+              </span>
+              <div class="progress-heading">
+                <span id="outputStatus">正在准备合成…</span>
+                <strong id="outputPercent">0%</strong>
+              </div>
+              <div id="outputProgressTrack" class="progress-track" role="progressbar" aria-label="画中画视频生成进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                <span id="outputProgressBar" class="progress-bar"></span>
+              </div>
+            </div>
+            <p id="outputError" class="form-error pip-form-message" role="alert" hidden></p>
+            <div id="outputResult" class="pip-output-result" hidden>
+              <strong>画中画视频已经生成</strong>
+              <div class="pip-result-actions">
+                <button id="previewFinalVideo" class="secondary-button" type="button">预览成片</button>
+                <a id="downloadFinalVideo" class="primary-button compact-button" href="#">下载最终视频</a>
+              </div>
+            </div>
+          </section>
+        </aside>
+      </div>
+    </main>
+  </body>
+</html>

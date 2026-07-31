@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="浏览、调整并使用视频艺术字内置效果模板。"
+    />
+    <title>艺术字效果模板库 · 视频文字剪辑</title>
+    <link rel="stylesheet" href="/styles.css?v=20260730-08" />
+    <script src="https://code.iconify.design/iconify-icon/3.0.0/iconify-icon.min.js" defer></script>
+    <script src="/ui-feedback.js?v=20260729-03" defer></script>
+    <script src="/art-template-library.js?v=20260729-03" defer></script>
+  </head>
+  <body class="template-library-body">
+    <a class="skip-link" href="#main">跳到主要内容</a>
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="brand" href="/" aria-label="返回视频文字剪辑">
+          <span class="brand-mark" aria-hidden="true">
+            <iconify-icon icon="ph:waveform-bold"></iconify-icon>
+          </span>
+          <span>视频文字剪辑</span>
+        </a>
+        <div class="header-actions">
+          <span class="mvp-badge">艺术字效果管理</span>
+          <a class="header-restart-button header-link-button" href="/font-manager">
+            字体管理
+          </a>
+          <a
+            id="backToVideoEditor"
+            class="header-restart-button header-link-button"
+            href="/"
+          >
+            返回视频编辑
+          </a>
+        </div>
+      </div>
+    </header>
+
+    <main id="main" class="template-library-shell">
+      <section class="template-library-heading" aria-labelledby="template-page-title">
+        <div>
+          <p class="eyebrow">可直接用于视频的艺术字效果</p>
+          <h1 id="template-page-title">艺术字效果模板库</h1>
+          <p>上传和管理可编辑效果模板，调整文字、字号和颜色后带入编辑器。</p>
+        </div>
+        <div class="template-library-stats" aria-label="艺术字模板统计">
+          <span id="templateCount">内置模板 0</span>
+          <span id="uploadedTemplateCount">我的模板 0</span>
+          <span id="preferredTemplateName">默认模板 热血立体</span>
+          <button
+            id="openTemplateUpload"
+            class="primary-button compact-button"
+            type="button"
+          >
+            上传艺术字模板
+          </button>
+        </div>
+      </section>
+
+      <section class="panel template-preview-toolbar" aria-label="艺术字统一预览设置">
+        <label class="field" for="templatePreviewText">
+          <span>预览文字</span>
+          <input
+            id="templatePreviewText"
+            type="text"
+            maxlength="20"
+            value="新征程新赶考"
+          />
+        </label>
+        <label class="field" for="templateFont">
+          <span>预览字体</span>
+          <select id="templateFont">
+            <option value="modern">现代黑体</option>
+            <option value="bold" selected>醒目粗体</option>
+            <option value="classic">经典黑体</option>
+            <option value="song">宋体</option>
+            <option value="kai">楷体</option>
+            <option value="fang">仿宋</option>
+          </select>
+        </label>
+        <label class="field" for="templatePreviewSize">
+          <span>预览字号 <output id="templatePreviewSizeValue">46</output></span>
+          <input
+            id="templatePreviewSize"
+            type="range"
+            min="28"
+            max="72"
+            value="46"
+          />
+        </label>
+        <label class="field color-field" for="templatePreviewColor">
+          <span>主颜色</span>
+          <input id="templatePreviewColor" type="color" value="#ffd84d" />
+        </label>
+        <label class="field" for="templateSearch">
+          <span>搜索模板</span>
+          <input
+            id="templateSearch"
+            type="search"
+            placeholder="输入模板名称或用途"
+          />
+        </label>
+      </section>
+
+      <div class="template-library-workspace">
+        <section class="panel template-catalog-panel" aria-labelledby="template-catalog-title">
+          <div class="font-panel-heading template-catalog-heading">
+            <div>
+              <p class="step-label">01 · 模板库</p>
+              <h2 id="template-catalog-title">选择艺术字效果</h2>
+            </div>
+            <div
+              id="templateCategoryFilters"
+              class="font-source-filters template-category-filters"
+              role="group"
+              aria-label="筛选艺术字模板"
+            >
+              <button type="button" data-template-filter="all" aria-pressed="true">
+                全部
+              </button>
+              <button type="button" data-template-filter="立体" aria-pressed="false">
+                立体
+              </button>
+              <button type="button" data-template-filter="发光" aria-pressed="false">
+                发光
+              </button>
+              <button type="button" data-template-filter="底板" aria-pressed="false">
+                底板
+              </button>
+              <button type="button" data-template-filter="质感" aria-pressed="false">
+                质感
+              </button>
+              <button type="button" data-template-filter="uploaded" aria-pressed="false">
+                我的模板
+              </button>
+            </div>
+          </div>
+
+          <div id="templateLibraryLoading" class="font-library-loading" aria-live="polite">
+            <span class="loading-spinner" aria-hidden="true"></span>
+            <strong>正在读取艺术字模板…</strong>
+          </div>
+          <div id="templateLibraryEmpty" class="font-library-empty" hidden>
+            <strong>没有找到符合条件的模板</strong>
+            <span>可以修改搜索内容或切换模板分类。</span>
+          </div>
+          <div id="templateCardGrid" class="template-card-grid" aria-live="polite"></div>
+        </section>
+
+        <aside class="panel template-detail-panel" aria-labelledby="template-detail-title">
+          <div class="font-panel-heading">
+            <div>
+              <p class="step-label">02 · 效果详情</p>
+              <h2 id="template-detail-title">查看并使用模板</h2>
+            </div>
+            <span id="templateDetailCategory" class="result-chip">立体</span>
+          </div>
+
+          <div id="templateDetailPreview" class="template-detail-preview">
+            新征程新赶考
+          </div>
+          <div class="template-detail-copy">
+            <strong id="templateDetailName">热血立体</strong>
+            <p id="templateDetailDescription">
+              双层描边与厚重投影，适合重点结论和强情绪标题。
+            </p>
+          </div>
+          <dl class="font-metadata template-metadata">
+            <div>
+              <dt>模板类型</dt>
+              <dd id="templateDetailType">内置效果</dd>
+            </div>
+            <div>
+              <dt>当前字体</dt>
+              <dd id="templateDetailFont">醒目粗体</dd>
+            </div>
+            <div>
+              <dt>当前字号</dt>
+              <dd id="templateDetailSize">46</dd>
+            </div>
+          </dl>
+          <div class="template-color-summary" aria-label="当前模板配色">
+            <span>
+              <i id="templatePrimarySwatch" aria-hidden="true"></i>
+              主颜色
+            </span>
+            <span>
+              <i id="templateStrokeSwatch" aria-hidden="true"></i>
+              描边色
+            </span>
+          </div>
+          <div class="template-detail-actions">
+            <button id="useTemplateButton" class="primary-button" type="button">
+              使用此模板
+            </button>
+            <button id="restoreTemplateColor" class="secondary-button" type="button">
+              恢复模板配色
+            </button>
+            <div id="uploadedTemplateActions" class="template-manage-actions" hidden>
+              <button id="renameTemplateButton" class="secondary-button" type="button">
+                修改名称
+              </button>
+              <button id="deleteTemplateButton" class="danger-button" type="button">
+                删除模板
+              </button>
+            </div>
+          </div>
+          <p id="templateDetailNote" class="template-library-note">
+            内置模板不会被修改或删除；这里的调整只会作为本次艺术字参数带入编辑器。
+          </p>
+        </aside>
+      </div>
+
+      <dialog id="templateUploadDialog" class="library-dialog">
+        <form id="templateUploadForm" class="library-dialog-card">
+          <div class="library-dialog-heading">
+            <div>
+              <p class="step-label">上传艺术字效果</p>
+              <h2>添加到我的模板</h2>
+            </div>
+            <button
+              class="dialog-close-button"
+              type="button"
+              data-close-template-upload
+              aria-label="关闭上传窗口"
+            >
+              <iconify-icon icon="ph:x-bold" aria-hidden="true"></iconify-icon>
+            </button>
+          </div>
+          <label class="template-file-drop" for="templateUploadFile">
+            <iconify-icon icon="ph:upload-simple-bold" aria-hidden="true"></iconify-icon>
+            <strong>选择艺术字效果模板文件</strong>
+            <span id="templateUploadFilename">
+              支持 .json 或 .arttext，最大 256KB，不支持 TTF/OTF 字体
+            </span>
+            <input
+              id="templateUploadFile"
+              name="file"
+              type="file"
+              accept=".json,.arttext,application/json"
+              required
+            />
+          </label>
+          <div class="template-format-help">
+            <strong>模板文件包含什么？</strong>
+            <p>
+              文件保存效果类型、模板名称、主颜色和描边色。上传后文字、字体、
+              字号和颜色仍可在艺术字编辑器中修改。
+            </p>
+            <button id="downloadTemplateExample" class="text-action" type="button">
+              下载示例模板
+            </button>
+          </div>
+          <p id="templateUploadError" class="form-error" role="alert" hidden></p>
+          <div class="library-dialog-actions">
+            <button
+              class="secondary-button"
+              type="button"
+              data-close-template-upload
+            >
+              取消
+            </button>
+            <button id="submitTemplateUpload" class="primary-button" type="submit">
+              上传到模板库
+            </button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="templateRenameDialog" class="library-dialog library-dialog-small">
+        <form id="templateRenameForm" class="library-dialog-card">
+          <div class="library-dialog-heading">
+            <div>
+              <p class="step-label">管理我的模板</p>
+              <h2>修改艺术字名称</h2>
+            </div>
+            <button
+              class="dialog-close-button"
+              type="button"
+              data-close-template-rename
+              aria-label="关闭重命名窗口"
+            >
+              <iconify-icon icon="ph:x-bold" aria-hidden="true"></iconify-icon>
+            </button>
+          </div>
+          <label class="field" for="templateRenameInput">
+            <span>模板名称</span>
+            <input id="templateRenameInput" type="text" maxlength="40" required />
+          </label>
+          <p id="templateRenameError" class="form-error" role="alert" hidden></p>
+          <div class="library-dialog-actions">
+            <button
+              class="secondary-button"
+              type="button"
+              data-close-template-rename
+            >
+              取消
+            </button>
+            <button id="submitTemplateRename" class="primary-button" type="submit">
+              保存名称
+            </button>
+          </div>
+        </form>
+      </dialog>
+
+      <p id="templateLibraryStatus" class="sr-only" aria-live="polite"></p>
+    </main>
+  </body>
+</html>

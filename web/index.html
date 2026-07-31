@@ -1,0 +1,757 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="上传口播视频，自动提取中文语音、识别疑似口误并按文字完成粗剪。"
+    />
+    <title>视频文字剪辑 · MVP</title>
+    <link rel="stylesheet" href="/styles.css?v=20260730-08" />
+    <script src="https://code.iconify.design/iconify-icon/3.0.0/iconify-icon.min.js" defer></script>
+    <script src="/ui-feedback.js?v=20260729-03" defer></script>
+    <script src="/app.js?v=20260730-03" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">跳到主要内容</a>
+    <div class="home-ambient" aria-hidden="true">
+      <canvas id="ambientCanvas"></canvas>
+      <span class="ambient-scan"></span>
+      <span class="ambient-orbit ambient-orbit-one"></span>
+      <span class="ambient-orbit ambient-orbit-two"></span>
+    </div>
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="brand" href="/" aria-label="视频文字剪辑首页">
+          <span class="brand-mark" aria-hidden="true">
+            <iconify-icon icon="ph:waveform-bold"></iconify-icon>
+          </span>
+          <span>视频文字剪辑</span>
+        </a>
+        <div class="header-actions">
+          <a class="header-restart-button header-link-button" href="/fonts">
+            艺术字模板库
+          </a>
+          <span class="mvp-badge">MVP · 文字粗剪</span>
+          <button
+            id="restartProjectButton"
+            class="header-restart-button"
+            type="button"
+            hidden
+          >
+            重新开始
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main id="main" class="page-shell">
+      <section class="hero" aria-labelledby="page-title">
+        <div class="hero-content">
+          <p class="eyebrow">中文口播智能处理</p>
+          <h1 id="page-title">上传视频，用文字完成剪辑</h1>
+          <p class="hero-copy">
+            自动识别口播并对齐时间轴，通过文字删减视频内容，再用 AI 为重点片段添加艺术字。
+          </p>
+          <div class="hero-trust-row" aria-label="产品特点">
+            <span>原视频不覆盖</span>
+            <span>AI 建议需确认</span>
+            <span>成片可直接下载</span>
+          </div>
+          <div class="hero-signal-readout" aria-label="处理能力">
+            <span><b>30 FPS</b><small>画面级预览</small></span>
+            <span><b>WORD SYNC</b><small>词级时间对齐</small></span>
+            <span><b>SAFE CUT</b><small>原片始终保留</small></span>
+          </div>
+          <div class="hero-studio-board" aria-label="剪辑信号概览">
+            <div class="studio-board-head">
+              <span>LIVE CUT DESK</span>
+              <strong>片段在这里被听见</strong>
+            </div>
+            <div class="studio-waveform" aria-hidden="true">
+              <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+              <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+            </div>
+            <div class="studio-rhythm">
+              <span>
+                <iconify-icon icon="ph:waveform-bold" aria-hidden="true"></iconify-icon>
+                词块对齐
+              </span>
+              <span>
+                <iconify-icon icon="ph:scissors-bold" aria-hidden="true"></iconify-icon>
+                断点预览
+              </span>
+              <span>
+                <iconify-icon icon="ph:sparkle-bold" aria-hidden="true"></iconify-icon>
+                艺术字候选
+              </span>
+            </div>
+            <ol class="studio-cut-map" aria-label="剪辑检查点">
+              <li><b>00.0</b><span>保留原片</span></li>
+              <li><b>12.8</b><span>删掉停顿</span></li>
+              <li><b>37.2</b><span>标出重点</span></li>
+            </ol>
+          </div>
+        </div>
+        <ol class="hero-flow" aria-label="视频制作流程">
+          <li>
+            <span class="hero-flow-index">01</span>
+            <span><strong>语音转写</strong><small>生成词级时间轴</small></span>
+          </li>
+          <li>
+            <span class="hero-flow-index">02</span>
+            <span><strong>文字剪辑</strong><small>选中文字即可删减</small></span>
+          </li>
+          <li>
+            <span class="hero-flow-index">03</span>
+            <span><strong>艺术字增强</strong><small>AI 推荐并由你确认</small></span>
+          </li>
+        </ol>
+      </section>
+
+      <section id="uploadCard" class="panel upload-panel" aria-labelledby="upload-title">
+        <div class="panel-heading">
+          <div>
+            <p class="step-label">01 · 选择视频</p>
+            <h2 id="upload-title">上传一段口播视频</h2>
+          </div>
+          <span class="privacy-note">音频将发送至阿里云百炼</span>
+        </div>
+
+        <div class="video-source-switch" role="tablist" aria-label="选择视频来源">
+          <button
+            id="localSourceTab"
+            class="video-source-tab is-active"
+            type="button"
+            role="tab"
+            aria-selected="true"
+            aria-controls="localSourcePanel"
+          >
+            <iconify-icon icon="ph:upload-simple-bold" aria-hidden="true"></iconify-icon>
+            上传新视频
+          </button>
+          <button
+            id="historySourceTab"
+            class="video-source-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="historySourcePanel"
+            tabindex="-1"
+          >
+            <iconify-icon icon="ph:clock-counter-clockwise-bold" aria-hidden="true"></iconify-icon>
+            剪辑历史
+            <span id="historyCountBadge" class="history-count-badge">0</span>
+          </button>
+        </div>
+
+        <div id="localSourcePanel" role="tabpanel" aria-labelledby="localSourceTab">
+        <form id="uploadForm" novalidate>
+          <div id="dropZone" class="drop-zone">
+            <input
+              id="videoFile"
+              name="file"
+              type="file"
+              accept=".mp4,.mov,.mkv,.webm,video/mp4,video/quicktime,video/webm"
+              required
+            />
+            <button
+              id="uploadPicker"
+              class="upload-prompt"
+              type="button"
+              aria-describedby="uploadRequirements"
+            >
+              <span class="upload-icon" aria-hidden="true">
+                <iconify-icon icon="ph:upload-simple-bold"></iconify-icon>
+              </span>
+              <span class="drop-title">拖拽视频到这里</span>
+              <span class="drop-subtitle">或点击选择本地视频</span>
+              <span class="choose-button">选择视频</span>
+            </button>
+            <section id="uploadPreview" class="upload-preview" aria-label="已选择的视频预览" hidden>
+              <video
+                id="selectedVideoPreview"
+                controls
+                playsinline
+                preload="metadata"
+              ></video>
+              <div class="upload-preview-toolbar">
+                <span class="upload-preview-status">
+                  <iconify-icon icon="ph:check-circle-fill" aria-hidden="true"></iconify-icon>
+                  视频已就绪，可先播放检查
+                </span>
+                <button id="changeFileButton" class="upload-change-button" type="button">
+                  <iconify-icon icon="ph:arrows-clockwise-bold" aria-hidden="true"></iconify-icon>
+                  更换视频
+                </button>
+              </div>
+            </section>
+          </div>
+          <div id="uploadRequirements" class="upload-specs" aria-label="上传要求">
+            <span>MP4</span>
+            <span>MOV</span>
+            <span>MKV</span>
+            <span>WEBM</span>
+            <small>单个文件最大 1GB</small>
+          </div>
+
+          <div id="fileSummary" class="file-summary" hidden>
+            <span class="file-icon" aria-hidden="true">
+              <iconify-icon icon="ph:file-video-bold"></iconify-icon>
+            </span>
+            <span class="file-details">
+              <strong id="fileName"></strong>
+              <span id="fileMeta"></span>
+            </span>
+            <button id="removeFile" class="icon-button" type="button" aria-label="移除所选视频">
+              <iconify-icon icon="ph:x-bold" aria-hidden="true"></iconify-icon>
+            </button>
+          </div>
+
+          <p id="formError" class="form-error" role="alert" hidden></p>
+
+          <button id="startButton" class="primary-button" type="submit" disabled>
+            <span>开始提取文字</span>
+            <iconify-icon icon="ph:arrow-right-bold" aria-hidden="true"></iconify-icon>
+          </button>
+        </form>
+        </div>
+
+        <section
+          id="historySourcePanel"
+          class="history-source-panel"
+          role="tabpanel"
+          aria-labelledby="historySourceTab"
+          hidden
+        >
+          <div class="history-source-heading">
+            <div>
+              <p class="step-label">已保存版本</p>
+              <h3>从上次成片继续</h3>
+              <p>剪辑版与艺术字版分别保存，选择任一版本即可继续处理。</p>
+            </div>
+            <button id="refreshHistoryButton" class="history-refresh-button" type="button">
+              <iconify-icon icon="ph:arrows-clockwise-bold" aria-hidden="true"></iconify-icon>
+              刷新
+            </button>
+          </div>
+          <p id="historyStatus" class="history-status" aria-live="polite"></p>
+          <div id="historyEmpty" class="history-empty" hidden>
+            <iconify-icon icon="ph:film-strip-bold" aria-hidden="true"></iconify-icon>
+            <strong>还没有保存的剪辑版本</strong>
+            <span>完成一次视频剪辑或艺术字生成后，会自动出现在这里。</span>
+          </div>
+          <ol id="historyList" class="history-list" aria-label="剪辑历史记录"></ol>
+        </section>
+      </section>
+
+      <section id="progressCard" class="panel progress-panel" aria-labelledby="progress-title" hidden>
+        <div class="panel-heading">
+          <div>
+            <p class="step-label">02 · 自动处理</p>
+            <h2 id="progress-title">正在提取文字</h2>
+          </div>
+          <span id="progressPercent" class="progress-percent">0%</span>
+        </div>
+
+        <div
+          id="progressTrack"
+          class="progress-track"
+          role="progressbar"
+          aria-label="处理进度"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow="0"
+        >
+          <span id="progressBar" class="progress-bar"></span>
+        </div>
+
+        <ol class="process-list" aria-label="处理步骤">
+          <li id="stepUpload" class="process-step is-active">
+            <span class="step-dot" aria-hidden="true"></span>
+            <span><strong>上传视频</strong><small id="uploadStatus">准备上传</small></span>
+          </li>
+          <li id="stepExtract" class="process-step">
+            <span class="step-dot" aria-hidden="true"></span>
+            <span><strong>提取音频</strong><small>转换为轻量 MP3</small></span>
+          </li>
+          <li id="stepTranscribe" class="process-step">
+            <span class="step-dot" aria-hidden="true"></span>
+            <span><strong>语音识别</strong><small>Paraformer 返回句子和词级时间戳</small></span>
+          </li>
+        </ol>
+
+        <p id="liveStatus" class="live-status" aria-live="polite">正在上传视频…</p>
+        <div id="jobError" class="job-error" role="alert" hidden>
+          <strong>处理没有完成</strong>
+          <p id="jobErrorText"></p>
+          <button id="retryButton" class="secondary-button" type="button">重新选择视频</button>
+        </div>
+      </section>
+
+      <section id="resultCard" class="panel result-panel" aria-labelledby="result-title" hidden>
+        <div class="text-editor-summary">
+        <div class="panel-heading result-heading">
+          <div>
+            <p class="step-label success-label">03 · 已完成</p>
+            <h2 id="result-title" tabindex="-1">文字已经提取完成</h2>
+          </div>
+          <button id="newUploadButton" class="secondary-button" type="button">转写新视频</button>
+        </div>
+
+        <dl class="result-stats">
+          <div><dt>视频时长</dt><dd id="durationStat">—</dd></div>
+          <div><dt>识别语言</dt><dd id="languageStat">中文</dd></div>
+          <div><dt>文字段落</dt><dd id="segmentStat">—</dd></div>
+        </dl>
+
+        </div>
+
+        <div class="text-editor-workspace">
+          <section
+            id="textEditorPreviewPane"
+            class="text-editor-preview-pane"
+            aria-label="视频预览与剪辑时间轴"
+          ></section>
+
+          <section class="text-editor-inspector" aria-label="文字剪辑设置">
+            <div class="text-editor-tabbar" role="tablist" aria-label="文字剪辑工作区">
+              <button
+                id="textTranscriptTab"
+                class="text-editor-tab"
+                type="button"
+                role="tab"
+                aria-selected="false"
+                aria-controls="textTranscriptPanel"
+                tabindex="-1"
+                data-text-editor-tab="transcript"
+              >识别全文</button>
+              <button
+                id="textSuggestionsTab"
+                class="text-editor-tab"
+                type="button"
+                role="tab"
+                aria-selected="false"
+                aria-controls="suggestionsBlock"
+                tabindex="-1"
+                data-text-editor-tab="suggestions"
+              >AI 建议</button>
+              <button
+                id="textCutsTab"
+                class="text-editor-tab"
+                type="button"
+                role="tab"
+                aria-selected="true"
+                aria-controls="textCutsPanel"
+                data-text-editor-tab="cuts"
+              >文字剪辑</button>
+              <button
+                id="textSilenceTab"
+                class="text-editor-tab"
+                type="button"
+                role="tab"
+                aria-selected="false"
+                aria-controls="textSilencePanel"
+                tabindex="-1"
+                data-text-editor-tab="silence"
+              >空白剪辑</button>
+              <button
+                id="textOutputTab"
+                class="text-editor-tab"
+                type="button"
+                role="tab"
+                aria-selected="false"
+                aria-controls="textOutputPanel"
+                tabindex="-1"
+                data-text-editor-tab="output"
+              >生成结果</button>
+            </div>
+
+            <div class="text-editor-panel-stack">
+
+        <section
+          id="textOutputPanel"
+          class="direct-tools-panel text-editor-panel"
+          role="tabpanel"
+          aria-labelledby="textOutputTab"
+          data-text-editor-panel="output"
+          hidden
+        >
+          <section class="output-cut-builder" aria-labelledby="output-cut-builder-title">
+            <div class="output-cut-builder-heading">
+              <div>
+                <p class="step-label">统一生成</p>
+                <h3 id="output-cut-builder-title">生成剪辑视频</h3>
+                <p>汇总文字剪辑、AI 建议、空白剪辑和时间轴中的全部已选区间。</p>
+              </div>
+              <span class="output-cut-builder-chip">原视频保留</span>
+            </div>
+            <div class="output-cut-summary" aria-live="polite">
+              <strong id="outputCutSummary">尚未选择要删除的内容</strong>
+              <span id="outputCutSelectionDetail">请先在文字剪辑、空白剪辑或时间轴中完成选择</span>
+            </div>
+            <label class="history-save-name" for="cutHistoryName">
+              <span>保存名称 <small>可选，留空将自动生成安全名称</small></span>
+              <input
+                id="cutHistoryName"
+                type="text"
+                maxlength="80"
+                autocomplete="off"
+                placeholder="例如：口播精简第一版"
+              />
+            </label>
+            <button id="generateCutButton" class="danger-button" type="button" disabled>
+              <iconify-icon icon="ph:scissors-bold" aria-hidden="true"></iconify-icon>
+              <span>生成剪辑视频</span>
+            </button>
+            <p id="cutError" class="form-error" role="alert" hidden></p>
+          </section>
+
+          <div id="directToolsPrompt">
+            <div>
+              <p class="step-label">无需先剪辑</p>
+              <h3 id="direct-tools-title">直接使用原视频继续创作</h3>
+              <p>剪辑是可选步骤，你可以直接为原视频添加艺术字或画中画。</p>
+            </div>
+            <div class="direct-tool-actions">
+              <a id="skipToArtButton" class="primary-button compact-button" href="#">
+                <iconify-icon icon="ph:text-aa-bold" aria-hidden="true"></iconify-icon>
+                <span>直接添加艺术字</span>
+              </a>
+              <a id="directPipButton" class="secondary-button compact-button" href="#">
+                <iconify-icon icon="ph:picture-in-picture-bold" aria-hidden="true"></iconify-icon>
+                <span>直接插入画中画</span>
+              </a>
+            </div>
+          </div>
+        </section>
+
+        <div
+          id="textTranscriptPanel"
+          class="transcript-card text-editor-panel"
+          role="tabpanel"
+          aria-labelledby="textTranscriptTab"
+          data-text-editor-panel="transcript"
+          hidden
+        >
+          <div class="transcript-heading">
+            <label class="text-label" for="transcriptText">识别全文</label>
+            <span id="transcriptMeta" class="field-meta">AI 语义断句</span>
+          </div>
+          <textarea
+            id="transcriptText"
+            rows="6"
+            spellcheck="true"
+            aria-describedby="transcriptHelper"
+          ></textarea>
+          <p id="transcriptHelper" class="text-helper">
+            直接在文本框修改错别字，系统会自动识别对应词块并保存；换行仅用于排版，不影响时间戳。
+          </p>
+          <p id="transcriptEditStatus" class="transcript-edit-status" aria-live="polite"></p>
+          <div class="transcript-word-editor-heading">
+            <strong>段落同步预览</strong>
+            <span>修改全文后，下方对应整段会自动更新</span>
+          </div>
+          <ol
+            id="transcriptSegmentList"
+            class="segment-list transcript-segment-list"
+            aria-label="识别文字整段同步预览"
+          ></ol>
+          <div class="result-actions">
+            <button id="copyButton" class="primary-button compact-button" type="button">
+              <iconify-icon icon="ph:copy-bold" aria-hidden="true"></iconify-icon>
+              <span>复制全文</span>
+            </button>
+            <button id="downloadButton" class="secondary-button" type="button">下载 TXT</button>
+            <span id="copyFeedback" class="copy-feedback" aria-live="polite"></span>
+          </div>
+        </div>
+
+        <section
+          id="suggestionsBlock"
+          class="suggestions-block text-editor-panel"
+          role="tabpanel"
+          aria-labelledby="textSuggestionsTab"
+          data-text-editor-panel="suggestions"
+          hidden
+        >
+          <div class="suggestions-heading">
+            <div>
+              <p class="step-label">04 · AI 初筛</p>
+              <h3 id="suggestions-title">AI 删减建议</h3>
+              <p class="section-helper">
+                仅标记疑似口误、重复、语气词和无效片段。AI 不会自动删除，仍需你确认。
+              </p>
+            </div>
+            <div class="suggestions-heading-actions">
+              <span class="ai-model-chip">Qwen 分析</span>
+              <button
+                id="selectAllSuggestionsButton"
+                class="secondary-button compact-button suggestions-bulk-button"
+                type="button"
+                aria-pressed="false"
+                hidden
+              >
+                <iconify-icon icon="ph:checks-bold" aria-hidden="true"></iconify-icon>
+                <span>一键标记删除</span>
+              </button>
+            </div>
+          </div>
+          <p id="suggestionState" class="suggestion-state" aria-live="polite">
+            正在读取 AI 分析结果…
+          </p>
+          <ol id="suggestionList" class="suggestion-list"></ol>
+        </section>
+
+        <section
+          id="textSilencePanel"
+          class="silence-editor-panel text-editor-panel"
+          role="tabpanel"
+          aria-labelledby="textSilenceTab"
+          data-text-editor-panel="silence"
+          hidden
+        >
+          <div class="no-speech-panel" aria-labelledby="no-speech-title">
+            <div class="no-speech-heading">
+              <div>
+                <p class="step-label">05 · 空白剪辑</p>
+                <h3 id="no-speech-title">检查长时间没有说话的画面</h3>
+                <p class="section-helper">
+                  仅检测超过 1.5 秒的无文字区间，并保留说话边界缓冲。片头片尾默认保护，所有删除都需要你确认。
+                </p>
+              </div>
+              <button
+                id="selectAllNoSpeechButton"
+                class="secondary-button compact-button no-speech-bulk-button"
+                type="button"
+                aria-pressed="false"
+                hidden
+              >
+                <iconify-icon icon="ph:selection-all-bold" aria-hidden="true"></iconify-icon>
+                <span>一键标记可删片段</span>
+              </button>
+            </div>
+            <p id="noSpeechState" class="no-speech-state" aria-live="polite">
+              正在读取无文字片段检测结果…
+            </p>
+            <ol id="noSpeechList" class="no-speech-list" aria-label="无文字片段建议"></ol>
+            <div class="no-speech-selection-footer">
+              <div class="no-speech-generate-summary" aria-live="polite">
+                <strong id="noSpeechCutSummary">尚未标记要删除的空白片段</strong>
+                <span id="noSpeechCutSelectionDetail">请先试听，再选择要从视频中删除的区间</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <div
+          id="textCutsPanel"
+          class="segments-block text-editor-panel"
+          role="tabpanel"
+          aria-labelledby="textCutsTab"
+          data-text-editor-panel="cuts"
+        >
+          <div class="editor-heading">
+            <div>
+              <p class="step-label">05 · 文字剪辑</p>
+              <h3>选择要从视频中删除的段落</h3>
+              <p class="section-helper">文字列表仅支持整段选择。选中的段落将在新视频中删除，原视频不会被覆盖。</p>
+            </div>
+            <button id="clearSelectionButton" class="secondary-button" type="button" disabled>清空选择</button>
+          </div>
+
+          <section class="cut-preview-panel" aria-labelledby="cut-preview-title">
+            <div class="cut-preview-heading">
+              <div>
+                <p class="step-label">实时预览</p>
+                <h4 id="cut-preview-title">播放并拖动时间轴剪辑视频</h4>
+              </div>
+              <span class="cut-timeline-legend">
+                <i aria-hidden="true"></i>
+                红色区间将在新视频中删除
+              </span>
+            </div>
+
+            <div id="cutPreviewPlayer" class="media-player-shell cut-preview-player">
+              <div id="cutVideoStage" class="video-stage cut-video-stage">
+                <video
+                  id="cutPreviewVideo"
+                  preload="metadata"
+                  playsinline
+                  aria-label="文字剪辑原视频预览"
+                ></video>
+              </div>
+
+              <div class="external-video-controls" aria-label="剪辑预览播放控制">
+                <button id="cutPreviewPlay" class="media-control-button" type="button" aria-label="播放">
+                  <iconify-icon id="cutPreviewPlayIcon" icon="ph:play-fill" aria-hidden="true"></iconify-icon>
+                  <iconify-icon id="cutPreviewPauseIcon" icon="ph:pause-fill" aria-hidden="true" hidden></iconify-icon>
+                </button>
+                <input
+                  id="cutPreviewSeek"
+                  class="media-seek"
+                  type="range"
+                  min="0"
+                  max="0"
+                  step="0.01"
+                  value="0"
+                  aria-label="视频播放进度"
+                />
+                <output id="cutPreviewTime" class="media-time">00:00 / 00:00</output>
+                <button id="cutPreviewMute" class="media-control-button" type="button" aria-label="静音">
+                  <iconify-icon id="cutPreviewVolumeIcon" icon="ph:speaker-high-fill" aria-hidden="true"></iconify-icon>
+                  <iconify-icon id="cutPreviewMutedIcon" icon="ph:speaker-slash-fill" aria-hidden="true" hidden></iconify-icon>
+                </button>
+                <input
+                  id="cutPreviewVolume"
+                  class="media-volume"
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value="1"
+                  aria-label="预览音量"
+                />
+                <button id="cutPreviewFullscreen" class="media-control-button" type="button" aria-label="进入全屏">
+                  <iconify-icon icon="ph:corners-out-bold" aria-hidden="true"></iconify-icon>
+                </button>
+              </div>
+
+              <div id="cutFrameTimeline" class="frame-timeline cut-frame-timeline" aria-label="文字剪辑帧时间轴" hidden>
+                <div class="frame-timeline-heading cut-frame-timeline-heading">
+                  <div>
+                    <strong>剪辑时间轴</strong>
+                    <span>拖动空白处创建删除区间，拖动区间两端精确调整</span>
+                  </div>
+                  <output id="cutFrameTimelineTime">00:00 / 00:00</output>
+                </div>
+                <div id="cutFrameTimelineTrack" class="frame-timeline-track cut-frame-timeline-track">
+                  <div id="cutFrameTimelineRuler" class="frame-timeline-ruler" aria-hidden="true"></div>
+                  <div id="cutFrameTimelineThumbnails" class="frame-timeline-thumbnails" aria-hidden="true"></div>
+                  <div id="cutFrameTimelineRanges" class="cut-frame-timeline-ranges"></div>
+                  <span id="cutFrameTimelinePlayhead" class="frame-timeline-playhead" aria-hidden="true"></span>
+                  <input
+                    id="cutFrameTimelineSeek"
+                    class="frame-timeline-seek"
+                    type="range"
+                    min="0"
+                    max="0"
+                    step="0.033"
+                    value="0"
+                    aria-label="逐帧定位剪辑预览时间"
+                  />
+                </div>
+                <div class="cut-frame-timeline-footer">
+                  <p id="cutFrameTimelineStatus" class="frame-timeline-status" role="status" aria-live="polite"></p>
+                  <button id="removeTimelineRangeButton" class="secondary-button" type="button" disabled>
+                    移除当前时间轴选区
+                  </button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <div class="cut-toolbar is-selection-only">
+            <div class="cut-summary" aria-live="polite">
+              <strong id="cutSummary">尚未选择要删除的段落</strong>
+              <span id="cutSelectionDetail">请选择整段，或在时间轴上拖出删除区间</span>
+            </div>
+          </div>
+
+          <ol id="segmentList" class="segment-list"></ol>
+
+          <div id="cutProgress" class="cut-progress" hidden>
+            <div class="cut-progress-heading">
+              <strong id="cutStatus">正在生成剪辑视频…</strong>
+              <span id="cutProgressPercent">0%</span>
+            </div>
+            <div
+              id="cutProgressTrack"
+              class="progress-track"
+              role="progressbar"
+              aria-label="视频剪辑进度"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow="0"
+            >
+              <span id="cutProgressBar" class="progress-bar"></span>
+            </div>
+          </div>
+
+          <section id="cutResult" class="cut-result" aria-labelledby="cut-result-title" hidden>
+            <div class="cut-result-heading">
+              <div>
+                <p class="step-label success-label">06 · 剪辑完成</p>
+                <h3 id="cut-result-title" tabindex="-1">新视频已经生成</h3>
+              </div>
+              <span id="cutDuration" class="result-chip"></span>
+            </div>
+            <video id="editedVideo" controls preload="metadata"></video>
+            <p class="next-step-copy">剪辑已完成。你可以基于剪辑视频添加艺术字、插入画中画或直接下载。</p>
+            <div class="result-actions">
+              <a id="continueArtButton" class="primary-button compact-button" href="#">
+                <iconify-icon icon="ph:text-aa-bold" aria-hidden="true"></iconify-icon>
+                <span>继续添加艺术字</span>
+              </a>
+              <a id="continuePipButton" class="secondary-button compact-button" href="#">
+                <iconify-icon icon="ph:picture-in-picture-bold" aria-hidden="true"></iconify-icon>
+                <span>插入画中画</span>
+              </a>
+              <a id="downloadVideoButton" class="secondary-button compact-button" href="#">
+                <iconify-icon icon="ph:download-simple-bold" aria-hidden="true"></iconify-icon>
+                <span>直接下载</span>
+              </a>
+            </div>
+            <span class="output-note">原视频仍保留，可重新选择文字生成新版本。</span>
+          </section>
+        </div>
+            </div>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      支持视频转写、可选文字粗剪、AI 艺术字与画中画；所有 AI 建议都需由用户确认。
+    </footer>
+
+    <div
+      id="cutOperationLock"
+      class="cut-operation-lock"
+      role="status"
+      aria-live="assertive"
+      aria-label="视频剪辑处理中"
+      tabindex="-1"
+      hidden
+    >
+      <section class="cut-operation-lock-card">
+        <div class="cut-operation-lock-orbit" aria-hidden="true">
+          <iconify-icon icon="ph:scissors-bold"></iconify-icon>
+        </div>
+        <p class="step-label">剪辑引擎运行中</p>
+        <h2>正在生成剪辑视频</h2>
+        <p id="cutOperationLockMessage">正在创建剪辑任务…</p>
+        <div class="cut-operation-lock-stream" aria-hidden="true">
+          <span></span><span></span><span></span><span></span><span></span>
+          <span></span><span></span><span></span><span></span><span></span>
+        </div>
+        <div
+          id="cutOperationLockTrack"
+          class="cut-operation-lock-track"
+          role="progressbar"
+          aria-label="剪辑处理进度"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow="5"
+        >
+          <span id="cutOperationLockBar"></span>
+        </div>
+        <div class="cut-operation-lock-meta">
+          <strong id="cutOperationLockPercent">5%</strong>
+          <span>完成前暂时不能进行其他操作</span>
+        </div>
+      </section>
+    </div>
+  </body>
+</html>
