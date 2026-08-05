@@ -8,10 +8,11 @@
       content="上传口播视频，自动提取中文语音、识别疑似口误并按文字完成粗剪。"
     />
     <title>视频文字剪辑 · MVP</title>
-    <link rel="stylesheet" href="/styles.css?v=20260730-08" />
+    <link rel="stylesheet" href="/styles.css?v=20260804-17" />
     <script src="https://code.iconify.design/iconify-icon/3.0.0/iconify-icon.min.js" defer></script>
     <script src="/ui-feedback.js?v=20260729-03" defer></script>
-    <script src="/app.js?v=20260730-03" defer></script>
+    <script src="/editor-suite.js?v=20260804-12" defer></script>
+    <script src="/app.js?v=20260804-11" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main">跳到主要内容</a>
@@ -47,6 +48,7 @@
     </header>
 
     <main id="main" class="page-shell">
+      <div class="editor-suite-slot" data-editor-suite-nav data-stage="cut"></div>
       <section class="hero" aria-labelledby="page-title">
         <div class="hero-content">
           <p class="eyebrow">中文口播智能处理</p>
@@ -290,43 +292,25 @@
         </div>
       </section>
 
-      <section id="resultCard" class="panel result-panel" aria-labelledby="result-title" hidden>
-        <div class="text-editor-summary">
-        <div class="panel-heading result-heading">
-          <div>
-            <p class="step-label success-label">03 · 已完成</p>
-            <h2 id="result-title" tabindex="-1">文字已经提取完成</h2>
-          </div>
-          <button id="newUploadButton" class="secondary-button" type="button">转写新视频</button>
-        </div>
-
-        <dl class="result-stats">
-          <div><dt>视频时长</dt><dd id="durationStat">—</dd></div>
-          <div><dt>识别语言</dt><dd id="languageStat">中文</dd></div>
-          <div><dt>文字段落</dt><dd id="segmentStat">—</dd></div>
-        </dl>
-
-        </div>
-
+      <section id="resultCard" class="panel result-panel" aria-label="文字剪辑工作区" tabindex="-1" hidden>
         <div class="text-editor-workspace">
           <section
             id="textEditorPreviewPane"
             class="text-editor-preview-pane"
-            aria-label="视频预览与剪辑时间轴"
+            aria-label="视频预览与公共时间轴"
           ></section>
 
-          <section class="text-editor-inspector" aria-label="文字剪辑设置">
+          <section class="text-editor-inspector" aria-label="当前工具设置">
             <div class="text-editor-tabbar" role="tablist" aria-label="文字剪辑工作区">
               <button
-                id="textTranscriptTab"
+                id="textCutsTab"
                 class="text-editor-tab"
                 type="button"
                 role="tab"
-                aria-selected="false"
-                aria-controls="textTranscriptPanel"
-                tabindex="-1"
-                data-text-editor-tab="transcript"
-              >识别全文</button>
+                aria-selected="true"
+                aria-controls="textCutsPanel"
+                data-text-editor-tab="cuts"
+              >文字剪辑</button>
               <button
                 id="textSuggestionsTab"
                 class="text-editor-tab"
@@ -338,15 +322,6 @@
                 data-text-editor-tab="suggestions"
               >AI 建议</button>
               <button
-                id="textCutsTab"
-                class="text-editor-tab"
-                type="button"
-                role="tab"
-                aria-selected="true"
-                aria-controls="textCutsPanel"
-                data-text-editor-tab="cuts"
-              >文字剪辑</button>
-              <button
                 id="textSilenceTab"
                 class="text-editor-tab"
                 type="button"
@@ -356,26 +331,14 @@
                 tabindex="-1"
                 data-text-editor-tab="silence"
               >空白剪辑</button>
-              <button
-                id="textOutputTab"
-                class="text-editor-tab"
-                type="button"
-                role="tab"
-                aria-selected="false"
-                aria-controls="textOutputPanel"
-                tabindex="-1"
-                data-text-editor-tab="output"
-              >生成结果</button>
             </div>
 
             <div class="text-editor-panel-stack">
 
         <section
           id="textOutputPanel"
-          class="direct-tools-panel text-editor-panel"
-          role="tabpanel"
-          aria-labelledby="textOutputTab"
-          data-text-editor-panel="output"
+          class="editor-suite-generation-runtime"
+          aria-hidden="true"
           hidden
         >
           <section class="output-cut-builder" aria-labelledby="output-cut-builder-title">
@@ -427,47 +390,6 @@
           </div>
         </section>
 
-        <div
-          id="textTranscriptPanel"
-          class="transcript-card text-editor-panel"
-          role="tabpanel"
-          aria-labelledby="textTranscriptTab"
-          data-text-editor-panel="transcript"
-          hidden
-        >
-          <div class="transcript-heading">
-            <label class="text-label" for="transcriptText">识别全文</label>
-            <span id="transcriptMeta" class="field-meta">AI 语义断句</span>
-          </div>
-          <textarea
-            id="transcriptText"
-            rows="6"
-            spellcheck="true"
-            aria-describedby="transcriptHelper"
-          ></textarea>
-          <p id="transcriptHelper" class="text-helper">
-            直接在文本框修改错别字，系统会自动识别对应词块并保存；换行仅用于排版，不影响时间戳。
-          </p>
-          <p id="transcriptEditStatus" class="transcript-edit-status" aria-live="polite"></p>
-          <div class="transcript-word-editor-heading">
-            <strong>段落同步预览</strong>
-            <span>修改全文后，下方对应整段会自动更新</span>
-          </div>
-          <ol
-            id="transcriptSegmentList"
-            class="segment-list transcript-segment-list"
-            aria-label="识别文字整段同步预览"
-          ></ol>
-          <div class="result-actions">
-            <button id="copyButton" class="primary-button compact-button" type="button">
-              <iconify-icon icon="ph:copy-bold" aria-hidden="true"></iconify-icon>
-              <span>复制全文</span>
-            </button>
-            <button id="downloadButton" class="secondary-button" type="button">下载 TXT</button>
-            <span id="copyFeedback" class="copy-feedback" aria-live="polite"></span>
-          </div>
-        </div>
-
         <section
           id="suggestionsBlock"
           class="suggestions-block text-editor-panel"
@@ -478,10 +400,10 @@
         >
           <div class="suggestions-heading">
             <div>
-              <p class="step-label">04 · AI 初筛</p>
+              <p class="step-label">05 · AI 初筛</p>
               <h3 id="suggestions-title">AI 删减建议</h3>
               <p class="section-helper">
-                仅标记疑似口误、重复、语气词和无效片段。AI 不会自动删除，仍需你确认。
+                仅提示疑似口误、重复、语气词和无效片段。点击删除后会连同前后紧邻的无声区立即移除，当前方案内不可撤销。
               </p>
             </div>
             <div class="suggestions-heading-actions">
@@ -494,7 +416,7 @@
                 hidden
               >
                 <iconify-icon icon="ph:checks-bold" aria-hidden="true"></iconify-icon>
-                <span>一键标记删除</span>
+                <span>一键删除</span>
               </button>
             </div>
           </div>
@@ -515,10 +437,10 @@
           <div class="no-speech-panel" aria-labelledby="no-speech-title">
             <div class="no-speech-heading">
               <div>
-                <p class="step-label">05 · 空白剪辑</p>
+                <p class="step-label">06 · 空白剪辑</p>
                 <h3 id="no-speech-title">检查长时间没有说话的画面</h3>
                 <p class="section-helper">
-                  仅检测超过 1.5 秒的无文字区间，并保留说话边界缓冲。片头片尾默认保护，所有删除都需要你确认。
+                  仅检测超过 1.5 秒的无文字区间，并保留说话边界缓冲。点击删除后立即生效，当前方案内不可撤销。
                 </p>
               </div>
               <button
@@ -529,7 +451,7 @@
                 hidden
               >
                 <iconify-icon icon="ph:selection-all-bold" aria-hidden="true"></iconify-icon>
-                <span>一键标记可删片段</span>
+                <span>一键删除可删片段</span>
               </button>
             </div>
             <p id="noSpeechState" class="no-speech-state" aria-live="polite">
@@ -538,8 +460,8 @@
             <ol id="noSpeechList" class="no-speech-list" aria-label="无文字片段建议"></ol>
             <div class="no-speech-selection-footer">
               <div class="no-speech-generate-summary" aria-live="polite">
-                <strong id="noSpeechCutSummary">尚未标记要删除的空白片段</strong>
-                <span id="noSpeechCutSelectionDetail">请先试听，再选择要从视频中删除的区间</span>
+                <strong id="noSpeechCutSummary">尚未删除空白片段</strong>
+                <span id="noSpeechCutSelectionDetail">请先试听，再直接删除不需要的区间</span>
               </div>
             </div>
           </div>
@@ -554,22 +476,29 @@
         >
           <div class="editor-heading">
             <div>
-              <p class="step-label">05 · 文字剪辑</p>
-              <h3>选择要从视频中删除的段落</h3>
-              <p class="section-helper">文字列表仅支持整段选择。选中的段落将在新视频中删除，原视频不会被覆盖。</p>
+              <p class="step-label">04 · 文字剪辑</p>
+              <h3>删除不需要的文字段落</h3>
+              <p class="section-helper">点击左侧圆圈删除整段，再次点击可撤销；点击文案可调整分段。删除时会连同前后紧邻的无声区一起处理。</p>
             </div>
-            <button id="clearSelectionButton" class="secondary-button" type="button" disabled>清空选择</button>
+            <div class="segment-heading-actions">
+              <span id="cutDraftSaveStatus" class="cut-draft-save-status" data-tone="neutral" role="status" aria-live="polite">剪辑草稿自动保存</span>
+              <span id="segmentStructureStatus" class="segment-selection-hint" aria-live="polite">圆圈切换删除，点击文案调整分段</span>
+              <span class="irreversible-cut-note">
+                <iconify-icon icon="ph:arrow-counter-clockwise-bold" aria-hidden="true"></iconify-icon>
+                再次点击可撤销
+              </span>
+              <button id="clearSelectionButton" class="secondary-button" type="button" disabled hidden aria-hidden="true">
+                <iconify-icon icon="ph:x-circle-bold" aria-hidden="true"></iconify-icon>
+                <span>删除不可撤销</span>
+              </button>
+            </div>
           </div>
 
-          <section class="cut-preview-panel" aria-labelledby="cut-preview-title">
+          <section class="cut-preview-panel" aria-label="视频预览">
             <div class="cut-preview-heading">
-              <div>
-                <p class="step-label">实时预览</p>
-                <h4 id="cut-preview-title">播放并拖动时间轴剪辑视频</h4>
-              </div>
               <span class="cut-timeline-legend">
                 <i aria-hidden="true"></i>
-                红色区间将在新视频中删除
+                三个工具共用这一处预览
               </span>
             </div>
 
@@ -579,11 +508,17 @@
                   id="cutPreviewVideo"
                   preload="metadata"
                   playsinline
-                  aria-label="文字剪辑原视频预览"
+                  aria-label="公共视频预览"
                 ></video>
+                <div
+                  id="editorSuitePreviewOverlay"
+                  class="editor-suite-preview-overlay"
+                  aria-label="当前工具效果预览"
+                  hidden
+                ></div>
               </div>
 
-              <div class="external-video-controls" aria-label="剪辑预览播放控制">
+              <div class="external-video-controls" aria-label="公共预览播放控制">
                 <button id="cutPreviewPlay" class="media-control-button" type="button" aria-label="播放">
                   <iconify-icon id="cutPreviewPlayIcon" icon="ph:play-fill" aria-hidden="true"></iconify-icon>
                   <iconify-icon id="cutPreviewPauseIcon" icon="ph:pause-fill" aria-hidden="true" hidden></iconify-icon>
@@ -618,35 +553,38 @@
                 </button>
               </div>
 
-              <div id="cutFrameTimeline" class="frame-timeline cut-frame-timeline" aria-label="文字剪辑帧时间轴" hidden>
+              <div id="cutFrameTimeline" class="frame-timeline cut-frame-timeline" aria-label="公共帧时间轴" hidden>
                 <div class="frame-timeline-heading cut-frame-timeline-heading">
-                  <div>
-                    <strong>剪辑时间轴</strong>
-                    <span>拖动空白处创建删除区间，拖动区间两端精确调整</span>
-                  </div>
+                  <span class="sr-only">拖动自定义区间；触碰文字时仅吸附完整文字边界，松开后弹窗确认</span>
                   <output id="cutFrameTimelineTime">00:00 / 00:00</output>
                 </div>
-                <div id="cutFrameTimelineTrack" class="frame-timeline-track cut-frame-timeline-track">
-                  <div id="cutFrameTimelineRuler" class="frame-timeline-ruler" aria-hidden="true"></div>
-                  <div id="cutFrameTimelineThumbnails" class="frame-timeline-thumbnails" aria-hidden="true"></div>
-                  <div id="cutFrameTimelineRanges" class="cut-frame-timeline-ranges"></div>
-                  <span id="cutFrameTimelinePlayhead" class="frame-timeline-playhead" aria-hidden="true"></span>
-                  <input
-                    id="cutFrameTimelineSeek"
-                    class="frame-timeline-seek"
-                    type="range"
-                    min="0"
-                    max="0"
-                    step="0.033"
-                    value="0"
-                    aria-label="逐帧定位剪辑预览时间"
-                  />
+                <div id="cutFrameTimelineScroll" class="cut-frame-timeline-scroll">
+                  <div id="cutFrameTimelineTrack" class="frame-timeline-track cut-frame-timeline-track">
+                    <div id="cutFrameTimelineRuler" class="frame-timeline-ruler" aria-hidden="true"></div>
+                    <div id="cutFrameTimelineText" class="cut-frame-timeline-text" aria-hidden="true"></div>
+                    <div
+                      id="editorSuiteTimelineLayer"
+                      class="editor-suite-timeline-layer editor-layer-timeline-segments"
+                      aria-label="艺术字和画中画叠加片段"
+                      hidden
+                    ></div>
+                    <div id="cutFrameTimelineThumbnails" class="frame-timeline-thumbnails" aria-hidden="true"></div>
+                    <div id="cutFrameTimelineRanges" class="cut-frame-timeline-ranges"></div>
+                    <span id="cutFrameTimelinePlayhead" class="frame-timeline-playhead" aria-hidden="true"></span>
+                    <input
+                      id="cutFrameTimelineSeek"
+                      class="frame-timeline-seek"
+                      type="range"
+                      min="0"
+                      max="0"
+                      step="0.033"
+                      value="0"
+                      aria-label="逐帧定位剪辑预览时间"
+                    />
+                  </div>
                 </div>
                 <div class="cut-frame-timeline-footer">
                   <p id="cutFrameTimelineStatus" class="frame-timeline-status" role="status" aria-live="polite"></p>
-                  <button id="removeTimelineRangeButton" class="secondary-button" type="button" disabled>
-                    移除当前时间轴选区
-                  </button>
                 </div>
               </div>
             </div>
@@ -654,8 +592,8 @@
 
           <div class="cut-toolbar is-selection-only">
             <div class="cut-summary" aria-live="polite">
-              <strong id="cutSummary">尚未选择要删除的段落</strong>
-              <span id="cutSelectionDetail">请选择整段，或在时间轴上拖出删除区间</span>
+              <strong id="cutSummary">尚未删除任何内容</strong>
+              <span id="cutSelectionDetail">点击文字删除会一并收紧前后无声区；时间轴拖动按自定义区间处理</span>
             </div>
           </div>
 
@@ -707,6 +645,12 @@
           </section>
         </div>
             </div>
+            <div
+              id="editorSuiteInspectorHost"
+              class="editor-suite-inspector-host"
+              aria-live="polite"
+              hidden
+            ></div>
           </section>
         </div>
       </section>
@@ -753,5 +697,55 @@
         </div>
       </section>
     </div>
+
+    <dialog
+      id="segmentEditDialog"
+      class="segment-edit-dialog"
+      aria-labelledby="segmentEditTitle"
+      aria-describedby="segmentEditHelper"
+    >
+      <section class="segment-edit-dialog-card">
+        <div class="segment-edit-dialog-signal" aria-hidden="true">
+          <span></span>
+          <strong>TEXT / SEGMENT</strong>
+        </div>
+        <div class="segment-edit-dialog-heading">
+          <div>
+            <p id="segmentEditEyebrow" class="step-label">段落 01</p>
+            <h2 id="segmentEditTitle">调整文字分段</h2>
+          </div>
+          <button id="segmentEditClose" class="segment-edit-dialog-close" type="button" aria-label="关闭分段编辑弹窗">
+            <iconify-icon icon="ph:x-bold" aria-hidden="true"></iconify-icon>
+          </button>
+        </div>
+        <p id="segmentEditTime" class="segment-edit-dialog-time"></p>
+        <label class="segment-edit-text-label" for="segmentEditText">当前段落文字</label>
+        <textarea
+          id="segmentEditText"
+          class="segment-edit-text"
+          rows="4"
+          readonly
+          spellcheck="false"
+        ></textarea>
+        <p id="segmentEditHelper" class="segment-edit-helper">
+          用鼠标拖动选择其中一部分文字，再点击“拆分”；选中文字会成为单独一行。
+        </p>
+        <p id="segmentEditSelectionStatus" class="segment-edit-selection-status" aria-live="polite">尚未选择文字</p>
+        <div class="segment-edit-actions" aria-label="分段操作">
+          <button id="splitSegmentButton" class="segment-edit-action is-primary" type="button" disabled>
+            <iconify-icon icon="ph:scissors-bold" aria-hidden="true"></iconify-icon>
+            <span>拆分</span>
+          </button>
+          <button id="mergeSegmentUpButton" class="segment-edit-action" type="button">
+            <iconify-icon icon="ph:arrow-line-up-bold" aria-hidden="true"></iconify-icon>
+            <span>向上合并</span>
+          </button>
+          <button id="mergeSegmentDownButton" class="segment-edit-action" type="button">
+            <iconify-icon icon="ph:arrow-line-down-bold" aria-hidden="true"></iconify-icon>
+            <span>向下合并</span>
+          </button>
+        </div>
+      </section>
+    </dialog>
   </body>
 </html>

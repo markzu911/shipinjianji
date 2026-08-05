@@ -56,13 +56,22 @@ MAX_ART_TEMPLATE_KB = 256
 MAX_ART_TEMPLATE_BYTES = MAX_ART_TEMPLATE_KB * 1024
 ALLOWED_ART_TEMPLATE_EXTENSIONS = {".json", ".arttext"}
 WINDOWS_FONT_DIR = Path(os.getenv("WINDIR", r"C:\Windows")) / "Fonts"
+BUILTIN_FONT_DIR = DATA_DIR / "fonts" / "builtin"
+BUILTIN_FONT_FILENAMES = {
+    "modern": "msyh.ttc",
+    "bold": "msyhbd.ttc",
+    "classic": "simhei.ttf",
+    "song": "simsun.ttc",
+    "kai": "simkai.ttf",
+    "fang": "simfang.ttf",
+}
 ART_TEXT_FONTS = {
-    "modern": WINDOWS_FONT_DIR / "msyh.ttc",
-    "bold": WINDOWS_FONT_DIR / "msyhbd.ttc",
-    "classic": WINDOWS_FONT_DIR / "simhei.ttf",
-    "song": WINDOWS_FONT_DIR / "simsun.ttc",
-    "kai": WINDOWS_FONT_DIR / "simkai.ttf",
-    "fang": WINDOWS_FONT_DIR / "simfang.ttf",
+    font_id: (
+        BUILTIN_FONT_DIR / filename
+        if (BUILTIN_FONT_DIR / filename).is_file()
+        else WINDOWS_FONT_DIR / filename
+    )
+    for font_id, filename in BUILTIN_FONT_FILENAMES.items()
 }
 BUILTIN_FONT_METADATA = {
     "modern": ("现代黑体", '"Microsoft YaHei", sans-serif'),
@@ -246,8 +255,11 @@ CUT_END_SEARCH_BEFORE_SECONDS = 0.040
 CUT_END_SEARCH_AFTER_SECONDS = 0.300
 CUT_START_EXTENDED_SEARCH_BEFORE_SECONDS = 0.500
 CUT_END_EXTENDED_SEARCH_AFTER_SECONDS = 0.750
+CUT_START_HEAD_GUARD_SECONDS = CUT_START_EXTENDED_SEARCH_BEFORE_SECONDS
+CUT_END_TAIL_GUARD_SECONDS = CUT_END_EXTENDED_SEARCH_AFTER_SECONDS
 CUT_LOW_ENERGY_RMS_THRESHOLD = 500.0
 CUT_EXTENDED_VALLEY_IMPROVEMENT = 0.65
+CUT_TAIL_VALLEY_IMPROVEMENT = 0.35
 CUT_VALLEY_TOLERANCE = 1.10
 CUT_AUDIO_FADE_SECONDS = 0.008
 NO_SPEECH_MIN_GAP_SECONDS = 1.5
@@ -274,6 +286,7 @@ async def disable_frontend_cache(request, call_next):
         "/",
         "/index.html",
         "/app.js",
+        "/editor-suite.js",
         "/styles.css",
         "/art-text",
         "/art-text.html",
@@ -305,6 +318,29 @@ class CutRequest(BaseModel):
     historyName: str | None = Field(default=None, max_length=80)
 
 
+class CutDraftTextRange(DeleteRange):
+    key: str = Field(min_length=1, max_length=120)
+    text: str = Field(default="", max_length=5000)
+    originalStart: float | None = Field(default=None, ge=0, le=86400)
+    originalEnd: float | None = Field(default=None, ge=0, le=86400)
+    adjacentSilenceBefore: float = Field(default=0, ge=0, le=86400)
+    adjacentSilenceAfter: float = Field(default=0, ge=0, le=86400)
+
+
+class CutDraftNoSpeechRange(DeleteRange):
+    key: str = Field(min_length=1, max_length=120)
+
+
+class CutDraftRequest(BaseModel):
+    revision: int = Field(default=0, ge=0)
+    textRanges: list[CutDraftTextRange] = Field(default_factory=list, max_length=500)
+    noSpeechRanges: list[CutDraftNoSpeechRange] = Field(
+        default_factory=list,
+        max_length=500,
+    )
+    timelineRanges: list[DeleteRange] = Field(default_factory=list, max_length=500)
+
+
 class JobCleanupRequest(BaseModel):
     maxAgeDays: int | None = Field(default=None, ge=0, le=3650)
     maxDirectories: int | None = Field(default=None, ge=0, le=10000)
@@ -319,6 +355,13 @@ class TranscriptWordUpdate(BaseModel):
 
 class TranscriptTextUpdate(BaseModel):
     text: str = Field(min_length=1, max_length=50000)
+
+
+class TranscriptSegmentOperation(BaseModel):
+    segmentIndex: int = Field(ge=0)
+    action: Literal["split", "merge_up", "merge_down"]
+    selectionStart: int | None = Field(default=None, ge=0)
+    selectionEnd: int | None = Field(default=None, ge=0)
 
 
 class TextOverlay(BaseModel):
@@ -341,6 +384,8 @@ class TextOverlay(BaseModel):
     artStyle: str = "impact"
     trackId: str | None = Field(default=None, max_length=80)
     trackType: Literal["transcript"] | None = None
+    sourceStart: float | None = Field(default=None, ge=0, le=86400)
+    sourceEnd: float | None = Field(default=None, gt=0, le=86400)
 
 
 class ArtTextRequest(BaseModel):
@@ -355,6 +400,8 @@ class TranscriptArtTextTrackRequest(BaseModel):
     fontSize: int = Field(ge=20, le=180)
     letterSpacing: int = Field(default=0, ge=0, le=20)
     strokeWidth: int = Field(default=3, ge=0, le=12)
+    draftTranscript: dict[str, Any] | None = None
+    draftDuration: float | None = Field(default=None, gt=0, le=86400)
 
 
 class ArtTextSuggestionRequest(BaseModel):
@@ -395,6 +442,8 @@ class PictureInPicturePromptRequest(BaseModel):
 class PictureInPictureOverlay(BaseModel):
     assetId: str = ""
     imageId: str = ""
+    start: float | None = None
+    end: float | None = None
     x: float = 0.78
     y: float = 0.22
     width: float = 0.32
@@ -423,6 +472,57 @@ def utc_now() -> str:
 
 def jobs_directory() -> Path:
     return DATA_DIR / "jobs"
+
+
+def cut_draft_path(job_id: str) -> Path:
+    if not is_job_directory_name(job_id):
+        raise ValueError("无效的转写任务编号。")
+    return jobs_directory() / job_id / "cut-draft.json"
+
+
+def load_cut_draft(job_id: str) -> dict[str, Any] | None:
+    path = cut_draft_path(job_id)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def save_cut_draft(job_id: str, draft: dict[str, Any]) -> None:
+    path = cut_draft_path(job_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_suffix(".tmp")
+    temporary_path.write_text(
+        json.dumps(draft, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temporary_path.replace(path)
+
+
+def remove_cut_draft(job_id: str) -> None:
+    path = cut_draft_path(job_id)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def normalize_cut_draft_range(
+    item: DeleteRange,
+    duration: float,
+) -> dict[str, float]:
+    start = float(item.start)
+    end = float(item.end)
+    if not math.isfinite(start) or not math.isfinite(end):
+        raise ValueError("剪辑草稿包含无效时间。")
+    start = max(0.0, min(start, duration))
+    end = max(0.0, min(end, duration))
+    if end <= start:
+        raise ValueError("剪辑草稿区间的结束时间必须晚于开始时间。")
+    return {"start": round(start, 3), "end": round(end, 3)}
 
 
 def is_job_directory_name(value: str) -> bool:
@@ -1530,8 +1630,13 @@ def snap_delete_ranges_to_samples(
     for range_index, item in enumerate(delete_ranges):
         original_start = float(item["start"])
         original_end = float(item["end"])
+        has_boundary_limits = bool(
+            boundary_limits and range_index < len(boundary_limits)
+        )
         start = original_start
         end = original_end
+        original_end_rms = 0.0
+        end_rms = 0.0
         if original_start > 0.001:
             start = find_low_energy_boundary(
                 samples,
@@ -1559,6 +1664,9 @@ def snap_delete_ranges_to_samples(
                 ):
                     start = extended_start
         if original_end < duration - 0.001:
+            original_end_rms = boundary_window_rms(
+                samples, sample_rate, original_end
+            )
             end = find_low_energy_boundary(
                 samples,
                 sample_rate,
@@ -1584,12 +1692,28 @@ def snap_delete_ranges_to_samples(
                     <= end_rms * CUT_EXTENDED_VALLEY_IMPROVEMENT
                 ):
                     end = extended_end
+                    end_rms = extended_end_rms
 
         start = max(0.0, min(start, duration))
         end = max(0.0, min(end, duration))
-        if boundary_limits and range_index < len(boundary_limits):
+        if has_boundary_limits:
+            # A waveform valley may expand a deletion into a real pause, but it
+            # must never shrink the selected semantic range.  Shrinking here
+            # leaves syllable tails from AI-selected words in the final video.
+            # Only extend a high-energy word ending when the nearby valley is
+            # substantially quieter; otherwise preserve the exact ASR edge.
             limits = boundary_limits[range_index]
             start = max(float(limits["start"]), min(start, original_start))
+            if (
+                original_end_rms <= CUT_LOW_ENERGY_RMS_THRESHOLD
+                or end <= original_end
+                or (
+                    end_rms > CUT_LOW_ENERGY_RMS_THRESHOLD
+                    and end_rms
+                    > original_end_rms * CUT_TAIL_VALLEY_IMPROVEMENT
+                )
+            ):
+                end = original_end
             end = min(float(limits["end"]), max(end, original_end))
         if end <= start + 0.01:
             start, end = original_start, original_end
@@ -1716,6 +1840,8 @@ def build_transcript_delete_boundary_limits(
     segments: list[dict[str, Any]],
     delete_ranges: list[dict[str, float]],
     duration: float,
+    start_head_guard_seconds: float = 0.0,
+    end_tail_guard_seconds: float = 0.0,
 ) -> list[dict[str, float]]:
     timed_units: list[dict[str, Any]] = []
     for segment in segments:
@@ -1747,6 +1873,14 @@ def build_transcript_delete_boundary_limits(
         )
 
     retained_units = [unit for unit in timed_units if not is_deleted(unit)]
+    head_guard = max(
+        0.0,
+        min(float(start_head_guard_seconds), CUT_START_HEAD_GUARD_SECONDS),
+    )
+    tail_guard = max(
+        0.0,
+        min(float(end_tail_guard_seconds), CUT_END_TAIL_GUARD_SECONDS),
+    )
     limits: list[dict[str, float]] = []
     for item in delete_ranges:
         requested_start = float(item["start"])
@@ -1763,8 +1897,17 @@ def build_transcript_delete_boundary_limits(
         ]
         limits.append(
             {
-                "start": round(max(previous_ends, default=0.0), 3),
-                "end": round(min(next_starts, default=duration), 3),
+                "start": round(
+                    max(0.0, max(previous_ends, default=0.0) - head_guard),
+                    3,
+                ),
+                "end": round(
+                    min(
+                        duration,
+                        min(next_starts, default=duration) + tail_guard,
+                    ),
+                    3,
+                ),
             }
         )
     return limits
@@ -2181,6 +2324,14 @@ def normalize_text_overlays(
             )
             if overlay.end - overlay.start < minimum_duration:
                 raise ValueError(f"第 {index} 条艺术字显示时间过短。")
+        if (overlay.sourceStart is None) != (overlay.sourceEnd is None):
+            raise ValueError(f"第 {index} 条艺术字的原视频时间锚点不完整。")
+        if (
+            overlay.sourceStart is not None
+            and overlay.sourceEnd is not None
+            and overlay.sourceEnd <= overlay.sourceStart
+        ):
+            raise ValueError(f"第 {index} 条艺术字的原视频时间锚点无效。")
         if overlay.trackType == TRANSCRIPT_ART_TEXT_TRACK_TYPE:
             if len(content_characters(text)) > TRANSCRIPT_ART_TEXT_MAX_CHARS_PER_CUE:
                 raise ValueError(
@@ -2216,6 +2367,16 @@ def normalize_text_overlays(
                 else None
             ),
             "trackType": overlay.trackType,
+            "sourceStart": (
+                round(float(overlay.sourceStart), 3)
+                if overlay.sourceStart is not None
+                else None
+            ),
+            "sourceEnd": (
+                round(float(overlay.sourceEnd), 3)
+                if overlay.sourceEnd is not None
+                else None
+            ),
         }
         normalized.append(normalized_overlay)
 
@@ -2320,6 +2481,29 @@ def collect_transcript_art_text_words(
                     "segmentIndex": segment_index - 1,
                 }
             )
+            if "sourceStart" in word or "sourceEnd" in word:
+                try:
+                    source_start = float(word.get("sourceStart"))
+                    source_end = float(word.get("sourceEnd"))
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"第 {segment_index} 段包含无效源时间锚点。"
+                    ) from None
+                if (
+                    not math.isfinite(source_start)
+                    or not math.isfinite(source_end)
+                    or source_start < 0
+                    or source_end <= source_start
+                ):
+                    raise ValueError(
+                        f"第 {segment_index} 段包含无法使用的源时间锚点。"
+                    )
+                normalized_segment_words[-1].update(
+                    {
+                        "sourceStart": round(source_start, 3),
+                        "sourceEnd": round(source_end, 3),
+                    }
+                )
 
         if pending_zero_duration_text:
             if not normalized_segment_words:
@@ -3007,14 +3191,21 @@ def build_transcript_art_text_track(
             )
         )
 
-    cues = [
-        {
+    cues = []
+    for group in fitted_groups:
+        cue = {
             "text": transcript_art_text_display_text(group),
             "start": group[0]["start"],
             "end": group[-1]["end"],
         }
-        for group in fitted_groups
-    ]
+        if "sourceStart" in group[0] and "sourceEnd" in group[-1]:
+            cue.update(
+                {
+                    "sourceStart": group[0]["sourceStart"],
+                    "sourceEnd": group[-1]["sourceEnd"],
+                }
+            )
+        cues.append(cue)
 
     if len(cues) > MAX_TRANSCRIPT_ART_TEXT_CUES:
         raise ValueError(
@@ -4682,8 +4873,16 @@ def normalize_picture_in_picture_overlays(
         asset_path = job_dir / f"picture-in-picture-{asset_id}{suffix}"
         if not asset_path.is_file():
             raise ValueError(f"第 {index} 个画中画素材文件不存在。")
-        start = float(record.get("start") or 0)
-        end = float(record.get("end") or 0)
+        start = float(
+            overlay.start
+            if overlay.start is not None
+            else record.get("start") or 0
+        )
+        end = float(
+            overlay.end
+            if overlay.end is not None
+            else record.get("end") or 0
+        )
         numeric_values = (start, end, overlay.x, overlay.y, overlay.width)
         if not all(math.isfinite(float(value)) for value in numeric_values):
             raise ValueError(f"第 {index} 张画中画包含无效数值。")
@@ -5011,6 +5210,284 @@ def build_sentence_segments(
     return segments
 
 
+EDITABLE_SEGMENT_PAUSE_SECONDS = 0.32
+EDITABLE_SEGMENT_CLAUSE_ENDINGS = (
+    "\u3002",
+    "\uff01",
+    "\uff1f",
+    "\u2026",
+    "\uff0c",
+    "\u3001",
+    "\uff1b",
+    "\uff1a",
+    ".",
+    "!",
+    "?",
+    ",",
+    ";",
+    ":",
+)
+EDITABLE_SEGMENT_BREAK_BEFORE = (
+    "\u4f46\u662f",
+    "\u800c\u662f",
+    "\u4e0d\u8fc7",
+    "\u7136\u800c",
+    "\u6240\u4ee5",
+    "\u56e0\u4e3a",
+    "\u7531\u4e8e",
+    "\u4e8e\u662f",
+    "\u5982\u679c",
+    "\u5373\u4f7f",
+    "\u53ea\u8981",
+    "\u54ea\u6015",
+    "\u5176\u5b9e",
+    "\u5c24\u5176",
+    "\u540c\u65f6",
+    "\u7136\u540e",
+)
+
+
+def build_editable_transcript_segments(
+    source_segments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Create finer selectable subtitle clauses without splitting timed words."""
+    editable_segments: list[dict[str, Any]] = []
+
+    for source_index, source_segment in enumerate(source_segments):
+        source_words = source_segment.get("words") or []
+        if not source_words:
+            text = str(source_segment.get("text") or "").strip()
+            start = float(source_segment.get("start", 0) or 0)
+            end = float(source_segment.get("end", start) or start)
+            if text and end > start:
+                editable_segments.append(
+                    {
+                        "id": len(editable_segments),
+                        "sourceSegmentIndex": source_index,
+                        "start": start,
+                        "end": end,
+                        "text": text,
+                        "words": [],
+                    }
+                )
+            continue
+
+        current_words: list[dict[str, Any]] = []
+
+        def flush_segment() -> None:
+            if not current_words:
+                return
+            text = "".join(str(word.get("text") or "") for word in current_words)
+            if not content_characters(text):
+                current_words.clear()
+                return
+            editable_segments.append(
+                {
+                    "id": len(editable_segments),
+                    "sourceSegmentIndex": source_index,
+                    "start": float(current_words[0]["start"]),
+                    "end": float(current_words[-1]["end"]),
+                    "text": text,
+                    "words": copy.deepcopy(current_words),
+                }
+            )
+            current_words.clear()
+
+        for source_word in source_words:
+            word = {
+                "text": str(source_word.get("text") or ""),
+                "start": float(source_word.get("start", 0) or 0),
+                "end": float(source_word.get("end", 0) or 0),
+            }
+            if current_words:
+                previous_word = current_words[-1]
+                gap = word["start"] - float(previous_word["end"])
+                current_text = "".join(
+                    str(item.get("text") or "") for item in current_words
+                )
+                has_semantic_break = (
+                    gap >= EDITABLE_SEGMENT_PAUSE_SECONDS
+                    or (
+                        len(content_characters(current_text)) >= 4
+                        and word["text"].lstrip().startswith(
+                            EDITABLE_SEGMENT_BREAK_BEFORE
+                        )
+                    )
+                )
+                if has_semantic_break:
+                    flush_segment()
+
+            current_words.append(word)
+            if word["text"].rstrip().endswith(EDITABLE_SEGMENT_CLAUSE_ENDINGS):
+                flush_segment()
+
+        flush_segment()
+
+    return editable_segments
+
+
+def editable_segment_character_tokens(
+    segment: dict[str, Any],
+) -> list[dict[str, Any]]:
+    source_words = segment.get("words") or []
+    if not source_words:
+        source_words = [
+            {
+                "text": str(segment.get("text") or ""),
+                "start": float(segment.get("start", 0) or 0),
+                "end": float(segment.get("end", 0) or 0),
+            }
+        ]
+
+    tokens: list[dict[str, Any]] = []
+    for word in source_words:
+        characters = list(str(word.get("text") or ""))
+        if not characters:
+            continue
+        start = float(word.get("start", 0) or 0)
+        end = max(start, float(word.get("end", start) or start))
+        duration = end - start
+        for index, character in enumerate(characters):
+            tokens.append(
+                {
+                    "text": character,
+                    "start": round(start + duration * index / len(characters), 3),
+                    "end": round(
+                        start + duration * (index + 1) / len(characters),
+                        3,
+                    ),
+                }
+            )
+
+    expected_text = str(segment.get("text") or "")
+    if "".join(token["text"] for token in tokens) == expected_text:
+        return tokens
+
+    characters = list(expected_text)
+    if not characters:
+        return []
+    start = float(segment.get("start", 0) or 0)
+    end = max(start, float(segment.get("end", start) or start))
+    duration = end - start
+    return [
+        {
+            "text": character,
+            "start": round(start + duration * index / len(characters), 3),
+            "end": round(start + duration * (index + 1) / len(characters), 3),
+        }
+        for index, character in enumerate(characters)
+    ]
+
+
+def build_editable_segment_from_tokens(
+    tokens: list[dict[str, Any]],
+    source_segment_index: int,
+) -> dict[str, Any]:
+    return {
+        "id": 0,
+        "sourceSegmentIndex": source_segment_index,
+        "start": float(tokens[0]["start"]),
+        "end": float(tokens[-1]["end"]),
+        "text": "".join(str(token.get("text") or "") for token in tokens),
+        "words": copy.deepcopy(tokens),
+    }
+
+
+def normalize_editable_segment_ids(
+    segments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    normalized = copy.deepcopy(segments)
+    for index, segment in enumerate(normalized):
+        segment["id"] = index
+    return normalized
+
+
+def apply_transcript_segment_operation(
+    editable_segments: list[dict[str, Any]],
+    operation: TranscriptSegmentOperation,
+) -> list[dict[str, Any]]:
+    segments = normalize_editable_segment_ids(editable_segments)
+    if operation.segmentIndex >= len(segments):
+        raise ValueError("要调整的文字段不存在。")
+
+    segment_index = operation.segmentIndex
+    if operation.action == "merge_up":
+        if segment_index == 0:
+            raise ValueError("第一段没有可向上合并的段落。")
+        merge_start = segment_index - 1
+        merge_parts = segments[merge_start : segment_index + 1]
+    elif operation.action == "merge_down":
+        if segment_index + 1 >= len(segments):
+            raise ValueError("最后一段没有可向下合并的段落。")
+        merge_start = segment_index
+        merge_parts = segments[segment_index : segment_index + 2]
+    else:
+        segment = segments[segment_index]
+        tokens = editable_segment_character_tokens(segment)
+        selection_start = operation.selectionStart
+        selection_end = operation.selectionEnd
+        if selection_start is None or selection_end is None:
+            raise ValueError("请先拖动选择要拆分成单独一行的文字。")
+        if not (0 <= selection_start < selection_end <= len(tokens)):
+            raise ValueError("选择的文字范围无效，请重新选择。")
+        if selection_start == 0 and selection_end == len(tokens):
+            raise ValueError("已选择整段文字，无需再次拆分。")
+        selected_tokens = tokens[selection_start:selection_end]
+        if not content_characters(
+            "".join(str(token.get("text") or "") for token in selected_tokens)
+        ):
+            raise ValueError("不能只把标点或空格拆分成单独一行。")
+
+        token_groups = [
+            tokens[:selection_start],
+            selected_tokens,
+            tokens[selection_end:],
+        ]
+        compact_groups: list[list[dict[str, Any]]] = []
+        pending_prefix: list[dict[str, Any]] = []
+        for group in token_groups:
+            if not group:
+                continue
+            group_text = "".join(str(token.get("text") or "") for token in group)
+            if not content_characters(group_text):
+                if compact_groups:
+                    compact_groups[-1].extend(group)
+                else:
+                    pending_prefix.extend(group)
+                continue
+            if pending_prefix:
+                group = [*pending_prefix, *group]
+                pending_prefix = []
+            compact_groups.append(group)
+        if pending_prefix and compact_groups:
+            compact_groups[-1].extend(pending_prefix)
+        if len(compact_groups) < 2:
+            raise ValueError("请选择当前段落中的部分文字进行拆分。")
+
+        source_segment_index = int(segment.get("sourceSegmentIndex", 0) or 0)
+        split_segments = [
+            build_editable_segment_from_tokens(group, source_segment_index)
+            for group in compact_groups
+        ]
+        segments[segment_index : segment_index + 1] = split_segments
+        return normalize_editable_segment_ids(segments)
+
+    merged_tokens = [
+        token
+        for part in merge_parts
+        for token in editable_segment_character_tokens(part)
+    ]
+    source_segment_index = int(
+        merge_parts[0].get("sourceSegmentIndex", 0) or 0
+    )
+    merged_segment = build_editable_segment_from_tokens(
+        merged_tokens,
+        source_segment_index,
+    )
+    segments[merge_start : merge_start + 2] = [merged_segment]
+    return normalize_editable_segment_ids(segments)
+
+
 def polish_punctuation(text: str, api_key: str) -> str | None:
     plain_text = content_characters(text)
     if not plain_text:
@@ -5204,6 +5681,33 @@ def detect_repeated_speech_ranges(
     return merged
 
 
+def repeated_retained_word_span(
+    words: list[dict[str, Any]],
+    start_index: int,
+    end_index: int,
+) -> tuple[int, int] | None:
+    """Find the following copy that a repeated-speech rule intends to keep."""
+    deleted_text = "".join(
+        content_characters(str(word.get("text") or "")).lower()
+        for word in words[start_index : end_index + 1]
+    )
+    if not deleted_text or end_index + 1 >= len(words):
+        return None
+
+    following_characters: list[str] = []
+    following_word_indices: list[int] = []
+    for word_index in range(end_index + 1, min(len(words), end_index + 13)):
+        key = content_characters(str(words[word_index].get("text") or "")).lower()
+        following_characters.extend(key)
+        following_word_indices.extend([word_index] * len(key))
+    following_text = "".join(following_characters)
+    maximum_length = min(32, len(deleted_text), len(following_text))
+    for length in range(maximum_length, 0, -1):
+        if following_text[:length] in deleted_text:
+            return end_index + 1, following_word_indices[length - 1]
+    return None
+
+
 def build_repeated_speech_suggestions(
     words: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -5212,31 +5716,139 @@ def build_repeated_speech_suggestions(
         start_index = repeated_range["startIndex"]
         end_index = repeated_range["endIndex"]
         repeated_words = words[start_index : end_index + 1]
-        suggestions.append(
-            {
-                "id": f"suggestion-{start_index}-{end_index}",
-                "type": "重复",
-                "reason": (
-                    "检测到重复起句后重新表述，保留最后一次完整表达"
-                    if repeated_range["parts"] > 1
-                    else "检测到相邻内容重复，保留后一次表达"
-                ),
-                "confidence": 0.99,
-                "text": "".join(word["text"] for word in repeated_words),
-                "start": float(repeated_words[0]["start"]),
-                "end": float(repeated_words[-1]["end"]),
-                "startIndex": start_index,
-                "endIndex": end_index,
-                "ranges": [
-                    {
-                        "start": float(word["start"]),
-                        "end": float(word["end"]),
-                    }
-                    for word in repeated_words
-                ],
-            }
+        suggestion = {
+            "id": f"suggestion-{start_index}-{end_index}",
+            "type": "重复",
+            "reason": (
+                "检测到重复起句后重新表述，保留最后一次完整表达"
+                if repeated_range["parts"] > 1
+                else "检测到相邻内容重复，保留后一次表达"
+            ),
+            "confidence": 0.99,
+            "text": "".join(word["text"] for word in repeated_words),
+            "start": float(repeated_words[0]["start"]),
+            "end": float(repeated_words[-1]["end"]),
+            "startIndex": start_index,
+            "endIndex": end_index,
+            "ranges": [
+                {
+                    "start": float(word["start"]),
+                    "end": float(word["end"]),
+                }
+                for word in repeated_words
+            ],
+        }
+        protected_span = repeated_retained_word_span(
+            words,
+            start_index,
+            end_index,
         )
+        if protected_span:
+            suggestion["_protectedStartIndex"] = protected_span[0]
+            suggestion["_protectedEndIndex"] = protected_span[1]
+        suggestions.append(suggestion)
     return suggestions[:8]
+
+
+ABANDONED_LEADIN_SUBJECTS = {
+    "我",
+    "你",
+    "他",
+    "她",
+    "我们",
+    "你们",
+    "他们",
+    "她们",
+}
+ABANDONED_LEADIN_PREDICATES = {"觉得", "认为", "感觉"}
+ABANDONED_LEADIN_COLLECTIVE_CUES = (
+    "身边",
+    "周围",
+    "人人",
+    "大家",
+    "所有人",
+    "别人",
+    "人家",
+    "很多人",
+    "多数人",
+)
+
+
+def build_abandoned_leadin_suggestions(
+    words: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Detect a short abandoned opinion lead-in before a complete main clause."""
+    keys = [content_characters(str(word.get("text") or "")).lower() for word in words]
+    terminal_marks = ("。", "！", "？", "!", "?")
+    clause_start = 0
+    suggestions: list[dict[str, Any]] = []
+
+    for clause_end, word in enumerate(words):
+        is_clause_end = str(word.get("text") or "").rstrip(
+            "”’》〉】」』）"
+        ).endswith(terminal_marks)
+        if not is_clause_end and clause_end + 1 < len(words):
+            continue
+
+        start_index = clause_start
+        if clause_end - start_index >= 4:
+            subject = keys[start_index]
+            predicate = keys[start_index + 1]
+            restarted_subject = keys[start_index + 2]
+            if (
+                subject in ABANDONED_LEADIN_SUBJECTS
+                and predicate in ABANDONED_LEADIN_PREDICATES
+                and restarted_subject.startswith(subject)
+            ):
+                search_end = min(clause_end, start_index + 10)
+                repeated_predicate_index = next(
+                    (
+                        index
+                        for index in range(start_index + 3, search_end + 1)
+                        if keys[index] == predicate
+                    ),
+                    None,
+                )
+                if repeated_predicate_index is not None:
+                    restarted_text = "".join(
+                        keys[start_index + 2 : repeated_predicate_index + 1]
+                    )
+                    if any(
+                        cue in restarted_text
+                        for cue in ABANDONED_LEADIN_COLLECTIVE_CUES
+                    ):
+                        deleted_words = words[start_index : start_index + 2]
+                        suggestions.append(
+                            {
+                                "id": f"suggestion-{start_index}-{start_index + 1}",
+                                "type": "错句",
+                                "reason": (
+                                    "检测到起句未完成后立即重启，保留后面的完整主句"
+                                ),
+                                "confidence": 0.99,
+                                "text": "".join(
+                                    item["text"] for item in deleted_words
+                                ),
+                                "start": float(deleted_words[0]["start"]),
+                                "end": float(deleted_words[-1]["end"]),
+                                "startIndex": start_index,
+                                "endIndex": start_index + 1,
+                                "ranges": [
+                                    {
+                                        "start": float(item["start"]),
+                                        "end": float(item["end"]),
+                                    }
+                                    for item in deleted_words
+                                ],
+                                "_protectedStartIndex": start_index + 2,
+                                "_protectedEndIndex": repeated_predicate_index,
+                            }
+                        )
+
+        if is_clause_end:
+            clause_start = clause_end + 1
+
+    return suggestions
 
 
 def suggest_deletions(
@@ -5252,8 +5864,20 @@ def suggest_deletions(
     if not words:
         return [], "completed"
 
-    rule_suggestions = build_repeated_speech_suggestions(words)
+    rule_suggestions = [
+        *build_repeated_speech_suggestions(words),
+        *build_abandoned_leadin_suggestions(words),
+    ]
     fallback_status = "completed" if rule_suggestions else "unavailable"
+
+    def rule_fallback() -> tuple[list[dict[str, Any]], str]:
+        public_suggestions = copy.deepcopy(rule_suggestions)
+        for suggestion in public_suggestions:
+            suggestion.pop("_protectedStartIndex", None)
+            suggestion.pop("_protectedEndIndex", None)
+        public_suggestions.sort(key=lambda item: item["startIndex"])
+        return public_suggestions[:8], fallback_status
+
     indexed_transcript = "\n".join(
         f"[{index}] {word['text']}"
         for index, word in enumerate(words)
@@ -5277,6 +5901,8 @@ def suggest_deletions(
                         "不要建议。例如“你身边人人都觉得身边人人都觉得一个月”应删除"
                         "第一处“身边人人都觉得”；“在另一群人眼中，在另一在另一群人眼中"
                         "就是家常便饭”应删除“在另一群人眼中，在另一”，保留最后完整起句。"
+                        "“你觉得你身边人人都觉得一个月赚一万”属于起句未完成后立即重启，"
+                        "应只删除开头的“你觉得”，保留“你身边人人都觉得一个月赚一万”。"
                         "同时不要把表达风格、正常停顿、完整观点、事实问题"
                         "或你不喜欢的内容判为错句。宁可少报，不要猜测。"
                         "遇到“今天是星期三，不对，今天是星期四”这类自我纠正时，"
@@ -5303,25 +5929,33 @@ def suggest_deletions(
             temperature=0,
         )
         if getattr(response, "status_code", None) != HTTPStatus.OK:
-            return rule_suggestions, fallback_status
+            return rule_fallback()
         content = str(
             response.output.choices[0].message.content
         ).strip()
         payload = json.loads(content)
     except (AttributeError, IndexError, TypeError, ValueError, json.JSONDecodeError):
-        return rule_suggestions, fallback_status
+        return rule_fallback()
     except Exception:
-        return rule_suggestions, fallback_status
+        return rule_fallback()
 
     raw_suggestions = payload.get("suggestions")
     if not isinstance(raw_suggestions, list):
-        return rule_suggestions, fallback_status
+        return rule_fallback()
 
     allowed_types = {"口误", "重复", "错句", "语气词", "无效片段"}
     candidates: list[dict[str, Any]] = [
         {**suggestion, "_rulePriority": 1}
         for suggestion in rule_suggestions
     ]
+    protected_rule_indices = {
+        index
+        for suggestion in rule_suggestions
+        for index in range(
+            int(suggestion.get("_protectedStartIndex", 0)),
+            int(suggestion.get("_protectedEndIndex", -1)) + 1,
+        )
+    }
     word_count = len(words)
     for item in raw_suggestions:
         if not isinstance(item, dict):
@@ -5353,12 +5987,21 @@ def suggest_deletions(
             confidence = float(item.get("confidence"))
         except (TypeError, ValueError):
             continue
+        minimum_confidence = {
+            "口误": 0.72,
+            "重复": 0.72,
+            "错句": 0.82,
+            "语气词": 0.75,
+            "无效片段": 0.82,
+        }.get(suggestion_type, 1.01)
+        suggestion_indices = set(range(start_index, end_index + 1))
         if (
             suggestion_type not in allowed_types
             or not reason
             or not math.isfinite(confidence)
-            or confidence < 0.68
+            or confidence < minimum_confidence
             or confidence > 1
+            or protected_rule_indices.intersection(suggestion_indices)
         ):
             continue
 
@@ -5491,6 +6134,8 @@ def suggest_deletions(
     accepted.sort(key=lambda item: item["startIndex"])
     for candidate in accepted:
         candidate.pop("_rulePriority", None)
+        candidate.pop("_protectedStartIndex", None)
+        candidate.pop("_protectedEndIndex", None)
     return accepted, "completed"
 
 
@@ -5592,6 +6237,7 @@ def transcribe_audio(
         if timed_words
         else fallback_segments
     )
+    editable_segments = build_editable_transcript_segments(segments)
     duration = max([segment["end"] for segment in segments] + [0])
     progress_callback(95)
     return {
@@ -5602,6 +6248,7 @@ def transcribe_audio(
         "languageProbability": None,
         "duration": duration,
         "segments": segments,
+        "editableSegments": editable_segments,
     }
 
 
@@ -5627,6 +6274,9 @@ def process_job(job_id: str) -> None:
         result = transcribe_audio(
             audio_path,
             lambda progress: update_job(job_id, progress=progress),
+        )
+        result["editableSegments"] = build_editable_transcript_segments(
+            result.get("segments") or []
         )
         with JOBS_LOCK:
             media_duration = float(JOBS[job_id]["duration"])
@@ -5704,6 +6354,8 @@ def process_cut_job(
             source_segments,
             requested_ranges,
             duration,
+            start_head_guard_seconds=CUT_START_HEAD_GUARD_SECONDS,
+            end_tail_guard_seconds=CUT_END_TAIL_GUARD_SECONDS,
         )
         media_ranges = snap_delete_ranges_to_audio(
             boundary_source,
@@ -6364,6 +7016,9 @@ def use_history_version(history_id: str) -> JSONResponse:
     result["mediaDuration"] = round(duration, 3)
     result.setdefault("language", "zh")
     result.setdefault("languageProbability", None)
+    result["editableSegments"] = build_editable_transcript_segments(
+        result.get("segments") or []
+    )
     result.setdefault("suggestions", [])
     result.setdefault("suggestionStatus", "unavailable")
     result.setdefault("noSpeechSuggestions", [])
@@ -6379,6 +7034,7 @@ def use_history_version(history_id: str) -> JSONResponse:
         "progress": 100,
         "result": result,
         "edit": None,
+        "cutDraft": None,
         "art": None,
         "artSuggestion": None,
         "pictureInPictureImages": [],
@@ -6489,6 +7145,7 @@ async def create_transcription(
         "progress": 10,
         "result": None,
         "edit": None,
+        "cutDraft": None,
         "art": None,
         "artSuggestion": None,
         "pictureInPictureImages": [],
@@ -6512,7 +7169,111 @@ def get_transcription(job_id: str) -> dict[str, Any]:
         job = JOBS.get(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+        if job.get("cutDraft") is None:
+            job["cutDraft"] = load_cut_draft(job_id)
         return public_job(job)
+
+
+@app.get("/api/transcriptions/{job_id}/cut-draft")
+def get_cut_draft(job_id: str) -> dict[str, Any]:
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+        draft = job.get("cutDraft")
+        if draft is None:
+            draft = load_cut_draft(job_id)
+            job["cutDraft"] = draft
+        return {"cutDraft": copy.deepcopy(draft)}
+
+
+@app.put("/api/transcriptions/{job_id}/cut-draft")
+def update_cut_draft(
+    job_id: str,
+    request: CutDraftRequest,
+) -> dict[str, Any]:
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+        if job.get("status") != "completed":
+            raise HTTPException(status_code=409, detail="文字识别尚未完成。")
+        duration = float(job.get("duration") or 0)
+        if duration <= 0:
+            raise HTTPException(status_code=409, detail="视频时长无效，无法保存剪辑草稿。")
+
+        current_draft = job.get("cutDraft")
+        if current_draft is None:
+            current_draft = load_cut_draft(job_id)
+        current_revision = int((current_draft or {}).get("revision") or 0)
+        if request.revision != current_revision:
+            raise HTTPException(
+                status_code=409,
+                detail="剪辑草稿已在其他页面更新，请刷新后继续。",
+            )
+
+        try:
+            text_ranges = []
+            for item in request.textRanges:
+                normalized = normalize_cut_draft_range(item, duration)
+                text_ranges.append(
+                    {
+                        **item.model_dump(
+                            exclude={"start", "end"},
+                            exclude_none=True,
+                        ),
+                        **normalized,
+                    }
+                )
+            no_speech_ranges = []
+            for item in request.noSpeechRanges:
+                normalized = normalize_cut_draft_range(item, duration)
+                no_speech_ranges.append(
+                    {
+                        "key": item.key,
+                        **normalized,
+                    }
+                )
+            timeline_ranges = [
+                normalize_cut_draft_range(item, duration)
+                for item in request.timelineRanges
+            ]
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        draft = {
+            "schemaVersion": 1,
+            "revision": current_revision + 1,
+            "textRanges": text_ranges,
+            "noSpeechRanges": no_speech_ranges,
+            "timelineRanges": timeline_ranges,
+            "updatedAt": utc_now(),
+        }
+        try:
+            save_cut_draft(job_id, draft)
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail="剪辑草稿保存失败，请检查磁盘空间后重试。",
+            ) from exc
+        job["cutDraft"] = draft
+        job["updatedAt"] = draft["updatedAt"]
+        return {"cutDraft": copy.deepcopy(draft)}
+
+
+@app.delete("/api/transcriptions/{job_id}/cut-draft")
+def delete_cut_draft(job_id: str) -> dict[str, str]:
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+        try:
+            remove_cut_draft(job_id)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail="剪辑草稿清除失败。") from exc
+        job["cutDraft"] = None
+        job["updatedAt"] = utc_now()
+        return {"status": "cleared"}
 
 
 @app.patch("/api/transcriptions/{job_id}/transcript")
@@ -6557,6 +7318,7 @@ def update_transcript_word(
                 raise HTTPException(status_code=404, detail="要修正的词块不存在。")
             segment["text"] = corrected_text
 
+        result["editableSegments"] = build_editable_transcript_segments(segments)
         result["text"] = "\n".join(
             str(item.get("text") or "") for item in segments
         )
@@ -6574,6 +7336,8 @@ def update_transcript_word(
 
         job["art"] = None
         job["artSuggestion"] = None
+        if (job.get("pictureInPicture") or {}).get("source") == "art":
+            job["pictureInPicture"] = None
 
         job["updatedAt"] = utc_now()
         return {
@@ -6613,6 +7377,7 @@ def update_transcript_text(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         result["segments"] = segments
+        result["editableSegments"] = build_editable_transcript_segments(segments)
         result["text"] = "\n".join(
             str(segment.get("text") or "") for segment in segments
         )
@@ -6630,6 +7395,8 @@ def update_transcript_text(
         if changed_count:
             job["art"] = None
             job["artSuggestion"] = None
+            if (job.get("pictureInPicture") or {}).get("source") == "art":
+                job["pictureInPicture"] = None
 
         job["updatedAt"] = utc_now()
         return {
@@ -6637,6 +7404,44 @@ def update_transcript_text(
             "editTranscript": copy.deepcopy(edit_transcript),
             "changedWords": changed_count,
         }
+
+
+@app.put("/api/transcriptions/{job_id}/editable-segments")
+def update_editable_transcript_segments(
+    job_id: str,
+    request: TranscriptSegmentOperation,
+) -> dict[str, Any]:
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+        if job.get("status") != "completed" or not job.get("result"):
+            raise HTTPException(status_code=409, detail="文字识别尚未完成。")
+        edit = job.get("edit") or {}
+        if edit.get("status") in {"queued", "processing"}:
+            raise HTTPException(status_code=409, detail="视频正在剪辑，请完成后再调整分段。")
+        art = job.get("art") or {}
+        if art.get("status") in {"queued", "processing"}:
+            raise HTTPException(
+                status_code=409,
+                detail="艺术字视频正在生成，请完成后再调整分段。",
+            )
+
+        result = job["result"]
+        editable_segments = result.get("editableSegments") or (
+            build_editable_transcript_segments(result.get("segments") or [])
+        )
+        try:
+            updated_segments = apply_transcript_segment_operation(
+                editable_segments,
+                request,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        result["editableSegments"] = updated_segments
+        job["updatedAt"] = utc_now()
+        return {"editableSegments": copy.deepcopy(updated_segments)}
 
 
 @app.post("/api/transcriptions/{job_id}/cuts", status_code=202)
@@ -6678,6 +7483,7 @@ def create_cut(
         job["edit"] = edit
         job["art"] = None
         job["artSuggestion"] = None
+        job["pictureInPicture"] = None
         job["updatedAt"] = now
 
     background_tasks.add_task(
@@ -6838,6 +7644,7 @@ def create_transcript_art_text_track(
     job_id: str,
     request: TranscriptArtTextTrackRequest,
 ) -> dict[str, Any]:
+    live_draft = request.draftTranscript is not None
     with JOBS_LOCK:
         job = JOBS.get(job_id)
         if job is None:
@@ -6851,22 +7658,41 @@ def create_transcript_art_text_track(
         video_path = JOB_FILES.get(job_id)
         if video_path is None:
             raise HTTPException(status_code=404, detail="原视频文件不存在。")
-        try:
-            ensure_original_source_available(job, request.source)
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        if request.source == "edited" and edit.get("status") != "completed":
-            raise HTTPException(status_code=409, detail="请先完成视频剪辑。")
-        if request.source == "edited":
-            duration = float(edit.get("outputDuration") or 0)
-            transcript = copy.deepcopy(edit.get("transcript") or {})
-            input_path = video_path.parent / "edited.mp4"
-        else:
-            duration = float(job["duration"])
-            transcript = copy.deepcopy(job.get("result") or {})
+        if live_draft:
+            draft_segments = request.draftTranscript.get("segments")
+            if request.draftDuration is None:
+                raise HTTPException(status_code=400, detail="剪辑草稿缺少视频时长。")
+            if not isinstance(draft_segments, list) or not draft_segments:
+                raise HTTPException(status_code=400, detail="剪辑草稿没有可用文案。")
+            if any(not isinstance(segment, dict) for segment in draft_segments):
+                raise HTTPException(status_code=400, detail="剪辑草稿文案格式无效。")
+            if len(draft_segments) > 1000 or sum(
+                len(str(segment.get("text") or ""))
+                for segment in draft_segments
+            ) > 50000:
+                raise HTTPException(status_code=400, detail="剪辑草稿文案过长。")
+            duration = float(request.draftDuration)
+            transcript = copy.deepcopy(request.draftTranscript)
             input_path = video_path
+            segmentation_source = f"{request.source}:draft"
+        else:
+            try:
+                ensure_original_source_available(job, request.source)
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            if request.source == "edited" and edit.get("status") != "completed":
+                raise HTTPException(status_code=409, detail="请先完成视频剪辑。")
+            segmentation_source = request.source
+            if request.source == "edited":
+                duration = float(edit.get("outputDuration") or 0)
+                transcript = copy.deepcopy(edit.get("transcript") or {})
+                input_path = video_path.parent / "edited.mp4"
+            else:
+                duration = float(job["duration"])
+                transcript = copy.deepcopy(job.get("result") or {})
+                input_path = video_path
         segmentation_cache = copy.deepcopy(
-            (job.get("artTranscriptSegmentation") or {}).get(request.source)
+            (job.get("artTranscriptSegmentation") or {}).get(segmentation_source)
         )
 
     if not input_path.is_file():
@@ -6878,14 +7704,15 @@ def create_transcript_art_text_track(
         semantic_breaks: list[int] | None = None
         segmentation_method = "local"
         if (
-            isinstance(segmentation_cache, dict)
+            not live_draft
+            and isinstance(segmentation_cache, dict)
             and segmentation_cache.get("key") == segmentation_key
             and segmentation_cache.get("model") == ART_TEXT_SEGMENTATION_MODEL
             and isinstance(segmentation_cache.get("breakAfter"), list)
         ):
             semantic_breaks = list(segmentation_cache["breakAfter"])
             segmentation_method = "ai"
-        else:
+        elif not live_draft:
             font_path = resolve_art_text_font_path(request.font)
             if font_path is None:
                 raise ValueError("全文艺术字轨道使用的字体不存在或已被删除。")
@@ -6912,7 +7739,7 @@ def create_transcript_art_text_track(
                         current_job.setdefault(
                             "artTranscriptSegmentation",
                             {},
-                        )[request.source] = {
+                        )[segmentation_source] = {
                             "key": segmentation_key,
                             "model": ART_TEXT_SEGMENTATION_MODEL,
                             "breakAfter": list(semantic_breaks),
@@ -6986,6 +7813,7 @@ def create_art_text(
     }
     with JOBS_LOCK:
         JOBS[job_id]["art"] = art
+        JOBS[job_id]["pictureInPicture"] = None
         JOBS[job_id]["updatedAt"] = now
 
     background_tasks.add_task(process_art_text_job, job_id, input_path, overlays)

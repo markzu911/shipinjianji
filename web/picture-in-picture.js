@@ -25,6 +25,7 @@ const pipVideoStage = document.querySelector("#pipVideoStage");
 const pipOverlayLayer = document.querySelector("#pipOverlayLayer");
 const videoTime = document.querySelector("#videoTime");
 const timelineTime = document.querySelector("#timelineTime");
+const pipTimelineScroll = document.querySelector("#pipTimelineScroll");
 const pipTimelineTrack = document.querySelector("#pipTimelineTrack");
 const pipTimelineRuler = document.querySelector("#pipTimelineRuler");
 const pipTimelineThumbnails = document.querySelector("#pipTimelineThumbnails");
@@ -77,10 +78,15 @@ const mediaControlGroups = [
 ];
 
 const PIP_TIMELINE_THUMB_MIN = 8;
-const PIP_TIMELINE_THUMB_MAX = 18;
-const PIP_TIMELINE_THUMB_WIDTH = 68;
+const PIP_TIMELINE_THUMB_MAX = 180;
+const PIP_TIMELINE_MAJOR_TICK_WIDTH = 72;
+const PIP_TIMELINE_MIN_PIXELS_PER_SECOND = 22;
+const PIP_TIMELINE_TEXT_CHAR_WIDTH = 10;
+const PIP_TIMELINE_TEXT_LINES = 2;
 
 const query = new URLSearchParams(window.location.search);
+const embeddedEditor = query.get("embedded") === "1";
+document.documentElement.classList.toggle("editor-tool-embedded", embeddedEditor);
 const jobId = query.get("job") || "";
 const requestedSource = ["original", "edited", "art"].includes(
   query.get("source"),
@@ -101,7 +107,14 @@ let selectedPictureItemId = "";
 let activePictureDrag = null;
 let pipTimelineBuildId = 0;
 let pipTimelineSignature = "";
+let pipTimelineRulerSignature = "";
 let pipTimelineResizeTimer = null;
+let editorHostCurrentTime = null;
+let editorHostStateSignature = "";
+let previewVisibilitySignature = "";
+let cutDraftActive = false;
+let pendingCutDraft = null;
+let pipEditorReady = false;
 
 function clamp(value, minimum, maximum) {
   return Math.min(maximum, Math.max(minimum, value));
@@ -129,6 +142,7 @@ function showPageError(message) {
 function showMessage(element, message) {
   element.textContent = message || "";
   element.hidden = !message;
+  if (element === outputError) window.queueMicrotask(notifyEditorHost);
 }
 
 async function parseResponse(response, fallback) {
@@ -229,7 +243,7 @@ function fitPipTimeToTranscript() {
     segment.end,
     `已贴合当前文案时间：${formatRange(segment.start, segment.end)}。`,
   );
-  pipVideo.currentTime = range.start;
+  seekEditorPreview(range.start);
   renderPreview();
 }
 
@@ -414,20 +428,72 @@ function setupExternalVideoControls(container) {
   renderVolume();
 }
 
-function renderTimelineRuler() {
-  pipTimelineRuler.replaceChildren();
-  const interval = duration <= 20 ? 5 : duration <= 60 ? 10 : 30;
-  for (let seconds = 0; seconds <= duration + 0.01; seconds += interval) {
-    const mark = document.createElement("span");
-    mark.style.left = `${duration > 0 ? (seconds / duration) * 100 : 0}%`;
-    mark.textContent = formatTime(seconds);
-    pipTimelineRuler.append(mark);
+function pipTimelinePixelsPerSecond() {
+  let pixelsPerSecond = PIP_TIMELINE_MIN_PIXELS_PER_SECOND;
+  for (const item of pictureItems.filter(({ enabled }) => enabled)) {
+    const itemDuration = Math.max(0.05, item.end - item.start);
+    const characterCount = Array.from(
+      String(item.text || "").replace(/\s+/g, ""),
+    ).length;
+    const requiredWidth =
+      Math.ceil(characterCount / PIP_TIMELINE_TEXT_LINES) *
+        PIP_TIMELINE_TEXT_CHAR_WIDTH +
+      16;
+    pixelsPerSecond = Math.max(pixelsPerSecond, requiredWidth / itemDuration);
   }
-  if (duration > 0 && duration % interval > 0.25) {
-    const mark = document.createElement("span");
-    mark.style.left = "100%";
-    mark.textContent = formatTime(duration);
-    pipTimelineRuler.append(mark);
+  return Math.ceil(pixelsPerSecond);
+}
+
+function updatePipTimelineScale() {
+  const viewportWidth = pipTimelineScroll.clientWidth;
+  if (duration <= 0 || viewportWidth <= 0) {
+    pipTimelineTrack.style.removeProperty("width");
+    return;
+  }
+  pipTimelineTrack.style.width = `${Math.max(
+    viewportWidth,
+    Math.round(duration * pipTimelinePixelsPerSecond()),
+  )}px`;
+}
+
+function pipTimelineMajorStep(total, width) {
+  const targetStep =
+    total / Math.max(1, Math.floor(width / PIP_TIMELINE_MAJOR_TICK_WIDTH));
+  const steps = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600];
+  return steps.find((step) => step >= targetStep) || steps.at(-1);
+}
+
+function renderTimelineRuler() {
+  updatePipTimelineScale();
+  const width = pipTimelineTrack.clientWidth;
+  if (duration <= 0 || width <= 0) {
+    pipTimelineRuler.replaceChildren();
+    return;
+  }
+  const majorStep = pipTimelineMajorStep(duration, width);
+  const minorStep = majorStep / 5;
+  const signature = `${duration.toFixed(3)}|${Math.round(width)}|${majorStep}`;
+  if (signature === pipTimelineRulerSignature) return;
+  pipTimelineRulerSignature = signature;
+  pipTimelineRuler.replaceChildren();
+
+  const tickCount = Math.floor(duration / minorStep + 0.000001);
+  for (let index = 0; index <= tickCount; index += 1) {
+    const seconds = index * minorStep;
+    const isMajor = index % 5 === 0;
+    const tick = document.createElement("span");
+    tick.className = "frame-timeline-tick";
+    tick.classList.toggle("is-major", isMajor);
+    tick.style.left = `${(seconds / duration) * 100}%`;
+    if (isMajor) {
+      const label = document.createElement("span");
+      label.className = "frame-timeline-tick-label";
+      label.textContent = formatTime(seconds);
+      if (index === 0) label.classList.add("is-start");
+      if (Math.abs(duration - seconds) < 0.001) label.classList.add("is-end");
+      tick.append(label);
+    }
+    pipTimelineRuler.append(tick);
   }
 }
 
@@ -442,8 +508,10 @@ function renderPipTimelinePlaceholders(count, fallback = false) {
 
 function desiredPipTimelineThumbnailCount() {
   const width = pipTimelineTrack.clientWidth || 640;
+  if (duration <= 0) return PIP_TIMELINE_THUMB_MIN;
+  const majorStep = pipTimelineMajorStep(duration, width);
   return clamp(
-    Math.round(width / PIP_TIMELINE_THUMB_WIDTH),
+    Math.ceil(duration / majorStep) + 1,
     PIP_TIMELINE_THUMB_MIN,
     PIP_TIMELINE_THUMB_MAX,
   );
@@ -565,13 +633,20 @@ async function buildPipTimelineThumbnails(options = {}) {
 function schedulePipTimelineRebuild() {
   window.clearTimeout(pipTimelineResizeTimer);
   pipTimelineResizeTimer = window.setTimeout(() => {
+    updatePipTimelineScale();
+    pipTimelineRulerSignature = "";
+    renderTimelineRuler();
     buildPipTimelineThumbnails();
   }, 180);
 }
 
 function renderTimelineSegments() {
+  updatePipTimelineScale();
   pipTimelineSegments.replaceChildren();
-  if (duration <= 0) return;
+  if (duration <= 0) {
+    notifyEditorHost();
+    return;
+  }
   for (const [index, item] of pictureItems.entries()) {
     if (!item.enabled) continue;
     const segment = document.createElement("button");
@@ -581,22 +656,39 @@ function renderTimelineSegments() {
     segment.style.width = `${Math.max(1, ((item.end - item.start) / duration) * 100)}%`;
     segment.title = `${item.text} ${formatRange(item.start, item.end)}`;
     segment.setAttribute("aria-label", `定位到画中画：${item.text}`);
+    const label = document.createElement("span");
+    label.className = "editor-layer-timeline-segment-label";
+    label.textContent = item.text || "画中画";
+    segment.append(label);
     segment.addEventListener("click", (event) => {
       event.stopPropagation();
-      pipVideo.currentTime = item.start;
+      seekEditorPreview(item.start);
       generatedList.children[index]?.scrollIntoView({ block: "nearest" });
     });
     pipTimelineSegments.append(segment);
   }
+  notifyEditorHost();
 }
 
-function renderTimelinePlayhead() {
-  const current = clamp(pipVideo.currentTime || 0, 0, duration);
+function renderTimelinePlayhead(currentTime = pipVideo.currentTime || 0) {
+  updatePipTimelineScale();
+  const current = clamp(Number(currentTime) || 0, 0, duration);
   const progress = duration > 0 ? (current / duration) * 100 : 0;
   pipTimelinePlayhead.style.left = `${progress}%`;
   pipTimelineSeek.value = String(current);
   timelineTime.textContent = `${formatTime(current)} / ${formatTime(duration)}`;
   videoTime.textContent = `${formatTime(current)} / ${formatTime(duration)}`;
+  if (!pipVideo.paused && pipTimelineScroll.clientWidth > 0) {
+    const playheadX = (progress / 100) * pipTimelineTrack.clientWidth;
+    const viewportStart = pipTimelineScroll.scrollLeft;
+    const viewportEnd = viewportStart + pipTimelineScroll.clientWidth;
+    if (playheadX < viewportStart || playheadX > viewportEnd) {
+      pipTimelineScroll.scrollLeft = Math.max(
+        0,
+        playheadX - pipTimelineScroll.clientWidth * 0.5,
+      );
+    }
+  }
 }
 
 function createPicturePreviewElement(item) {
@@ -604,6 +696,7 @@ function createPicturePreviewElement(item) {
   overlay.type = "button";
   overlay.className = "pip-preview-item";
   overlay.dataset.pictureId = item.id;
+  overlay.dataset.effectStart = String(item.start || 0);
   const media = document.createElement(item.type === "video" ? "video" : "img");
   media.src = item.assetUrl || item.imageUrl;
   if (item.type === "video") {
@@ -640,14 +733,43 @@ function syncPreviewVideo(media, item, current) {
   else media.play().catch(() => {});
 }
 
-function renderPreview() {
-  renderTimelinePlayhead();
+function previewPlaybackTime() {
+  const current =
+    embeddedEditor && Number.isFinite(editorHostCurrentTime)
+      ? editorHostCurrentTime
+      : Number(pipVideo.currentTime) || 0;
+  return clamp(current, 0, duration || Infinity);
+}
+
+function seekEditorPreview(seconds) {
+  const nextTime = clamp(Number(seconds) || 0, 0, duration || Infinity);
+  if (embeddedEditor && window.parent !== window) {
+    editorHostCurrentTime = nextTime;
+    window.parent.postMessage(
+      {
+        type: "editor-suite:seek",
+        kind: "pip",
+        currentTime: nextTime,
+      },
+      window.location.origin,
+    );
+  } else {
+    pipVideo.currentTime = nextTime;
+  }
+  return nextTime;
+}
+
+function renderPreview(options = {}) {
+  const current = previewPlaybackTime();
+  if (!embeddedEditor) renderTimelinePlayhead(current);
   if (activePictureDrag) return;
   if (showingFinalVideo) {
+    if (options.timeOnly && previewVisibilitySignature === "final") return;
+    previewVisibilitySignature = "final";
     pipOverlayLayer.replaceChildren();
+    notifyEditorHost();
     return;
   }
-  const current = Number(pipVideo.currentTime) || 0;
   const visibleItems = pictureItems.filter(
     (item) =>
       item.enabled &&
@@ -655,6 +777,11 @@ function renderPreview() {
       current >= item.start &&
       current <= item.end,
   );
+  const nextVisibilitySignature = visibleItems.map(({ id }) => id).join("|");
+  if (options.timeOnly && nextVisibilitySignature === previewVisibilitySignature) {
+    return;
+  }
+  previewVisibilitySignature = nextVisibilitySignature;
   const visibleIds = new Set(visibleItems.map((item) => item.id));
   for (const child of [...pipOverlayLayer.children]) {
     if (!visibleIds.has(child.dataset.pictureId)) child.remove();
@@ -680,9 +807,245 @@ function renderPreview() {
       syncPreviewVideo(overlay.querySelector("video"), item, current);
     }
   }
+  notifyEditorHost();
 }
 
-function selectTranscriptSegment(index) {
+function notifyEditorHost(options = {}) {
+  if (!embeddedEditor || window.parent === window) return;
+  const state = {
+    overlayHtml: pipOverlayLayer.innerHTML,
+    overlayWidth: pipOverlayLayer.clientWidth,
+    overlayHeight: pipOverlayLayer.clientHeight,
+    timelineHtml: pipTimelineSegments?.innerHTML || "",
+    generationDisabled: generatePipVideo.disabled,
+    generationLabel: generatePipVideo.textContent.trim(),
+    generationBusy: !outputProgress.hidden,
+    generationError: outputError.hidden ? "" : outputError.textContent.trim(),
+  };
+  const signature = JSON.stringify(state);
+  if (!options.force && signature === editorHostStateSignature) return;
+  editorHostStateSignature = signature;
+  window.parent.postMessage(
+    {
+      type: "editor-suite:tool-state",
+      kind: "pip",
+      currentTime: previewPlaybackTime(),
+      ...state,
+    },
+    window.location.origin,
+  );
+}
+
+function updateEditorSuiteJobState(payload) {
+  window.EditorSuite?.update(payload);
+  if (!embeddedEditor || window.parent === window) return;
+  window.parent.postMessage(
+    { type: "editor-suite:job-state", job: payload },
+    window.location.origin,
+  );
+}
+
+function embeddedPipDraftKey() {
+  return `editor-suite:pip-draft:${jobId}`;
+}
+
+function persistEmbeddedPipDraft() {
+  if (!embeddedEditor || !jobId || !pipEditorReady) return;
+  const segment = selectedSegment();
+  try {
+    window.sessionStorage.setItem(
+      embeddedPipDraftKey(),
+      JSON.stringify({
+        text: segment?.text || "",
+        sourceStart: segment?.sourceStart ?? null,
+        sourceEnd: segment?.sourceEnd ?? null,
+        prompt: pipPrompt.value,
+        assetType: currentAssetType(),
+        mode: currentGenerationMode(),
+        aspectRatio: currentImageAspectRatio(),
+        items: pictureItems.map((item) => ({
+          id: item.id,
+          start: item.start,
+          end: item.end,
+          sourceStart: item.sourceStart ?? null,
+          sourceEnd: item.sourceEnd ?? null,
+          x: item.x,
+          y: item.y,
+          width: item.width,
+          enabled: item.enabled,
+        })),
+      }),
+    );
+  } catch {
+    // The editor remains usable when private browsing blocks session storage.
+  }
+}
+
+function restoreEmbeddedPipDraft() {
+  if (!embeddedEditor || !jobId) return false;
+  try {
+    const saved = JSON.parse(
+      window.sessionStorage.getItem(embeddedPipDraftKey()) || "null",
+    );
+    if (!saved) return false;
+    pipPrompt.value = String(saved.prompt || "");
+    for (const input of assetTypeInputs) input.checked = input.value === saved.assetType;
+    for (const input of generationModeInputs) input.checked = input.value === saved.mode;
+    for (const input of aspectRatioInputs) input.checked = input.value === saved.aspectRatio;
+    updateAssetType();
+    updateGenerationMode();
+    updateAspectRatioSelection();
+    const savedItems = new Map(
+      (saved.items || []).map((item) => [String(item.id), item]),
+    );
+    for (const item of pictureItems) {
+      const savedItem = savedItems.get(String(item.id));
+      if (savedItem) Object.assign(item, savedItem);
+    }
+    renderGeneratedList();
+    const index = transcriptSegments.findIndex((segment) =>
+      saved.sourceStart !== null && saved.sourceEnd !== null
+        ? Math.abs(Number(segment.sourceStart) - Number(saved.sourceStart)) < 0.01 &&
+          Math.abs(Number(segment.sourceEnd) - Number(saved.sourceEnd)) < 0.01
+        : segment.text === saved.text,
+    );
+    if (index >= 0) selectTranscriptSegment(index, { preservePreviewTime: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function matchingDraftSegment(item, segments) {
+  const sourceStart = Number(item.sourceStart);
+  const sourceEnd = Number(item.sourceEnd);
+  if (
+    item.sourceStart !== null &&
+    item.sourceEnd !== null &&
+    Number.isFinite(sourceStart) &&
+    Number.isFinite(sourceEnd)
+  ) {
+    const anchored = segments.find(
+      (segment) =>
+        Math.min(sourceEnd, Number(segment.sourceEnd)) -
+          Math.max(sourceStart, Number(segment.sourceStart)) > 0.01,
+    );
+    if (anchored) return anchored;
+  }
+  const matchingText = segments.filter(
+    (segment) => String(segment.text).trim() === String(item.text).trim(),
+  );
+  return matchingText.sort(
+    (left, right) =>
+      Math.abs(Number(left.start) - Number(item.start)) -
+      Math.abs(Number(right.start) - Number(item.start)),
+  )[0] || null;
+}
+
+function applyEditorCutDraft(data) {
+  pendingCutDraft = data;
+  cutDraftActive = Boolean(data.active);
+  if (!pipEditorReady || !data.transcript) return;
+  const previousSegment = selectedSegment();
+  duration = Math.max(0, Number(data.duration) || 0);
+  transcriptSegments = (data.transcript.segments || [])
+    .map((segment) => ({
+      text: String(segment.text || "").trim(),
+      start: clamp(Number(segment.start) || 0, 0, duration),
+      end: clamp(Number(segment.end) || 0, 0, duration),
+      sourceStart: Number(segment.sourceStart),
+      sourceEnd: Number(segment.sourceEnd),
+    }))
+    .filter((segment) => segment.text && segment.end > segment.start);
+  for (const item of pictureItems) {
+    const segment = matchingDraftSegment(item, transcriptSegments);
+    if (!segment) continue;
+    item.start = segment.start;
+    item.end = segment.end;
+    item.sourceStart = segment.sourceStart;
+    item.sourceEnd = segment.sourceEnd;
+  }
+  selectedSegmentIndex = Math.max(
+    0,
+    transcriptSegments.findIndex((segment) =>
+      previousSegment?.sourceStart !== undefined
+        ? Math.abs(Number(segment.sourceStart) - Number(previousSegment.sourceStart)) < 0.01
+        : segment.text === previousSegment?.text,
+    ),
+  );
+  pipTimelineSeek.max = String(duration);
+  pipTimelineRulerSignature = "";
+  renderSegmentList();
+  renderGeneratedList();
+  renderTimelineRuler();
+  renderTimelineSegments();
+  if (transcriptSegments.length > 0) {
+    selectTranscriptSegment(selectedSegmentIndex, { preservePreviewTime: true });
+  }
+  showPromptWriterStatus(
+    cutDraftActive
+      ? "当前文案和时间已按剪辑方案实时更新；可先选择内容，剪辑视频生成后即可生成画中画素材。"
+      : "",
+    cutDraftActive ? "warning" : "",
+  );
+  persistEmbeddedPipDraft();
+}
+
+function handleEditorHostMessage(event) {
+  if (
+    !embeddedEditor ||
+    event.origin !== window.location.origin ||
+    event.source !== window.parent
+  ) {
+    return;
+  }
+  const data = event.data || {};
+  if (data.type === "editor-suite:cut-draft") {
+    applyEditorCutDraft(data);
+    return;
+  }
+  if (data.type === "editor-suite:generate-video" && data.kind === "pip") {
+    if (generatePipVideo.disabled) return;
+    generatePipVideo.click();
+    return;
+  }
+  if (data.type === "editor-suite:sync-time") {
+    const nextTime = clamp(Number(data.currentTime) || 0, 0, duration || Infinity);
+    editorHostCurrentTime = nextTime;
+    renderPreview({ timeOnly: true });
+    return;
+  }
+  if (data.type !== "editor-suite:move-effect" || data.kind !== "pip") return;
+  const item = pictureItems.find((candidate) => String(candidate.id) === String(data.id));
+  if (!item) return;
+  item.x = clamp(Number(data.x) || 0.5, 0.05, 0.95);
+  item.y = clamp(Number(data.y) || 0.5, 0.05, 0.95);
+  selectedPictureItemId = item.id;
+  renderGeneratedList();
+  renderPreview();
+}
+
+window.addEventListener("message", handleEditorHostMessage);
+
+const pipGenerationObserver = new MutationObserver(notifyEditorHost);
+pipGenerationObserver.observe(generatePipVideo, {
+  attributes: true,
+  childList: true,
+  subtree: true,
+  attributeFilter: ["disabled"],
+});
+pipGenerationObserver.observe(outputProgress, {
+  attributes: true,
+  attributeFilter: ["hidden"],
+});
+pipGenerationObserver.observe(outputError, {
+  attributes: true,
+  childList: true,
+  subtree: true,
+  attributeFilter: ["hidden"],
+});
+
+function selectTranscriptSegment(index, options = {}) {
   if (!transcriptSegments[index]) return;
   selectedSegmentIndex = index;
   const segment = transcriptSegments[index];
@@ -692,9 +1055,12 @@ function selectTranscriptSegment(index) {
   showPromptWriterStatus("");
   setPipTimeRange(segment.start, segment.end);
   selectedSegmentTime.textContent = formatRange(segment.start, segment.end);
-  pipVideo.currentTime = clamp(segment.start, 0, duration);
+  if (!options.preservePreviewTime) {
+    seekEditorPreview(segment.start);
+  }
   renderSegmentList();
   renderPreview();
+  persistEmbeddedPipDraft();
 }
 
 function renderSegmentList() {
@@ -766,7 +1132,7 @@ function placementSelect(item) {
 
 function seekToPictureItem(item) {
   if (showingFinalVideo) setVideoSource(baseVideoUrl, false);
-  pipVideo.currentTime = clamp(item.start + 0.02, 0, duration);
+  seekEditorPreview(item.start + 0.02);
 }
 
 function renderGeneratedList() {
@@ -881,6 +1247,7 @@ function renderGeneratedList() {
       sizeText.textContent = `大小 ${size.value}%`;
       seekToPictureItem(item);
       renderPreview();
+      persistEmbeddedPipDraft();
     });
     sizeLabel.append(sizeText, size);
     controls.append(positionLabel, sizeLabel);
@@ -890,6 +1257,7 @@ function renderGeneratedList() {
     card.append(previewButton, content);
     generatedList.append(card);
   });
+  persistEmbeddedPipDraft();
 }
 
 function updateAssetType() {
@@ -934,6 +1302,13 @@ function showPromptWriterStatus(message, state = "") {
 }
 
 async function writePromptDraft() {
+  if (cutDraftActive) {
+    showPromptWriterStatus(
+      "当前选择已保留；请先生成剪辑视频，再让 AI 读取正确的视频画面。",
+      "warning",
+    );
+    return;
+  }
   const segment = selectedSegment();
   if (!segment) {
     showPromptWriterStatus("请先选择要插入画中画的文字片段。", "error");
@@ -991,6 +1366,14 @@ async function writePromptDraft() {
 }
 
 async function generateAsset() {
+  if (cutDraftActive) {
+    showMessage(
+      imageError,
+      "当前可继续选择文案和填写内容；请先生成剪辑视频，再生成画中画素材。",
+    );
+    persistEmbeddedPipDraft();
+    return;
+  }
   const segment = selectedSegment();
   if (!segment) {
     showMessage(imageError, "请先选择要插入画中画的文字片段。");
@@ -1051,6 +1434,8 @@ async function generateAsset() {
     pictureItems.push({
       ...record,
       type: record.type || assetType,
+      sourceStart: segment.sourceStart ?? null,
+      sourceEnd: segment.sourceEnd ?? null,
       x: 0.8,
       y: 0.2,
       width: 0.32,
@@ -1164,6 +1549,7 @@ async function pollPictureInPictureJob() {
     const response = await fetch(`/api/transcriptions/${encodeURIComponent(jobId)}`);
     const payload = await parseResponse(response, "无法读取视频生成进度。");
     job = payload;
+    updateEditorSuiteJobState(payload);
     const activePictureInPicture = pictureInPictureForSource(payload);
     renderPictureInPictureJob(activePictureInPicture);
     if (["queued", "processing"].includes(activePictureInPicture?.status)) {
@@ -1179,6 +1565,10 @@ async function pollPictureInPictureJob() {
 }
 
 async function generateVideo() {
+  if (cutDraftActive) {
+    showMessage(outputError, "请先生成剪辑视频，再输出画中画成片。");
+    return;
+  }
   const enabledItems = pictureItems.filter(
     (item) => item.enabled && isReadyAsset(item),
   );
@@ -1200,6 +1590,8 @@ async function generateVideo() {
           source: requestedSource,
           overlays: enabledItems.map((item) => ({
             assetId: item.id,
+            start: item.start,
+            end: item.end,
             x: item.x,
             y: item.y,
             width: item.width,
@@ -1283,6 +1675,7 @@ async function initialize() {
       throw new Error("请等待文字识别完成后再插入画中画。");
     }
     job = payload;
+    updateEditorSuiteJobState(payload);
     let transcript = null;
     if (requestedSource === "original") {
       if (payload.edit?.status) {
@@ -1293,8 +1686,8 @@ async function initialize() {
       baseVideoUrl =
         `/api/transcriptions/${encodeURIComponent(jobId)}/original-video`;
       pipSourceLabel.textContent = "原视频";
-      pipEditWorkflowStep.classList.remove("is-complete");
-      pipArtWorkflowStep.classList.remove("is-complete");
+      pipEditWorkflowStep?.classList.remove("is-complete");
+      pipArtWorkflowStep?.classList.remove("is-complete");
     } else if (requestedSource === "edited") {
       if (payload.edit?.status !== "completed" || !payload.edit.outputUrl) {
         throw new Error("请先完成视频剪辑，或选择直接处理原视频。");
@@ -1303,7 +1696,7 @@ async function initialize() {
       transcript = payload.edit.transcript;
       baseVideoUrl = payload.edit.outputUrl;
       pipSourceLabel.textContent = "剪辑视频";
-      pipArtWorkflowStep.classList.remove("is-complete");
+      pipArtWorkflowStep?.classList.remove("is-complete");
     } else {
       if (payload.art?.status !== "completed" || !payload.art.outputUrl) {
         throw new Error("请先生成艺术字视频，或选择直接处理原视频。");
@@ -1320,7 +1713,7 @@ async function initialize() {
       baseVideoUrl = payload.art.outputUrl;
       pipSourceLabel.textContent = "艺术字视频";
       if (artSource === "original") {
-        pipEditWorkflowStep.classList.remove("is-complete");
+        pipEditWorkflowStep?.classList.remove("is-complete");
       }
     }
     transcriptSegments = (transcript?.segments || [])
@@ -1336,14 +1729,20 @@ async function initialize() {
     pipVideo.src = `${baseVideoUrl}?v=${Date.now()}`;
     renderSegmentList();
     renderGeneratedList();
-    renderTimelineRuler();
-    renderTimelineSegments();
     const activePictureInPicture = pictureInPictureForSource(payload);
     renderPictureInPictureJob(activePictureInPicture);
     pageLoading.hidden = true;
     pageError.hidden = true;
     pipWorkspace.hidden = false;
-    if (transcriptSegments.length > 0) selectTranscriptSegment(0);
+    pipEditorReady = true;
+    if (pendingCutDraft?.transcript) applyEditorCutDraft(pendingCutDraft);
+    restoreEmbeddedPipDraft();
+    pipTimelineRulerSignature = "";
+    renderTimelineRuler();
+    renderTimelineSegments();
+    if (transcriptSegments.length > 0 && selectedSegmentIndex < 0) {
+      selectTranscriptSegment(0, { preservePreviewTime: embeddedEditor });
+    }
     if (["queued", "processing"].includes(activePictureInPicture?.status)) {
       pollPictureInPictureJob();
     }
@@ -1382,13 +1781,20 @@ for (const input of assetTypeInputs) {
   input.addEventListener("change", () => {
     updateAssetType();
     showPromptWriterStatus("");
+    persistEmbeddedPipDraft();
   });
 }
 for (const input of generationModeInputs) {
-  input.addEventListener("change", updateGenerationMode);
+  input.addEventListener("change", () => {
+    updateGenerationMode();
+    persistEmbeddedPipDraft();
+  });
 }
 for (const input of aspectRatioInputs) {
-  input.addEventListener("change", updateAspectRatioSelection);
+  input.addEventListener("change", () => {
+    updateAspectRatioSelection();
+    persistEmbeddedPipDraft();
+  });
 }
 generatePipImage.addEventListener("click", generateAsset);
 writePipPrompt.addEventListener("click", writePromptDraft);
@@ -1397,12 +1803,13 @@ for (const input of [pipStartTime, pipEndTime]) {
   input.addEventListener("change", () => {
     const range = currentPipTimeRange();
     if (!range) return;
-    pipVideo.currentTime = range.start;
+    seekEditorPreview(range.start);
     renderPreview();
   });
 }
 pipPrompt.addEventListener("input", () => {
   if (promptWriterStatus.dataset.state === "success") showPromptWriterStatus("");
+  persistEmbeddedPipDraft();
 });
 generatePipVideo.addEventListener("click", generateVideo);
 restartProjectButton.addEventListener("click", restartProject);
@@ -1413,21 +1820,40 @@ previewFinalVideo.addEventListener("click", () => {
 pipVideo.addEventListener("loadedmetadata", () => {
   syncVideoStageLayout();
   renderTimelinePlayhead();
+  pipTimelineRulerSignature = "";
+  renderTimelineRuler();
   renderPreview();
   buildPipTimelineThumbnails({ force: true });
 });
 pipVideo.addEventListener("timeupdate", renderPreview);
-pipVideo.addEventListener("seeking", renderPreview);
+pipVideo.addEventListener("seeking", () => {
+  if (embeddedEditor) {
+    editorHostCurrentTime = clamp(
+      Number(pipVideo.currentTime) || 0,
+      0,
+      duration || Infinity,
+    );
+    window.parent.postMessage(
+      {
+        type: "editor-suite:seek",
+        kind: "pip",
+        currentTime: pipVideo.currentTime || 0,
+      },
+      window.location.origin,
+    );
+  }
+  renderPreview();
+});
 pipVideo.addEventListener("play", renderPreview);
 pipVideo.addEventListener("pause", renderPreview);
 pipTimelineSeek.addEventListener("input", () => {
-  pipVideo.currentTime = Number(pipTimelineSeek.value);
+  seekEditorPreview(pipTimelineSeek.value);
 });
 pipTimelineTrack.addEventListener("pointerdown", (event) => {
   if (event.target.closest(".pip-timeline-segment")) return;
   const bounds = pipTimelineTrack.getBoundingClientRect();
   const ratio = clamp((event.clientX - bounds.left) / bounds.width, 0, 1);
-  pipVideo.currentTime = ratio * duration;
+  seekEditorPreview(ratio * duration);
 });
 window.addEventListener("resize", () => {
   syncVideoStageLayout();

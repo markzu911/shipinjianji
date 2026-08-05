@@ -8,10 +8,11 @@
       content="为视频添加可自定义样式、位置和时间的艺术字。"
     />
     <title>添加艺术字 · 视频文字剪辑</title>
-    <link rel="stylesheet" href="/styles.css?v=20260730-08" />
+    <link rel="stylesheet" href="/styles.css?v=20260804-17" />
     <script src="https://code.iconify.design/iconify-icon/3.0.0/iconify-icon.min.js" defer></script>
     <script src="/ui-feedback.js?v=20260729-03" defer></script>
-    <script src="/art-text.js?v=20260730-09" defer></script>
+    <script src="/editor-suite.js?v=20260804-12" defer></script>
+    <script src="/art-text.js?v=20260804-11" defer></script>
   </head>
   <body class="art-editor-body">
     <a class="skip-link" href="#main">跳到主要内容</a>
@@ -44,27 +45,7 @@
     </header>
 
     <main id="main" class="art-page-shell">
-      <nav class="workflow-steps" aria-label="视频制作进度">
-        <span class="workflow-step is-complete">
-          <span class="workflow-index">1</span>
-          上传与转写
-        </span>
-        <span class="workflow-line" aria-hidden="true"></span>
-        <span class="workflow-step is-complete">
-          <span class="workflow-index">2</span>
-          视频剪辑（可选）
-        </span>
-        <span class="workflow-line" aria-hidden="true"></span>
-        <span class="workflow-step is-active" aria-current="step">
-          <span class="workflow-index">3</span>
-          添加艺术字
-        </span>
-        <span class="workflow-line" aria-hidden="true"></span>
-        <span class="workflow-step">
-          <span class="workflow-index">4</span>
-          插入画中画
-        </span>
-      </nav>
+      <div class="editor-suite-slot" data-editor-suite-nav data-stage="art"></div>
 
       <section class="art-page-heading" aria-labelledby="art-page-title">
         <div>
@@ -112,30 +93,6 @@
             tabindex="-1"
           >
             AI 推荐
-          </button>
-          <button
-            id="transcriptTab"
-            class="workbench-tab"
-            type="button"
-            role="tab"
-            aria-selected="false"
-            aria-controls="transcriptPanel"
-            data-workbench-tab="transcript"
-            tabindex="-1"
-          >
-            视频文案
-          </button>
-          <button
-            id="outputTab"
-            class="workbench-tab"
-            type="button"
-            role="tab"
-            aria-selected="false"
-            aria-controls="outputPanel"
-            data-workbench-tab="output"
-            tabindex="-1"
-          >
-            生成下载
           </button>
         </div>
 
@@ -194,9 +151,34 @@
                   <iconify-icon icon="ph:corners-out-bold" aria-hidden="true"></iconify-icon>
                 </button>
               </div>
-              <div id="frameTimeline" class="frame-timeline" aria-label="艺术字时间轴" hidden>
-                <div class="frame-timeline-heading">
-                  <strong>艺术字时间轴</strong>
+              <div id="frameTimeline" class="frame-timeline editor-layer-timeline" aria-label="艺术字时间轴" hidden>
+                <div class="frame-timeline-heading editor-layer-timeline-heading">
+                  <div>
+                    <strong>艺术字时间轴</strong>
+                    <span>文字层与剪辑页使用相同刻度，拖动可逐帧定位</span>
+                  </div>
+                  <output id="frameTimelineTime">00:00 / 00:00</output>
+                </div>
+                <div id="frameTimelineScroll" class="cut-frame-timeline-scroll editor-layer-timeline-scroll">
+                  <div class="frame-timeline-track editor-layer-timeline-track">
+                    <div id="frameTimelineRuler" class="frame-timeline-ruler" aria-hidden="true"></div>
+                    <div id="frameTimelineThumbnails" class="frame-timeline-thumbnails" aria-hidden="true"></div>
+                    <div id="frameTimelineSegments" class="frame-timeline-segments editor-layer-timeline-segments" aria-hidden="true"></div>
+                    <span id="frameTimelinePlayhead" class="frame-timeline-playhead" aria-hidden="true"></span>
+                    <input
+                      id="frameTimelineSeek"
+                      class="frame-timeline-seek"
+                      type="range"
+                      min="0"
+                      max="0"
+                      step="0.033"
+                      value="0"
+                      aria-label="逐帧定位艺术字预览时间"
+                    />
+                  </div>
+                </div>
+                <div class="cut-frame-timeline-footer editor-layer-timeline-footer">
+                  <p id="frameTimelineStatus" class="frame-timeline-status" role="status" aria-live="polite"></p>
                   <div class="frame-timeline-jump">
                     <label class="sr-only" for="frameTimelineJumpInput">定位到指定时间</label>
                     <input
@@ -208,26 +190,8 @@
                       aria-describedby="frameTimelineStatus"
                     />
                     <button id="frameTimelineJumpButton" type="button">定位</button>
-                    <output id="frameTimelineTime">00:00 / 00:00</output>
                   </div>
                 </div>
-                <div class="frame-timeline-track">
-                  <div id="frameTimelineRuler" class="frame-timeline-ruler" aria-hidden="true"></div>
-                  <div id="frameTimelineThumbnails" class="frame-timeline-thumbnails" aria-hidden="true"></div>
-                  <div id="frameTimelineSegments" class="frame-timeline-segments" aria-hidden="true"></div>
-                  <span id="frameTimelinePlayhead" class="frame-timeline-playhead" aria-hidden="true"></span>
-                  <input
-                    id="frameTimelineSeek"
-                    class="frame-timeline-seek"
-                    type="range"
-                    min="0"
-                    max="0"
-                    step="0.033"
-                    value="0"
-                    aria-label="逐帧定位艺术字预览时间"
-                  />
-                </div>
-                <p id="frameTimelineStatus" class="frame-timeline-status" role="status" aria-live="polite"></p>
               </div>
             </div>
             <p class="section-helper">播放或拖动视频进度，可检查每条艺术字出现的时间。</p>
@@ -254,6 +218,27 @@
                 <input id="customText" type="text" maxlength="60" placeholder="例如：今天分享三个重点" />
                 <button id="addCustomText" class="secondary-button" type="button">添加</button>
               </div>
+            </div>
+
+            <div class="transcript-quick-action">
+              <div>
+                <strong>视频文案</strong>
+                <small>按剪后词级时间自动生成全文艺术字，默认使用“热血立体”。</small>
+              </div>
+              <button
+                id="addAllRetainedSegments"
+                class="primary-button compact-button"
+                type="button"
+              >
+                一键添加视频文案
+              </button>
+              <p
+                id="retainedBulkMessage"
+                class="retained-bulk-message"
+                role="status"
+                aria-live="polite"
+                hidden
+              ></p>
             </div>
 
             <div id="emptyControlState" class="empty-control-state">
@@ -570,10 +555,7 @@
 
         <section
           id="transcriptPanel"
-          class="panel retained-panel workbench-panel"
-          role="tabpanel"
-          aria-labelledby="transcriptTab"
-          data-workbench-panel="transcript"
+          aria-hidden="true"
           hidden
         >
           <div class="art-section-heading">
@@ -614,6 +596,18 @@
             ></p>
           </div>
           <div class="retained-bulk-toolbar" aria-label="批量添加艺术字">
+            <div class="transcript-style-step">
+              <div class="transcript-style-copy">
+                <span class="field-label">先选择字幕艺术字类型</span>
+                <small>整条 AI 分句字幕会统一使用这套模板和字号。</small>
+              </div>
+              <div
+                id="transcriptStyleGrid"
+                class="transcript-style-grid"
+                role="radiogroup"
+                aria-label="选择字幕艺术字类型"
+              ></div>
+            </div>
             <label class="retained-select-all" for="selectAllRetainedSegments">
               <input
                 id="selectAllRetainedSegments"
@@ -633,31 +627,15 @@
               >
                 添加所选（0）
               </button>
-              <button
-                id="addAllRetainedSegments"
-                class="secondary-button compact-button"
-                type="button"
-              >
-                AI 分句生成艺术字字幕
-              </button>
             </div>
-            <p
-              id="retainedBulkMessage"
-              class="retained-bulk-message"
-              role="status"
-              aria-live="polite"
-              hidden
-            ></p>
           </div>
           <ol id="retainedSegments" class="retained-segments"></ol>
         </section>
 
         <div
           id="outputPanel"
-          class="workbench-output-panel workbench-panel"
-          role="tabpanel"
-          aria-labelledby="outputTab"
-          data-workbench-panel="output"
+          class="editor-suite-generation-runtime"
+          aria-hidden="true"
           hidden
         >
         <section class="panel generate-panel" aria-labelledby="generate-title">
