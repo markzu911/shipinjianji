@@ -8,11 +8,11 @@
       content="上传口播视频，自动提取中文语音、识别疑似口误并按文字完成粗剪。"
     />
     <title>视频文字剪辑 · MVP</title>
-    <link rel="stylesheet" href="/styles.css?v=20260804-17" />
+    <link rel="stylesheet" href="/styles.css?v=20260805-01" />
     <script src="https://code.iconify.design/iconify-icon/3.0.0/iconify-icon.min.js" defer></script>
-    <script src="/ui-feedback.js?v=20260729-03" defer></script>
-    <script src="/editor-suite.js?v=20260804-12" defer></script>
-    <script src="/app.js?v=20260804-11" defer></script>
+    <script src="/ui-feedback.js?v=20260806-01" defer></script>
+    <script src="/editor-suite.js?v=20260805-05" defer></script>
+    <script src="/app.js?v=20260805-02" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main">跳到主要内容</a>
@@ -331,9 +331,48 @@
                 tabindex="-1"
                 data-text-editor-tab="silence"
               >空白剪辑</button>
+              <button
+                id="textHistoryTab"
+                class="text-editor-tab"
+                type="button"
+                role="tab"
+                aria-selected="false"
+                aria-controls="textHistoryPanel"
+                tabindex="-1"
+                data-text-editor-tab="history"
+              >操作记录 <span id="cutHistoryCount" class="text-editor-tab-count" hidden>0</span></button>
             </div>
 
             <div class="text-editor-panel-stack">
+              <div class="cut-history-toolbar" aria-label="全局撤销与重做">
+                <div class="cut-history-actions">
+                  <button
+                    id="cutUndoButton"
+                    class="cut-history-button"
+                    type="button"
+                    title="撤销（Ctrl+Z）"
+                    aria-label="撤销上一步剪辑操作"
+                    disabled
+                  >
+                    <iconify-icon icon="ph:arrow-counter-clockwise-bold" aria-hidden="true"></iconify-icon>
+                    <span>撤销</span>
+                  </button>
+                  <button
+                    id="cutRedoButton"
+                    class="cut-history-button"
+                    type="button"
+                    title="重做（Ctrl+Y / Ctrl+Shift+Z）"
+                    aria-label="重做下一步剪辑操作"
+                    disabled
+                  >
+                    <iconify-icon icon="ph:arrow-clockwise-bold" aria-hidden="true"></iconify-icon>
+                    <span>重做</span>
+                  </button>
+                </div>
+                <p id="cutHistoryStatus" class="cut-history-status" role="status" aria-live="polite">
+                  暂无操作记录
+                </p>
+              </div>
 
         <section
           id="textOutputPanel"
@@ -403,7 +442,7 @@
               <p class="step-label">05 · AI 初筛</p>
               <h3 id="suggestions-title">AI 删减建议</h3>
               <p class="section-helper">
-                仅提示疑似口误、重复、语气词和无效片段。点击删除后会连同前后紧邻的无声区立即移除，当前方案内不可撤销。
+                仅提示疑似口误、重复、语气词和无效片段。点击删除后会连同前后紧邻的无声区立即移除，可通过全局撤销恢复。
               </p>
             </div>
             <div class="suggestions-heading-actions">
@@ -440,7 +479,7 @@
                 <p class="step-label">06 · 空白剪辑</p>
                 <h3 id="no-speech-title">检查长时间没有说话的画面</h3>
                 <p class="section-helper">
-                  仅检测超过 1.5 秒的无文字区间，并保留说话边界缓冲。点击删除后立即生效，当前方案内不可撤销。
+                  仅检测超过 1.5 秒的无文字区间，并保留说话边界缓冲。点击删除后立即生效，可通过全局撤销恢复。
                 </p>
               </div>
               <button
@@ -465,6 +504,26 @@
               </div>
             </div>
           </div>
+        </section>
+
+        <section
+          id="textHistoryPanel"
+          class="cut-history-panel text-editor-panel"
+          role="tabpanel"
+          aria-labelledby="textHistoryTab"
+          data-text-editor-panel="history"
+          hidden
+        >
+          <div class="cut-history-panel-heading">
+            <div>
+              <p class="step-label">全局历史</p>
+              <h3>操作记录</h3>
+              <p class="section-helper">记录当前视频的剪辑操作。撤销后继续编辑，会自动清除对应的重做分支。</p>
+            </div>
+            <span class="cut-history-shortcut">Ctrl+Z / Ctrl+Y</span>
+          </div>
+          <p id="cutHistoryEmpty" class="cut-history-empty">还没有剪辑操作。删除文字、AI 建议、空白片段或时间轴区间后会显示在这里。</p>
+          <ol id="cutHistoryList" class="cut-history-list" aria-label="剪辑操作记录"></ol>
         </section>
 
         <div
@@ -724,15 +783,18 @@
           id="segmentEditText"
           class="segment-edit-text"
           rows="4"
-          readonly
           spellcheck="false"
         ></textarea>
         <p id="segmentEditHelper" class="segment-edit-helper">
-          用鼠标拖动选择其中一部分文字，再点击“拆分”；选中文字会成为单独一行。
+          可直接修改这段文字，保存后同步更新艺术字字幕；或用鼠标拖动选择其中一部分文字，再点击“拆分”。
         </p>
         <p id="segmentEditSelectionStatus" class="segment-edit-selection-status" aria-live="polite">尚未选择文字</p>
         <div class="segment-edit-actions" aria-label="分段操作">
-          <button id="splitSegmentButton" class="segment-edit-action is-primary" type="button" disabled>
+          <button id="saveSegmentTextButton" class="segment-edit-action is-primary" type="button">
+            <iconify-icon icon="ph:check-bold" aria-hidden="true"></iconify-icon>
+            <span>保存文字</span>
+          </button>
+          <button id="splitSegmentButton" class="segment-edit-action" type="button" disabled>
             <iconify-icon icon="ph:scissors-bold" aria-hidden="true"></iconify-icon>
             <span>拆分</span>
           </button>

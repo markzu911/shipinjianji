@@ -6,4 +6,4 @@ if (-not (Test-Path -LiteralPath $python)) {
 }
 
 # Listen on all local network interfaces so other devices on the LAN can connect.
-& $python -m uvicorn server.app:app --host 0.0.0.0 --port 8000 --reload
+& $python -m uvicorn server.app:app --host 0.0.0.0 --port 8001 --reload

@@ -128,4 +128,154 @@
       icon: "ph:warning-octagon-bold",
       ...(typeof options === "string" ? { message: options } : options),
     });
+
+  // --- Video generation modal ---------------------------------------------
+  // A full-screen overlay that blocks other interactions while a video is being
+  // generated, shows a live progress bar, then previews the finished video with
+  // a download button.
+  let generationOverlay = null;
+  let generationOnClose = null;
+
+  function clampPercent(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return 0;
+    return Math.max(0, Math.min(100, Math.round(number)));
+  }
+
+  function buildGenerationModal() {
+    const overlay = document.createElement("div");
+    overlay.className = "generation-overlay";
+    overlay.setAttribute("hidden", "");
+    overlay.innerHTML = `
+      <div class="generation-card" role="dialog" aria-modal="true" aria-labelledby="generationTitle">
+        <div class="generation-card-head">
+          <h2 id="generationTitle">生成视频</h2>
+          <span id="generationPercent" class="generation-percent">0%</span>
+        </div>
+        <p id="generationStatus" class="generation-status">正在准备…</p>
+        <div id="generationTrack" class="generation-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div id="generationBar" class="generation-bar"></div>
+        </div>
+        <div id="generationVideoWrap" class="generation-video-wrap" hidden>
+          <video id="generationVideo" controls autoplay playsinline preload="auto"></video>
+          <p id="generationVideoMeta" class="generation-video-meta"></p>
+        </div>
+        <div class="generation-actions">
+          <a id="generationDownload" class="generation-button is-primary" href="#" download hidden>下载成片</a>
+          <button id="generationClose" class="generation-button is-secondary" type="button" hidden>知道了</button>
+        </div>
+      </div>
+    `;
+    document.body.append(overlay);
+    overlay.querySelector("#generationClose").addEventListener("click", () => {
+      hideGenerationModal();
+    });
+    return overlay;
+  }
+
+  function generationEls() {
+    if (!generationOverlay) generationOverlay = buildGenerationModal();
+    return {
+      overlay: generationOverlay,
+      title: generationOverlay.querySelector("#generationTitle"),
+      status: generationOverlay.querySelector("#generationStatus"),
+      percent: generationOverlay.querySelector("#generationPercent"),
+      bar: generationOverlay.querySelector("#generationBar"),
+      track: generationOverlay.querySelector("#generationTrack"),
+      videoWrap: generationOverlay.querySelector("#generationVideoWrap"),
+      video: generationOverlay.querySelector("#generationVideo"),
+      videoMeta: generationOverlay.querySelector("#generationVideoMeta"),
+      download: generationOverlay.querySelector("#generationDownload"),
+      close: generationOverlay.querySelector("#generationClose"),
+    };
+  }
+
+  function showGenerationModal(options = {}) {
+    const els = generationEls();
+    els.title.textContent = options.title || "生成视频";
+    els.status.textContent = options.status || "正在准备…";
+    els.status.classList.remove("is-error");
+    if (options.progress != null) {
+      const value = clampPercent(options.progress);
+      els.bar.classList.remove("is-indeterminate");
+      els.bar.style.width = `${value}%`;
+      els.percent.textContent = `${value}%`;
+      els.track.setAttribute("aria-valuenow", String(value));
+    } else {
+      els.bar.classList.add("is-indeterminate");
+      els.bar.style.width = "100%";
+      els.percent.textContent = "";
+    }
+    els.videoWrap.hidden = true;
+    els.download.hidden = true;
+    els.close.hidden = true;
+    generationOnClose = options.onClose || null;
+    els.overlay.hidden = false;
+    document.body.classList.add("has-generation-modal");
+  }
+
+  function updateGenerationProgress(progress, message) {
+    const els = generationEls();
+    const value = clampPercent(progress);
+    els.bar.classList.remove("is-indeterminate");
+    els.bar.style.width = `${value}%`;
+    els.percent.textContent = `${value}%`;
+    els.track.setAttribute("aria-valuenow", String(value));
+    if (message) els.status.textContent = message;
+  }
+
+  function completeGeneration(options = {}) {
+    const els = generationEls();
+    els.bar.classList.remove("is-indeterminate");
+    els.bar.style.width = "100%";
+    els.percent.textContent = "100%";
+    els.track.setAttribute("aria-valuenow", "100");
+    els.status.textContent = options.status || "生成完成";
+    if (options.videoUrl) {
+      els.video.src = options.videoUrl;
+      els.video.load();
+      void els.video.play().catch(() => {});
+      els.videoWrap.hidden = false;
+      els.videoMeta.textContent = options.duration
+        ? `成片时长 ${options.duration}`
+        : "";
+    }
+    if (options.downloadUrl) {
+      els.download.href = options.downloadUrl;
+      els.download.hidden = false;
+    }
+    els.close.hidden = false;
+  }
+
+  function failGeneration(message) {
+    const els = generationEls();
+    els.bar.classList.remove("is-indeterminate");
+    els.status.classList.add("is-error");
+    els.status.textContent = message || "生成失败，请重试。";
+    els.close.hidden = false;
+  }
+
+  function hideGenerationModal() {
+    if (!generationOverlay) return;
+    const els = generationEls();
+    els.video.pause();
+    els.video.removeAttribute("src");
+    els.video.load();
+    els.status.classList.remove("is-error");
+    els.overlay.hidden = true;
+    document.body.classList.remove("has-generation-modal");
+    if (generationOnClose) {
+      const callback = generationOnClose;
+      generationOnClose = null;
+      callback();
+    }
+  }
+
+  window.appGeneration = {
+    show: showGenerationModal,
+    setProgress: updateGenerationProgress,
+    complete: completeGeneration,
+    fail: failGeneration,
+    hide: hideGenerationModal,
+  };
 })();

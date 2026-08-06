@@ -103,6 +103,7 @@ let assetPollTimer = null;
 let baseVideoUrl = "";
 let finalVideoUrl = "";
 let showingFinalVideo = false;
+let generationModalActive = false;
 let selectedPictureItemId = "";
 let activePictureDrag = null;
 let pipTimelineBuildId = 0;
@@ -811,7 +812,6 @@ function renderPreview(options = {}) {
 }
 
 function notifyEditorHost(options = {}) {
-  if (!embeddedEditor || window.parent === window) return;
   const state = {
     overlayHtml: pipOverlayLayer.innerHTML,
     overlayWidth: pipOverlayLayer.clientWidth,
@@ -821,10 +821,33 @@ function notifyEditorHost(options = {}) {
     generationLabel: generatePipVideo.textContent.trim(),
     generationBusy: !outputProgress.hidden,
     generationError: outputError.hidden ? "" : outputError.textContent.trim(),
+    generationPayload: {
+      source: requestedSource,
+      overlays: pictureItems
+        .filter((item) => item.enabled && isReadyAsset(item))
+        .map((item) => ({
+          assetId: item.id,
+          start: item.start,
+          end: item.end,
+          sourceStart: item.sourceStart ?? null,
+          sourceEnd: item.sourceEnd ?? null,
+          x: item.x,
+          y: item.y,
+          width: item.width,
+        })),
+    },
   };
   const signature = JSON.stringify(state);
   if (!options.force && signature === editorHostStateSignature) return;
   editorHostStateSignature = signature;
+  if (!embeddedEditor || window.parent === window) {
+    document.dispatchEvent(
+      new CustomEvent("editor-suite:tool-state", {
+        detail: { kind: "pip", ...state },
+      }),
+    );
+    return;
+  }
   window.parent.postMessage(
     {
       type: "editor-suite:tool-state",
@@ -984,7 +1007,7 @@ function applyEditorCutDraft(data) {
   }
   showPromptWriterStatus(
     cutDraftActive
-      ? "当前文案和时间已按剪辑方案实时更新；可先选择内容，剪辑视频生成后即可生成画中画素材。"
+      ? "当前文案和时间已按剪辑方案实时更新；点击生成视频会按当前预览一次合成。"
       : "",
     cutDraftActive ? "warning" : "",
   );
@@ -1006,7 +1029,7 @@ function handleEditorHostMessage(event) {
   }
   if (data.type === "editor-suite:generate-video" && data.kind === "pip") {
     if (generatePipVideo.disabled) return;
-    generatePipVideo.click();
+    generateVideo(data.composition || null);
     return;
   }
   if (data.type === "editor-suite:sync-time") {
@@ -1089,7 +1112,7 @@ function renderSegmentList() {
     const copy = document.createElement("span");
     const time = document.createElement("time");
     const text = document.createElement("strong");
-    time.textContent = formatRange(segment.start, segment.end);
+    time.textContent = formatTime(segment.start);
     text.textContent = segment.text;
     copy.append(time, text);
     label.append(radio, copy);
@@ -1519,6 +1542,22 @@ function renderPictureInPictureJob(pictureInPicture) {
     outputResult.hidden = true;
     generatePipVideo.disabled = true;
     setOutputProgress(pictureInPicture.progress, pictureInPicture.stage);
+    if (!generationModalActive) {
+      generationModalActive = true;
+      window.appGeneration?.show({
+        title: "生成画中画视频",
+        progress: pictureInPicture.progress,
+        status: pictureInPicture.stage || "正在生成画中画视频…",
+        onClose: () => {
+          generationModalActive = false;
+        },
+      });
+    } else {
+      window.appGeneration?.setProgress(
+        pictureInPicture.progress,
+        pictureInPicture.stage,
+      );
+    }
     return;
   }
   if (pictureInPicture.status === "completed") {
@@ -1532,6 +1571,13 @@ function renderPictureInPictureJob(pictureInPicture) {
     generatePipVideo.disabled = !pictureItems.some(
       (item) => item.enabled && isReadyAsset(item),
     );
+    if (generationModalActive) {
+      generationModalActive = false;
+      window.appGeneration?.complete({
+        videoUrl: pictureInPicture.outputUrl,
+        downloadUrl: `${pictureInPicture.outputUrl}?download=true`,
+      });
+    }
     return;
   }
   if (pictureInPicture.status === "failed") {
@@ -1541,6 +1587,12 @@ function renderPictureInPictureJob(pictureInPicture) {
       (item) => item.enabled && isReadyAsset(item),
     );
     showMessage(outputError, pictureInPicture.error || "画中画视频生成失败，请重试。");
+    if (generationModalActive) {
+      generationModalActive = false;
+      window.appGeneration?.fail(
+        pictureInPicture.error || "画中画视频生成失败，请重试。",
+      );
+    }
   }
 }
 
@@ -1564,11 +1616,7 @@ async function pollPictureInPictureJob() {
   }
 }
 
-async function generateVideo() {
-  if (cutDraftActive) {
-    showMessage(outputError, "请先生成剪辑视频，再输出画中画成片。");
-    return;
-  }
+async function generateVideo(composition = null) {
   const enabledItems = pictureItems.filter(
     (item) => item.enabled && isReadyAsset(item),
   );
@@ -1580,23 +1628,59 @@ async function generateVideo() {
   outputResult.hidden = true;
   generatePipVideo.disabled = true;
   setOutputProgress(5, "正在创建画中画合成任务…");
+  const overlays = enabledItems.map((item) => ({
+    assetId: item.id,
+    start: item.start,
+    end: item.end,
+    sourceStart: item.sourceStart ?? null,
+    sourceEnd: item.sourceEnd ?? null,
+    x: item.x,
+    y: item.y,
+    width: item.width,
+  }));
+  const compositionRanges = Array.isArray(composition?.ranges)
+    ? composition.ranges
+    : Array.isArray(pendingCutDraft?.ranges)
+      ? pendingCutDraft.ranges
+      : Array.isArray(job?.edit?.requestedRanges)
+        ? job.edit.requestedRanges
+      : [];
+  const useComposition =
+    compositionRanges.length > 0 &&
+    (cutDraftActive || Boolean(composition) || Boolean(job?.edit?.composition));
+  const artPayload =
+    composition?.art ||
+    (job?.art?.composition
+      ? {
+          source: job.art.source || "original",
+          historyName: job.art.historyName || null,
+          overlays: job.art.overlays || [],
+        }
+      : null);
+  const endpoint = useComposition ? "compose" : "picture-in-picture";
+  const requestPayload = useComposition
+    ? {
+        target: "pip",
+        ranges: compositionRanges,
+        artOverlays: Array.isArray(artPayload?.overlays)
+          ? artPayload.overlays
+          : [],
+        artSource: artPayload?.source || "original",
+        pictureInPictureOverlays: overlays,
+        pictureInPictureSource: requestedSource,
+        historyName: artPayload?.historyName || null,
+      }
+    : {
+        source: requestedSource,
+        overlays,
+      };
   try {
     const response = await fetch(
-      `/api/transcriptions/${encodeURIComponent(jobId)}/picture-in-picture`,
+      `/api/transcriptions/${encodeURIComponent(jobId)}/${endpoint}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          source: requestedSource,
-          overlays: enabledItems.map((item) => ({
-            assetId: item.id,
-            start: item.start,
-            end: item.end,
-            x: item.x,
-            y: item.y,
-            width: item.width,
-          })),
-        }),
+        body: JSON.stringify(requestPayload),
       },
     );
     const result = await parseResponse(response, "无法创建画中画视频。");
@@ -1606,6 +1690,10 @@ async function generateVideo() {
     outputProgress.hidden = true;
     generatePipVideo.disabled = false;
     showMessage(outputError, error.message);
+    if (generationModalActive) {
+      generationModalActive = false;
+      window.appGeneration?.fail(error.message);
+    }
   }
 }
 

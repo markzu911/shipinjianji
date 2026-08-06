@@ -46,6 +46,12 @@ const noSpeechCutSelectionDetail = document.querySelector(
 const segmentList = document.querySelector("#segmentList");
 const segmentStructureStatus = document.querySelector("#segmentStructureStatus");
 const cutDraftSaveStatus = document.querySelector("#cutDraftSaveStatus");
+const cutUndoButton = document.querySelector("#cutUndoButton");
+const cutRedoButton = document.querySelector("#cutRedoButton");
+const cutHistoryStatus = document.querySelector("#cutHistoryStatus");
+const cutHistoryCount = document.querySelector("#cutHistoryCount");
+const cutHistoryEmpty = document.querySelector("#cutHistoryEmpty");
+const cutHistoryList = document.querySelector("#cutHistoryList");
 const segmentEditDialog = document.querySelector("#segmentEditDialog");
 const segmentEditEyebrow = document.querySelector("#segmentEditEyebrow");
 const segmentEditTime = document.querySelector("#segmentEditTime");
@@ -54,6 +60,7 @@ const segmentEditSelectionStatus = document.querySelector(
   "#segmentEditSelectionStatus",
 );
 const segmentEditClose = document.querySelector("#segmentEditClose");
+const saveSegmentTextButton = document.querySelector("#saveSegmentTextButton");
 const splitSegmentButton = document.querySelector("#splitSegmentButton");
 const mergeSegmentUpButton = document.querySelector("#mergeSegmentUpButton");
 const mergeSegmentDownButton = document.querySelector(
@@ -171,11 +178,14 @@ const CUT_TIMELINE_MAJOR_TICK_WIDTH = 72;
 const CUT_TIMELINE_MIN_PIXELS_PER_SECOND = 22;
 const CUT_TIMELINE_TEXT_CHAR_WIDTH = 10;
 const CUT_TIMELINE_TEXT_LINES = 2;
+const CUT_HISTORY_LIMIT = 40;
+const CUT_HISTORY_COALESCE_MS = 800;
 
 let selectedFile = null;
 let selectedPreviewUrl = "";
 let pollTimer = null;
 let editPollTimer = null;
+let generationModalActive = false;
 let currentJobId = null;
 let currentSegments = [];
 let currentEditableSegments = [];
@@ -213,6 +223,13 @@ const selectedRanges = new Map();
 const selectedNoSpeechRanges = new Map();
 const ignoredSuggestions = new Set();
 const ignoredNoSpeechSuggestions = new Set();
+let cutHistoryBaseline = null;
+let cutHistoryEntries = [];
+let cutHistoryIndex = 0;
+let cutHistoryLastState = null;
+let cutHistoryPendingMeta = null;
+let cutHistoryReplaying = false;
+let cutHistoryFeedback = "";
 
 function updateOriginalSourceActionsVisibility() {
   const visible = originalSourceActionsAllowed && !hasCutSelection();
@@ -542,7 +559,20 @@ function renderCutSegments() {
     const segmentText = document.createElement("button");
     segmentText.type = "button";
     segmentText.className = "segment-text";
-    segmentText.textContent = String(segment.text || "暂无识别文字");
+    const segmentWords = Array.isArray(segment.words) ? segment.words : [];
+    if (segmentWords.length) {
+      const textContent = document.createElement("span");
+      textContent.className = "segment-text-content";
+      for (const word of segmentWords) {
+        const span = document.createElement("span");
+        span.className = "segment-word";
+        span.textContent = String(word.text || "");
+        textContent.append(span);
+      }
+      segmentText.append(textContent);
+    } else {
+      segmentText.textContent = String(segment.text || "暂无识别文字");
+    }
     segmentText.setAttribute(
       "aria-label",
       `编辑第 ${segmentIndex + 1} 段分段：${String(segment.text || "暂无识别文字")}`,
@@ -551,7 +581,35 @@ function renderCutSegments() {
     item.append(selectSegmentButton, timeColumn, segmentText);
     segmentList.append(item);
   });
+  updateCutSegmentText();
   updateCutSegmentTimestamps();
+}
+
+function updateCutSegmentText() {
+  const deletedRanges = getMergedSelection();
+  segmentList
+    .querySelectorAll(".segment-item[data-segment-index]")
+    .forEach((item) => {
+      const segmentIndex = Number(item.dataset.segmentIndex);
+      const segment = currentEditableSegments[segmentIndex];
+      const spans = item.querySelectorAll(".segment-word");
+      if (!segment || !spans.length) return;
+      const words = Array.isArray(segment.words) ? segment.words : [];
+      spans.forEach((span, index) => {
+        const word = words[index];
+        let deleted = false;
+        if (word) {
+          const start = Number(word.start);
+          const end = Number(word.end);
+          const midpoint = start + (end - start) / 2;
+          deleted = deletedRanges.some(
+            (range) =>
+              midpoint >= Number(range.start) && midpoint < Number(range.end),
+          );
+        }
+        span.classList.toggle("is-deleted", deleted);
+      });
+    });
 }
 
 function getLiveEditedSegmentTiming(
@@ -741,6 +799,7 @@ async function applyEditableSegmentOperation(action) {
     }
     currentEditableSegments = result.editableSegments || currentEditableSegments;
     syncCorrectedWords();
+    renderCutSegments();
     renderCutTimelineTextSegments();
     updateSelectionSummary();
     setSegmentOperationBusy(false);
@@ -754,6 +813,61 @@ async function applyEditableSegmentOperation(action) {
     segmentEditSelectionStatus.textContent = error.message;
     segmentEditSelectionStatus.dataset.ready = "error";
   }
+}
+
+async function saveSegmentText() {
+  if (segmentOperationInFlight || activeSegmentEditIndex === null) return;
+  const newText = segmentEditText.value;
+  const original = currentEditableSegments[activeSegmentEditIndex];
+  if (!newText.trim()) {
+    segmentEditSelectionStatus.textContent = "修改后的文字不能为空。";
+    segmentEditSelectionStatus.dataset.ready = "error";
+    return;
+  }
+  if (original && original.text === newText) {
+    closeSegmentEditDialog();
+    return;
+  }
+  setSegmentOperationBusy(true);
+  try {
+    const response = await fetch(
+      `/api/transcriptions/${encodeURIComponent(currentJobId)}/editable-segments`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          segmentIndex: activeSegmentEditIndex,
+          action: "text",
+          text: newText,
+        }),
+      },
+    );
+    const result = await response.json();
+    if (!response.ok) {
+      throw new Error(result.detail || "文字保存失败，请重试。");
+    }
+    currentEditableSegments = result.editableSegments || currentEditableSegments;
+    syncCorrectedWords();
+    renderCutSegments();
+    renderCutTimelineTextSegments();
+    updateSelectionSummary();
+    setSegmentOperationBusy(false);
+    closeSegmentEditDialog();
+    setSegmentStructureStatus("已保存这段文字，全文艺术字字幕已同步。", "success");
+    broadcastTranscriptUpdated();
+  } catch (error) {
+    setSegmentOperationBusy(false);
+    segmentEditSelectionStatus.textContent = error.message;
+    segmentEditSelectionStatus.dataset.ready = "error";
+  }
+}
+
+function broadcastTranscriptUpdated() {
+  document.dispatchEvent(
+    new CustomEvent("editor-suite:transcript-updated", {
+      detail: { jobId: currentJobId },
+    }),
+  );
 }
 
 function getSuggestionRanges(suggestion) {
@@ -1585,10 +1699,7 @@ function cutSelectionSignature(ranges = getMergedSelection()) {
 }
 
 function hasUncommittedCutSelection() {
-  return (
-    hasCutSelection() &&
-    cutSelectionSignature() !== generatedCutSelectionSignature
-  );
+  return cutSelectionSignature() !== generatedCutSelectionSignature;
 }
 
 function buildLiveCutDraftState() {
@@ -1622,6 +1733,31 @@ function buildLiveCutDraftState() {
 
 function syncEditorSuiteCutDraftState(state = buildLiveCutDraftState()) {
   window.EditorSuite?.setCutDraft(state);
+}
+
+function acceptEditorSuiteJobState(event) {
+  const job = event.detail;
+  const edit = job?.edit;
+  if (
+    !job?.id ||
+    job.id !== currentJobId ||
+    edit?.status !== "completed" ||
+    !edit.composition
+  ) {
+    return;
+  }
+  generatedCutSelectionSignature = cutSelectionSignature(
+    edit.requestedRanges || edit.ranges || [],
+  );
+  pendingCutSelectionSignature = "";
+  updateCutSegmentTimestamps();
+  syncEditorSuiteCutDraftState({
+    active: false,
+    ranges: edit.ranges || edit.requestedRanges || [],
+    sourceDuration: cutTimelineDuration(),
+    duration: Number(edit.outputDuration) || 0,
+    transcript: edit.transcript || null,
+  });
 }
 
 function updateTimelineRangeConfirmation() {
@@ -1659,6 +1795,7 @@ function setCutControlsDisabled(disabled) {
   updateTimelineRangeConfirmation();
   updateSuggestionStates();
   updateNoSpeechStates();
+  renderCutHistory();
 }
 
 function setCutDraftSaveStatus(message, tone = "neutral") {
@@ -1900,7 +2037,404 @@ async function clearPersistedCutDraft(jobId) {
   }
 }
 
+function cutHistoryStorageKey(jobId = currentJobId) {
+  return jobId ? `video-editor:cut-history:${jobId}` : "";
+}
+
+function cloneCutHistorySnapshot(source = buildPersistedCutDraftPayload()) {
+  const textRanges = (Array.isArray(source?.textRanges) ? source.textRanges : [])
+    .flatMap((item) => {
+      const normalized = serializableCutDraftRange(item);
+      if (!normalized) return [];
+      const key = String(item?.key || rangeKey(normalized.start, normalized.end));
+      const range = {
+        key,
+        ...normalized,
+        text: String(item?.text || ""),
+        adjacentSilenceBefore: Math.max(
+          0,
+          Number(item?.adjacentSilenceBefore) || 0,
+        ),
+        adjacentSilenceAfter: Math.max(
+          0,
+          Number(item?.adjacentSilenceAfter) || 0,
+        ),
+      };
+      for (const field of ["originalStart", "originalEnd"]) {
+        const value = Number(item?.[field]);
+        if (Number.isFinite(value) && value >= 0) range[field] = value;
+      }
+      return [range];
+    });
+  const noSpeechRanges = (
+    Array.isArray(source?.noSpeechRanges) ? source.noSpeechRanges : []
+  ).flatMap((item) => {
+    const normalized = serializableCutDraftRange(item);
+    if (!normalized) return [];
+    return [
+      {
+        key: String(item?.key || rangeKey(normalized.start, normalized.end)),
+        ...normalized,
+      },
+    ];
+  });
+  const timelineRanges = (
+    Array.isArray(source?.timelineRanges) ? source.timelineRanges : []
+  ).flatMap((item) => {
+    const normalized = serializableCutDraftRange(item);
+    return normalized ? [normalized] : [];
+  });
+  return { textRanges, noSpeechRanges, timelineRanges };
+}
+
+function cutHistorySnapshotSignature(snapshot) {
+  return cutDraftSelectionSignature(cloneCutHistorySnapshot(snapshot));
+}
+
+function saveLocalCutHistory(jobId = currentJobId) {
+  const key = cutHistoryStorageKey(jobId);
+  if (!key || !cutHistoryBaseline) return;
+  try {
+    window.localStorage.setItem(
+      key,
+      JSON.stringify({
+        schemaVersion: 1,
+        baseline: cutHistoryBaseline,
+        entries: cutHistoryEntries,
+        index: cutHistoryIndex,
+        updatedAt: new Date().toISOString(),
+      }),
+    );
+  } catch {
+    // The editing draft still works when browser history storage is restricted.
+  }
+}
+
+function removeLocalCutHistory(jobId = currentJobId) {
+  const key = cutHistoryStorageKey(jobId);
+  if (!key) return;
+  try {
+    window.localStorage.removeItem(key);
+  } catch {
+    // Nothing else is required when browser storage is restricted.
+  }
+}
+
+function loadLocalCutHistory(jobId = currentJobId) {
+  const key = cutHistoryStorageKey(jobId);
+  if (!key) return null;
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(key) || "null");
+    if (!stored || stored.schemaVersion !== 1) return null;
+    const baseline = cloneCutHistorySnapshot(stored.baseline);
+    const entries = (Array.isArray(stored.entries) ? stored.entries : [])
+      .slice(0, CUT_HISTORY_LIMIT)
+      .flatMap((entry, index) => {
+        if (!entry || typeof entry !== "object") return [];
+        return [
+          {
+            id: String(entry.id || `restored-${index}`),
+            label: String(entry.label || "更新剪辑方案"),
+            at: String(entry.at || new Date().toISOString()),
+            coalesceKey: String(entry.coalesceKey || ""),
+            before: cloneCutHistorySnapshot(entry.before),
+            after: cloneCutHistorySnapshot(entry.after),
+          },
+        ];
+      });
+    const index = clamp(Number(stored.index) || 0, 0, entries.length);
+    return { baseline, entries, index };
+  } catch {
+    return null;
+  }
+}
+
+function formatCutHistoryTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "刚刚";
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
+function canUndoCutHistory() {
+  return Boolean(
+    currentJobId &&
+      cutHistoryIndex > 0 &&
+      !cutControlsLocked &&
+      !timelineRangeInProgress &&
+      !timelineRangeConfirmationOpen,
+  );
+}
+
+function canRedoCutHistory() {
+  return Boolean(
+    currentJobId &&
+      cutHistoryIndex < cutHistoryEntries.length &&
+      !cutControlsLocked &&
+      !timelineRangeInProgress &&
+      !timelineRangeConfirmationOpen,
+  );
+}
+
+function renderCutHistory() {
+  if (!cutUndoButton || !cutRedoButton || !cutHistoryStatus) return;
+  cutUndoButton.disabled = !canUndoCutHistory();
+  cutRedoButton.disabled = !canRedoCutHistory();
+  const undoEntry = cutHistoryEntries[cutHistoryIndex - 1];
+  const redoEntry = cutHistoryEntries[cutHistoryIndex];
+  cutUndoButton.setAttribute(
+    "aria-label",
+    undoEntry ? `撤销：${undoEntry.label}` : "没有可撤销的剪辑操作",
+  );
+  cutRedoButton.setAttribute(
+    "aria-label",
+    redoEntry ? `重做：${redoEntry.label}` : "没有可重做的剪辑操作",
+  );
+
+  if (cutHistoryFeedback) {
+    cutHistoryStatus.textContent = cutHistoryFeedback;
+  } else if (cutHistoryEntries.length === 0) {
+    cutHistoryStatus.textContent = "暂无操作记录";
+  } else if (cutHistoryIndex === 0) {
+    cutHistoryStatus.textContent = `0/${cutHistoryEntries.length} · 已回到初始状态`;
+  } else {
+    cutHistoryStatus.textContent =
+      `${cutHistoryIndex}/${cutHistoryEntries.length} · ${undoEntry.label}`;
+  }
+
+  if (cutHistoryCount) {
+    cutHistoryCount.textContent = String(cutHistoryEntries.length);
+    cutHistoryCount.hidden = cutHistoryEntries.length === 0;
+  }
+  if (cutHistoryEmpty) cutHistoryEmpty.hidden = cutHistoryEntries.length > 0;
+  if (!cutHistoryList) return;
+  const fragment = document.createDocumentFragment();
+  [...cutHistoryEntries]
+    .map((entry, index) => ({ entry, index }))
+    .reverse()
+    .forEach(({ entry, index }) => {
+      const item = document.createElement("li");
+      const applied = index < cutHistoryIndex;
+      item.className = "cut-history-entry";
+      item.classList.toggle("is-undone", !applied);
+      item.classList.toggle("is-current", applied && index === cutHistoryIndex - 1);
+
+      const label = document.createElement("strong");
+      label.className = "cut-history-entry-label";
+      label.textContent = entry.label;
+      const time = document.createElement("time");
+      time.className = "cut-history-entry-time";
+      time.dateTime = entry.at;
+      time.textContent = formatCutHistoryTime(entry.at);
+      const state = document.createElement("span");
+      state.className = "cut-history-entry-state";
+      state.textContent = applied
+        ? index === cutHistoryIndex - 1
+          ? "当前状态"
+          : "已应用"
+        : "已撤销 · 可重做";
+      item.append(label, time, state);
+      fragment.append(item);
+    });
+  cutHistoryList.replaceChildren(fragment);
+}
+
+function resetCutHistoryRuntime() {
+  cutHistoryBaseline = null;
+  cutHistoryEntries = [];
+  cutHistoryIndex = 0;
+  cutHistoryLastState = null;
+  cutHistoryPendingMeta = null;
+  cutHistoryReplaying = false;
+  cutHistoryFeedback = "";
+  renderCutHistory();
+}
+
+function restoreLocalCutHistory() {
+  const current = cloneCutHistorySnapshot();
+  const stored = loadLocalCutHistory();
+  const storedExpected = stored
+    ? stored.index > 0
+      ? stored.entries[stored.index - 1]?.after
+      : stored.baseline
+    : null;
+  if (
+    stored &&
+    storedExpected &&
+    cutHistorySnapshotSignature(storedExpected) ===
+      cutHistorySnapshotSignature(current)
+  ) {
+    cutHistoryBaseline = stored.baseline;
+    cutHistoryEntries = stored.entries;
+    cutHistoryIndex = stored.index;
+    cutHistoryFeedback =
+      stored.entries.length > 0 ? "已恢复本机操作记录" : "";
+  } else {
+    cutHistoryBaseline = current;
+    cutHistoryEntries = [];
+    cutHistoryIndex = 0;
+    cutHistoryFeedback = "";
+    saveLocalCutHistory();
+  }
+  cutHistoryLastState = current;
+  cutHistoryPendingMeta = null;
+  renderCutHistory();
+}
+
+function stageCutHistoryOperation(label, { coalesceKey = "" } = {}) {
+  cutHistoryPendingMeta = {
+    label: String(label || "更新剪辑方案"),
+    coalesceKey: String(coalesceKey || ""),
+  };
+}
+
+function recordCutHistoryIfChanged() {
+  const current = cloneCutHistorySnapshot();
+  const previous = cutHistoryLastState || current;
+  const meta = cutHistoryPendingMeta;
+  cutHistoryPendingMeta = null;
+  if (!cutHistoryBaseline) cutHistoryBaseline = previous;
+
+  if (
+    cutHistoryReplaying ||
+    !cutDraftReady ||
+    cutHistorySnapshotSignature(previous) === cutHistorySnapshotSignature(current)
+  ) {
+    cutHistoryLastState = current;
+    renderCutHistory();
+    return;
+  }
+
+  if (cutHistoryIndex < cutHistoryEntries.length) {
+    cutHistoryEntries = cutHistoryEntries.slice(0, cutHistoryIndex);
+  }
+  const now = new Date();
+  const lastEntry = cutHistoryEntries[cutHistoryEntries.length - 1];
+  const coalesce = Boolean(
+    meta?.coalesceKey &&
+      lastEntry?.coalesceKey === meta.coalesceKey &&
+      now.getTime() - new Date(lastEntry.at).getTime() <= CUT_HISTORY_COALESCE_MS,
+  );
+  if (coalesce) {
+    lastEntry.after = current;
+    lastEntry.at = now.toISOString();
+    lastEntry.label = meta.label;
+  } else {
+    cutHistoryEntries.push({
+      id: `${now.getTime()}-${Math.random().toString(36).slice(2, 8)}`,
+      label: meta?.label || "更新剪辑方案",
+      at: now.toISOString(),
+      coalesceKey: meta?.coalesceKey || "",
+      before: previous,
+      after: current,
+    });
+  }
+  while (cutHistoryEntries.length > CUT_HISTORY_LIMIT) {
+    const removed = cutHistoryEntries.shift();
+    cutHistoryBaseline = removed.after;
+  }
+  cutHistoryIndex = cutHistoryEntries.length;
+  cutHistoryLastState = current;
+  cutHistoryFeedback = `已记录：${meta?.label || "更新剪辑方案"}`;
+  saveLocalCutHistory();
+  renderCutHistory();
+}
+
+function applyCutHistorySnapshot(snapshot) {
+  const normalized = cloneCutHistorySnapshot(snapshot);
+  selectedRanges.clear();
+  selectedNoSpeechRanges.clear();
+  for (const item of normalized.textRanges) {
+    selectedRanges.set(item.key, {
+      start: item.start,
+      end: item.end,
+      text: item.text,
+      originalStart: Number.isFinite(item.originalStart)
+        ? item.originalStart
+        : item.start,
+      originalEnd: Number.isFinite(item.originalEnd) ? item.originalEnd : item.end,
+      adjacentSilenceBefore: item.adjacentSilenceBefore,
+      adjacentSilenceAfter: item.adjacentSilenceAfter,
+    });
+  }
+  for (const item of normalized.noSpeechRanges) {
+    selectedNoSpeechRanges.set(item.key, {
+      id: item.key,
+      start: item.start,
+      end: item.end,
+    });
+  }
+  timelineDeleteRanges = normalized.timelineRanges.map((range) => ({
+    id: nextTimelineRangeId++,
+    start: range.start,
+    end: range.end,
+  }));
+  selectedTimelineRangeId = null;
+  timelineRangeInProgress = false;
+  timelineRangeConfirmationOpen = false;
+  cutHistoryLastState = normalized;
+  cutHistoryReplaying = true;
+  try {
+    updateCutTimelineStatus("");
+    updateSelectionSummary();
+  } finally {
+    cutHistoryReplaying = false;
+  }
+}
+
+function undoCutHistory() {
+  if (!canUndoCutHistory()) return;
+  const entry = cutHistoryEntries[cutHistoryIndex - 1];
+  cutHistoryIndex -= 1;
+  cutHistoryFeedback = `已撤销：${entry.label}`;
+  applyCutHistorySnapshot(entry.before);
+  saveLocalCutHistory();
+  renderCutHistory();
+}
+
+function redoCutHistory() {
+  if (!canRedoCutHistory()) return;
+  const entry = cutHistoryEntries[cutHistoryIndex];
+  cutHistoryIndex += 1;
+  cutHistoryFeedback = `已重做：${entry.label}`;
+  applyCutHistorySnapshot(entry.after);
+  saveLocalCutHistory();
+  renderCutHistory();
+}
+
+function isNativeUndoTarget(target) {
+  if (!(target instanceof Element)) return false;
+  return Boolean(
+    target.closest("input, textarea, select, [contenteditable='true']"),
+  );
+}
+
+function handleGlobalCutHistoryShortcut(event) {
+  if (
+    (!event.ctrlKey && !event.metaKey) ||
+    event.altKey ||
+    isNativeUndoTarget(event.target)
+  ) {
+    return;
+  }
+  const key = event.key.toLowerCase();
+  const wantsUndo = key === "z" && !event.shiftKey;
+  const wantsRedo = key === "y" || (key === "z" && event.shiftKey);
+  if (wantsUndo && canUndoCutHistory()) {
+    event.preventDefault();
+    undoCutHistory();
+  } else if (wantsRedo && canRedoCutHistory()) {
+    event.preventDefault();
+    redoCutHistory();
+  }
+}
+
 function updateSelectionSummary() {
+  recordCutHistoryIfChanged();
   const merged = getMergedSelection();
   const deletedDuration = merged.reduce(
     (total, range) => total + range.end - range.start,
@@ -1995,6 +2529,7 @@ function updateSelectionSummary() {
     "has-cut-selection",
     hasCutSelection(),
   );
+  updateCutSegmentText();
   updateCutSegmentTimestamps();
   updateCutInspectorTimestamps();
   syncEditorSuiteCutDraftState();
@@ -2625,6 +3160,7 @@ function beginTimelineRangeAdjustment(event) {
     window.removeEventListener("pointercancel", finish);
     const safeRange = alignManualRangeToTranscript(range);
     if (safeRange) Object.assign(range, safeRange);
+    stageCutHistoryOperation("调整时间轴删除区间");
     updateCutTimelineStatus(
       `已调整待确认区间 ${formatCutRange(range.start, range.end)}，确认后才会删除。`,
       "neutral",
@@ -2654,6 +3190,7 @@ function confirmPendingTimelineRange() {
     ({ id }) => id === selectedTimelineRangeId,
   );
   if (!range || !timelineRangeInProgress) return;
+  stageCutHistoryOperation("删除时间轴区间");
   timelineRangeInProgress = false;
   selectedTimelineRangeId = null;
   updateSelectionSummary();
@@ -2678,7 +3215,7 @@ async function requestTimelineRangeConfirmation(range) {
       title: "删除这个时间轴区间？",
       message:
         `将删除 ${formatCutRange(range.start, range.end)}，并自动拼接前后画面。` +
-        "删除后当前方案内不可撤销，原视频仍会保留。",
+        "删除后可通过全局撤销恢复，原视频仍会保留。",
       confirmText: "确认删除",
       cancelText: "取消",
       tone: "danger",
@@ -2710,6 +3247,9 @@ function adjustTimelineRangeWithKeyboard(event) {
   selectedTimelineRangeId = rangeId;
   if (event.key === "Delete" || event.key === "Backspace") {
     event.preventDefault();
+    if (!timelineRangeInProgress) {
+      stageCutHistoryOperation("恢复时间轴区间");
+    }
     cancelPendingTimelineRange();
     return;
   }
@@ -2724,6 +3264,9 @@ function adjustTimelineRangeWithKeyboard(event) {
   const delta = direction * (event.shiftKey ? 1 : 0.1);
   const total = cutTimelineDuration();
   const mode = control.dataset.dragMode;
+  stageCutHistoryOperation("调整时间轴删除区间", {
+    coalesceKey: `timeline-adjust:${rangeId}:${mode}`,
+  });
   if (mode === "start") {
     range.start = clamp(
       range.start + delta,
@@ -3283,6 +3826,7 @@ function resetToUpload() {
   selectedNoSpeechRanges.clear();
   ignoredSuggestions.clear();
   ignoredNoSpeechSuggestions.clear();
+  resetCutHistoryRuntime();
   noSpeechPreviewEnd = null;
   cutSelectionPreviewEnd = null;
   suggestionList.replaceChildren();
@@ -3325,6 +3869,24 @@ function resetToUpload() {
   uploadCard.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
+function isExpiredJobError(error) {
+  return /任务不存在|不存在或服务已重启|转写任务不存在/.test(
+    String(error?.message || error?.detail || ""),
+  );
+}
+
+async function handleExpiredTask() {
+  window.appGeneration?.hide();
+  await window.appAlert?.({
+    eyebrow: "需要重新上传",
+    title: "当前任务已失效",
+    message:
+      "服务重启后，已上传视频的处理记录会清空。请重新上传视频，开始新的剪辑。",
+    confirmText: "重新上传",
+  });
+  resetToUpload();
+}
+
 async function confirmAndResetProject() {
   const confirmed = await window.appConfirm({
     eyebrow: "项目状态检查",
@@ -3341,6 +3903,7 @@ async function confirmAndResetProject() {
     await cutDraftSaveQueue;
     await clearPersistedCutDraft(jobId);
     removeLocalCutDraft(jobId);
+    removeLocalCutHistory(jobId);
     resetToUpload();
   } catch (error) {
     cutDraftReady = true;
@@ -3397,6 +3960,7 @@ function renderJob(job) {
 function renderResult(job) {
   cutDraftReady = false;
   cutDraftSaveQueue = Promise.resolve();
+  resetCutHistoryRuntime();
   const result = job.result || {};
   const segments = result.segments || [];
   currentJobId = job.id;
@@ -3440,6 +4004,7 @@ function renderResult(job) {
   restorePersistedCutDraft(
     resolvePersistedCutDraft(job.cutDraft || null, currentJobId),
   );
+  restoreLocalCutHistory();
   cutError.hidden = true;
   cutProgress.hidden = true;
   cutResult.hidden = true;
@@ -3480,6 +4045,10 @@ async function pollJob(jobId) {
       pollTimer = window.setTimeout(() => pollJob(jobId), 1200);
     }
   } catch (error) {
+    if (isExpiredJobError(error)) {
+      handleExpiredTask();
+      return;
+    }
     jobErrorText.textContent = error.message;
     jobError.hidden = false;
     liveStatus.textContent = "无法读取处理状态";
@@ -3521,6 +4090,19 @@ function renderEdit(edit) {
     setCutControlsDisabled(true);
     setCutOperationLock(true, edit.stage);
     setCutProgress(edit.progress || 0, edit.stage);
+    if (!generationModalActive) {
+      generationModalActive = true;
+      window.appGeneration?.show({
+        title: "生成剪辑视频",
+        progress: edit.progress,
+        status: edit.stage || "正在生成剪辑视频…",
+        onClose: () => {
+          generationModalActive = false;
+        },
+      });
+    } else {
+      window.appGeneration?.setProgress(edit.progress, edit.stage);
+    }
   } else if (edit.status === "completed") {
     generatedCutSelectionSignature =
       pendingCutSelectionSignature ||
@@ -3550,12 +4132,26 @@ function renderEdit(edit) {
     cutDuration.textContent = `成片 ${formatTime(edit.outputDuration)}`;
     cutResult.scrollIntoView({ behavior: "smooth", block: "start" });
     cutResultTitle.focus({ preventScroll: true });
+    if (generationModalActive) {
+      generationModalActive = false;
+      window.appGeneration?.complete({
+        videoUrl: edit.outputUrl,
+        downloadUrl: `${edit.outputUrl}?download=true`,
+        duration: formatTime(edit.outputDuration),
+      });
+    }
   } else if (edit.status === "failed") {
     setCutOperationLock(false);
     cutProgress.hidden = true;
     cutError.textContent = edit.error || "视频剪辑失败，请重新尝试。";
     cutError.hidden = false;
     setCutControlsDisabled(false);
+    if (generationModalActive) {
+      generationModalActive = false;
+      window.appGeneration?.fail(
+        edit.error || "视频剪辑失败，请重新尝试。",
+      );
+    }
   }
 }
 
@@ -3571,6 +4167,10 @@ async function pollEdit(jobId) {
       editPollTimer = window.setTimeout(() => pollEdit(jobId), 1200);
     }
   } catch (error) {
+    if (isExpiredJobError(error)) {
+      handleExpiredTask();
+      return;
+    }
     cutProgress.hidden = false;
     cutError.hidden = true;
     setCutOperationLock(true, "连接暂时中断，正在重新获取剪辑状态…");
@@ -3621,12 +4221,20 @@ async function generateCut() {
     renderEdit(payload);
     pollEdit(currentJobId);
   } catch (error) {
+    if (isExpiredJobError(error)) {
+      handleExpiredTask();
+      return;
+    }
     pendingCutSelectionSignature = "";
     setCutOperationLock(false);
     cutProgress.hidden = true;
     cutError.textContent = error.message;
     cutError.hidden = false;
     setCutControlsDisabled(false);
+    if (generationModalActive) {
+      generationModalActive = false;
+      window.appGeneration?.fail(error.message);
+    }
   }
 }
 
@@ -3942,11 +4550,17 @@ segmentList.addEventListener("click", (event) => {
   if (range.end <= range.start) return;
   const key = rangeKey(range.start, range.end);
   if (selectedRanges.has(key)) {
+    stageCutHistoryOperation(
+      `恢复第 ${Number(segmentButton.dataset.segmentIndex) + 1} 段文字`,
+    );
     selectedRanges.delete(key);
     updateSelectionSummary();
     seekCutPreview(range.start);
     return;
   }
+  stageCutHistoryOperation(
+    `删除第 ${Number(segmentButton.dataset.segmentIndex) + 1} 段文字`,
+  );
   seekCutPreview(range.start);
   for (const [selectedKey, selectedRange] of selectedRanges.entries()) {
     const selectedStart = Number(
@@ -3982,6 +4596,7 @@ segmentEditDialog.addEventListener("click", (event) => {
 splitSegmentButton.addEventListener("click", () => {
   applyEditableSegmentOperation("split");
 });
+saveSegmentTextButton.addEventListener("click", saveSegmentText);
 mergeSegmentUpButton.addEventListener("click", () => {
   applyEditableSegmentOperation("merge_up");
 });
@@ -4004,6 +4619,7 @@ suggestionList.addEventListener("click", (event) => {
   let previewRange = null;
   if (button.dataset.action === "apply") {
     if (isSuggestionSelected(suggestion)) return;
+    stageCutHistoryOperation("删除 AI 建议片段");
     ignoredSuggestions.delete(suggestion.id);
     const expandedRanges = [];
     for (const range of ranges) {
@@ -4045,6 +4661,7 @@ selectAllSuggestionsButton.addEventListener("click", () => {
       !ignoredSuggestions.has(suggestion.id),
   );
   if (candidates.length === 0) return;
+  stageCutHistoryOperation(`批量删除 ${candidates.length} 条 AI 建议`);
   for (const suggestion of candidates) {
     for (const range of getSuggestionRanges(suggestion)) {
       const key = rangeKey(range.start, range.end);
@@ -4091,6 +4708,7 @@ noSpeechList?.addEventListener("click", (event) => {
   let markedForPreview = false;
   if (button.dataset.action === "apply") {
     if (selectedNoSpeechRanges.has(range.id)) return;
+    stageCutHistoryOperation("删除空白片段");
     ignoredNoSpeechSuggestions.delete(suggestion.id);
     if (suggestion.deletable !== false) {
       selectedNoSpeechRanges.set(range.id, range);
@@ -4117,6 +4735,7 @@ selectAllNoSpeechButton?.addEventListener("click", () => {
       !isNoSpeechSelected(suggestion),
   );
   if (candidates.length === 0) return;
+  stageCutHistoryOperation(`批量删除 ${candidates.length} 个空白片段`);
   for (const suggestion of candidates) {
     const range = getNoSpeechRange(suggestion);
     if (!range) continue;
@@ -4178,6 +4797,10 @@ uploadForm.addEventListener("submit", (event) => {
 
 retryButton.addEventListener("click", resetToUpload);
 restartProjectButton.addEventListener("click", confirmAndResetProject);
+cutUndoButton?.addEventListener("click", undoCutHistory);
+cutRedoButton?.addEventListener("click", redoCutHistory);
+document.addEventListener("keydown", handleGlobalCutHistoryShortcut);
+window.addEventListener("editor-suite:job-state", acceptEditorSuiteJobState);
 
 for (const tab of textEditorTabs) {
   tab.addEventListener("click", () => {

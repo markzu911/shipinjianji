@@ -10,11 +10,6 @@
     art: "艺术字",
     pip: "画中画",
   };
-  const generationLabels = {
-    cut: "生成剪辑视频",
-    art: "生成艺术字视频",
-    pip: "生成画中画视频",
-  };
 
   root.innerHTML = `
     <nav class="editor-suite-nav" aria-label="统一视频编辑工作台">
@@ -46,6 +41,16 @@
       <div class="editor-suite-project-state" aria-live="polite">
         <span class="editor-suite-state-dot" aria-hidden="true"></span>
         <span data-editor-suite-status>上传视频后，三个工具会在同一任务中启用。</span>
+        <a
+          class="editor-suite-download-button"
+          data-editor-suite-download
+          href="#"
+          aria-label="下载当前预览成片"
+          title="下载当前预览成片"
+          hidden
+        >
+          <iconify-icon icon="ph:download-simple-bold" aria-hidden="true"></iconify-icon>
+        </a>
         <button
           class="editor-suite-generate-button"
           type="button"
@@ -53,8 +58,8 @@
           aria-label="生成视频"
           disabled
         >
-          <iconify-icon icon="ph:film-strip-bold" aria-hidden="true"></iconify-icon>
-          <span>生成视频</span>
+          <iconify-icon icon="ph:scissors-bold" aria-hidden="true"></iconify-icon>
+          <span>剪辑视频</span>
         </button>
       </div>
     </nav>
@@ -83,30 +88,7 @@
   const previewVideo = document.querySelector("#cutPreviewVideo");
   const previewStage = document.querySelector("#cutVideoStage");
   const generateButton = root.querySelector("[data-editor-suite-generate]");
-  const cutGenerateSource = document.querySelector("#generateCutButton");
-  const artGenerateSource = document.querySelector("#generateArtVideo");
-  const pipGenerateSource = document.querySelector("#generatePipVideo");
-  const cutProgress = document.querySelector("#cutProgress");
-  const artProgress = document.querySelector("#artProgress");
-  const pipProgress = document.querySelector("#outputProgress");
-  const cutGenerationError = document.querySelector("#cutError");
-  const artGenerationError = document.querySelector("#artFormError");
-  const pipGenerationError = document.querySelector("#outputError");
-  const directGenerationSources = new Map([
-    ["cut", cutGenerateSource],
-    ["art", artGenerateSource],
-    ["pip", pipGenerateSource],
-  ]);
-  const directGenerationProgress = new Map([
-    ["cut", cutProgress],
-    ["art", artProgress],
-    ["pip", pipProgress],
-  ]);
-  const directGenerationErrors = new Map([
-    ["cut", cutGenerationError],
-    ["art", artGenerationError],
-    ["pip", pipGenerationError],
-  ]);
+  const downloadButton = root.querySelector("[data-editor-suite-download]");
   const frameEntries = new Map();
   const toolStates = new Map();
   const desiredToolUrls = new Map();
@@ -117,6 +99,7 @@
   let renderedTimelineState = null;
   let frameSyncRequest = 0;
   let currentJob = null;
+  let previousJobId = null;
   let cutDraftActive = false;
   let cutDraftState = {
     active: false,
@@ -170,69 +153,222 @@
     if (tool) tool.classList.toggle("is-complete", complete);
   }
 
-  function generationState(name) {
-    if (cutDraftActive && name !== "cut") {
-      return {
-        disabled: true,
-        label: generationLabels[name],
-        busy: false,
-      };
-    }
-    const directSource = directGenerationSources.get(name);
-    if (directSource) {
-      const directProgress = directGenerationProgress.get(name);
-      const directError = directGenerationErrors.get(name);
-      return {
-        disabled: directSource.disabled,
-        label: directSource.textContent.trim() || generationLabels[name],
-        busy: Boolean(directProgress && !directProgress.hidden),
-        error: directError && !directError.hidden
-          ? directError.textContent.trim()
-          : "",
-      };
-    }
-    const state = toolStates.get(name);
+  function previewCompositionState() {
+    const ranges = cutDraftActive
+      ? cutDraftState.ranges
+      : currentJob?.edit?.status === "completed"
+        ? currentJob.edit.requestedRanges || currentJob.edit.ranges || []
+        : [];
+    const art = toolStates.get("art")?.generationPayload || (
+      currentJob?.art?.overlays
+        ? {
+            source: currentJob.art.source || "original",
+            historyName: currentJob.art.historyName || null,
+            overlays: currentJob.art.overlays,
+          }
+        : { overlays: [] }
+    );
+    const pictureInPicture = toolStates.get("pip")?.generationPayload || (
+      currentJob?.pictureInPicture?.overlays
+        ? {
+            source: currentJob.pictureInPicture.source || "original",
+            overlays: currentJob.pictureInPicture.overlays,
+          }
+        : { overlays: [] }
+    );
     return {
-      disabled: state?.generationDisabled ?? true,
-      label: state?.generationLabel || generationLabels[name],
-      busy: Boolean(state?.generationBusy),
-      error: String(state?.generationError || ""),
+      ranges: Array.isArray(ranges) ? ranges : [],
+      art,
+      pictureInPicture,
     };
+  }
+
+  function compositionRequest() {
+    const composition = previewCompositionState();
+    return {
+      target: "all",
+      ranges: composition.ranges,
+      artOverlays: composition.art?.overlays || [],
+      artSource: composition.art?.source || "original",
+      pictureInPictureOverlays:
+        composition.pictureInPicture?.overlays || [],
+      pictureInPictureSource:
+        composition.pictureInPicture?.source || "original",
+      historyName: compositionHistoryName(),
+    };
+  }
+
+  function stableValue(value) {
+    if (Array.isArray(value)) return value.map(stableValue);
+    if (!value || typeof value !== "object") return value;
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, stableValue(value[key])]),
+    );
+  }
+
+  function compositionVisualSignature(value) {
+    if (!value) return "";
+    const { target, historyName, ...visual } = value;
+    return JSON.stringify(stableValue(visual));
+  }
+
+  function currentPreviewMatchesComposition() {
+    return (
+      currentJob?.composition?.status === "completed" &&
+      compositionVisualSignature(compositionRequest()) ===
+        compositionVisualSignature(currentJob.composition.request)
+    );
+  }
+
+  function compositionBusy() {
+    return ["queued", "processing"].includes(
+      currentJob?.composition?.status,
+    );
+  }
+
+  function compositionReady() {
+    return currentJob?.status === "completed" && !compositionBusy();
   }
 
   function syncGenerationButton() {
     if (!generateButton) return;
-    const state = generationState(activeTool);
+    const state = {
+      disabled: !compositionReady(),
+      busy: compositionBusy(),
+      error: String(currentJob?.composition?.error || ""),
+    };
     const label = generateButton.querySelector("span");
     generateButton.disabled = state.disabled;
     generateButton.classList.toggle("is-busy", state.busy);
     generateButton.setAttribute("aria-busy", String(state.busy));
-    generateButton.dataset.generationKind = activeTool;
+    generateButton.dataset.generationKind = "all";
     if (label) {
-      label.textContent = state.busy ? "生成中…" : "生成视频";
+      label.textContent = state.busy ? "生成中…" : "剪辑视频";
     }
-    const disabledHints = {
-      cut: "请先在剪辑工具中选择要删除的内容",
-      art: "请先在艺术字工具中添加文字",
-      pip: "请先在画中画工具中生成并启用素材",
-    };
     generateButton.title = state.disabled && !state.busy
-      ? cutDraftActive && activeTool !== "cut"
-        ? "剪辑方案尚未生成，请先生成剪辑视频再输出效果"
-        : disabledHints[activeTool]
+      ? "视频准备完成后即可把当前预览导出为成片"
       : state.busy
-        ? `${toolLabels[activeTool]}视频正在生成`
-        : state.label;
+        ? "当前预览正在生成"
+      : "按当前预览合成剪辑、艺术字和画中画";
     generateButton.setAttribute(
       "aria-label",
-      state.busy ? `${toolLabels[activeTool]}视频生成中` : state.label,
+      state.busy ? "当前预览视频生成中" : "剪辑当前预览视频",
     );
+    const outputUrl = currentJob?.composition?.outputUrl;
+    const outputMatchesPreview = currentPreviewMatchesComposition();
+    if (downloadButton) {
+      downloadButton.hidden = !outputUrl || !outputMatchesPreview;
+      downloadButton.href = outputUrl ? `${outputUrl}?download=true` : "#";
+    }
     if (state.error) {
       status.textContent = state.error;
       root.dataset.state = "error";
     } else if (state.busy) {
-      status.textContent = `${toolLabels[activeTool]}视频正在生成，请稍候…`;
+      status.textContent = "正在按当前预览合成视频，请稍候…";
       root.dataset.state = "working";
+    } else if (currentJob?.composition?.status === "completed" && !outputMatchesPreview) {
+      status.textContent = "当前预览有未生成的更改，点击剪辑视频更新成片。";
+      root.dataset.state = "ready";
+    }
+  }
+
+  let compositionPollTimer = null;
+
+  function compositionHistoryName() {
+    for (const selector of ["#cutHistoryName", "#artHistoryName"]) {
+      const value = document.querySelector(selector)?.value?.trim();
+      if (value) return value;
+    }
+    return null;
+  }
+
+  async function generateCurrentPreview() {
+    if (!compositionReady()) return;
+    const jobId = currentJobId();
+    if (!jobId) return;
+    const request = compositionRequest();
+    generateButton.disabled = true;
+    generateButton.classList.add("is-busy");
+    status.textContent = "正在创建当前预览合成任务…";
+    root.dataset.state = "working";
+    try {
+      const response = await fetch(
+        `/api/transcriptions/${encodeURIComponent(jobId)}/compose`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(request),
+        },
+      );
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "无法创建当前预览合成任务。");
+      await refresh();
+      window.appGeneration?.show({
+        title: "合成成片",
+        progress: Number(payload.progress) || 5,
+        status: payload.stage || "正在生成当前预览…",
+      });
+      pollComposition(jobId);
+    } catch (error) {
+      status.textContent = error.message;
+      root.dataset.state = "error";
+      syncGenerationButton();
+      window.appGeneration?.fail(error.message);
+      if (
+        window.handleExpiredTask &&
+        /任务不存在|服务已重启|转写任务不存在/.test(error.message)
+      ) {
+        window.handleExpiredTask();
+      }
+    }
+  }
+
+  function formatGenerationDuration(seconds) {
+    const total = Math.max(0, Math.round(Number(seconds) || 0));
+    const minutes = Math.floor(total / 60);
+    const rest = total % 60;
+    return `${minutes}:${String(rest).padStart(2, "0")}`;
+  }
+
+  async function pollComposition(jobId) {
+    if (compositionPollTimer) window.clearTimeout(compositionPollTimer);
+    try {
+      const response = await fetch(`/api/transcriptions/${encodeURIComponent(jobId)}`);
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "无法读取合成进度。");
+      renderJobState(payload);
+      window.dispatchEvent(new CustomEvent("editor-suite:job-state", { detail: payload }));
+      const composition = payload.composition;
+      if (["queued", "processing"].includes(composition?.status)) {
+        window.appGeneration?.setProgress(
+          composition.progress,
+          composition.stage,
+        );
+        compositionPollTimer = window.setTimeout(() => pollComposition(jobId), 900);
+        return;
+      }
+      if (composition?.status === "completed") {
+        const outputUrl = composition.outputUrl;
+        window.appGeneration?.complete({
+          videoUrl: outputUrl,
+          downloadUrl: outputUrl ? `${outputUrl}?download=true` : null,
+          duration: formatGenerationDuration(composition.outputDuration),
+        });
+        return;
+      }
+      if (composition?.status === "failed") {
+        window.appGeneration?.fail(
+          composition.error || "合成失败，请重新尝试。",
+        );
+        return;
+      }
+    } catch (error) {
+      status.textContent = error.message;
+      root.dataset.state = "error";
+      syncGenerationButton();
+      window.appGeneration?.fail(error.message);
     }
   }
 
@@ -344,7 +480,8 @@
     panel.dataset.editorSuitePanel = name;
     panel.setAttribute("role", "tabpanel");
     panel.setAttribute("aria-label", `${toolLabels[name]}设置`);
-    panel.hidden = true;
+    panel.setAttribute("aria-hidden", "true");
+    panel.setAttribute("inert", "");
 
     const frame = document.createElement("iframe");
     frame.className = "editor-suite-tool-frame";
@@ -507,8 +644,7 @@
     if (frameSyncRequest) return;
     frameSyncRequest = window.requestAnimationFrame(() => {
       frameSyncRequest = 0;
-      if (activeTool === "cut") return;
-      syncFrameTime();
+      for (const name of frameEntries.keys()) syncFrameTime(name);
       syncMirroredPlayback();
     });
   }
@@ -522,11 +658,16 @@
     const isCut = activeTool === "cut";
     cutTabbar.hidden = !isCut;
     cutPanelStack.hidden = !isCut;
-    inspectorHost.hidden = isCut;
+    inspectorHost.hidden = false;
+    inspectorHost.classList.toggle("is-background", isCut);
+    inspectorHost.setAttribute("aria-hidden", String(isCut));
     inspector.dataset.activeTool = activeTool;
     document.body.dataset.activeEditorTool = activeTool;
     for (const [name, entry] of frameEntries) {
-      entry.panel.hidden = isCut || name !== activeTool;
+      const selected = !isCut && name === activeTool;
+      entry.panel.classList.toggle("is-active", selected);
+      entry.panel.setAttribute("aria-hidden", String(!selected));
+      entry.panel.toggleAttribute("inert", !selected);
     }
     renderMirroredPreview();
     renderMirroredTimeline();
@@ -573,15 +714,44 @@
       return;
     }
 
+    const jobChanged = job.id !== previousJobId;
+    previousJobId = job.id;
+    if (jobChanged && stage === "cut") {
+      // A fresh video task lands on the cut tool. Clear a stale ?tool=art
+      // parameter left by a previous task so the workspace does not jump to
+      // the art-text tool right after transcription.
+      activeTool = "cut";
+      const url = new URL(window.location.href);
+      if (url.searchParams.has("tool")) {
+        url.searchParams.delete("tool");
+        window.history.replaceState(
+          { ...(window.history.state || {}), editorTool: "cut" },
+          "",
+          url,
+        );
+      }
+    }
+
     currentJob = job;
+    if (!job.composition) {
+      job.composition = null;
+    }
 
     const ready = job.status === "completed";
     const editReady = job.edit?.status === "completed";
     const downstreamReady = ready && (!job.edit || editReady || cutDraftActive);
     const artReady = job.art?.status === "completed";
     const pipReady = job.pictureInPicture?.status === "completed";
-    const artSource = editReady ? "edited" : "original";
-    const pipSource = artReady ? "art" : artSource;
+    const artSource = job.art?.composition
+      ? job.art.source || "original"
+      : editReady
+        ? "edited"
+        : "original";
+    const pipSource = job.pictureInPicture?.composition
+      ? job.pictureInPicture.source || artSource
+      : artReady
+        ? "art"
+        : artSource;
     const encodedJobId = encodeURIComponent(job.id);
 
     setToolLink("cut", `/?job=${encodedJobId}`, true);
@@ -626,9 +796,15 @@
       pipReady && !cutDraftActive,
     );
 
-    if (cutDraftActive) {
+    if (compositionBusy()) {
+      status.textContent = "正在按当前预览合成剪辑视频，请稍候…";
+      root.dataset.state = "working";
+    } else if (job.composition?.status === "completed") {
+      status.textContent = "当前预览已生成最终成片，剪辑、艺术字和画中画均已保留。";
+      root.dataset.state = "complete";
+    } else if (cutDraftActive) {
       status.textContent =
-        "删除方案已更新；可继续添加艺术字和画中画，最终输出前需先生成剪辑视频。";
+        "当前预览包含剪辑调整；点击生成视频会一次完成剪辑、艺术字和画中画合成。";
       root.dataset.state = "working";
     } else if (pipReady) {
       status.textContent = "剪辑、艺术字和画中画已汇入最终成片。";
@@ -781,6 +957,9 @@
     }
     if (data.type === "editor-suite:job-state" && data.job?.id) {
       renderJobState(data.job);
+      window.dispatchEvent(
+        new CustomEvent("editor-suite:job-state", { detail: data.job }),
+      );
       return;
     }
     if (data.type === "editor-suite:seek" && data.kind === activeTool) {
@@ -791,6 +970,14 @@
       ) {
         previewVideo.currentTime = workspaceSourceTime(nextTime);
       }
+      return;
+    }
+    if (
+      data.type === "editor-suite:request-cut-draft" &&
+      ["art", "pip"].includes(data.kind) &&
+      frameEntries.get(data.kind)?.frame.contentWindow === event.source
+    ) {
+      syncFrameCutDraft(data.kind);
       return;
     }
     if (data.type !== "editor-suite:tool-state" || !["art", "pip"].includes(data.kind)) {
@@ -805,6 +992,10 @@
       generationLabel: String(data.generationLabel || ""),
       generationBusy: Boolean(data.generationBusy),
       generationError: String(data.generationError || ""),
+      generationPayload:
+        data.generationPayload && typeof data.generationPayload === "object"
+          ? data.generationPayload
+          : null,
     });
     syncGenerationButton();
     renderMirroredPreview();
@@ -818,6 +1009,15 @@
         syncFrameTime(data.kind);
       }
     }
+  });
+
+  document.addEventListener("editor-suite:tool-state", (event) => {
+    const data = event.detail || {};
+    if (!['art', 'pip'].includes(data.kind)) return;
+    toolStates.set(data.kind, data);
+    syncGenerationButton();
+    renderMirroredPreview();
+    renderMirroredTimeline();
   });
 
   for (const eventName of ["timeupdate", "seeking", "loadedmetadata", "play", "pause"]) {
@@ -873,47 +1073,7 @@
     true,
   );
 
-  generateButton?.addEventListener("click", () => {
-    if (generateButton.disabled) return;
-    const directSource = directGenerationSources.get(activeTool);
-    if (directSource) {
-      directSource.click();
-      return;
-    }
-    const entry = frameEntries.get(activeTool);
-    if (!entry?.frame.contentWindow) return;
-    entry.frame.contentWindow.postMessage(
-      { type: "editor-suite:generate-video", kind: activeTool },
-      window.location.origin,
-    );
-  });
-
-  for (const [name, source] of directGenerationSources) {
-    if (!source) continue;
-    const generationObserver = new MutationObserver(syncGenerationButton);
-    generationObserver.observe(source, {
-      attributes: true,
-      childList: true,
-      subtree: true,
-      attributeFilter: ["disabled"],
-    });
-    const progress = directGenerationProgress.get(name);
-    if (progress) {
-      generationObserver.observe(progress, {
-        attributes: true,
-        attributeFilter: ["hidden"],
-      });
-    }
-    const error = directGenerationErrors.get(name);
-    if (error) {
-      generationObserver.observe(error, {
-        attributes: true,
-        childList: true,
-        subtree: true,
-        attributeFilter: ["hidden"],
-      });
-    }
-  }
+  generateButton?.addEventListener("click", generateCurrentPreview);
 
   window.addEventListener("popstate", () => {
     if (!supportsInlineWorkspace()) return;
@@ -931,8 +1091,20 @@
     openTool,
     activeTool: () => activeTool,
     setCutDraft,
+    generateCurrentPreview,
   };
   document.addEventListener("editor-suite:refresh", () => refresh());
+  document.addEventListener("editor-suite:transcript-updated", (event) => {
+    // The cut page edited transcript text; ask an embedded art page to
+    // re-read the re-segmented subtitle track from the server.
+    const artEntry = frameEntries.get("art");
+    if (artEntry?.frame?.contentWindow) {
+      artEntry.frame.contentWindow.postMessage(
+        { type: "editor-suite:transcript-updated" },
+        window.location.origin,
+      );
+    }
+  });
   updateActiveTool();
   syncGenerationButton();
   refresh();

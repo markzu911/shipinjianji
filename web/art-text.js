@@ -142,13 +142,14 @@ const embeddedEditor = query.get("embedded") === "1";
 document.documentElement.classList.toggle("editor-tool-embedded", embeddedEditor);
 const jobId = query.get("job") || "";
 const videoSource = query.get("source") === "original" ? "original" : "edited";
-const TRANSCRIPT_TRACK_MAX_CHARS_PER_CUE = 10;
+const TRANSCRIPT_TRACK_MAX_CHARS_PER_CUE = 12;
 const TRANSCRIPT_TRACK_DEFAULT_STYLE = "impact";
 let job = null;
 let duration = 0;
 let overlays = [];
 let cutSuppressedOverlays = [];
 let selectedOverlayId = null;
+let generationModalActive = false;
 let nextOverlayId = 1;
 let pollTimer = null;
 let aiPollTimer = null;
@@ -163,6 +164,7 @@ let retainedTranscriptSegments = [];
 let selectedRetainedSegmentKeys = new Set();
 let transcriptTrackBusy = false;
 let transcriptTrackRefreshTimer = null;
+let transcriptTrackDraftVersion = 0;
 let transcriptTrackTemplateId = TRANSCRIPT_TRACK_DEFAULT_STYLE;
 let transcriptSaveBusy = false;
 let retainedSavedText = "";
@@ -1877,14 +1879,37 @@ function positionPreviewOverlay(element, overlay) {
   element.style.transform = `translate(-50%, -50%) scale(${fitScale})`;
 }
 
+let lastOverlayTap = null;
+
 function beginOverlayDrag(event, overlayId) {
   event.preventDefault();
+  // A quick second tap on the same art text is a double-click to edit. The
+  // native dblclick event is suppressed by preventDefault() above, so detect
+  // the double-click from pointerdown timing instead.
+  const now = Date.now();
+  if (
+    lastOverlayTap &&
+    lastOverlayTap.id === overlayId &&
+    now - lastOverlayTap.time < 400
+  ) {
+    lastOverlayTap = null;
+    beginInlineOverlayEdit(overlayId);
+    return;
+  }
+  lastOverlayTap = { id: overlayId, time: now };
   selectedOverlayId = overlayId;
   renderControls();
   renderOverlayList();
   renderPreview();
 
   const move = (moveEvent) => {
+    // Moving the pointer means this was a drag, not a double-click.
+    if (
+      Math.abs(moveEvent.clientX - event.clientX) > 6 ||
+      Math.abs(moveEvent.clientY - event.clientY) > 6
+    ) {
+      lastOverlayTap = null;
+    }
     const overlay = overlays.find((item) => item.id === overlayId);
     if (!overlay) return;
     const bounds = videoStage.getBoundingClientRect();
@@ -1906,6 +1931,106 @@ function beginOverlayDrag(event, overlayId) {
   };
   window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", finish, { once: true });
+}
+
+let inlineOverlayEditor = null;
+
+function closeInlineOverlayEditor(options = {}) {
+  const editor = inlineOverlayEditor;
+  inlineOverlayEditor = null;
+  if (!editor || !editor.isConnected) return;
+  const overlayId = Number(editor.dataset.overlayId);
+  const overlay = Number.isFinite(overlayId)
+    ? overlays.find((item) => item.id === overlayId)
+    : null;
+  const value = editor.value.trim();
+  if (options.commit && overlay && value) {
+    selectedOverlayId = overlay.id;
+    renderControls();
+    updateSelectedOverlay({ text: value });
+    editor.remove();
+    return;
+  }
+  if (options.warnEmpty && overlay && !value) {
+    inlineOverlayEditor = editor;
+    showRetainedBulkMessage("文案不能为空。", "warning");
+    editor.focus();
+    return;
+  }
+  editor.remove();
+  if (!options.commit) renderPreview();
+}
+
+function beginInlineOverlayEdit(overlayId) {
+  if (inlineOverlayEditor) closeInlineOverlayEditor();
+  const overlay = overlays.find((item) => item.id === overlayId);
+  if (!overlay) return;
+  if (isTranscriptTrackOverlay(overlay)) {
+    window.appAlert?.({
+      title: "全文艺术字轨道不能单独修改文案",
+      message:
+        "整条 AI 分句字幕的文案来自转写内容并保持整轨同步，不能单独改其中一条。" +
+        "如需自定义文案，请删除轨道后手动添加艺术字。",
+    });
+    return;
+  }
+  artVideo.pause();
+  selectedOverlayId = overlay.id;
+  renderControls();
+  renderOverlayList();
+  renderPreview();
+  const overlayElement = overlayLayer.querySelector(
+    `[data-overlay-id="${overlayId}"]`,
+  );
+  if (!overlayElement) return;
+
+  const editor = document.createElement("textarea");
+  editor.className = "art-inline-editor";
+  editor.dataset.overlayId = String(overlayId);
+  editor.value = String(overlay.text || "");
+  editor.maxLength = 60;
+  editor.rows = 1;
+  const layerRect = overlayLayer.getBoundingClientRect();
+  const elementRect = overlayElement.getBoundingClientRect();
+  const editorWidth = Math.min(
+    Math.max(160, Math.ceil(elementRect.width) + 12),
+    Math.max(160, layerRect.width * 0.9),
+  );
+  const editorHeight = Math.min(
+    Math.max(42, Math.ceil(elementRect.height) + 8),
+    160,
+  );
+  editor.style.left = `${
+    elementRect.left - layerRect.left + elementRect.width / 2 - editorWidth / 2
+  }px`;
+  editor.style.top = `${
+    elementRect.top - layerRect.top + elementRect.height / 2 - editorHeight / 2
+  }px`;
+  editor.style.width = `${editorWidth}px`;
+  editor.style.minHeight = `${editorHeight}px`;
+  const displayFontSize = Number(getComputedStyle(overlayElement).fontSize) || 20;
+  editor.style.fontSize = `${Math.max(14, Math.round(displayFontSize * 0.92))}px`;
+  editor.addEventListener("pointerdown", (event) => event.stopPropagation());
+  editor.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      closeInlineOverlayEditor(
+        editor.value.trim() ? { commit: true } : { warnEmpty: true },
+      );
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      closeInlineOverlayEditor();
+    }
+  });
+  editor.addEventListener("blur", () => {
+    if (inlineOverlayEditor === editor) {
+      closeInlineOverlayEditor({ commit: true });
+    }
+  });
+  inlineOverlayEditor = editor;
+  overlayLayer.append(editor);
+  editor.focus();
+  editor.select();
 }
 
 function isOverlayVisibleAtTime(overlay, currentTime) {
@@ -1986,7 +2111,6 @@ function renderPreview(options = {}) {
 }
 
 function notifyEditorHost(options = {}) {
-  if (!embeddedEditor || window.parent === window) return;
   const state = {
     overlayHtml: overlayLayer.innerHTML,
     overlayWidth: overlayLayer.clientWidth,
@@ -1996,10 +2120,23 @@ function notifyEditorHost(options = {}) {
     generationLabel: generateArtVideo.textContent.trim(),
     generationBusy: !artProgress.hidden,
     generationError: artFormError.hidden ? "" : artFormError.textContent.trim(),
+    generationPayload: {
+      source: videoSource,
+      historyName: artHistoryName.value.trim() || null,
+      overlays: overlays.map(({ id, ...overlay }) => overlay),
+    },
   };
   const signature = JSON.stringify(state);
   if (!options.force && signature === editorHostStateSignature) return;
   editorHostStateSignature = signature;
+  if (!embeddedEditor || window.parent === window) {
+    document.dispatchEvent(
+      new CustomEvent("editor-suite:tool-state", {
+        detail: { kind: "art", ...state },
+      }),
+    );
+    return;
+  }
   window.parent.postMessage(
     {
       type: "editor-suite:tool-state",
@@ -2018,6 +2155,46 @@ function updateEditorSuiteJobState(payload) {
     { type: "editor-suite:job-state", job: payload },
     window.location.origin,
   );
+}
+
+async function refreshArtAfterTranscriptUpdate() {
+  if (!jobId) return;
+  try {
+    const response = await fetch(
+      `/api/transcriptions/${encodeURIComponent(jobId)}`,
+    );
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || "无法刷新艺术字。");
+    job = payload;
+    updateEditorSuiteJobState(payload);
+    const transcript = payload.result || {};
+    const nextDuration = Math.max(0, Number(payload.duration) || duration);
+    duration = nextDuration;
+    if (Array.isArray(transcript.segments) && transcript.segments.length) {
+      renderRetainedTranscript({
+        text: transcript.text || "",
+        segments: transcript.segments.map((segment) => ({
+          ...segment,
+          start: clamp(Number(segment.start) || 0, 0, nextDuration),
+          end: clamp(Number(segment.end) || 0, 0, nextDuration),
+        })),
+      });
+    }
+    const art = payload.art || {};
+    if (Array.isArray(art.overlays) && art.overlays.length) {
+      cutSuppressedOverlays = [];
+      overlays = art.overlays.map((item) => ({
+        ...item,
+        id: nextOverlayId++,
+      }));
+      selectedOverlayId = overlays[0]?.id || null;
+    }
+    renderEditor();
+    renderPreview({ force: true });
+    showRetainedBulkMessage("已同步剪后文案，全文艺术字字幕已更新。", "success");
+  } catch (error) {
+    showRetainedBulkMessage("刷新艺术字失败，请手动重新生成轨道。", "warning");
+  }
 }
 
 function buildTranscriptWordMatchIndex(transcript) {
@@ -2155,6 +2332,10 @@ function retimeDraftAnchoredOverlays(data) {
       retained.push(overlay);
       continue;
     }
+    if (isTranscriptTrackOverlay(overlay)) {
+      retained.push(overlay);
+      continue;
+    }
     const range = editedRangeForSourceOverlay(overlay, data);
     const minimumDuration = isTranscriptTrackOverlay(overlay) ? 0.02 : 0.05;
     if (
@@ -2170,6 +2351,19 @@ function retimeDraftAnchoredOverlays(data) {
     overlay.end = clamp(range.end, overlay.start + minimumDuration, duration);
     retained.push(overlay);
   }
+  const transcriptItems = retained
+    .filter(isTranscriptTrackOverlay)
+    .sort((left, right) => left.start - right.start);
+  for (let index = 1; index < transcriptItems.length; index += 1) {
+    const previous = transcriptItems[index - 1];
+    const current = transcriptItems[index];
+    if (
+      current.start < previous.end - 0.001 &&
+      current.start - previous.start >= 0.019
+    ) {
+      previous.end = current.start;
+    }
+  }
   overlays = retained;
   cutSuppressedOverlays = suppressed;
   if (!overlays.some((overlay) => overlay.id === selectedOverlayId)) {
@@ -2180,6 +2374,7 @@ function retimeDraftAnchoredOverlays(data) {
 
 function applyEditorCutDraft(data) {
   pendingCutDraft = data;
+  transcriptTrackDraftVersion += 1;
   cutDraftActive = Boolean(data.active);
   if (!artEditorReady || !data.transcript) return;
   duration = Math.max(0, Number(data.duration) || 0);
@@ -2188,6 +2383,14 @@ function applyEditorCutDraft(data) {
     start: clamp(Number(segment.start) || 0, 0, duration),
     end: clamp(Number(segment.end) || 0, 0, duration),
   }));
+  const trackSeed = currentTranscriptTrack()[0];
+  const locallyRebuiltTrack = trackSeed
+    ? replaceTranscriptTrackFromCutDraft(
+        trackSeed,
+        transcriptTrackSharedStyle(trackSeed),
+        data,
+      )
+    : [];
   const { matchedCount, removedCount } = retimeDraftAnchoredOverlays(data);
   appliedCutDraftState = data;
   renderRetainedTranscript({
@@ -2202,11 +2405,9 @@ function applyEditorCutDraft(data) {
   frameTimelineSeek.max = String(duration);
   frameTimelineSignature = "";
   frameTimelineRulerSignature = "";
-  window.clearTimeout(transcriptTrackRefreshTimer);
-  transcriptTrackRefreshTimer = null;
   showRetainedBulkMessage(
     cutDraftActive
-      ? `已按剪后文案的词级时间匹配 ${matchedCount} 条艺术字；最终输出前需先生成剪辑视频。${
+      ? `已按剪后文案的词级时间匹配 ${matchedCount} 条艺术字；点击生成视频会按当前预览一次合成。${
           removedCount ? ` 已隐藏 ${removedCount} 条文字已被删除的艺术字。` : ""
         }`
       : removedCount
@@ -2215,6 +2416,12 @@ function applyEditorCutDraft(data) {
     cutDraftActive ? "warning" : "success",
   );
   renderEditor();
+  if (!locallyRebuiltTrack.length && trackSeed) {
+    showRetainedBulkMessage(
+      "当前剪后文案缺少可用的词级时间，全文艺术字未被旧数据覆盖。",
+      "warning",
+    );
+  }
   window.requestAnimationFrame(() => refreshFrameTimeline({ force: true }));
 }
 
@@ -2233,13 +2440,17 @@ function handleEditorHostMessage(event) {
   }
   if (data.type === "editor-suite:generate-video" && data.kind === "art") {
     if (generateArtVideo.disabled) return;
-    generateArtVideo.click();
+    generateVideo(data.composition || null);
     return;
   }
   if (data.type === "editor-suite:sync-time") {
     const nextTime = clamp(Number(data.currentTime) || 0, 0, duration || Infinity);
     editorHostCurrentTime = nextTime;
     renderPreview({ timeOnly: true });
+    return;
+  }
+  if (data.type === "editor-suite:transcript-updated") {
+    void refreshArtAfterTranscriptUpdate();
     return;
   }
   if (data.type !== "editor-suite:move-effect" || data.kind !== "art") return;
@@ -2438,6 +2649,349 @@ function comparableCaptionText(value) {
 
 function transcriptCueTextLength(value) {
   return comparableCaptionText(value).length;
+}
+
+function currentCutDraftTranscript() {
+  const transcript = pendingCutDraft?.transcript;
+  return Array.isArray(transcript?.segments) && transcript.segments.length
+    ? transcript
+    : null;
+}
+
+function transcriptTrackSharedStyle(trackSeed) {
+  return {
+    font: trackSeed.font,
+    fontSize: Number(trackSeed.fontSize) || 54,
+    color: trackSeed.color,
+    strokeColor: trackSeed.strokeColor,
+    strokeWidth: Number(trackSeed.strokeWidth) || 0,
+    shadow: trackSeed.shadow,
+    x: Number(trackSeed.x),
+    y: Number(trackSeed.y),
+    direction: "horizontal",
+    textAlign: trackSeed.textAlign || "center",
+    charsPerLine: 0,
+    letterSpacing: Number(trackSeed.letterSpacing) || 0,
+    lineSpacing: 0,
+    artStyle: trackSeed.artStyle,
+  };
+}
+
+function transcriptTrackDisplayText(words) {
+  return words
+    .map((word) => String(word.text || ""))
+    .join("")
+    .replace(/\p{P}/gu, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function cutDraftTimedTranscriptWords(segment) {
+  const rawWords = Array.isArray(segment.words) && segment.words.length
+    ? segment.words
+    : [segment];
+  // Preserve the original letter case while matching case-insensitively, so
+  // latin words like "AI" or "OK" stay capitalized in the generated subtitles.
+  const segmentContent = String(segment.text || "")
+    .replace(/[\s\p{P}\p{S}]/gu, "");
+  const segmentLower = segmentContent.toLowerCase();
+  if (!segmentContent) return [];
+
+  const timedWords = [];
+  let textOffset = 0;
+  for (const [index, word] of rawWords.entries()) {
+    const wordLower = String(word.text || "")
+      .replace(/[\s\p{P}\p{S}]/gu, "")
+      .toLowerCase();
+    const start = Number(word.start);
+    const end = Number(word.end);
+    if (!wordLower || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+      continue;
+    }
+    const matchOffset = segmentLower.indexOf(wordLower, textOffset);
+    let nextOffset = matchOffset >= textOffset
+      ? matchOffset + wordLower.length
+      : Math.min(segmentLower.length, textOffset + wordLower.length);
+    if (index === rawWords.length - 1) nextOffset = segmentLower.length;
+    const text = segmentContent.slice(textOffset, nextOffset);
+    if (text) timedWords.push({ ...word, text });
+    textOffset = nextOffset;
+  }
+  if (textOffset < segmentContent.length && timedWords.length) {
+    timedWords.at(-1).text += segmentContent.slice(textOffset);
+  }
+  return timedWords;
+}
+
+function transcriptTrackMaxCharsPerCue(style = {}) {
+  const videoWidth = Number(artVideo?.videoWidth) || 1920;
+  const fontSize = Math.max(1, Number(style.fontSize) || 54);
+  const strokeWidth = Math.max(0, Number(style.strokeWidth) || 0);
+  const padding = Math.max(48, Math.floor(fontSize / 2), (strokeWidth + 7) * 3);
+  const safeWidth = Math.max(1, videoWidth * 0.88);
+  const fitted = Math.floor((safeWidth - padding * 2) / fontSize);
+  return Math.max(6, Math.min(TRANSCRIPT_TRACK_MAX_CHARS_PER_CUE, fitted));
+}
+
+function cutDraftTranscriptTrackCues(data, maxChars = TRANSCRIPT_TRACK_MAX_CHARS_PER_CUE) {
+  const cues = [];
+  const closingMarks = /[”’》〉】」』）)\]]+$/;
+  const strongBoundary = (word) =>
+    /[。！？!?；;]$/.test(String(word.text || "").replace(closingMarks, ""));
+  const softBoundary = (word) =>
+    /[，、,:：]$/.test(String(word.text || "").replace(closingMarks, ""));
+  const groupLength = (group) =>
+    group.reduce((total, word) => total + transcriptCueTextLength(word.text), 0);
+
+  const flush = (group) => {
+    if (!group.length) return;
+    const text = transcriptTrackDisplayText(group);
+    const start = Number(group[0].start);
+    const end = Number(group.at(-1).end);
+    if (text && Number.isFinite(start) && Number.isFinite(end) && end > start) {
+      const cue = { text, start, end };
+      const sourceStart = Number(group[0].sourceStart);
+      const sourceEnd = Number(group.at(-1).sourceEnd);
+      if (
+        Number.isFinite(sourceStart) &&
+        Number.isFinite(sourceEnd) &&
+        sourceEnd > sourceStart
+      ) {
+        Object.assign(cue, { sourceStart, sourceEnd });
+      }
+      cues.push(cue);
+    }
+  };
+
+  // A cue may only come from one spoken sentence, so split the words into
+  // sentences first and never pack across a strong sentence boundary.
+  const sentences = [];
+  for (const segment of data?.transcript?.segments || []) {
+    let sentence = [];
+    for (const word of cutDraftTimedTranscriptWords(segment)) {
+      sentence.push(word);
+      if (strongBoundary(word)) {
+        if (sentence.length) sentences.push(sentence);
+        sentence = [];
+      }
+    }
+    if (sentence.length) sentences.push(sentence);
+  }
+
+  const splitClauses = (words) => {
+    const clauses = [];
+    let current = [];
+    for (const word of words) {
+      current.push(word);
+      if (softBoundary(word)) {
+        clauses.push(current);
+        current = [];
+      }
+    }
+    if (current.length) clauses.push(current);
+    return clauses;
+  };
+
+  const splitLongClauseBalanced = (clause) => {
+    const chunks = [];
+    let remaining = [...clause];
+    while (remaining.length) {
+      if (groupLength(remaining) <= maxChars) {
+        chunks.push(remaining);
+        break;
+      }
+      let maxTake = 0;
+      let length = 0;
+      for (let index = 0; index < remaining.length; index += 1) {
+        const wordLength = transcriptCueTextLength(remaining[index].text);
+        if (length + wordLength > maxChars) break;
+        maxTake += 1;
+        length += wordLength;
+      }
+      if (maxTake === 0) maxTake = 1;
+      const totalLength = groupLength(remaining);
+      let bestTake = 1;
+      let bestScore = Infinity;
+      for (let take = 1; take <= maxTake; take += 1) {
+        const leftLength = groupLength(remaining.slice(0, take));
+        const rightLength = totalLength - leftLength;
+        if (leftLength < 2 || (rightLength > 0 && rightLength < 2)) continue;
+        // Audio pauses are the general signal for a natural phrase boundary.
+        const pause = Math.max(
+          0,
+          Number(remaining[take]?.start || 0) -
+            Number(remaining[take - 1]?.end || 0),
+        );
+        let score;
+        if (pause >= 0.5) score = -90;
+        else if (pause >= 0.3) score = -70;
+        else if (pause >= 0.18) score = -50;
+        else if (pause >= 0.1) score = -35;
+        else if (pause >= 0.05) score = -18;
+        else score = 0;
+        if (softBoundary(remaining[take - 1])) score -= 25;
+        // Balance only breaks ties between otherwise-equal boundaries.
+        score += Math.abs(leftLength - rightLength);
+        if (score < bestScore) {
+          bestScore = score;
+          bestTake = take;
+        }
+      }
+      chunks.push(remaining.slice(0, bestTake));
+      remaining = remaining.slice(bestTake);
+    }
+    return chunks;
+  };
+
+  const leadingPhrases = new Set([
+    "说实话",
+    "坦白说",
+    "老实说",
+    "换句话说",
+    "也就是说",
+    "所以说",
+    "所以说啊",
+    "简单来说",
+    "总的来说",
+    "事实上",
+    "实际上",
+    "比如说",
+    "记住一句话",
+  ]);
+
+  const packedAll = [];
+  for (const sentence of sentences) {
+    const words = sentence.filter((word) => transcriptCueTextLength(word.text) > 0);
+    const clauses = splitClauses(words);
+    // A discourse-marker clause (e.g. "说实话，") leads the following clause.
+    const mergedClauses = [];
+    for (let index = 0; index < clauses.length; index += 1) {
+      const clause = clauses[index];
+      if (
+        leadingPhrases.has(transcriptTrackDisplayText(clause)) &&
+        index + 1 < clauses.length
+      ) {
+        mergedClauses.push([...clause, ...clauses[index + 1]]);
+        index += 1;
+      } else {
+        mergedClauses.push(clause);
+      }
+    }
+    // Pack whole clauses onto one line up to the budget so a sentence is not
+    // fragmented at every comma.
+    let current = [];
+    for (const clause of mergedClauses) {
+      if (
+        current.length &&
+        groupLength(current) + groupLength(clause) > maxChars
+      ) {
+        packedAll.push(current);
+        current = [];
+      }
+      current.push(...clause);
+    }
+    if (current.length) packedAll.push(current);
+  }
+
+  // A single clause that alone exceeds the budget is split balanced.
+  const packedLines = [];
+  for (const line of packedAll) {
+    if (groupLength(line) <= maxChars) {
+      packedLines.push(line);
+    } else {
+      packedLines.push(...splitLongClauseBalanced(line));
+    }
+  }
+
+  // A single-character piece leads into the following cue instead of standing
+  // on its own line, across the whole track so a one-character sentence is
+  // folded forward even when it is the only content of its own sentence.
+  const finalGroups = [];
+  let pendingFold = null;
+  for (const current of packedLines) {
+    if (groupLength(current) === 1 && pendingFold === null) {
+      pendingFold = current;
+      continue;
+    }
+    if (pendingFold !== null) {
+      const combined = [...pendingFold, ...current];
+      if (groupLength(combined) <= maxChars) {
+        finalGroups.push(combined);
+      } else if (current.length > 1) {
+        finalGroups.push([...pendingFold, current[0]]);
+        finalGroups.push(current.slice(1));
+      } else {
+        finalGroups.push(combined);
+      }
+      pendingFold = null;
+      continue;
+    }
+    finalGroups.push(current);
+  }
+  if (pendingFold !== null) {
+    if (finalGroups.length) {
+      finalGroups[finalGroups.length - 1] = [
+        ...finalGroups.at(-1),
+        ...pendingFold,
+      ];
+    } else {
+      finalGroups.push(pendingFold);
+    }
+  }
+  finalGroups.forEach(flush);
+
+  for (let index = 1; index < cues.length; index += 1) {
+    const previous = cues[index - 1];
+    const current = cues[index];
+    if (current.start >= previous.end - 0.001) continue;
+    if (current.start - previous.start < 0.019) return [];
+    previous.end = current.start;
+  }
+  return cues;
+}
+
+function replaceTranscriptTrackFromCutDraft(trackSeed, sharedStyle, data) {
+  const maxChars = transcriptTrackMaxCharsPerCue(sharedStyle);
+  const cues = cutDraftTranscriptTrackCues(data, maxChars);
+  if (!cues.length) return [];
+  const existingIds = new Set(currentTranscriptTrack().map((overlay) => overlay.id));
+  const trackId = trackSeed?.trackId || "transcript-full";
+  const created = [];
+  for (const cue of cues) {
+    const overlay = createOverlay(
+      cue.text,
+      cue.start,
+      cue.end,
+      {
+        ...sharedStyle,
+        trackId,
+        trackType: TRANSCRIPT_TRACK_TYPE,
+        sourceStart: cue.sourceStart,
+        sourceEnd: cue.sourceEnd,
+      },
+      { deferRender: true },
+    );
+    if (overlay) created.push(overlay);
+  }
+  if (created.length !== cues.length) {
+    const createdIds = new Set(created.map((overlay) => overlay.id));
+    overlays = overlays.filter((overlay) => !createdIds.has(overlay.id));
+    return [];
+  }
+  overlays = overlays.filter((overlay) => !existingIds.has(overlay.id));
+  cutSuppressedOverlays = cutSuppressedOverlays.filter(
+    (overlay) => !isTranscriptTrackOverlay(overlay),
+  );
+  selectedOverlayId = activeTrackCue(created)?.id || created[0].id;
+  return created;
+}
+
+function requestLatestEditorCutDraft() {
+  if (!embeddedEditor || window.parent === window) return;
+  window.parent.postMessage(
+    { type: "editor-suite:request-cut-draft", kind: "art" },
+    window.location.origin,
+  );
 }
 
 function matchingTranscriptSegment(overlay) {
@@ -2661,13 +3215,16 @@ function updateRetainedBulkControls() {
     transcriptTrackBusy ||
     trackItems.length > 0 ||
     retainedTranscriptSegments.length === 0 ||
+    (embeddedEditor && !currentCutDraftTranscript()) ||
     !availableArtTemplateIds.has(TRANSCRIPT_TRACK_DEFAULT_STYLE);
   addAllRetainedSegments.textContent = transcriptTrackBusy
     ? "正在生成视频文案…"
     : trackItems.length > 0
       ? "视频文案已添加"
       : "一键添加视频文案";
+  generateArtVideo.disabled = transcriptTrackBusy || overlays.length === 0;
   updateTranscriptStyleButtons();
+  window.queueMicrotask(notifyEditorHost);
 }
 
 function comparableTranscriptEditorText(value) {
@@ -2830,6 +3387,15 @@ function addRetainedSegmentsAsOverlays(segments) {
 
 async function addFullTranscriptTrack() {
   if (transcriptTrackBusy || currentTranscriptTrack().length > 0) return;
+  if (embeddedEditor && !currentCutDraftTranscript()) {
+    requestLatestEditorCutDraft();
+    showRetainedBulkMessage(
+      "正在读取当前剪后文案，请稍候再试。不会使用剪辑前的旧文案。",
+      "warning",
+    );
+    updateRetainedBulkControls();
+    return;
+  }
   if (!availableArtTemplateIds.has(TRANSCRIPT_TRACK_DEFAULT_STYLE)) {
     showRetainedBulkMessage(
       "默认的“热血立体”艺术字暂不可用，请刷新后重试。",
@@ -2876,7 +3442,38 @@ async function addFullTranscriptTrack() {
     artStyle: selectedStyle,
   };
 
+  const cutTranscript = currentCutDraftTranscript();
+  if (cutTranscript) {
+    transcriptTrackBusy = true;
+    updateRetainedBulkControls();
+    const created = replaceTranscriptTrackFromCutDraft(
+      null,
+      sharedStyle,
+      pendingCutDraft,
+    );
+    transcriptTrackBusy = false;
+    if (!created.length) {
+      showRetainedBulkMessage(
+        "当前剪后文案缺少可用的词级时间，无法生成全文艺术字。",
+        "warning",
+      );
+      updateRetainedBulkControls();
+      return;
+    }
+    seekEditorPreview(created[0].start);
+    selectedRetainedSegmentKeys.clear();
+    showRetainedBulkMessage(
+      `已直接使用当前剪后文案和词级时间生成 ${created.length} 个艺术字片段。`,
+    );
+    renderEditor();
+    renderRetainedSegmentList();
+    revealSettingsPanel();
+    return;
+  }
+
   transcriptTrackBusy = true;
+  const requestDraftVersion = transcriptTrackDraftVersion;
+  const requestPayload = transcriptTrackRequestPayload(sharedStyle);
   showRetainedBulkMessage(
     `AI 正在使用“${selectedTranscriptTemplateName()}”生成统一字号字幕…`,
   );
@@ -2887,12 +3484,16 @@ async function addFullTranscriptTrack() {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(transcriptTrackRequestPayload(sharedStyle)),
+        body: JSON.stringify(requestPayload),
       },
     );
     const result = await response.json();
     if (!response.ok) {
       throw new Error(result.detail || "无法生成全文单行艺术字轨道。");
+    }
+    if (requestDraftVersion !== transcriptTrackDraftVersion) {
+      window.setTimeout(addFullTranscriptTrack, 0);
+      return;
     }
 
     const created = [];
@@ -2950,8 +3551,18 @@ function transcriptTrackRequestPayload(sharedStyle) {
     letterSpacing: sharedStyle.letterSpacing,
     strokeWidth: sharedStyle.strokeWidth,
   };
-  if (cutDraftActive && pendingCutDraft?.transcript) {
-    payload.draftTranscript = pendingCutDraft.transcript;
+  const cutTranscript = pendingCutDraft?.transcript;
+  if (Array.isArray(cutTranscript?.segments) && cutTranscript.segments.length) {
+    payload.draftTranscript = cutTranscript;
+    payload.draftDuration = Math.max(
+      0.001,
+      Number(pendingCutDraft.duration) || duration,
+    );
+  } else if (retainedTranscriptSegments.length) {
+    payload.draftTranscript = {
+      text: retainedSavedText,
+      segments: retainedTranscriptSegments,
+    };
     payload.draftDuration = duration;
   }
   return payload;
@@ -2980,25 +3591,32 @@ async function rebuildTranscriptTrackLayout(options = {}) {
   const existingTrack = transcriptTrackOverlays(trackSeed.trackId);
   if (!existingTrack.length) return false;
 
-  const sharedStyle = {
-    font: trackSeed.font,
-    fontSize: Number(trackSeed.fontSize) || 54,
-    color: trackSeed.color,
-    strokeColor: trackSeed.strokeColor,
-    strokeWidth: Number(trackSeed.strokeWidth) || 0,
-    shadow: trackSeed.shadow,
-    x: Number(trackSeed.x),
-    y: Number(trackSeed.y),
-    direction: "horizontal",
-    textAlign: trackSeed.textAlign || "center",
-    charsPerLine: 0,
-    letterSpacing: Number(trackSeed.letterSpacing) || 0,
-    lineSpacing: 0,
-    artStyle: trackSeed.artStyle,
-  };
+  const sharedStyle = transcriptTrackSharedStyle(trackSeed);
+  if (currentCutDraftTranscript()) {
+    const created = replaceTranscriptTrackFromCutDraft(
+      trackSeed,
+      sharedStyle,
+      pendingCutDraft,
+    );
+    if (!created.length) {
+      showRetainedBulkMessage(
+        "当前剪后文案缺少可用的词级时间，全文艺术字保持原状。",
+        "warning",
+      );
+      return false;
+    }
+    showRetainedBulkMessage(
+      `已按当前剪后文案即时重排，共 ${created.length} 个艺术字片段。`,
+    );
+    renderEditor();
+    renderRetainedSegmentList();
+    return true;
+  }
   const previousIds = new Set(existingTrack.map((overlay) => overlay.id));
   const created = [];
   transcriptTrackBusy = true;
+  const requestDraftVersion = transcriptTrackDraftVersion;
+  const requestPayload = transcriptTrackRequestPayload(sharedStyle);
   showRetainedBulkMessage(
     options.liveSync
       ? "剪辑方案已更新，正在同步全文艺术字内容和时间…"
@@ -3011,12 +3629,16 @@ async function rebuildTranscriptTrackLayout(options = {}) {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(transcriptTrackRequestPayload(sharedStyle)),
+        body: JSON.stringify(requestPayload),
       },
     );
     const result = await response.json();
     if (!response.ok) {
       throw new Error(result.detail || "无法根据字号重新整理全文轨道。");
+    }
+    if (requestDraftVersion !== transcriptTrackDraftVersion) {
+      scheduleTranscriptTrackRefresh();
+      return false;
     }
 
     for (const cue of result.cues || []) {
@@ -3524,7 +4146,8 @@ function validateOverlays() {
   if (overlays.length === 0) return "请至少添加一条艺术字。";
   for (const [index, overlay] of overlays.entries()) {
     if (!overlay.text.trim()) return `第 ${index + 1} 条艺术字内容不能为空。`;
-    if (overlay.end - overlay.start < 0.05) {
+    const minimumDuration = isTranscriptTrackOverlay(overlay) ? 0.02 : 0.05;
+    if (overlay.end - overlay.start < minimumDuration) {
       return `第 ${index + 1} 条艺术字的结束时间必须晚于开始时间。`;
     }
     if (overlay.start < 0 || overlay.end > duration + 0.01) {
@@ -3566,7 +4189,7 @@ function validateOverlays() {
       retainedTranscriptSegments.map((segment) => segment.text).join(""),
     );
     if (!trackText || trackText !== transcriptText) {
-      return "全文艺术字轨道与当前视频文案不一致，请删除后重新生成。";
+      return "全文艺术字轨道与当前视频文案不一致。";
     }
   }
   return "";
@@ -3587,6 +4210,19 @@ function renderArtJob(art) {
     artResult.hidden = true;
     generateArtVideo.disabled = true;
     setArtProgress(art.progress, art.stage);
+    if (!generationModalActive) {
+      generationModalActive = true;
+      window.appGeneration?.show({
+        title: "生成艺术字视频",
+        progress: art.progress,
+        status: art.stage || "正在生成艺术字视频…",
+        onClose: () => {
+          generationModalActive = false;
+        },
+      });
+    } else {
+      window.appGeneration?.setProgress(art.progress, art.stage);
+    }
     return;
   }
 
@@ -3600,9 +4236,23 @@ function renderArtJob(art) {
     continuePictureInPicture.href =
       `/picture-in-picture?job=${encodeURIComponent(jobId)}&source=art`;
     artResultDuration.textContent = `成片 ${formatTime(art.outputDuration)}`;
+    if (generationModalActive) {
+      generationModalActive = false;
+      window.appGeneration?.complete({
+        videoUrl: art.outputUrl,
+        downloadUrl: `${art.outputUrl}?download=true`,
+        duration: formatTime(art.outputDuration),
+      });
+    }
   } else if (art.status === "failed") {
     artProgress.hidden = true;
     showFormError(art.error || "艺术字视频生成失败，请重新尝试。");
+    if (generationModalActive) {
+      generationModalActive = false;
+      window.appGeneration?.fail(
+        art.error || "艺术字视频生成失败，请重新尝试。",
+      );
+    }
   }
 }
 
@@ -3630,12 +4280,21 @@ async function pollArtJob() {
   }
 }
 
-async function generateVideo() {
+async function generateVideo(composition = null) {
+  const trackRefreshPending =
+    transcriptTrackRefreshTimer !== null && currentTranscriptTrack().length > 0;
+  if (trackRefreshPending) {
+    window.clearTimeout(transcriptTrackRefreshTimer);
+    transcriptTrackRefreshTimer = null;
+  }
   let validationError = validateOverlays();
   if (
-    validationError === "全文艺术字轨道每段最多 10 个字，请重新生成全文轨道。"
+    trackRefreshPending ||
+    validationError === "全文艺术字轨道每段最多 10 个字，请重新生成全文轨道。" ||
+    validationError === "全文艺术字轨道存在重叠时间，请重新生成。" ||
+    validationError === "全文艺术字轨道与当前视频文案不一致。"
   ) {
-    showFormError("正在按每行最多 10 字重新整理全文轨道…");
+    showFormError("正在自动整理全文艺术字的内容和时间…");
     const rebuilt = await rebuildTranscriptTrackLayout();
     if (!rebuilt) {
       showFormError(validationError);
@@ -3659,13 +4318,33 @@ async function generateVideo() {
     historyName: artHistoryName.value.trim() || null,
     overlays: overlays.map(({ id, ...overlay }) => overlay),
   };
+  const compositionRanges = Array.isArray(composition?.ranges)
+    ? composition.ranges
+    : Array.isArray(pendingCutDraft?.ranges)
+      ? pendingCutDraft.ranges
+      : Array.isArray(job?.edit?.requestedRanges)
+        ? job.edit.requestedRanges
+      : [];
+  const useComposition =
+    compositionRanges.length > 0 &&
+    (cutDraftActive || Boolean(composition) || Boolean(job?.edit?.composition));
+  const endpoint = useComposition ? "compose" : "art-text";
+  const requestPayload = useComposition
+    ? {
+        target: "art",
+        ranges: compositionRanges,
+        artOverlays: payload.overlays,
+        artSource: videoSource,
+        historyName: payload.historyName,
+      }
+    : payload;
   try {
     const response = await fetch(
-      `/api/transcriptions/${encodeURIComponent(jobId)}/art-text`,
+      `/api/transcriptions/${encodeURIComponent(jobId)}/${endpoint}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(requestPayload),
       },
     );
     const result = await response.json();
@@ -4086,4 +4765,5 @@ for (const container of mediaControlGroups) {
   setupExternalVideoControls(container);
 }
 
+requestLatestEditorCutDraft();
 initialize();
