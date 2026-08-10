@@ -8,10 +8,10 @@
       content="浏览、调整并使用视频艺术字内置效果模板。"
     />
     <title>艺术字效果模板库 · 视频文字剪辑</title>
-    <link rel="stylesheet" href="/styles.css?v=20260730-08" />
+    <link rel="stylesheet" href="/styles.css?v=20260810-09" />
     <script src="https://code.iconify.design/iconify-icon/3.0.0/iconify-icon.min.js" defer></script>
-    <script src="/ui-feedback.js?v=20260729-03" defer></script>
-    <script src="/art-template-library.js?v=20260729-03" defer></script>
+    <script src="/ui-feedback.js?v=20260807-03" defer></script>
+    <script src="/art-template-library.js?v=20260810-01" defer></script>
   </head>
   <body class="template-library-body">
     <a class="skip-link" href="#main">跳到主要内容</a>
@@ -44,7 +44,6 @@
         <div>
           <p class="eyebrow">可直接用于视频的艺术字效果</p>
           <h1 id="template-page-title">艺术字效果模板库</h1>
-          <p>上传和管理可编辑效果模板，调整文字、字号和颜色后带入编辑器。</p>
         </div>
         <div class="template-library-stats" aria-label="艺术字模板统计">
           <span id="templateCount">内置模板 0</span>
@@ -148,6 +147,15 @@
             <span>可以修改搜索内容或切换模板分类。</span>
           </div>
           <div id="templateCardGrid" class="template-card-grid" aria-live="polite"></div>
+          <div id="hiddenTemplatesSection" class="hidden-templates-section" hidden>
+            <div class="hidden-templates-heading">
+              <span>
+                <strong>已隐藏的内置模板</strong>
+                <small>点击恢复后重新出现在模板库</small>
+              </span>
+            </div>
+            <div id="hiddenTemplatesGrid" class="hidden-templates-grid"></div>
+          </div>
         </section>
 
         <aside class="panel template-detail-panel" aria-labelledby="template-detail-title">
@@ -199,18 +207,19 @@
             <button id="restoreTemplateColor" class="secondary-button" type="button">
               恢复模板配色
             </button>
+            <button
+              id="deleteTemplateButton"
+              class="danger-button"
+              type="button"
+            >
+              删除模板
+            </button>
             <div id="uploadedTemplateActions" class="template-manage-actions" hidden>
               <button id="renameTemplateButton" class="secondary-button" type="button">
                 修改名称
               </button>
-              <button id="deleteTemplateButton" class="danger-button" type="button">
-                删除模板
-              </button>
             </div>
           </div>
-          <p id="templateDetailNote" class="template-library-note">
-            内置模板不会被修改或删除；这里的调整只会作为本次艺术字参数带入编辑器。
-          </p>
         </aside>
       </div>
 

@@ -39,7 +39,7 @@ Copy-Item .env.example .env
 .\start.ps1
 ```
 
-打开 <http://127.0.0.1:8000>。
+打开 <http://127.0.0.1:8001>。
 
 如果系统中的 `python` 不可用，可使用 Codex 工作区 Python 创建虚拟环境：
 
@@ -74,8 +74,8 @@ API Key 只配置在服务端 `.env`，不要写入 `web/` 下的浏览器代码
 `data/jobs/` 保存上传源视频、提取音频和生成中的临时文件。服务重启后内存任务状态会清空，但这些文件仍会留在磁盘。可先预览再执行清理：
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8000/api/maintenance/jobs
-Invoke-RestMethod http://127.0.0.1:8000/api/maintenance/jobs/cleanup -Method Post -ContentType 'application/json' -Body '{"dryRun":false}'
+Invoke-RestMethod http://127.0.0.1:8001/api/maintenance/jobs
+Invoke-RestMethod http://127.0.0.1:8001/api/maintenance/jobs/cleanup -Method Post -ContentType 'application/json' -Body '{"dryRun":false}'
 ```
 
 清理只会处理 UUID 形式的 `data/jobs/` 任务目录，并跳过当前服务内存中仍活跃的任务；`data/history/` 不受影响。

@@ -8,15 +8,27 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PACKAGE_NAME = "video-text-editor-mac-8888"
+PACKAGE_NAME = "video-text-editor-mac-8003-with-data"
+FONT_PACKAGE_NAME = "video-text-editor-fonts-builtin"
 BUILD_DIR = ROOT / "build" / PACKAGE_NAME
 DIST_DIR = ROOT / "dist"
 ZIP_PATH = DIST_DIR / f"{PACKAGE_NAME}.zip"
+FONT_ZIP_PATH = DIST_DIR / f"{FONT_PACKAGE_NAME}.zip"
+WINDOWS_FONT_DIR = Path(os.getenv("WINDIR", r"C:\Windows")) / "Fonts"
+BUILTIN_FONT_FILENAMES = (
+    "msyh.ttc",
+    "msyhbd.ttc",
+    "simhei.ttf",
+    "simsun.ttc",
+    "simkai.ttf",
+    "simfang.ttf",
+)
 
 PROJECT_FILES = [
     "server",
     "web",
     "tests",
+    "data",
     "requirements.txt",
     ".env.example",
     "README.md",
@@ -31,7 +43,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 HOST="${HOST:-127.0.0.1}"
-PORT="${PORT:-8888}"
+PORT="${PORT:-8003}"
 URL="http://${HOST}:${PORT}/"
 VENV_DIR="${VENV_DIR:-.venv}"
 
@@ -88,6 +100,14 @@ echo "安装/检查 Python 依赖..."
 "${VENV_DIR}/bin/python" -m pip install --upgrade pip
 "${VENV_DIR}/bin/python" -m pip install -r requirements.txt
 
+CERTIFI_BUNDLE="$("${VENV_DIR}/bin/python" - <<'PY'
+import certifi
+print(certifi.where())
+PY
+)"
+export SSL_CERT_FILE="${SSL_CERT_FILE:-${CERTIFI_BUNDLE}}"
+export REQUESTS_CA_BUNDLE="${REQUESTS_CA_BUNDLE:-${CERTIFI_BUNDLE}}"
+
 if [ ! -f ".env" ]; then
   cp ".env.example" ".env"
   echo ""
@@ -116,14 +136,16 @@ MAC_README = """# Mac 一键运行说明
 
 双击 `run_mac.command` 即可启动项目，默认地址是：
 
-http://127.0.0.1:8888/
+http://127.0.0.1:8003/
+
+这个 `with-data` 包已经包含当前项目的 `data/` 快照，包括历史版本、任务文件、字体和模板。
 
 首次运行会自动完成：
 
 - 创建 `.venv` 虚拟环境
 - 安装 `requirements.txt` 里的 Python 依赖
 - 从 `.env.example` 生成本机 `.env`
-- 创建干净的 `data/` 工作目录
+- 保留压缩包内的 `data/` 数据，并补齐缺少的工作目录
 - 打开浏览器并启动 FastAPI 服务
 
 需要的本机环境：
@@ -137,7 +159,7 @@ http://127.0.0.1:8888/
 - `DASHSCOPE_API_KEY`
 - `ARK_API_KEY`
 
-默认端口是 `8888`。如果要临时换端口，在终端里运行：
+默认端口是 `8003`。如果要临时换端口，在终端里运行：
 
 ```bash
 PORT=8899 ./run_mac.command
@@ -167,7 +189,7 @@ def copy_project_files() -> None:
             shutil.copytree(
                 source,
                 target,
-                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache"),
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache", ".DS_Store"),
             )
         elif source.is_file():
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -182,11 +204,24 @@ def copy_project_files() -> None:
     for executable in (BUILD_DIR / "run_mac.command", BUILD_DIR / "run_mac.sh"):
         executable.chmod(executable.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
+    bundled_font_dir = BUILD_DIR / "data" / "fonts" / "builtin"
+    bundled_font_dir.mkdir(parents=True, exist_ok=True)
+    for filename in BUILTIN_FONT_FILENAMES:
+        source = WINDOWS_FONT_DIR / filename
+        if not source.is_file():
+            raise FileNotFoundError(
+                f"Missing built-in font {source}. Set WINDIR to a Windows installation containing the font files."
+            )
+        shutil.copy2(source, bundled_font_dir / filename)
+
 
 def add_to_zip(zip_file: zipfile.ZipFile, path: Path, archive_name: Path) -> None:
     info = zipfile.ZipInfo(str(archive_name).replace(os.sep, "/"))
     info.date_time = (2026, 7, 31, 12, 0, 0)
-    info.compress_type = zipfile.ZIP_DEFLATED
+    if path.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm", ".mp3", ".wav", ".jpg", ".jpeg", ".png"}:
+        info.compress_type = zipfile.ZIP_STORED
+    else:
+        info.compress_type = zipfile.ZIP_DEFLATED
 
     mode = path.stat().st_mode
     if path.name in {"run_mac.command", "run_mac.sh"}:
@@ -210,11 +245,33 @@ def build_zip() -> None:
                 add_to_zip(zip_file, path, archive_name)
 
 
+def build_font_zip() -> None:
+    if FONT_ZIP_PATH.exists():
+        ensure_inside(FONT_ZIP_PATH, DIST_DIR)
+        FONT_ZIP_PATH.unlink()
+
+    readme = (
+        "Font files for the video text editor.\n\n"
+        "Merge the data/fonts/builtin/ directory from this archive into the same path in the Mac package.\n"
+    ).encode("utf-8")
+    with zipfile.ZipFile(FONT_ZIP_PATH, "w") as zip_file:
+        info = zipfile.ZipInfo("README.txt")
+        info.date_time = (2026, 7, 31, 12, 0, 0)
+        info.compress_type = zipfile.ZIP_DEFLATED
+        zip_file.writestr(info, readme)
+        font_dir = BUILD_DIR / "data" / "fonts" / "builtin"
+        for path in sorted(font_dir.iterdir()):
+            add_to_zip(zip_file, path, Path("data") / "fonts" / "builtin" / path.name)
+
+
 def main() -> None:
     copy_project_files()
     build_zip()
+    build_font_zip()
     size_mb = ZIP_PATH.stat().st_size / (1024 * 1024)
+    font_size_mb = FONT_ZIP_PATH.stat().st_size / (1024 * 1024)
     print(f"Built {ZIP_PATH} ({size_mb:.2f} MB)")
+    print(f"Built {FONT_ZIP_PATH} ({font_size_mb:.2f} MB)")
 
 
 if __name__ == "__main__":

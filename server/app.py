@@ -56,13 +56,22 @@ MAX_ART_TEMPLATE_KB = 256
 MAX_ART_TEMPLATE_BYTES = MAX_ART_TEMPLATE_KB * 1024
 ALLOWED_ART_TEMPLATE_EXTENSIONS = {".json", ".arttext"}
 WINDOWS_FONT_DIR = Path(os.getenv("WINDIR", r"C:\Windows")) / "Fonts"
+BUILTIN_FONT_DIR = DATA_DIR / "fonts" / "builtin"
+BUILTIN_FONT_FILENAMES = {
+    "modern": "msyh.ttc",
+    "bold": "msyhbd.ttc",
+    "classic": "simhei.ttf",
+    "song": "simsun.ttc",
+    "kai": "simkai.ttf",
+    "fang": "simfang.ttf",
+}
 ART_TEXT_FONTS = {
-    "modern": WINDOWS_FONT_DIR / "msyh.ttc",
-    "bold": WINDOWS_FONT_DIR / "msyhbd.ttc",
-    "classic": WINDOWS_FONT_DIR / "simhei.ttf",
-    "song": WINDOWS_FONT_DIR / "simsun.ttc",
-    "kai": WINDOWS_FONT_DIR / "simkai.ttf",
-    "fang": WINDOWS_FONT_DIR / "simfang.ttf",
+    font_id: (
+        BUILTIN_FONT_DIR / filename
+        if (BUILTIN_FONT_DIR / filename).is_file()
+        else WINDOWS_FONT_DIR / filename
+    )
+    for font_id, filename in BUILTIN_FONT_FILENAMES.items()
 }
 BUILTIN_FONT_METADATA = {
     "modern": ("现代黑体", '"Microsoft YaHei", sans-serif'),
@@ -177,7 +186,7 @@ ART_TEXT_STYLES = {template["id"] for template in ART_TEXT_TEMPLATE_CATALOG}
 ART_TEXT_SAFE_AREA_RATIO = 0.92
 MAX_MANUAL_ART_TEXT_OVERLAYS = 20
 MAX_TRANSCRIPT_ART_TEXT_CUES = 240
-TRANSCRIPT_ART_TEXT_MAX_CHARS_PER_CUE = 10
+TRANSCRIPT_ART_TEXT_MAX_CHARS_PER_CUE = 12
 TRANSCRIPT_ART_TEXT_TRACK_TYPE = "transcript"
 AI_ART_POSITIONS = {
     "top-left": (0.2, 0.18),
@@ -246,8 +255,11 @@ CUT_END_SEARCH_BEFORE_SECONDS = 0.040
 CUT_END_SEARCH_AFTER_SECONDS = 0.300
 CUT_START_EXTENDED_SEARCH_BEFORE_SECONDS = 0.500
 CUT_END_EXTENDED_SEARCH_AFTER_SECONDS = 0.750
+CUT_START_HEAD_GUARD_SECONDS = CUT_START_EXTENDED_SEARCH_BEFORE_SECONDS
+CUT_END_TAIL_GUARD_SECONDS = CUT_END_EXTENDED_SEARCH_AFTER_SECONDS
 CUT_LOW_ENERGY_RMS_THRESHOLD = 500.0
 CUT_EXTENDED_VALLEY_IMPROVEMENT = 0.65
+CUT_TAIL_VALLEY_IMPROVEMENT = 0.35
 CUT_VALLEY_TOLERANCE = 1.10
 CUT_AUDIO_FADE_SECONDS = 0.008
 NO_SPEECH_MIN_GAP_SECONDS = 1.5
@@ -261,6 +273,7 @@ JOB_FILES: dict[str, Path] = {}
 JOBS_LOCK = threading.Lock()
 FONT_LIBRARY_LOCK = threading.Lock()
 ART_TEMPLATE_LIBRARY_LOCK = threading.Lock()
+ART_POSITION_PRESETS_LOCK = threading.Lock()
 HISTORY_LIBRARY_LOCK = threading.Lock()
 _T2S_CONVERTER: Any | None = None
 
@@ -274,6 +287,8 @@ async def disable_frontend_cache(request, call_next):
         "/",
         "/index.html",
         "/app.js",
+        "/editor-suite.js",
+        "/ui-feedback.js",
         "/styles.css",
         "/art-text",
         "/art-text.html",
@@ -305,6 +320,29 @@ class CutRequest(BaseModel):
     historyName: str | None = Field(default=None, max_length=80)
 
 
+class CutDraftTextRange(DeleteRange):
+    key: str = Field(min_length=1, max_length=120)
+    text: str = Field(default="", max_length=5000)
+    originalStart: float | None = Field(default=None, ge=0, le=86400)
+    originalEnd: float | None = Field(default=None, ge=0, le=86400)
+    adjacentSilenceBefore: float = Field(default=0, ge=0, le=86400)
+    adjacentSilenceAfter: float = Field(default=0, ge=0, le=86400)
+
+
+class CutDraftNoSpeechRange(DeleteRange):
+    key: str = Field(min_length=1, max_length=120)
+
+
+class CutDraftRequest(BaseModel):
+    revision: int = Field(default=0, ge=0)
+    textRanges: list[CutDraftTextRange] = Field(default_factory=list, max_length=500)
+    noSpeechRanges: list[CutDraftNoSpeechRange] = Field(
+        default_factory=list,
+        max_length=500,
+    )
+    timelineRanges: list[DeleteRange] = Field(default_factory=list, max_length=500)
+
+
 class JobCleanupRequest(BaseModel):
     maxAgeDays: int | None = Field(default=None, ge=0, le=3650)
     maxDirectories: int | None = Field(default=None, ge=0, le=10000)
@@ -319,6 +357,14 @@ class TranscriptWordUpdate(BaseModel):
 
 class TranscriptTextUpdate(BaseModel):
     text: str = Field(min_length=1, max_length=50000)
+
+
+class TranscriptSegmentOperation(BaseModel):
+    segmentIndex: int = Field(ge=0)
+    action: Literal["split", "merge_up", "merge_down", "text"]
+    selectionStart: int | None = Field(default=None, ge=0)
+    selectionEnd: int | None = Field(default=None, ge=0)
+    text: str | None = Field(default=None, max_length=500)
 
 
 class TextOverlay(BaseModel):
@@ -341,6 +387,8 @@ class TextOverlay(BaseModel):
     artStyle: str = "impact"
     trackId: str | None = Field(default=None, max_length=80)
     trackType: Literal["transcript"] | None = None
+    sourceStart: float | None = Field(default=None, ge=0, le=86400)
+    sourceEnd: float | None = Field(default=None, gt=0, le=86400)
 
 
 class ArtTextRequest(BaseModel):
@@ -355,6 +403,8 @@ class TranscriptArtTextTrackRequest(BaseModel):
     fontSize: int = Field(ge=20, le=180)
     letterSpacing: int = Field(default=0, ge=0, le=20)
     strokeWidth: int = Field(default=3, ge=0, le=12)
+    draftTranscript: dict[str, Any] | None = None
+    draftDuration: float | None = Field(default=None, gt=0, le=86400)
 
 
 class ArtTextSuggestionRequest(BaseModel):
@@ -371,6 +421,8 @@ class PictureInPictureImageRequest(BaseModel):
     prompt: str = Field(default="", max_length=800)
     source: Literal["original", "edited", "art"] = "art"
     aspectRatio: Literal["1:1", "3:4", "4:3", "16:9", "9:16"] = "16:9"
+    sourceStart: float | None = Field(default=None, ge=0, le=86400)
+    sourceEnd: float | None = Field(default=None, gt=0, le=86400)
 
 
 class PictureInPictureVideoRequest(BaseModel):
@@ -381,6 +433,8 @@ class PictureInPictureVideoRequest(BaseModel):
     prompt: str = Field(default="", max_length=800)
     source: Literal["original", "edited", "art"] = "art"
     aspectRatio: Literal["1:1", "3:4", "4:3", "16:9", "9:16"] = "16:9"
+    sourceStart: float | None = Field(default=None, ge=0, le=86400)
+    sourceEnd: float | None = Field(default=None, gt=0, le=86400)
 
 
 class PictureInPicturePromptRequest(BaseModel):
@@ -390,11 +444,17 @@ class PictureInPicturePromptRequest(BaseModel):
     assetType: Literal["image", "video"] = "image"
     source: Literal["original", "edited", "art"] = "art"
     aspectRatio: Literal["1:1", "3:4", "4:3", "16:9", "9:16"] = "16:9"
+    sourceStart: float | None = Field(default=None, ge=0, le=86400)
+    sourceEnd: float | None = Field(default=None, gt=0, le=86400)
 
 
 class PictureInPictureOverlay(BaseModel):
     assetId: str = ""
     imageId: str = ""
+    start: float | None = None
+    end: float | None = None
+    sourceStart: float | None = Field(default=None, ge=0, le=86400)
+    sourceEnd: float | None = Field(default=None, gt=0, le=86400)
     x: float = 0.78
     y: float = 0.22
     width: float = 0.32
@@ -405,12 +465,39 @@ class PictureInPictureRequest(BaseModel):
     source: Literal["original", "edited", "art"] = "art"
 
 
+class PreviewCompositionRequest(BaseModel):
+    # `all` is the shared editor action. The legacy targets remain accepted
+    # for older embedded pages, but composition always renders every supplied
+    # layer in one request.
+    target: Literal["all", "art", "pip"] = "all"
+    ranges: list[DeleteRange]
+    artOverlays: list[TextOverlay] = Field(default_factory=list)
+    artSource: Literal["original", "edited"] = "original"
+    pictureInPictureOverlays: list[PictureInPictureOverlay] = Field(
+        default_factory=list
+    )
+    pictureInPictureSource: Literal["original", "edited", "art"] = "original"
+    historyName: str | None = Field(default=None, max_length=80)
+
+
 class FontUpdate(BaseModel):
     name: str
 
 
 class ArtTemplateUpdate(BaseModel):
     name: str
+
+
+class ArtPositionPresetCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+    x: float
+    y: float
+
+
+class ArtPositionPresetUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=40)
+    x: float | None = None
+    y: float | None = None
 
 
 class HistoryVersionUpdate(BaseModel):
@@ -423,6 +510,57 @@ def utc_now() -> str:
 
 def jobs_directory() -> Path:
     return DATA_DIR / "jobs"
+
+
+def cut_draft_path(job_id: str) -> Path:
+    if not is_job_directory_name(job_id):
+        raise ValueError("无效的转写任务编号。")
+    return jobs_directory() / job_id / "cut-draft.json"
+
+
+def load_cut_draft(job_id: str) -> dict[str, Any] | None:
+    path = cut_draft_path(job_id)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def save_cut_draft(job_id: str, draft: dict[str, Any]) -> None:
+    path = cut_draft_path(job_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_suffix(".tmp")
+    temporary_path.write_text(
+        json.dumps(draft, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temporary_path.replace(path)
+
+
+def remove_cut_draft(job_id: str) -> None:
+    path = cut_draft_path(job_id)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def normalize_cut_draft_range(
+    item: DeleteRange,
+    duration: float,
+) -> dict[str, float]:
+    start = float(item.start)
+    end = float(item.end)
+    if not math.isfinite(start) or not math.isfinite(end):
+        raise ValueError("剪辑草稿包含无效时间。")
+    start = max(0.0, min(start, duration))
+    end = max(0.0, min(end, duration))
+    if end <= start:
+        raise ValueError("剪辑草稿区间的结束时间必须晚于开始时间。")
+    return {"start": round(start, 3), "end": round(end, 3)}
 
 
 def is_job_directory_name(value: str) -> bool:
@@ -600,6 +738,17 @@ def history_manifest_path() -> Path:
     return history_library_directory() / "manifest.json"
 
 
+HISTORY_KINDS = {"edited", "art", "composed"}
+
+
+def history_kind_label(kind: str) -> str:
+    if kind == "edited":
+        return "剪辑版"
+    if kind == "composed":
+        return "成片"
+    return "艺术字版"
+
+
 def load_history_versions_unlocked() -> list[dict[str, Any]]:
     manifest_path = history_manifest_path()
     if not manifest_path.is_file():
@@ -615,7 +764,7 @@ def load_history_versions_unlocked() -> list[dict[str, Any]]:
         for item in payload
         if isinstance(item, dict)
         and re.fullmatch(r"history-[0-9a-f]{32}", str(item.get("id") or ""))
-        and item.get("kind") in {"edited", "art"}
+        and item.get("kind") in HISTORY_KINDS
         and str(item.get("videoFilename") or "") == "video.mp4"
     ]
 
@@ -649,7 +798,7 @@ def public_history_version(record: dict[str, Any]) -> dict[str, Any]:
         "id": history_id,
         "name": str(record.get("name") or "未命名版本"),
         "kind": str(record["kind"]),
-        "kindLabel": "剪辑版" if record["kind"] == "edited" else "艺术字版",
+        "kindLabel": history_kind_label(str(record["kind"])),
         "duration": round(float(record.get("duration") or 0), 3),
         "fileSize": int(record.get("fileSize") or 0),
         "sourceJobId": str(record.get("sourceJobId") or ""),
@@ -728,7 +877,7 @@ def render_history_thumbnail(
 def save_history_version(
     *,
     job_id: str,
-    kind: Literal["edited", "art"],
+    kind: Literal["edited", "art", "composed"],
     source_video: Path,
     duration: float,
     transcript: dict[str, Any],
@@ -749,7 +898,7 @@ def save_history_version(
     temporary_transcript_path = version_dir / ".transcript.tmp.json"
     thumbnail_path = version_dir / "thumbnail.jpg"
     now = utc_now()
-    kind_label = "剪辑版" if kind == "edited" else "艺术字版"
+    kind_label = history_kind_label(kind)
     source_name = normalize_history_version_name(
         Path(original_filename).stem,
         "视频",
@@ -842,6 +991,35 @@ def save_uploaded_art_templates_unlocked(
     temporary_path.replace(manifest_path)
 
 
+def art_template_hidden_path() -> Path:
+    return art_template_library_directory() / "hidden.json"
+
+
+def load_hidden_art_templates_unlocked() -> set[str]:
+    path = art_template_hidden_path()
+    if not path.is_file():
+        return set()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("艺术字模板隐藏列表读取失败。") from exc
+    if not isinstance(payload, list):
+        raise RuntimeError("艺术字模板隐藏列表格式无效。")
+    return {str(item) for item in payload if str(item) in ART_TEXT_STYLES}
+
+
+def save_hidden_art_templates_unlocked(hidden: set[str]) -> None:
+    library_dir = art_template_library_directory()
+    library_dir.mkdir(parents=True, exist_ok=True)
+    path = art_template_hidden_path()
+    temporary_path = path.with_suffix(".tmp")
+    temporary_path.write_text(
+        json.dumps(sorted(hidden), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temporary_path.replace(path)
+
+
 def public_builtin_art_template(template: dict[str, Any]) -> dict[str, Any]:
     return {
         **copy.deepcopy(template),
@@ -870,16 +1048,28 @@ def public_uploaded_art_template(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def list_art_text_templates() -> list[dict[str, Any]]:
-    builtins = [
-        public_builtin_art_template(template)
-        for template in ART_TEXT_TEMPLATE_CATALOG
-    ]
     with ART_TEMPLATE_LIBRARY_LOCK:
+        hidden = load_hidden_art_templates_unlocked()
+        builtins = [
+            public_builtin_art_template(template)
+            for template in ART_TEXT_TEMPLATE_CATALOG
+            if template["id"] not in hidden
+        ]
         uploaded = [
             public_uploaded_art_template(record)
             for record in load_uploaded_art_templates_unlocked()
         ]
     return builtins + uploaded
+
+
+def list_hidden_art_text_templates() -> list[dict[str, Any]]:
+    with ART_TEMPLATE_LIBRARY_LOCK:
+        hidden = load_hidden_art_templates_unlocked()
+    return [
+        public_builtin_art_template(template)
+        for template in ART_TEXT_TEMPLATE_CATALOG
+        if template["id"] in hidden
+    ]
 
 
 def find_uploaded_art_template(template_id: str) -> dict[str, Any] | None:
@@ -892,6 +1082,68 @@ def find_uploaded_art_template(template_id: str) -> dict[str, Any] | None:
             ),
             None,
         )
+
+
+ART_POSITION_PRESET_MAX_COUNT = 50
+ART_POSITION_MIN = 0.05
+ART_POSITION_MAX = 0.95
+
+
+def art_position_presets_directory() -> Path:
+    return DATA_DIR / "art-position-presets"
+
+
+def art_position_presets_manifest_path() -> Path:
+    return art_position_presets_directory() / "manifest.json"
+
+
+def load_art_position_presets_unlocked() -> list[dict[str, Any]]:
+    manifest_path = art_position_presets_manifest_path()
+    if not manifest_path.is_file():
+        return []
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("艺术字坐标预设库索引读取失败。") from exc
+    if not isinstance(payload, list):
+        raise RuntimeError("艺术字坐标预设库索引格式无效。")
+    return [
+        item
+        for item in payload
+        if isinstance(item, dict) and str(item.get("id", "")).startswith("pos-")
+    ]
+
+
+def save_art_position_presets_unlocked(
+    presets: list[dict[str, Any]],
+) -> None:
+    library_dir = art_position_presets_directory()
+    library_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = art_position_presets_manifest_path()
+    temporary_path = manifest_path.with_suffix(".tmp")
+    temporary_path.write_text(
+        json.dumps(presets, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temporary_path.replace(manifest_path)
+
+
+def public_art_position_preset(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(record["id"]),
+        "name": str(record["name"]),
+        "x": round(float(record["x"]), 4),
+        "y": round(float(record["y"]), 4),
+        "createdAt": record.get("createdAt"),
+        "updatedAt": record.get("updatedAt"),
+    }
+
+
+def clamp_art_position(value: float) -> float:
+    return round(
+        max(ART_POSITION_MIN, min(ART_POSITION_MAX, float(value))),
+        4,
+    )
 
 
 def resolve_art_text_style(template_id: str) -> str | None:
@@ -1074,6 +1326,112 @@ def validate_font_file(font_path: Path) -> tuple[str, str]:
 
 def public_job(job: dict[str, Any]) -> dict[str, Any]:
     return copy.deepcopy(job)
+
+
+class GenerationCancelledError(Exception):
+    """Raised inside render jobs when the user cancels generation."""
+
+
+# Per-job registry of in-flight FFmpeg processes so cancellation can terminate
+# them mid-run. Populated by run_ffmpeg (the current worker thread's job id is
+# used) and drained by mark_job_cancelled.
+RUNNING_PROCESSES: dict[str, list[subprocess.Popen]] = {}
+PROCESSES_LOCK = threading.Lock()
+_job_thread_local = threading.local()
+
+
+def _thread_job_id() -> str:
+    return str(getattr(_job_thread_local, "job_id", "") or "")
+
+
+def _set_thread_job(job_id: str) -> None:
+    _job_thread_local.job_id = job_id
+
+
+def is_cancelled(job_id: str) -> bool:
+    if not job_id:
+        return False
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        return bool(job and job.get("cancelRequested"))
+
+
+def check_cancelled(job_id: str) -> None:
+    if is_cancelled(job_id):
+        raise GenerationCancelledError()
+
+
+def run_ffmpeg(
+    command: list[str],
+    *,
+    timeout: float,
+    cwd: str | None = None,
+    job_id: str | None = None,
+) -> subprocess.CompletedProcess:
+    """Run an FFmpeg command as a killable subprocess.
+
+    The launched process is registered under the current job (from the worker
+    thread) so a cancellation can terminate it mid-run. On a non-zero exit that
+    follows a cancellation request, raises GenerationCancelledError instead of
+    letting the caller report a generic FFmpeg failure.
+    """
+    resolved_job = job_id or _thread_job_id()
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if resolved_job:
+        with PROCESSES_LOCK:
+            RUNNING_PROCESSES.setdefault(resolved_job, []).append(process)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+        raise
+    finally:
+        if resolved_job:
+            with PROCESSES_LOCK:
+                registered = RUNNING_PROCESSES.get(resolved_job)
+                if registered:
+                    try:
+                        registered.remove(process)
+                    except ValueError:
+                        pass
+    completed = subprocess.CompletedProcess(
+        command,
+        process.returncode,
+        stdout,
+        stderr,
+    )
+    if completed.returncode != 0 and is_cancelled(resolved_job):
+        raise GenerationCancelledError()
+    return completed
+
+
+def mark_job_cancelled(job_id: str) -> None:
+    """Flag the job as cancelled, mark in-flight sub-jobs, and kill FFmpeg."""
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            return
+        job["cancelRequested"] = True
+        for key in ("edit", "art", "pictureInPicture", "composition"):
+            sub = job.get(key)
+            if isinstance(sub, dict) and sub.get("status") in {"queued", "processing"}:
+                sub["status"] = "cancelled"
+                sub["stage"] = "已取消"
+                sub["error"] = "用户取消了生成。"
+    with PROCESSES_LOCK:
+        processes = list(RUNNING_PROCESSES.pop(job_id, ()))
+    for process in processes:
+        try:
+            process.terminate()
+        except Exception:
+            pass
 
 
 def update_job(job_id: str, **changes: Any) -> None:
@@ -1530,8 +1888,13 @@ def snap_delete_ranges_to_samples(
     for range_index, item in enumerate(delete_ranges):
         original_start = float(item["start"])
         original_end = float(item["end"])
+        has_boundary_limits = bool(
+            boundary_limits and range_index < len(boundary_limits)
+        )
         start = original_start
         end = original_end
+        original_end_rms = 0.0
+        end_rms = 0.0
         if original_start > 0.001:
             start = find_low_energy_boundary(
                 samples,
@@ -1559,6 +1922,9 @@ def snap_delete_ranges_to_samples(
                 ):
                     start = extended_start
         if original_end < duration - 0.001:
+            original_end_rms = boundary_window_rms(
+                samples, sample_rate, original_end
+            )
             end = find_low_energy_boundary(
                 samples,
                 sample_rate,
@@ -1584,12 +1950,28 @@ def snap_delete_ranges_to_samples(
                     <= end_rms * CUT_EXTENDED_VALLEY_IMPROVEMENT
                 ):
                     end = extended_end
+                    end_rms = extended_end_rms
 
         start = max(0.0, min(start, duration))
         end = max(0.0, min(end, duration))
-        if boundary_limits and range_index < len(boundary_limits):
+        if has_boundary_limits:
+            # A waveform valley may expand a deletion into a real pause, but it
+            # must never shrink the selected semantic range.  Shrinking here
+            # leaves syllable tails from AI-selected words in the final video.
+            # Only extend a high-energy word ending when the nearby valley is
+            # substantially quieter; otherwise preserve the exact ASR edge.
             limits = boundary_limits[range_index]
             start = max(float(limits["start"]), min(start, original_start))
+            if (
+                original_end_rms <= CUT_LOW_ENERGY_RMS_THRESHOLD
+                or end <= original_end
+                or (
+                    end_rms > CUT_LOW_ENERGY_RMS_THRESHOLD
+                    and end_rms
+                    > original_end_rms * CUT_TAIL_VALLEY_IMPROVEMENT
+                )
+            ):
+                end = original_end
             end = min(float(limits["end"]), max(end, original_end))
         if end <= start + 0.01:
             start, end = original_start, original_end
@@ -1626,6 +2008,51 @@ def snap_delete_ranges_to_audio(
         # Boundary analysis is an enhancement. If decoding fails, preserve the
         # exact user-selected range rather than failing an otherwise valid edit.
         return copy.deepcopy(delete_ranges)
+
+
+def snap_suggestion_ranges_to_audio(
+    segments: list[dict[str, Any]],
+    suggestions: list[dict[str, Any]],
+    duration: float,
+    samples: array,
+) -> list[dict[str, Any]]:
+    """Snap AI-suggestion delete ranges to nearby low-energy valleys.
+
+    ASR word-end timestamps can stop mid-syllable, so a deletion that cuts
+    exactly at ``word["end"]`` leaves the deleted word's acoustic tail in the
+    final video. Extending each suggestion's delete ranges to a quiet valley
+    once here, at suggestion time, means the range the user previews and
+    confirms is exactly the range the cut job later uses — the preview does not
+    change again when the video is generated.
+
+    The boundary limits use no head/tail guard on purpose: a suggestion must
+    never extend past the previous or next *retained* word, or the cut would
+    swallow a kept character (e.g. turning "你身边..." into "身边..."). Only the
+    gap between the deleted words and their retained neighbours is snapped away.
+    """
+    result: list[dict[str, Any]] = []
+    for suggestion in suggestions:
+        public_suggestion = copy.deepcopy(suggestion)
+        ranges = public_suggestion.get("ranges") or []
+        if samples and ranges:
+            boundary_limits = build_transcript_delete_boundary_limits(
+                segments,
+                ranges,
+                duration,
+            )
+            snapped_ranges = snap_delete_ranges_to_samples(
+                ranges,
+                duration,
+                samples,
+                sample_rate=CUT_BOUNDARY_SAMPLE_RATE,
+                boundary_limits=boundary_limits,
+            )
+            if snapped_ranges:
+                public_suggestion["ranges"] = snapped_ranges
+                public_suggestion["start"] = float(snapped_ranges[0]["start"])
+                public_suggestion["end"] = float(snapped_ranges[-1]["end"])
+        result.append(public_suggestion)
+    return result
 
 
 def build_keep_ranges(
@@ -1716,6 +2143,8 @@ def build_transcript_delete_boundary_limits(
     segments: list[dict[str, Any]],
     delete_ranges: list[dict[str, float]],
     duration: float,
+    start_head_guard_seconds: float = 0.0,
+    end_tail_guard_seconds: float = 0.0,
 ) -> list[dict[str, float]]:
     timed_units: list[dict[str, Any]] = []
     for segment in segments:
@@ -1747,6 +2176,14 @@ def build_transcript_delete_boundary_limits(
         )
 
     retained_units = [unit for unit in timed_units if not is_deleted(unit)]
+    head_guard = max(
+        0.0,
+        min(float(start_head_guard_seconds), CUT_START_HEAD_GUARD_SECONDS),
+    )
+    tail_guard = max(
+        0.0,
+        min(float(end_tail_guard_seconds), CUT_END_TAIL_GUARD_SECONDS),
+    )
     limits: list[dict[str, float]] = []
     for item in delete_ranges:
         requested_start = float(item["start"])
@@ -1763,8 +2200,17 @@ def build_transcript_delete_boundary_limits(
         ]
         limits.append(
             {
-                "start": round(max(previous_ends, default=0.0), 3),
-                "end": round(min(next_starts, default=duration), 3),
+                "start": round(
+                    max(0.0, max(previous_ends, default=0.0) - head_guard),
+                    3,
+                ),
+                "end": round(
+                    min(
+                        duration,
+                        min(next_starts, default=duration) + tail_guard,
+                    ),
+                    3,
+                ),
             }
         )
     return limits
@@ -2083,19 +2529,43 @@ def render_cut_video(
         "+faststart",
         str(temporary_path),
     ]
-    completed = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        timeout=60 * 60,
-        check=False,
-    )
+    completed = run_ffmpeg(command, timeout=60 * 60)
     if completed.returncode != 0:
         temporary_path.unlink(missing_ok=True)
         details = completed.stderr.strip().splitlines()
         reason = details[-1] if details else "未知 FFmpeg 错误"
         raise RuntimeError(f"视频剪辑失败：{reason}")
     temporary_path.replace(output_path)
+
+
+def normalize_transcript_overlay_timing(
+    overlays: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """End each subtitle at the next cue's real word-level start time."""
+    track_groups: dict[str, list[dict[str, Any]]] = {}
+    for overlay in overlays:
+        if overlay.get("trackType") != TRANSCRIPT_ART_TEXT_TRACK_TYPE:
+            continue
+        track_id = str(overlay.get("trackId") or "").strip()
+        if track_id:
+            track_groups.setdefault(track_id, []).append(overlay)
+
+    minimum_duration = 0.02
+    for track_items in track_groups.values():
+        ordered_items = sorted(
+            track_items,
+            key=lambda item: (float(item["start"]), float(item["end"])),
+        )
+        for previous, current in zip(ordered_items, ordered_items[1:]):
+            if float(current["start"]) >= float(previous["end"]) - 0.001:
+                continue
+            boundary = round(float(current["start"]), 3)
+            if boundary - float(previous["start"]) < minimum_duration - 0.001:
+                raise ValueError(
+                    "全文艺术字的剪后词级时间过密，无法生成有效字幕片段。"
+                )
+            previous["end"] = boundary
+    return overlays
 
 
 def normalize_text_overlays(
@@ -2181,6 +2651,14 @@ def normalize_text_overlays(
             )
             if overlay.end - overlay.start < minimum_duration:
                 raise ValueError(f"第 {index} 条艺术字显示时间过短。")
+        if (overlay.sourceStart is None) != (overlay.sourceEnd is None):
+            raise ValueError(f"第 {index} 条艺术字的原视频时间锚点不完整。")
+        if (
+            overlay.sourceStart is not None
+            and overlay.sourceEnd is not None
+            and overlay.sourceEnd <= overlay.sourceStart
+        ):
+            raise ValueError(f"第 {index} 条艺术字的原视频时间锚点无效。")
         if overlay.trackType == TRANSCRIPT_ART_TEXT_TRACK_TYPE:
             if len(content_characters(text)) > TRANSCRIPT_ART_TEXT_MAX_CHARS_PER_CUE:
                 raise ValueError(
@@ -2216,6 +2694,16 @@ def normalize_text_overlays(
                 else None
             ),
             "trackType": overlay.trackType,
+            "sourceStart": (
+                round(float(overlay.sourceStart), 3)
+                if overlay.sourceStart is not None
+                else None
+            ),
+            "sourceEnd": (
+                round(float(overlay.sourceEnd), 3)
+                if overlay.sourceEnd is not None
+                else None
+            ),
         }
         normalized.append(normalized_overlay)
 
@@ -2249,13 +2737,7 @@ def normalize_text_overlays(
             for item in transcript_items[1:]
         ):
             raise ValueError("全文艺术字轨道必须统一使用同一套样式和位置。")
-        ordered_items = sorted(
-            transcript_items,
-            key=lambda item: (item["start"], item["end"]),
-        )
-        for previous, current in zip(ordered_items, ordered_items[1:]):
-            if current["start"] < previous["end"] - 0.001:
-                raise ValueError("全文艺术字轨道的时间片段不能重叠。")
+        normalize_transcript_overlay_timing(normalized)
     return normalized
 
 
@@ -2320,6 +2802,29 @@ def collect_transcript_art_text_words(
                     "segmentIndex": segment_index - 1,
                 }
             )
+            if "sourceStart" in word or "sourceEnd" in word:
+                try:
+                    source_start = float(word.get("sourceStart"))
+                    source_end = float(word.get("sourceEnd"))
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"第 {segment_index} 段包含无效源时间锚点。"
+                    ) from None
+                if (
+                    not math.isfinite(source_start)
+                    or not math.isfinite(source_end)
+                    or source_start < 0
+                    or source_end <= source_start
+                ):
+                    raise ValueError(
+                        f"第 {segment_index} 段包含无法使用的源时间锚点。"
+                    )
+                normalized_segment_words[-1].update(
+                    {
+                        "sourceStart": round(source_start, 3),
+                        "sourceEnd": round(source_end, 3),
+                    }
+                )
 
         if pending_zero_duration_text:
             if not normalized_segment_words:
@@ -2393,13 +2898,44 @@ def transcript_art_text_segmentation_key(
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
+ART_TEXT_STRONG_ENDINGS = tuple("。！？!?；;")
+ART_TEXT_CLOSING_MARKS = "”’》〉】」』）)]"
+
+
+def art_text_word_ends_sentence(word: dict[str, Any]) -> bool:
+    return str(word.get("text") or "").rstrip(ART_TEXT_CLOSING_MARKS).endswith(
+        ART_TEXT_STRONG_ENDINGS
+    )
+
+
 def transcript_art_text_character_limit(
     font: ImageFont.FreeTypeFont,
     video_width: int,
     letter_spacing: int,
     stroke_width: int,
 ) -> int:
-    return TRANSCRIPT_ART_TEXT_MAX_CHARS_PER_CUE
+    """Per-cue character budget fitted to the real line width.
+
+    Returns how many full-width characters fit the safe line with the selected
+    font, clamped to a sane subtitle range, so a cue is only split when the
+    rendered line actually needs it instead of at an arbitrary low ceiling.
+    """
+    safe_width = max(1, round(video_width * 0.88))
+    fitted = 0
+    for count in range(6, TRANSCRIPT_ART_TEXT_MAX_CHARS_PER_CUE + 1):
+        if (
+            measure_single_line_art_text(
+                "文" * count,
+                font,
+                letter_spacing,
+                stroke_width,
+            )
+            <= safe_width
+        ):
+            fitted = count
+        else:
+            break
+    return max(6, fitted)
 
 
 def generate_transcript_art_text_breaks(
@@ -2413,7 +2949,6 @@ def generate_transcript_art_text_breaks(
         1,
         min(TRANSCRIPT_ART_TEXT_MAX_CHARS_PER_CUE, int(max_characters)),
     )
-    target_min_characters = min(6, max_characters)
 
     segment_ranges: list[tuple[int, int]] = []
     segment_start = 0
@@ -2501,8 +3036,10 @@ def generate_transcript_art_text_breaks(
             for index in range(start_index, end_index + 1)
         )
         example_breaks = [end_index]
-        if end_index - start_index >= 6:
-            example_breaks.insert(0, start_index + 5)
+        if end_index - start_index > max_characters:
+            example_breaks.insert(
+                0, start_index + (end_index - start_index) // 2
+            )
         example_payload = json.dumps(
             {"break_after": example_breaks},
             ensure_ascii=False,
@@ -2510,8 +3047,9 @@ def generate_transcript_art_text_breaks(
         for attempt in range(2):
             strict_instruction = (
                 f"这次必须补足分句：任何字幕都不得超过 {max_characters} 个汉字。"
-                "完整长句也要在主语、谓语、宾语、转折或自然口播节奏处拆成"
-                "前后可以连续阅读的字幕块；只能在词块后切，不能从词块中间硬切。"
+                "仍优先让完整句子整句成行；只有当一句超过上限时，才在主语、"
+                "谓语、宾语、转折或自然口播节奏处拆成尽量少的、可连续阅读的"
+                "字幕块；只能在词块后切，不能从词块中间硬切。"
                 if attempt
                 else ""
             )
@@ -2525,14 +3063,18 @@ def generate_transcript_art_text_breaks(
                             "content": (
                                 "你是中文口播字幕的语义分句助手。输入是带编号的连续词块，"
                                 "你只能选择在哪个词块后结束当前字幕，不能增删、替换、"
-                                "重排文字，也不能改时间。每条字幕必须语义自然，优先在完整"
-                                "分句、转折、因果、条件或自然停顿处结束；不要把主谓、动宾、"
-                                "固定短语、数字单位或引号内容从中间拆开。禁止单字、语气词、"
-                                "连接词单独成句，也不要留下需要依赖下一句才能理解的短尾巴。"
-                                f"每句建议 {target_min_characters} 到 {max_characters} 个汉字，"
-                                f"{max_characters} 个汉字是硬性上限；长复句必须按语气、"
-                                "转折和停顿拆成多个自然、可连续阅读的字幕块。只能在词块边界拆，"
-                                "不能从一个词中间硬切。"
+                                "重排文字，也不能改时间。一句话如果不超过 "
+                                f"{max_characters} 个汉字，就整句作为一条字幕，不要拆开。"
+                                "只有当一句话超过 "
+                                f"{max_characters} 个汉字时，才按口语语义单元切分："
+                                "优先在完整的陈述、转折、因果、条件或自然停顿处结束，"
+                                "每个字幕块应是一个能独立看懂的自然短语，"
+                                "不要让一个字幕块同时装下两个不同的话题，"
+                                "也不要留下需要靠下一块才能理解的悬空尾巴。"
+                                "不要把主谓、动宾、固定搭配、数字单位或引号内容从中间拆开；"
+                                "禁止单字、语气词、连接词单独成句。"
+                                "对于没有标点的长句，按说话的自然语义分组，而不是按字数均分。"
+                                "只能在词块边界拆，不能从一个词中间硬切。"
                                 f"{strict_instruction}"
                                 f"最后一个词块 [{end_index}] 必须作为本批最后一个结束位置。"
                                 f"只输出 JSON，例如：{example_payload}。"
@@ -2618,14 +3160,16 @@ def fallback_transcript_art_text_groups(
     words: list[dict[str, Any]],
 ) -> list[list[dict[str, Any]]]:
     strong_endings = tuple("。！？!?；;")
-    soft_endings = tuple("，、,:：")
     closing_marks = "”’》〉】」』）)]"
     groups: list[list[dict[str, Any]]] = []
     current_group: list[dict[str, Any]] = []
     for word in words:
         current_group.append(word)
         ending = str(word.get("text") or "").rstrip(closing_marks)
-        if ending.endswith(strong_endings + soft_endings):
+        # Split at sentence boundaries only. Commas inside a sentence stay part
+        # of the same group so one sentence does not get fragmented into many
+        # single-clause subtitles; the fit pass later splits only when needed.
+        if ending.endswith(strong_endings):
             groups.append(current_group)
             current_group = []
     if current_group:
@@ -2670,7 +3214,16 @@ def merge_transcript_art_text_orphans(
     merged = [list(group) for group in groups if group]
     index = 0
     while len(merged) > 1 and index < len(merged):
-        if len(content_characters(transcript_art_text_display_text(merged[index]))) >= 5:
+        size = len(
+            content_characters(transcript_art_text_display_text(merged[index]))
+        )
+        if size >= 5:
+            index += 1
+            continue
+        if art_text_word_ends_sentence(merged[index][-1]) and size > 1:
+            # A short complete sentence stands on its own; only a single
+            # character sentence is folded forward as a spoken lead-in so two
+            # complete sentences are never jammed onto one line.
             index += 1
             continue
         if index + 1 < len(merged):
@@ -2752,12 +3305,93 @@ def merge_incomplete_transcript_art_text_groups(
     merged = [list(group) for group in groups if group]
     index = 0
     while index + 1 < len(merged):
+        if art_text_word_ends_sentence(merged[index][-1]):
+            # A complete sentence is never merged into the next one, even when
+            # its display text ends with a character from the incomplete list.
+            index += 1
+            continue
         text = transcript_art_text_display_text(merged[index])
         if transcript_art_text_group_is_incomplete(text):
             merged[index : index + 2] = [[*merged[index], *merged[index + 1]]]
             continue
         index += 1
     return merged
+
+
+def normalize_transcript_art_text_track_groups(
+    groups: list[list[dict[str, Any]]],
+    max_characters: int,
+) -> list[list[dict[str, Any]]]:
+    """Enforce the subtitle layout rules on already-fitted cue groups.
+
+    A cue may only come from one spoken sentence, and no cue may be a lone
+    character. Groups that span two sentences are split at the sentence
+    boundary, and a single-character sentence is allowed to lead into the
+    following sentence so it never becomes a one-character line. Tiny leftovers
+    are folded into a neighbour without exceeding the per-cue character budget.
+    """
+
+    def size(group: list[dict[str, Any]]) -> int:
+        return len(content_characters(transcript_art_text_display_text(group)))
+
+    sentence_groups: list[list[dict[str, Any]]] = []
+    for group in groups:
+        current: list[dict[str, Any]] = []
+        for word in group:
+            current.append(word)
+            if art_text_word_ends_sentence(word):
+                sentence_groups.append(current)
+                current = []
+        if current:
+            sentence_groups.append(current)
+
+    merged: list[list[dict[str, Any]]] = []
+    pending_lead: list[dict[str, Any]] | None = None
+    for group in sentence_groups:
+        if not group:
+            continue
+        if size(group) == 1 and pending_lead is None:
+            # Hold a lone character so it can lead into the next cue instead of
+            # standing on its own line.
+            pending_lead = list(group)
+            continue
+        if pending_lead is not None:
+            combined = [*pending_lead, *group]
+            if size(combined) <= max_characters:
+                merged.append(combined)
+            elif len(group) > 1:
+                merged.append([*pending_lead, group[0]])
+                merged.append(list(group[1:]))
+            else:
+                merged.append(combined)
+            pending_lead = None
+            continue
+        merged.append(list(group))
+    if pending_lead is not None:
+        if merged:
+            merged[-1] = [*merged[-1], *pending_lead]
+        else:
+            merged.append(pending_lead)
+    return merged
+
+
+def split_sentence_into_clauses(
+    words: list[dict[str, Any]],
+) -> list[list[dict[str, Any]]]:
+    """Split a spoken sentence at soft clause boundaries, keeping commas."""
+    soft_endings = tuple("，、,:：")
+    closing_marks = "”’》〉】」』）)]"
+    clauses: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for word in words:
+        current.append(word)
+        ending = str(word.get("text") or "").rstrip(closing_marks)
+        if ending.endswith(soft_endings):
+            clauses.append(current)
+            current = []
+    if current:
+        clauses.append(current)
+    return clauses
 
 
 def split_transcript_art_text_group_to_fit(
@@ -2768,12 +3402,111 @@ def split_transcript_art_text_group_to_fit(
     stroke_width: int,
     max_characters: int = TRANSCRIPT_ART_TEXT_MAX_CHARS_PER_CUE,
 ) -> list[list[dict[str, Any]]]:
-    result: list[list[dict[str, Any]]] = []
-    remaining = list(group)
+    """Pack a spoken sentence into art-text lines, preferring whole clauses.
+
+    Comma-separated clauses of the same sentence are packed onto one line up to
+    the per-line budget, so one sentence is not fragmented at every comma. Only
+    a clause that alone exceeds the budget is split word-by-word, balanced and
+    preferring natural boundaries.
+    """
     max_characters = max(
         1,
         min(TRANSCRIPT_ART_TEXT_MAX_CHARS_PER_CUE, int(max_characters)),
     )
+
+    def character_count(items: list[dict[str, Any]]) -> int:
+        return len(content_characters(transcript_art_text_display_text(items)))
+
+    def width(items: list[dict[str, Any]]) -> float:
+        return measure_single_line_art_text(
+            transcript_art_text_display_text(items),
+            font,
+            letter_spacing,
+            stroke_width,
+        )
+
+    if character_count(group) <= max_characters and width(group) <= maximum_width:
+        return [list(group)]
+
+    clauses = split_sentence_into_clauses(group)
+    # A discourse marker clause (e.g. "说实话，") leads the following clause
+    # instead of trailing the previous one.
+    leading_phrases = frozenset(
+        {
+            "说实话",
+            "坦白说",
+            "老实说",
+            "换句话说",
+            "也就是说",
+            "所以说",
+            "所以说啊",
+            "简单来说",
+            "总的来说",
+            "事实上",
+            "实际上",
+            "比如说",
+            "记住一句话",
+        }
+    )
+    merged_clauses: list[list[dict[str, Any]]] = []
+    clause_index = 0
+    while clause_index < len(clauses):
+        clause = clauses[clause_index]
+        if (
+            transcript_art_text_display_text(clause) in leading_phrases
+            and clause_index + 1 < len(clauses)
+        ):
+            merged_clauses.append([*clause, *clauses[clause_index + 1]])
+            clause_index += 2
+        else:
+            merged_clauses.append(clause)
+            clause_index += 1
+    clauses = merged_clauses
+
+    packed: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for clause in clauses:
+        if (
+            current
+            and character_count(current) + character_count(clause) > max_characters
+        ):
+            packed.append(current)
+            current = []
+        current.extend(clause)
+    if current:
+        packed.append(current)
+
+    result: list[list[dict[str, Any]]] = []
+    for line in packed:
+        if character_count(line) <= max_characters and width(line) <= maximum_width:
+            result.append(line)
+            continue
+        result.extend(
+            split_long_clause_to_fit(
+                line,
+                font,
+                maximum_width,
+                letter_spacing,
+                stroke_width,
+                max_characters,
+                character_count,
+                width,
+            )
+        )
+    return result
+
+
+def split_long_clause_to_fit(
+    clause: list[dict[str, Any]],
+    font: ImageFont.FreeTypeFont,
+    maximum_width: int,
+    letter_spacing: int,
+    stroke_width: int,
+    max_characters: int,
+    character_count: Callable[[list[dict[str, Any]]], int],
+    width: Callable[[list[dict[str, Any]]], float],
+) -> list[list[dict[str, Any]]]:
+    """Split a single over-long clause at balanced, natural word boundaries."""
     strong_endings = tuple("。！？!?；;")
     soft_endings = tuple("，、,:：")
     closing_marks = "”’》〉】」』）)]"
@@ -2832,49 +3565,32 @@ def split_transcript_art_text_group_to_fit(
         }
     )
 
-    def width(items: list[dict[str, Any]]) -> float:
-        return measure_single_line_art_text(
-            transcript_art_text_display_text(items),
-            font,
-            letter_spacing,
-            stroke_width,
-        )
-
-    def character_count(items: list[dict[str, Any]]) -> int:
-        return len(content_characters(transcript_art_text_display_text(items)))
-
+    result: list[list[dict[str, Any]]] = []
+    remaining = list(clause)
     while remaining:
         remaining_width = width(remaining)
         remaining_characters = character_count(remaining)
-        has_internal_semantic_boundary = any(
-            str(remaining[index - 1].get("text") or "")
-            .rstrip(closing_marks)
-            .endswith((*strong_endings, *soft_endings))
-            or content_characters(
-                str(remaining[index].get("text") or "")
-            ).startswith(boundary_starters)
-            for index in range(1, len(remaining))
-        )
-        # A small (<= 18%) fit adjustment is preferable to breaking a complete
-        # spoken clause. A real clause boundary still wins, so two short clauses
-        # are not squeezed into one tiny subtitle merely because they just fit.
-        if (
-            len(remaining) == 1
-            or (
-                remaining_characters <= max_characters
-                and remaining_width <= maximum_width
-            )
-            or (
-                remaining_characters <= max_characters
-                and
-                remaining_width <= maximum_width * 1.18
-                and not has_internal_semantic_boundary
-            )
-        ):
+        if len(remaining) == 1:
+            # Never leave a lone character as its own line: fold it back into
+            # the previous chunk when the budget allows.
+            if result and character_count(result[-1]) + 1 <= max_characters:
+                result[-1] = [*result[-1], *remaining]
+            else:
+                result.append(remaining)
+            break
+        if remaining_characters <= max_characters and remaining_width <= maximum_width:
             result.append(remaining)
             break
 
         total_characters = remaining_characters
+        minimum_side = 4 if total_characters >= 9 else 2
+        # Semantic naturalness decides where to break; balance only breaks ties.
+        # The character ceiling is the only hard constraint, so a natural
+        # boundary such as "靠不靠谱" / "行不行" is never skipped merely to make
+        # chunk sizes more equal.
+        min_left = minimum_side
+        min_chunks = max(1, math.ceil(total_characters / max_characters))
+        target_left = total_characters / min_chunks
         candidates: list[tuple[float, int]] = []
         for split_index in range(1, len(remaining)):
             left = remaining[:split_index]
@@ -2882,15 +3598,11 @@ def split_transcript_art_text_group_to_fit(
             left_characters = character_count(left)
             if left_characters > max_characters:
                 break
-            left_width = width(left)
-            # Apply the same small semantic-fit tolerance used for a complete
-            # group. Otherwise a comma boundary just beyond the nominal width
-            # is skipped and the following clause is pulled into the subtitle.
-            if left_width > maximum_width * 1.18:
-                break
             right_characters = character_count(right)
-            minimum_side = 4 if total_characters >= 9 else 2
-            if left_characters < minimum_side or right_characters < minimum_side:
+            if left_characters < min_left or right_characters < minimum_side:
+                continue
+            left_width = width(left)
+            if left_width > maximum_width:
                 continue
 
             previous_text = str(left[-1].get("text") or "")
@@ -2901,36 +3613,47 @@ def split_transcript_art_text_group_to_fit(
                 float(right[0].get("start") or 0)
                 - float(left[-1].get("end") or 0),
             )
-            fill_ratio = left_width / maximum_width
-            score = 70 - abs(fill_ratio - 0.76) * 55
-            if previous_ending.endswith(strong_endings):
-                score += 120
-            elif previous_ending.endswith(soft_endings):
-                score += 90
-            if pause >= 0.35:
-                score += 100
+            left_text = transcript_art_text_display_text(left)
+            previous_content = content_characters(previous_text)
+            # Audio pauses are the general, content-independent signal for a
+            # natural phrase boundary: the longer the gap between two spoken
+            # words, the better the place to break — regardless of which words
+            # happen to be there. Punctuation and balance are secondary.
+            if pause >= 0.50:
+                score = 90
+            elif pause >= 0.30:
+                score = 70
             elif pause >= 0.18:
-                score += 65
-            elif pause >= 0.08:
+                score = 50
+            elif pause >= 0.10:
+                score = 35
+            elif pause >= 0.05:
+                score = 18
+            else:
+                score = 0
+            if previous_ending.endswith(strong_endings):
+                score += 45
+            elif previous_ending.endswith(soft_endings):
                 score += 25
             if next_text.startswith(boundary_starters):
-                score += 72
-            character_fill_ratio = left_characters / max_characters
-            score -= abs(character_fill_ratio - 0.78) * 45
-            previous_content = content_characters(previous_text)
-            left_text = transcript_art_text_display_text(left)
+                score += 15
             if (
                 previous_content in weak_endings
                 or transcript_art_text_split_is_incomplete(left_text)
             ):
-                score -= 95
+                score -= 50
             if next_text in weak_starters:
-                score -= 95
+                score -= 50
+            # Balance only breaks ties between otherwise-equal boundaries.
+            score -= abs(left_characters - target_left) * 4
             candidates.append((score, split_index))
 
         if candidates:
             _, split_index = max(candidates, key=lambda item: (item[0], item[1]))
         else:
+            # No balanced candidate fits: pick the largest prefix that fits the
+            # budget while refusing to strand fewer than minimum_side characters
+            # on either side.
             split_index = 1
             for candidate_index in range(1, len(remaining)):
                 candidate = remaining[: candidate_index + 1]
@@ -2938,8 +3661,13 @@ def split_transcript_art_text_group_to_fit(
                     break
                 if width(candidate) > maximum_width:
                     break
+                if character_count(candidate) < minimum_side:
+                    continue
                 split_index = candidate_index + 1
-            if len(remaining) - split_index == 1 and split_index > 1:
+            if (
+                len(remaining) - split_index < minimum_side
+                and split_index > minimum_side
+            ):
                 split_index -= 1
         result.append(remaining[:split_index])
         remaining = remaining[split_index:]
@@ -3006,15 +3734,34 @@ def build_transcript_art_text_track(
                 max_characters=character_limit,
             )
         )
+    fitted_groups = normalize_transcript_art_text_track_groups(
+        fitted_groups,
+        character_limit,
+    )
 
-    cues = [
-        {
+    cues = []
+    for group in fitted_groups:
+        cue = {
             "text": transcript_art_text_display_text(group),
             "start": group[0]["start"],
             "end": group[-1]["end"],
         }
-        for group in fitted_groups
-    ]
+        if "sourceStart" in group[0] and "sourceEnd" in group[-1]:
+            cue.update(
+                {
+                    "sourceStart": group[0]["sourceStart"],
+                    "sourceEnd": group[-1]["sourceEnd"],
+                }
+            )
+        cues.append(cue)
+
+    for previous, current in zip(cues, cues[1:]):
+        if float(current["start"]) >= float(previous["end"]) - 0.001:
+            continue
+        boundary = round(float(current["start"]), 3)
+        if boundary - float(previous["start"]) < 0.019:
+            raise ValueError("剪后词级时间戳过密，无法生成完整的全文艺术字。")
+        previous["end"] = boundary
 
     if len(cues) > MAX_TRANSCRIPT_ART_TEXT_CUES:
         raise ValueError(
@@ -4174,13 +4921,10 @@ def render_art_text_video(
         temporary_path.name,
     ])
     try:
-        completed = subprocess.run(
+        completed = run_ffmpeg(
             command,
             cwd=working_directory,
-            capture_output=True,
-            text=True,
             timeout=60 * 60,
-            check=False,
         )
     except OSError as exc:
         temporary_path.unlink(missing_ok=True)
@@ -4682,8 +5426,16 @@ def normalize_picture_in_picture_overlays(
         asset_path = job_dir / f"picture-in-picture-{asset_id}{suffix}"
         if not asset_path.is_file():
             raise ValueError(f"第 {index} 个画中画素材文件不存在。")
-        start = float(record.get("start") or 0)
-        end = float(record.get("end") or 0)
+        start = float(
+            overlay.start
+            if overlay.start is not None
+            else record.get("start") or 0
+        )
+        end = float(
+            overlay.end
+            if overlay.end is not None
+            else record.get("end") or 0
+        )
         numeric_values = (start, end, overlay.x, overlay.y, overlay.width)
         if not all(math.isfinite(float(value)) for value in numeric_values):
             raise ValueError(f"第 {index} 张画中画包含无效数值。")
@@ -4706,6 +5458,16 @@ def normalize_picture_in_picture_overlays(
                 "prompt": str(record.get("prompt") or ""),
                 "start": round(start, 3),
                 "end": round(end, 3),
+                "sourceStart": (
+                    round(float(overlay.sourceStart), 3)
+                    if overlay.sourceStart is not None
+                    else None
+                ),
+                "sourceEnd": (
+                    round(float(overlay.sourceEnd), 3)
+                    if overlay.sourceEnd is not None
+                    else None
+                ),
                 "x": round(float(overlay.x), 4),
                 "y": round(float(overlay.y), 4),
                 "width": round(float(overlay.width), 4),
@@ -4753,11 +5515,68 @@ def resolve_picture_in_picture_source(
     if art.get("status") != "completed" or not input_path.is_file():
         raise ValueError("请先生成艺术字视频。")
     transcript = (
-        job.get("result") or {}
-        if art.get("source") == "original"
-        else (job.get("edit") or {}).get("transcript") or {}
+        (job.get("edit") or {}).get("transcript") or {}
+        if art.get("composition")
+        else (
+            job.get("result") or {}
+            if art.get("source") == "original"
+            else (job.get("edit") or {}).get("transcript") or {}
+        )
     )
     return input_path, float(art.get("outputDuration") or 0), transcript
+
+
+def resolve_picture_in_picture_reference(
+    job: dict[str, Any],
+    video_path: Path | None,
+    request: Any,
+) -> tuple[Path, float, Path, float]:
+    """Resolve PiP AI generation inputs.
+
+    Returns (source_path, duration, reference_path, reference_time) where
+    source_path/duration drive validation and output placement, and
+    reference_path/reference_time are where the style reference frame is read.
+
+    When sourceStart/sourceEnd (original source anchors) are provided, the
+    reference frame is read from the ORIGINAL video at the anchor midpoint so
+    PiP material can be generated before the edited/art video is rendered
+    ("finish everything, then compose" workflow). Otherwise the resolved source
+    video is used at the midpoint of start/end.
+    """
+    has_anchor = (
+        request.sourceStart is not None and request.sourceEnd is not None
+    )
+    try:
+        source_path, duration, _ = resolve_picture_in_picture_source(
+            job,
+            video_path,
+            request.source,
+        )
+    except ValueError as exc:
+        if not has_anchor:
+            raise ValueError(str(exc)) from exc
+        # The edited/art video isn't ready, but PiP material can still be
+        # generated: style-match against the original video via the anchors.
+        if video_path is None or not video_path.is_file():
+            raise ValueError("原视频文件不存在。") from exc
+        source_path = video_path
+        duration = float(job.get("duration") or 0)
+    if has_anchor:
+        reference_path = video_path if video_path is not None else source_path
+        reference_time = min(
+            max(
+                0.0,
+                (float(request.sourceStart) + float(request.sourceEnd)) / 2,
+            ),
+            max(0.0, duration - 0.01),
+        )
+    else:
+        reference_path = source_path
+        reference_time = min(
+            max(0.0, (float(request.start) + float(request.end)) / 2),
+            max(0.0, duration - 0.01),
+        )
+    return source_path, duration, reference_path, reference_time
 
 
 def render_picture_in_picture_video(
@@ -4833,13 +5652,7 @@ def render_picture_in_picture_video(
             str(temporary_path),
         ]
     )
-    completed = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        timeout=60 * 60,
-        check=False,
-    )
+    completed = run_ffmpeg(command, timeout=60 * 60)
     if completed.returncode != 0:
         temporary_path.unlink(missing_ok=True)
         details = completed.stderr.strip().splitlines()
@@ -5011,11 +5824,461 @@ def build_sentence_segments(
     return segments
 
 
+EDITABLE_SEGMENT_PAUSE_SECONDS = 0.32
+EDITABLE_SEGMENT_CLAUSE_ENDINGS = (
+    "\u3002",
+    "\uff01",
+    "\uff1f",
+    "\u2026",
+    "\uff0c",
+    "\u3001",
+    "\uff1b",
+    "\uff1a",
+    ".",
+    "!",
+    "?",
+    ",",
+    ";",
+    ":",
+)
+EDITABLE_SEGMENT_BREAK_BEFORE = (
+    "\u4f46\u662f",
+    "\u800c\u662f",
+    "\u4e0d\u8fc7",
+    "\u7136\u800c",
+    "\u6240\u4ee5",
+    "\u56e0\u4e3a",
+    "\u7531\u4e8e",
+    "\u4e8e\u662f",
+    "\u5982\u679c",
+    "\u5373\u4f7f",
+    "\u53ea\u8981",
+    "\u54ea\u6015",
+    "\u5176\u5b9e",
+    "\u5c24\u5176",
+    "\u540c\u65f6",
+    "\u7136\u540e",
+)
+
+
+def build_editable_transcript_segments(
+    source_segments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Create finer selectable subtitle clauses without splitting timed words."""
+    editable_segments: list[dict[str, Any]] = []
+
+    for source_index, source_segment in enumerate(source_segments):
+        source_words = source_segment.get("words") or []
+        if not source_words:
+            text = str(source_segment.get("text") or "").strip()
+            start = float(source_segment.get("start", 0) or 0)
+            end = float(source_segment.get("end", start) or start)
+            if text and end > start:
+                editable_segments.append(
+                    {
+                        "id": len(editable_segments),
+                        "sourceSegmentIndex": source_index,
+                        "start": start,
+                        "end": end,
+                        "text": text,
+                        "words": [],
+                    }
+                )
+            continue
+
+        current_words: list[dict[str, Any]] = []
+
+        def flush_segment() -> None:
+            if not current_words:
+                return
+            text = "".join(str(word.get("text") or "") for word in current_words)
+            if not content_characters(text):
+                current_words.clear()
+                return
+            editable_segments.append(
+                {
+                    "id": len(editable_segments),
+                    "sourceSegmentIndex": source_index,
+                    "start": float(current_words[0]["start"]),
+                    "end": float(current_words[-1]["end"]),
+                    "text": text,
+                    "words": copy.deepcopy(current_words),
+                }
+            )
+            current_words.clear()
+
+        for source_word in source_words:
+            word = {
+                "text": str(source_word.get("text") or ""),
+                "start": float(source_word.get("start", 0) or 0),
+                "end": float(source_word.get("end", 0) or 0),
+            }
+            if current_words:
+                previous_word = current_words[-1]
+                gap = word["start"] - float(previous_word["end"])
+                current_text = "".join(
+                    str(item.get("text") or "") for item in current_words
+                )
+                has_semantic_break = (
+                    gap >= EDITABLE_SEGMENT_PAUSE_SECONDS
+                    or (
+                        len(content_characters(current_text)) >= 4
+                        and word["text"].lstrip().startswith(
+                            EDITABLE_SEGMENT_BREAK_BEFORE
+                        )
+                    )
+                )
+                if has_semantic_break:
+                    flush_segment()
+
+            current_words.append(word)
+            if word["text"].rstrip().endswith(EDITABLE_SEGMENT_CLAUSE_ENDINGS):
+                flush_segment()
+
+        flush_segment()
+
+    return editable_segments
+
+
+def editable_segment_character_tokens(
+    segment: dict[str, Any],
+) -> list[dict[str, Any]]:
+    source_words = segment.get("words") or []
+    if not source_words:
+        source_words = [
+            {
+                "text": str(segment.get("text") or ""),
+                "start": float(segment.get("start", 0) or 0),
+                "end": float(segment.get("end", 0) or 0),
+            }
+        ]
+
+    tokens: list[dict[str, Any]] = []
+    for word in source_words:
+        characters = list(str(word.get("text") or ""))
+        if not characters:
+            continue
+        start = float(word.get("start", 0) or 0)
+        end = max(start, float(word.get("end", start) or start))
+        duration = end - start
+        for index, character in enumerate(characters):
+            tokens.append(
+                {
+                    "text": character,
+                    "start": round(start + duration * index / len(characters), 3),
+                    "end": round(
+                        start + duration * (index + 1) / len(characters),
+                        3,
+                    ),
+                }
+            )
+
+    expected_text = str(segment.get("text") or "")
+    if "".join(token["text"] for token in tokens) == expected_text:
+        return tokens
+
+    characters = list(expected_text)
+    if not characters:
+        return []
+    start = float(segment.get("start", 0) or 0)
+    end = max(start, float(segment.get("end", start) or start))
+    duration = end - start
+    return [
+        {
+            "text": character,
+            "start": round(start + duration * index / len(characters), 3),
+            "end": round(start + duration * (index + 1) / len(characters), 3),
+        }
+        for index, character in enumerate(characters)
+    ]
+
+
+def build_editable_segment_from_tokens(
+    tokens: list[dict[str, Any]],
+    source_segment_index: int,
+) -> dict[str, Any]:
+    return {
+        "id": 0,
+        "sourceSegmentIndex": source_segment_index,
+        "start": float(tokens[0]["start"]),
+        "end": float(tokens[-1]["end"]),
+        "text": "".join(str(token.get("text") or "") for token in tokens),
+        "words": copy.deepcopy(tokens),
+    }
+
+
+def normalize_editable_segment_ids(
+    segments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    normalized = copy.deepcopy(segments)
+    for index, segment in enumerate(normalized):
+        segment["id"] = index
+    return normalized
+
+
+def apply_transcript_segment_operation(
+    editable_segments: list[dict[str, Any]],
+    operation: TranscriptSegmentOperation,
+) -> list[dict[str, Any]]:
+    segments = normalize_editable_segment_ids(editable_segments)
+    if operation.segmentIndex >= len(segments):
+        raise ValueError("要调整的文字段不存在。")
+
+    segment_index = operation.segmentIndex
+    if operation.action == "text":
+        new_text = str(operation.text or "").strip()
+        if not content_characters(new_text):
+            raise ValueError("修改后的文字不能为空。")
+        if len(content_characters(new_text)) > 300:
+            raise ValueError("单段文字过长，请精简后再保存。")
+        segment = segments[segment_index]
+        start = float(segment.get("start") or 0)
+        end = max(start, float(segment.get("end") or start))
+        segment["text"] = new_text
+        segment["words"] = split_timed_text_units(new_text, start, end)
+        return normalize_editable_segment_ids(segments)
+    if operation.action == "merge_up":
+        if segment_index == 0:
+            raise ValueError("第一段没有可向上合并的段落。")
+        merge_start = segment_index - 1
+        merge_parts = segments[merge_start : segment_index + 1]
+    elif operation.action == "merge_down":
+        if segment_index + 1 >= len(segments):
+            raise ValueError("最后一段没有可向下合并的段落。")
+        merge_start = segment_index
+        merge_parts = segments[segment_index : segment_index + 2]
+    else:
+        segment = segments[segment_index]
+        tokens = editable_segment_character_tokens(segment)
+        selection_start = operation.selectionStart
+        selection_end = operation.selectionEnd
+        if selection_start is None or selection_end is None:
+            raise ValueError("请先拖动选择要拆分成单独一行的文字。")
+        if not (0 <= selection_start < selection_end <= len(tokens)):
+            raise ValueError("选择的文字范围无效，请重新选择。")
+        if selection_start == 0 and selection_end == len(tokens):
+            raise ValueError("已选择整段文字，无需再次拆分。")
+        selected_tokens = tokens[selection_start:selection_end]
+        if not content_characters(
+            "".join(str(token.get("text") or "") for token in selected_tokens)
+        ):
+            raise ValueError("不能只把标点或空格拆分成单独一行。")
+
+        token_groups = [
+            tokens[:selection_start],
+            selected_tokens,
+            tokens[selection_end:],
+        ]
+        compact_groups: list[list[dict[str, Any]]] = []
+        pending_prefix: list[dict[str, Any]] = []
+        for group in token_groups:
+            if not group:
+                continue
+            group_text = "".join(str(token.get("text") or "") for token in group)
+            if not content_characters(group_text):
+                if compact_groups:
+                    compact_groups[-1].extend(group)
+                else:
+                    pending_prefix.extend(group)
+                continue
+            if pending_prefix:
+                group = [*pending_prefix, *group]
+                pending_prefix = []
+            compact_groups.append(group)
+        if pending_prefix and compact_groups:
+            compact_groups[-1].extend(pending_prefix)
+        if len(compact_groups) < 2:
+            raise ValueError("请选择当前段落中的部分文字进行拆分。")
+
+        source_segment_index = int(segment.get("sourceSegmentIndex", 0) or 0)
+        split_segments = [
+            build_editable_segment_from_tokens(group, source_segment_index)
+            for group in compact_groups
+        ]
+        segments[segment_index : segment_index + 1] = split_segments
+        return normalize_editable_segment_ids(segments)
+
+    merged_tokens = [
+        token
+        for part in merge_parts
+        for token in editable_segment_character_tokens(part)
+    ]
+    source_segment_index = int(
+        merge_parts[0].get("sourceSegmentIndex", 0) or 0
+    )
+    merged_segment = build_editable_segment_from_tokens(
+        merged_tokens,
+        source_segment_index,
+    )
+    segments[merge_start : merge_start + 2] = [merged_segment]
+    return normalize_editable_segment_ids(segments)
+
+
+def sync_source_segments_from_editable(
+    source_segments: list[dict[str, Any]],
+    editable_segments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Re-sync ASR segment text/words from the edited editable view."""
+    synced = copy.deepcopy(source_segments)
+    for source_index, source in enumerate(synced):
+        parts = [
+            item
+            for item in editable_segments
+            if int(item.get("sourceSegmentIndex", -1)) == source_index
+        ]
+        if not parts:
+            continue
+        combined_text = "".join(str(item.get("text") or "") for item in parts)
+        if not content_characters(combined_text):
+            continue
+        combined_words: list[dict[str, Any]] = []
+        for part in parts:
+            combined_words.extend(copy.deepcopy(part.get("words") or []))
+        if not combined_words:
+            combined_words = split_timed_text_units(
+                combined_text,
+                float(source.get("start") or 0),
+                float(source.get("end") or 0),
+            )
+        # Capture the original source-anchor range before overwriting the words
+        # so a re-segmented subtitle track keeps its cut-draft time mapping.
+        # Without these anchors the retimed art-text cues drift forward.
+        original_words = source.get("words") or []
+        anchor_starts = [
+            word.get("sourceStart")
+            for word in original_words
+            if word.get("sourceStart") is not None
+        ]
+        anchor_ends = [
+            word.get("sourceEnd")
+            for word in original_words
+            if word.get("sourceEnd") is not None
+        ]
+        source["text"] = combined_text
+        source["words"] = combined_words
+        if anchor_starts and anchor_ends:
+            segment_start = float(source.get("start") or 0)
+            segment_end = max(
+                segment_start, float(source.get("end") or segment_start)
+            )
+            segment_duration = max(segment_end - segment_start, 0.001)
+            anchor_start = float(min(anchor_starts))
+            anchor_end = float(max(anchor_ends))
+            anchor_duration = anchor_end - anchor_start
+            for word in source["words"]:
+                word_start = float(word.get("start") or 0)
+                word_end = max(word_start, float(word.get("end") or word_start))
+                word["sourceStart"] = round(
+                    anchor_start
+                    + (word_start - segment_start)
+                    / segment_duration
+                    * anchor_duration,
+                    3,
+                )
+                word["sourceEnd"] = round(
+                    anchor_start
+                    + (word_end - segment_start)
+                    / segment_duration
+                    * anchor_duration,
+                    3,
+                )
+    return synced
+
+
+ART_TEXT_TRACK_SHARED_KEYS = (
+    "font",
+    "fontSize",
+    "color",
+    "strokeColor",
+    "strokeWidth",
+    "shadow",
+    "x",
+    "y",
+    "direction",
+    "textAlign",
+    "charsPerLine",
+    "letterSpacing",
+    "lineSpacing",
+    "artStyle",
+)
+
+
+def update_transcript_track_text_for_segment(
+    art: dict[str, Any],
+    segment_start: float,
+    segment_end: float,
+    new_text: str,
+) -> None:
+    """Update only the subtitle-track cues that overlap an edited segment.
+
+    The cue TIMES stay exactly as they were; only the text changes, distributed
+    proportionally across the overlapping cues by their source duration. This
+    keeps the existing subtitle timeline stable when the 文案 is edited, instead
+    of re-flowing every cue from a fresh segmentation.
+    """
+    try:
+        overlays = art.get("overlays") or []
+        track_items = [
+            item
+            for item in overlays
+            if item.get("trackType") == TRANSCRIPT_ART_TEXT_TRACK_TYPE
+        ]
+        if not track_items:
+            return
+        overlapping = [
+            item
+            for item in track_items
+            if float(item.get("sourceEnd") or item.get("end") or 0) > segment_start
+            and float(item.get("sourceStart") or item.get("start") or 0) < segment_end
+        ]
+        if not overlapping:
+            return
+        overlapping.sort(
+            key=lambda item: (
+                float(item.get("sourceStart") or item.get("start") or 0),
+                float(item.get("sourceEnd") or item.get("end") or 0),
+            )
+        )
+        chars = list(content_characters(new_text))
+        if not chars:
+            return
+        durations = [
+            max(
+                0.001,
+                float(item.get("sourceEnd") or item.get("end") or 0)
+                - float(item.get("sourceStart") or item.get("start") or 0),
+            )
+            for item in overlapping
+        ]
+        total = sum(durations)
+        cursor = 0
+        for index, item in enumerate(overlapping):
+            remaining_chars = len(chars) - cursor
+            remaining_cues = len(overlapping) - index
+            if index == len(overlapping) - 1:
+                count = remaining_chars
+            else:
+                count = round(remaining_chars * durations[index] / total)
+                # Leave at least one character for each cue still to come, and
+                # never strand a cue with no text when the input shrank.
+                count = min(count, remaining_chars - (remaining_cues - 1))
+                count = max(1, count)
+            item["text"] = "".join(chars[cursor : cursor + count])
+            cursor += count
+        # The previously rendered art video used the old subtitles, so it is
+        # now stale and must be regenerated.
+        art["status"] = None
+        art["outputUrl"] = None
+        art["updatedAt"] = utc_now()
+    except Exception:
+        # The subtitle text update is a best-effort enhancement.
+        return
+
+
 def polish_punctuation(text: str, api_key: str) -> str | None:
     plain_text = content_characters(text)
     if not plain_text:
         return None
-
     try:
         response = Generation.call(
             api_key=api_key,
@@ -5204,6 +6467,33 @@ def detect_repeated_speech_ranges(
     return merged
 
 
+def repeated_retained_word_span(
+    words: list[dict[str, Any]],
+    start_index: int,
+    end_index: int,
+) -> tuple[int, int] | None:
+    """Find the following copy that a repeated-speech rule intends to keep."""
+    deleted_text = "".join(
+        content_characters(str(word.get("text") or "")).lower()
+        for word in words[start_index : end_index + 1]
+    )
+    if not deleted_text or end_index + 1 >= len(words):
+        return None
+
+    following_characters: list[str] = []
+    following_word_indices: list[int] = []
+    for word_index in range(end_index + 1, min(len(words), end_index + 13)):
+        key = content_characters(str(words[word_index].get("text") or "")).lower()
+        following_characters.extend(key)
+        following_word_indices.extend([word_index] * len(key))
+    following_text = "".join(following_characters)
+    maximum_length = min(32, len(deleted_text), len(following_text))
+    for length in range(maximum_length, 0, -1):
+        if following_text[:length] in deleted_text:
+            return end_index + 1, following_word_indices[length - 1]
+    return None
+
+
 def build_repeated_speech_suggestions(
     words: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -5212,31 +6502,139 @@ def build_repeated_speech_suggestions(
         start_index = repeated_range["startIndex"]
         end_index = repeated_range["endIndex"]
         repeated_words = words[start_index : end_index + 1]
-        suggestions.append(
-            {
-                "id": f"suggestion-{start_index}-{end_index}",
-                "type": "重复",
-                "reason": (
-                    "检测到重复起句后重新表述，保留最后一次完整表达"
-                    if repeated_range["parts"] > 1
-                    else "检测到相邻内容重复，保留后一次表达"
-                ),
-                "confidence": 0.99,
-                "text": "".join(word["text"] for word in repeated_words),
-                "start": float(repeated_words[0]["start"]),
-                "end": float(repeated_words[-1]["end"]),
-                "startIndex": start_index,
-                "endIndex": end_index,
-                "ranges": [
-                    {
-                        "start": float(word["start"]),
-                        "end": float(word["end"]),
-                    }
-                    for word in repeated_words
-                ],
-            }
+        suggestion = {
+            "id": f"suggestion-{start_index}-{end_index}",
+            "type": "重复",
+            "reason": (
+                "检测到重复起句后重新表述，保留最后一次完整表达"
+                if repeated_range["parts"] > 1
+                else "检测到相邻内容重复，保留后一次表达"
+            ),
+            "confidence": 0.99,
+            "text": "".join(word["text"] for word in repeated_words),
+            "start": float(repeated_words[0]["start"]),
+            "end": float(repeated_words[-1]["end"]),
+            "startIndex": start_index,
+            "endIndex": end_index,
+            "ranges": [
+                {
+                    "start": float(word["start"]),
+                    "end": float(word["end"]),
+                }
+                for word in repeated_words
+            ],
+        }
+        protected_span = repeated_retained_word_span(
+            words,
+            start_index,
+            end_index,
         )
+        if protected_span:
+            suggestion["_protectedStartIndex"] = protected_span[0]
+            suggestion["_protectedEndIndex"] = protected_span[1]
+        suggestions.append(suggestion)
     return suggestions[:8]
+
+
+ABANDONED_LEADIN_SUBJECTS = {
+    "我",
+    "你",
+    "他",
+    "她",
+    "我们",
+    "你们",
+    "他们",
+    "她们",
+}
+ABANDONED_LEADIN_PREDICATES = {"觉得", "认为", "感觉"}
+ABANDONED_LEADIN_COLLECTIVE_CUES = (
+    "身边",
+    "周围",
+    "人人",
+    "大家",
+    "所有人",
+    "别人",
+    "人家",
+    "很多人",
+    "多数人",
+)
+
+
+def build_abandoned_leadin_suggestions(
+    words: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Detect a short abandoned opinion lead-in before a complete main clause."""
+    keys = [content_characters(str(word.get("text") or "")).lower() for word in words]
+    terminal_marks = ("。", "！", "？", "!", "?")
+    clause_start = 0
+    suggestions: list[dict[str, Any]] = []
+
+    for clause_end, word in enumerate(words):
+        is_clause_end = str(word.get("text") or "").rstrip(
+            "”’》〉】」』）"
+        ).endswith(terminal_marks)
+        if not is_clause_end and clause_end + 1 < len(words):
+            continue
+
+        start_index = clause_start
+        if clause_end - start_index >= 4:
+            subject = keys[start_index]
+            predicate = keys[start_index + 1]
+            restarted_subject = keys[start_index + 2]
+            if (
+                subject in ABANDONED_LEADIN_SUBJECTS
+                and predicate in ABANDONED_LEADIN_PREDICATES
+                and restarted_subject.startswith(subject)
+            ):
+                search_end = min(clause_end, start_index + 10)
+                repeated_predicate_index = next(
+                    (
+                        index
+                        for index in range(start_index + 3, search_end + 1)
+                        if keys[index] == predicate
+                    ),
+                    None,
+                )
+                if repeated_predicate_index is not None:
+                    restarted_text = "".join(
+                        keys[start_index + 2 : repeated_predicate_index + 1]
+                    )
+                    if any(
+                        cue in restarted_text
+                        for cue in ABANDONED_LEADIN_COLLECTIVE_CUES
+                    ):
+                        deleted_words = words[start_index : start_index + 2]
+                        suggestions.append(
+                            {
+                                "id": f"suggestion-{start_index}-{start_index + 1}",
+                                "type": "错句",
+                                "reason": (
+                                    "检测到起句未完成后立即重启，保留后面的完整主句"
+                                ),
+                                "confidence": 0.99,
+                                "text": "".join(
+                                    item["text"] for item in deleted_words
+                                ),
+                                "start": float(deleted_words[0]["start"]),
+                                "end": float(deleted_words[-1]["end"]),
+                                "startIndex": start_index,
+                                "endIndex": start_index + 1,
+                                "ranges": [
+                                    {
+                                        "start": float(item["start"]),
+                                        "end": float(item["end"]),
+                                    }
+                                    for item in deleted_words
+                                ],
+                                "_protectedStartIndex": start_index + 2,
+                                "_protectedEndIndex": repeated_predicate_index,
+                            }
+                        )
+
+        if is_clause_end:
+            clause_start = clause_end + 1
+
+    return suggestions
 
 
 def suggest_deletions(
@@ -5252,8 +6650,20 @@ def suggest_deletions(
     if not words:
         return [], "completed"
 
-    rule_suggestions = build_repeated_speech_suggestions(words)
+    rule_suggestions = [
+        *build_repeated_speech_suggestions(words),
+        *build_abandoned_leadin_suggestions(words),
+    ]
     fallback_status = "completed" if rule_suggestions else "unavailable"
+
+    def rule_fallback() -> tuple[list[dict[str, Any]], str]:
+        public_suggestions = copy.deepcopy(rule_suggestions)
+        for suggestion in public_suggestions:
+            suggestion.pop("_protectedStartIndex", None)
+            suggestion.pop("_protectedEndIndex", None)
+        public_suggestions.sort(key=lambda item: item["startIndex"])
+        return public_suggestions[:8], fallback_status
+
     indexed_transcript = "\n".join(
         f"[{index}] {word['text']}"
         for index, word in enumerate(words)
@@ -5277,6 +6687,8 @@ def suggest_deletions(
                         "不要建议。例如“你身边人人都觉得身边人人都觉得一个月”应删除"
                         "第一处“身边人人都觉得”；“在另一群人眼中，在另一在另一群人眼中"
                         "就是家常便饭”应删除“在另一群人眼中，在另一”，保留最后完整起句。"
+                        "“你觉得你身边人人都觉得一个月赚一万”属于起句未完成后立即重启，"
+                        "应只删除开头的“你觉得”，保留“你身边人人都觉得一个月赚一万”。"
                         "同时不要把表达风格、正常停顿、完整观点、事实问题"
                         "或你不喜欢的内容判为错句。宁可少报，不要猜测。"
                         "遇到“今天是星期三，不对，今天是星期四”这类自我纠正时，"
@@ -5303,25 +6715,33 @@ def suggest_deletions(
             temperature=0,
         )
         if getattr(response, "status_code", None) != HTTPStatus.OK:
-            return rule_suggestions, fallback_status
+            return rule_fallback()
         content = str(
             response.output.choices[0].message.content
         ).strip()
         payload = json.loads(content)
     except (AttributeError, IndexError, TypeError, ValueError, json.JSONDecodeError):
-        return rule_suggestions, fallback_status
+        return rule_fallback()
     except Exception:
-        return rule_suggestions, fallback_status
+        return rule_fallback()
 
     raw_suggestions = payload.get("suggestions")
     if not isinstance(raw_suggestions, list):
-        return rule_suggestions, fallback_status
+        return rule_fallback()
 
     allowed_types = {"口误", "重复", "错句", "语气词", "无效片段"}
     candidates: list[dict[str, Any]] = [
         {**suggestion, "_rulePriority": 1}
         for suggestion in rule_suggestions
     ]
+    protected_rule_indices = {
+        index
+        for suggestion in rule_suggestions
+        for index in range(
+            int(suggestion.get("_protectedStartIndex", 0)),
+            int(suggestion.get("_protectedEndIndex", -1)) + 1,
+        )
+    }
     word_count = len(words)
     for item in raw_suggestions:
         if not isinstance(item, dict):
@@ -5353,12 +6773,21 @@ def suggest_deletions(
             confidence = float(item.get("confidence"))
         except (TypeError, ValueError):
             continue
+        minimum_confidence = {
+            "口误": 0.72,
+            "重复": 0.72,
+            "错句": 0.82,
+            "语气词": 0.75,
+            "无效片段": 0.82,
+        }.get(suggestion_type, 1.01)
+        suggestion_indices = set(range(start_index, end_index + 1))
         if (
             suggestion_type not in allowed_types
             or not reason
             or not math.isfinite(confidence)
-            or confidence < 0.68
+            or confidence < minimum_confidence
             or confidence > 1
+            or protected_rule_indices.intersection(suggestion_indices)
         ):
             continue
 
@@ -5491,6 +6920,8 @@ def suggest_deletions(
     accepted.sort(key=lambda item: item["startIndex"])
     for candidate in accepted:
         candidate.pop("_rulePriority", None)
+        candidate.pop("_protectedStartIndex", None)
+        candidate.pop("_protectedEndIndex", None)
     return accepted, "completed"
 
 
@@ -5592,6 +7023,7 @@ def transcribe_audio(
         if timed_words
         else fallback_segments
     )
+    editable_segments = build_editable_transcript_segments(segments)
     duration = max([segment["end"] for segment in segments] + [0])
     progress_callback(95)
     return {
@@ -5602,6 +7034,7 @@ def transcribe_audio(
         "languageProbability": None,
         "duration": duration,
         "segments": segments,
+        "editableSegments": editable_segments,
     }
 
 
@@ -5627,6 +7060,9 @@ def process_job(job_id: str) -> None:
         result = transcribe_audio(
             audio_path,
             lambda progress: update_job(job_id, progress=progress),
+        )
+        result["editableSegments"] = build_editable_transcript_segments(
+            result.get("segments") or []
         )
         with JOBS_LOCK:
             media_duration = float(JOBS[job_id]["duration"])
@@ -5657,6 +7093,13 @@ def process_job(job_id: str) -> None:
             result["segments"],
             get_asr_api_key(),
         )
+        if audio_samples and suggestions:
+            suggestions = snap_suggestion_ranges_to_audio(
+                result["segments"],
+                suggestions,
+                media_duration,
+                audio_samples,
+            )
         result["suggestions"] = suggestions
         result["suggestionStatus"] = suggestion_status
         update_job(
@@ -5681,6 +7124,7 @@ def process_cut_job(
     delete_ranges: list[dict[str, float]],
     transcript_delete_ranges: list[dict[str, float]] | None = None,
 ) -> None:
+    _set_thread_job(job_id)
     video_path = JOB_FILES[job_id]
     output_path = video_path.parent / "edited.mp4"
 
@@ -5693,30 +7137,18 @@ def process_cut_job(
         update_edit_job(
             job_id,
             status="processing",
-            stage="正在优化语音边界并剪辑视频",
+            stage="正在按当前预览剪辑视频",
             progress=20,
         )
-        boundary_source = video_path.parent / "speech.mp3"
-        if not boundary_source.is_file():
-            boundary_source = video_path
         requested_ranges = transcript_delete_ranges or delete_ranges
-        boundary_limits = build_transcript_delete_boundary_limits(
-            source_segments,
-            requested_ranges,
-            duration,
-        )
-        media_ranges = snap_delete_ranges_to_audio(
-            boundary_source,
-            requested_ranges,
-            duration,
-            boundary_limits,
-        )
+        media_ranges = copy.deepcopy(requested_ranges)
         update_edit_job(
             job_id,
-            stage="正在剪辑已校准的语音区间",
+            stage="正在生成当前预览视频",
             progress=35,
             ranges=media_ranges,
         )
+        check_cancelled(job_id)
         render_cut_video(video_path, output_path, media_ranges, duration)
         deleted_duration = sum(
             item["end"] - item["start"] for item in media_ranges
@@ -5755,6 +7187,13 @@ def process_cut_job(
             historyName=history_version["name"],
             error=None,
         )
+    except GenerationCancelledError:
+        update_edit_job(
+            job_id,
+            status="cancelled",
+            stage="已取消",
+            error="用户取消了生成。",
+        )
     except Exception as exc:
         update_edit_job(
             job_id,
@@ -5769,8 +7208,10 @@ def process_art_text_job(
     input_path: Path,
     overlays: list[dict[str, Any]],
 ) -> None:
+    _set_thread_job(job_id)
     output_path = input_path.parent / "art-text.mp4"
     try:
+        check_cancelled(job_id)
         update_art_job(
             job_id,
             status="processing",
@@ -5809,6 +7250,13 @@ def process_art_text_job(
             historyName=history_version["name"],
             error=None,
         )
+    except GenerationCancelledError:
+        update_art_job(
+            job_id,
+            status="cancelled",
+            stage="已取消",
+            error="用户取消了生成。",
+        )
     except Exception as exc:
         update_art_job(
             job_id,
@@ -5823,8 +7271,10 @@ def process_picture_in_picture_job(
     input_path: Path,
     overlays: list[dict[str, Any]],
 ) -> None:
+    _set_thread_job(job_id)
     output_path = input_path.parent / "picture-in-picture.mp4"
     try:
+        check_cancelled(job_id)
         update_picture_in_picture_job(
             job_id,
             status="processing",
@@ -5840,12 +7290,296 @@ def process_picture_in_picture_job(
             outputUrl=f"/api/transcriptions/{job_id}/picture-in-picture-video",
             error=None,
         )
+    except GenerationCancelledError:
+        update_picture_in_picture_job(
+            job_id,
+            status="cancelled",
+            stage="已取消",
+            error="用户取消了生成。",
+        )
     except Exception as exc:
         update_picture_in_picture_job(
             job_id,
             status="failed",
             stage="画中画视频生成失败",
             error=str(exc),
+        )
+
+
+def process_preview_composition_job(
+    job_id: str,
+    requested_ranges: list[dict[str, float]],
+    art_overlays: list[dict[str, Any]],
+    picture_in_picture_overlays: list[dict[str, Any]],
+    composition_request: dict[str, Any],
+) -> None:
+    """Turn the shared live preview into one rendered video in a single job."""
+    _set_thread_job(job_id)
+    video_path = JOB_FILES[job_id]
+    edited_path = video_path.parent / "edited.mp4"
+    art_path = video_path.parent / "art-text.mp4"
+    pip_path = video_path.parent / "picture-in-picture.mp4"
+
+    try:
+        with JOBS_LOCK:
+            job = JOBS[job_id]
+            duration = float(job["duration"])
+            source_segments = copy.deepcopy(
+                (job.get("result") or {}).get("segments") or []
+            )
+
+        update_edit_job(
+            job_id,
+            status="processing",
+            stage="正在生成当前预览的剪辑基础视频",
+            progress=15,
+        )
+        update_job(
+            job_id,
+            composition={
+                "status": "processing",
+                "stage": "正在生成当前预览的剪辑基础视频",
+                "progress": 15,
+                "outputUrl": None,
+                "outputDuration": None,
+                "error": None,
+                "updatedAt": utc_now(),
+            },
+        )
+        if art_overlays:
+            update_art_job(
+                job_id,
+                stage="正在生成当前预览的剪辑基础视频",
+                progress=10,
+            )
+        if picture_in_picture_overlays:
+            update_picture_in_picture_job(
+                job_id,
+                stage="正在生成当前预览的剪辑基础视频",
+                progress=10,
+            )
+
+        media_ranges = copy.deepcopy(requested_ranges)
+        update_edit_job(
+            job_id,
+            stage="正在按当前预览生成最终时间轴",
+            progress=35,
+            ranges=media_ranges,
+        )
+        render_cut_video(video_path, edited_path, media_ranges, duration)
+        check_cancelled(job_id)
+        output_duration = round(
+            duration
+            - sum(item["end"] - item["start"] for item in media_ranges),
+            3,
+        )
+        transcript = build_retained_transcript(
+            source_segments,
+            requested_ranges,
+            output_duration,
+            timeline_delete_ranges=media_ranges,
+        )
+        update_edit_job(
+            job_id,
+            status="completed",
+            stage="当前预览的剪辑基础视频已生成",
+            progress=100,
+            outputUrl=f"/api/transcriptions/{job_id}/edited-video",
+            outputDuration=output_duration,
+            transcript=transcript,
+            ranges=media_ranges,
+            error=None,
+        )
+
+        current_input = edited_path
+        if art_overlays:
+            final_art_overlays = copy.deepcopy(art_overlays)
+            if not final_art_overlays:
+                raise RuntimeError("剪辑后没有可显示的艺术字，请检查当前预览。")
+            update_art_job(
+                job_id,
+                status="processing",
+                stage="正在按最终时间轴合成艺术字",
+                progress=55,
+                overlays=final_art_overlays,
+            )
+            update_job(
+                job_id,
+                composition={
+                    "status": "processing",
+                    "stage": "正在按最终时间轴合成艺术字",
+                    "progress": 55,
+                    "outputUrl": None,
+                    "outputDuration": output_duration,
+                    "error": None,
+                    "updatedAt": utc_now(),
+                },
+            )
+            if picture_in_picture_overlays:
+                update_picture_in_picture_job(
+                    job_id,
+                    stage="正在按最终时间轴合成艺术字",
+                    progress=55,
+                )
+            render_art_text_video(edited_path, art_path, final_art_overlays)
+            check_cancelled(job_id)
+            update_art_job(
+                job_id,
+                status="completed",
+                stage="当前预览的艺术字已合成",
+                progress=100,
+                outputUrl=f"/api/transcriptions/{job_id}/art-text-video",
+                outputDuration=output_duration,
+                error=None,
+            )
+            current_input = art_path
+
+        if picture_in_picture_overlays:
+            final_pip_overlays = copy.deepcopy(picture_in_picture_overlays)
+            if not final_pip_overlays:
+                raise RuntimeError("剪辑后没有可显示的画中画，请检查当前预览。")
+            update_picture_in_picture_job(
+                job_id,
+                status="processing",
+                stage="正在按最终时间轴合成画中画",
+                progress=75,
+                overlays=final_pip_overlays,
+            )
+            update_job(
+                job_id,
+                composition={
+                    "status": "processing",
+                    "stage": "正在按最终时间轴合成画中画",
+                    "progress": 75,
+                    "outputUrl": None,
+                    "outputDuration": output_duration,
+                    "error": None,
+                    "updatedAt": utc_now(),
+                },
+            )
+            render_picture_in_picture_video(current_input, pip_path, final_pip_overlays)
+            check_cancelled(job_id)
+            update_picture_in_picture_job(
+                job_id,
+                status="completed",
+                stage="当前预览已生成视频",
+                progress=100,
+                outputUrl=f"/api/transcriptions/{job_id}/picture-in-picture-video",
+                outputDuration=output_duration,
+                error=None,
+            )
+            current_input = pip_path
+
+        # Keep one canonical output for the shared editor button. The staged
+        # files above are still retained for backwards-compatible result views,
+        # while this file is always the exact final preview composition.
+        check_cancelled(job_id)
+        composition_path = video_path.parent / "composition.mp4"
+        shutil.copy2(current_input, composition_path)
+        with JOBS_LOCK:
+            original_filename = str(JOBS[job_id].get("filename") or "视频.mp4")
+        history_version = save_history_version(
+            job_id=job_id,
+            kind="composed",
+            source_video=composition_path,
+            duration=output_duration,
+            transcript=transcript,
+            original_filename=original_filename,
+            custom_name=(composition_request or {}).get("historyName"),
+        )
+        update_job(
+            job_id,
+            composition={
+                "status": "completed",
+                "stage": "当前预览已生成最终视频",
+                "progress": 100,
+                "outputUrl": f"/api/transcriptions/{job_id}/composition-video",
+                "outputDuration": output_duration,
+                "request": composition_request,
+                "historyId": history_version["id"],
+                "historyName": history_version["name"],
+                "error": None,
+                "updatedAt": utc_now(),
+            },
+        )
+    except GenerationCancelledError:
+        with JOBS_LOCK:
+            job = JOBS.get(job_id) or {}
+            edit_status = (job.get("edit") or {}).get("status")
+            art_status = (job.get("art") or {}).get("status")
+            pip_status = (job.get("pictureInPicture") or {}).get("status")
+        if edit_status in {"queued", "processing"}:
+            update_edit_job(
+                job_id,
+                status="cancelled",
+                stage="已取消",
+                error="用户取消了生成。",
+            )
+        if art_status in {"queued", "processing"}:
+            update_art_job(
+                job_id,
+                status="cancelled",
+                stage="已取消",
+                error="用户取消了生成。",
+            )
+        if pip_status in {"queued", "processing"}:
+            update_picture_in_picture_job(
+                job_id,
+                status="cancelled",
+                stage="已取消",
+                error="用户取消了生成。",
+            )
+        update_job(
+            job_id,
+            composition={
+                "status": "cancelled",
+                "stage": "已取消",
+                "progress": 100,
+                "outputUrl": None,
+                "outputDuration": None,
+                "error": "用户取消了生成。",
+                "updatedAt": utc_now(),
+            },
+        )
+    except Exception as exc:
+        message = str(exc)
+        with JOBS_LOCK:
+            job = JOBS.get(job_id) or {}
+            edit_status = (job.get("edit") or {}).get("status")
+            art_status = (job.get("art") or {}).get("status")
+            pip_status = (job.get("pictureInPicture") or {}).get("status")
+        if edit_status in {"queued", "processing"}:
+            update_edit_job(
+                job_id,
+                status="failed",
+                stage="当前预览生成失败",
+                error=message,
+            )
+        if art_status in {"queued", "processing"}:
+            update_art_job(
+                job_id,
+                status="failed",
+                stage="当前预览生成失败",
+                error=message,
+            )
+        if pip_status in {"queued", "processing"}:
+            update_picture_in_picture_job(
+                job_id,
+                status="failed",
+                stage="当前预览生成失败",
+                error=message,
+            )
+        update_job(
+            job_id,
+            composition={
+                "status": "failed",
+                "stage": "当前预览生成失败",
+                "progress": 100,
+                "outputUrl": None,
+                "outputDuration": None,
+                "error": message,
+                "updatedAt": utc_now(),
+            },
         )
 
 
@@ -5977,6 +7711,7 @@ def process_art_suggestion_job(
 @app.get("/api/art-templates")
 def get_art_text_templates() -> dict[str, Any]:
     templates = list_art_text_templates()
+    hidden_builtins = list_hidden_art_text_templates()
     return {
         "templates": templates,
         "count": len(templates),
@@ -5986,6 +7721,8 @@ def get_art_text_templates() -> dict[str, Any]:
         "uploadedCount": sum(
             template["source"] == "uploaded" for template in templates
         ),
+        "hiddenCount": len(hidden_builtins),
+        "hiddenBuiltins": hidden_builtins,
     }
 
 
@@ -6063,7 +7800,13 @@ def update_art_text_template(
 @app.delete("/api/art-templates/{template_id}")
 def delete_art_text_template(template_id: str) -> dict[str, str]:
     if template_id in ART_TEXT_STYLES:
-        raise HTTPException(status_code=400, detail="内置艺术字模板不能删除。")
+        # Built-in templates are soft-deleted: hidden from the library so they
+        # can be restored later instead of being lost permanently.
+        with ART_TEMPLATE_LIBRARY_LOCK:
+            hidden = load_hidden_art_templates_unlocked()
+            hidden.add(template_id)
+            save_hidden_art_templates_unlocked(hidden)
+        return {"status": "hidden"}
     with JOBS_LOCK:
         is_used = any(
             overlay.get("artStyle") == template_id
@@ -6084,6 +7827,98 @@ def delete_art_text_template(template_id: str) -> dict[str, str]:
             item for item in templates if item.get("id") != template_id
         ]
         save_uploaded_art_templates_unlocked(templates)
+    return {"status": "deleted"}
+
+
+@app.post("/api/art-templates/{template_id}/restore")
+def restore_art_text_template(template_id: str) -> dict[str, str]:
+    if template_id not in ART_TEXT_STYLES:
+        raise HTTPException(status_code=404, detail="内置艺术字模板不存在。")
+    with ART_TEMPLATE_LIBRARY_LOCK:
+        hidden = load_hidden_art_templates_unlocked()
+        hidden.discard(template_id)
+        save_hidden_art_templates_unlocked(hidden)
+    return {"status": "restored"}
+
+
+@app.get("/api/art-position-presets")
+def get_art_position_presets() -> dict[str, Any]:
+    with ART_POSITION_PRESETS_LOCK:
+        presets = [
+            public_art_position_preset(record)
+            for record in load_art_position_presets_unlocked()
+        ]
+    return {"presets": presets, "count": len(presets)}
+
+
+@app.post("/api/art-position-presets", status_code=201)
+def create_art_position_preset(
+    request: ArtPositionPresetCreate,
+) -> dict[str, Any]:
+    name = request.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="坐标预设名称不能为空。")
+    with ART_POSITION_PRESETS_LOCK:
+        presets = load_art_position_presets_unlocked()
+        if len(presets) >= ART_POSITION_PRESET_MAX_COUNT:
+            raise HTTPException(
+                status_code=400,
+                detail=f"坐标预设最多保存 {ART_POSITION_PRESET_MAX_COUNT} 条。",
+            )
+        now = utc_now()
+        record = {
+            "id": f"pos-{uuid.uuid4().hex}",
+            "name": name,
+            "x": clamp_art_position(request.x),
+            "y": clamp_art_position(request.y),
+            "createdAt": now,
+            "updatedAt": now,
+        }
+        presets.append(record)
+        save_art_position_presets_unlocked(presets)
+    return public_art_position_preset(record)
+
+
+@app.patch("/api/art-position-presets/{preset_id}")
+def update_art_position_preset(
+    preset_id: str,
+    request: ArtPositionPresetUpdate,
+) -> dict[str, Any]:
+    if request.name is not None:
+        name = request.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="坐标预设名称不能为空。")
+    else:
+        name = None
+    with ART_POSITION_PRESETS_LOCK:
+        presets = load_art_position_presets_unlocked()
+        record = next(
+            (item for item in presets if item.get("id") == preset_id),
+            None,
+        )
+        if record is None:
+            raise HTTPException(status_code=404, detail="坐标预设不存在。")
+        if name is not None:
+            record["name"] = name
+        if request.x is not None:
+            record["x"] = clamp_art_position(request.x)
+        if request.y is not None:
+            record["y"] = clamp_art_position(request.y)
+        record["updatedAt"] = utc_now()
+        save_art_position_presets_unlocked(presets)
+        return public_art_position_preset(record)
+
+
+@app.delete("/api/art-position-presets/{preset_id}")
+def delete_art_position_preset(preset_id: str) -> dict[str, str]:
+    with ART_POSITION_PRESETS_LOCK:
+        presets = load_art_position_presets_unlocked()
+        if not any(item.get("id") == preset_id for item in presets):
+            raise HTTPException(status_code=404, detail="坐标预设不存在。")
+        presets = [
+            item for item in presets if item.get("id") != preset_id
+        ]
+        save_art_position_presets_unlocked(presets)
     return {"status": "deleted"}
 
 
@@ -6364,6 +8199,9 @@ def use_history_version(history_id: str) -> JSONResponse:
     result["mediaDuration"] = round(duration, 3)
     result.setdefault("language", "zh")
     result.setdefault("languageProbability", None)
+    result["editableSegments"] = build_editable_transcript_segments(
+        result.get("segments") or []
+    )
     result.setdefault("suggestions", [])
     result.setdefault("suggestionStatus", "unavailable")
     result.setdefault("noSpeechSuggestions", [])
@@ -6379,11 +8217,13 @@ def use_history_version(history_id: str) -> JSONResponse:
         "progress": 100,
         "result": result,
         "edit": None,
+        "cutDraft": None,
         "art": None,
         "artSuggestion": None,
         "pictureInPictureImages": [],
         "pictureInPictureVideos": [],
         "pictureInPicture": None,
+        "composition": None,
         "historySource": public_history_version(record),
         "error": None,
         "createdAt": now,
@@ -6489,11 +8329,13 @@ async def create_transcription(
         "progress": 10,
         "result": None,
         "edit": None,
+        "cutDraft": None,
         "art": None,
         "artSuggestion": None,
         "pictureInPictureImages": [],
         "pictureInPictureVideos": [],
         "pictureInPicture": None,
+        "composition": None,
         "error": None,
         "createdAt": now,
         "updatedAt": now,
@@ -6512,7 +8354,127 @@ def get_transcription(job_id: str) -> dict[str, Any]:
         job = JOBS.get(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+        if job.get("cutDraft") is None:
+            job["cutDraft"] = load_cut_draft(job_id)
         return public_job(job)
+
+
+@app.post("/api/transcriptions/{job_id}/cancel")
+def cancel_transcription_job(job_id: str) -> dict[str, Any]:
+    """Cancel an in-progress video generation (edit / art / PiP / compose).
+
+    Flags the job, marks any in-flight sub-job as "cancelled", and terminates the
+    running FFmpeg process so the render stops promptly. Safe to call when
+    nothing is generating — the job is returned unchanged.
+    """
+    with JOBS_LOCK:
+        if job_id not in JOBS:
+            raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+    mark_job_cancelled(job_id)
+    with JOBS_LOCK:
+        return public_job(JOBS[job_id])
+
+
+@app.get("/api/transcriptions/{job_id}/cut-draft")
+def get_cut_draft(job_id: str) -> dict[str, Any]:
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+        draft = job.get("cutDraft")
+        if draft is None:
+            draft = load_cut_draft(job_id)
+            job["cutDraft"] = draft
+        return {"cutDraft": copy.deepcopy(draft)}
+
+
+@app.put("/api/transcriptions/{job_id}/cut-draft")
+def update_cut_draft(
+    job_id: str,
+    request: CutDraftRequest,
+) -> dict[str, Any]:
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+        if job.get("status") != "completed":
+            raise HTTPException(status_code=409, detail="文字识别尚未完成。")
+        duration = float(job.get("duration") or 0)
+        if duration <= 0:
+            raise HTTPException(status_code=409, detail="视频时长无效，无法保存剪辑草稿。")
+
+        current_draft = job.get("cutDraft")
+        if current_draft is None:
+            current_draft = load_cut_draft(job_id)
+        current_revision = int((current_draft or {}).get("revision") or 0)
+        if request.revision != current_revision:
+            raise HTTPException(
+                status_code=409,
+                detail="剪辑草稿已在其他页面更新，请刷新后继续。",
+            )
+
+        try:
+            text_ranges = []
+            for item in request.textRanges:
+                normalized = normalize_cut_draft_range(item, duration)
+                text_ranges.append(
+                    {
+                        **item.model_dump(
+                            exclude={"start", "end"},
+                            exclude_none=True,
+                        ),
+                        **normalized,
+                    }
+                )
+            no_speech_ranges = []
+            for item in request.noSpeechRanges:
+                normalized = normalize_cut_draft_range(item, duration)
+                no_speech_ranges.append(
+                    {
+                        "key": item.key,
+                        **normalized,
+                    }
+                )
+            timeline_ranges = [
+                normalize_cut_draft_range(item, duration)
+                for item in request.timelineRanges
+            ]
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        draft = {
+            "schemaVersion": 1,
+            "revision": current_revision + 1,
+            "textRanges": text_ranges,
+            "noSpeechRanges": no_speech_ranges,
+            "timelineRanges": timeline_ranges,
+            "updatedAt": utc_now(),
+        }
+        try:
+            save_cut_draft(job_id, draft)
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail="剪辑草稿保存失败，请检查磁盘空间后重试。",
+            ) from exc
+        job["cutDraft"] = draft
+        job["updatedAt"] = draft["updatedAt"]
+        return {"cutDraft": copy.deepcopy(draft)}
+
+
+@app.delete("/api/transcriptions/{job_id}/cut-draft")
+def delete_cut_draft(job_id: str) -> dict[str, str]:
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+        try:
+            remove_cut_draft(job_id)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail="剪辑草稿清除失败。") from exc
+        job["cutDraft"] = None
+        job["updatedAt"] = utc_now()
+        return {"status": "cleared"}
 
 
 @app.patch("/api/transcriptions/{job_id}/transcript")
@@ -6557,6 +8519,7 @@ def update_transcript_word(
                 raise HTTPException(status_code=404, detail="要修正的词块不存在。")
             segment["text"] = corrected_text
 
+        result["editableSegments"] = build_editable_transcript_segments(segments)
         result["text"] = "\n".join(
             str(item.get("text") or "") for item in segments
         )
@@ -6574,6 +8537,9 @@ def update_transcript_word(
 
         job["art"] = None
         job["artSuggestion"] = None
+        if (job.get("pictureInPicture") or {}).get("source") == "art":
+            job["pictureInPicture"] = None
+        job["composition"] = None
 
         job["updatedAt"] = utc_now()
         return {
@@ -6613,6 +8579,7 @@ def update_transcript_text(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         result["segments"] = segments
+        result["editableSegments"] = build_editable_transcript_segments(segments)
         result["text"] = "\n".join(
             str(segment.get("text") or "") for segment in segments
         )
@@ -6630,6 +8597,9 @@ def update_transcript_text(
         if changed_count:
             job["art"] = None
             job["artSuggestion"] = None
+            if (job.get("pictureInPicture") or {}).get("source") == "art":
+                job["pictureInPicture"] = None
+            job["composition"] = None
 
         job["updatedAt"] = utc_now()
         return {
@@ -6637,6 +8607,70 @@ def update_transcript_text(
             "editTranscript": copy.deepcopy(edit_transcript),
             "changedWords": changed_count,
         }
+
+
+@app.put("/api/transcriptions/{job_id}/editable-segments")
+def update_editable_transcript_segments(
+    job_id: str,
+    request: TranscriptSegmentOperation,
+) -> dict[str, Any]:
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+        if job.get("status") != "completed" or not job.get("result"):
+            raise HTTPException(status_code=409, detail="文字识别尚未完成。")
+        edit = job.get("edit") or {}
+        if edit.get("status") in {"queued", "processing"}:
+            raise HTTPException(status_code=409, detail="视频正在剪辑，请完成后再调整分段。")
+        art = job.get("art") or {}
+        if art.get("status") in {"queued", "processing"}:
+            raise HTTPException(
+                status_code=409,
+                detail="艺术字视频正在生成，请完成后再调整分段。",
+            )
+
+        result = job["result"]
+        editable_segments = result.get("editableSegments") or (
+            build_editable_transcript_segments(result.get("segments") or [])
+        )
+        try:
+            updated_segments = apply_transcript_segment_operation(
+                editable_segments,
+                request,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        result["editableSegments"] = updated_segments
+        if request.action == "text":
+            # A text edit changes the actual transcript, so re-sync the ASR
+            # segments and update the overlapping subtitle cues' text while
+            # keeping their times stable.
+            result["segments"] = sync_source_segments_from_editable(
+                result.get("segments") or [],
+                updated_segments,
+            )
+            result["text"] = "\n".join(
+                str(segment.get("text") or "")
+                for segment in result["segments"]
+            )
+            existing_art = job.get("art")
+            edited_editable = updated_segments[request.segmentIndex]
+            source_index = int(
+                edited_editable.get("sourceSegmentIndex", 0) or 0
+            )
+            source_segments = result.get("segments") or []
+            if existing_art is not None and 0 <= source_index < len(source_segments):
+                source_segment = source_segments[source_index]
+                update_transcript_track_text_for_segment(
+                    existing_art,
+                    float(source_segment.get("start") or 0),
+                    float(source_segment.get("end") or 0),
+                    source_segment.get("text") or "",
+                )
+        job["updatedAt"] = utc_now()
+        return {"editableSegments": copy.deepcopy(updated_segments)}
 
 
 @app.post("/api/transcriptions/{job_id}/cuts", status_code=202)
@@ -6678,6 +8712,9 @@ def create_cut(
         job["edit"] = edit
         job["art"] = None
         job["artSuggestion"] = None
+        job["pictureInPicture"] = None
+        job["composition"] = None
+        job["cancelRequested"] = False
         job["updatedAt"] = now
 
     background_tasks.add_task(
@@ -6709,6 +8746,24 @@ def get_edited_video(job_id: str, download: bool = False) -> FileResponse:
         media_type="video/mp4",
         filename=filename,
     )
+
+
+@app.get("/api/transcriptions/{job_id}/composition-video")
+def get_composition_video(job_id: str, download: bool = False) -> FileResponse:
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        video_path = JOB_FILES.get(job_id)
+        composition = job.get("composition") if job else None
+        if job is None:
+            raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+        if not composition or composition.get("status") != "completed" or video_path is None:
+            raise HTTPException(status_code=409, detail="当前预览视频尚未生成。")
+
+    output_path = video_path.parent / "composition.mp4"
+    if not output_path.is_file():
+        raise HTTPException(status_code=404, detail="当前预览视频文件不存在。")
+    filename = f"{Path(job['filename']).stem}-当前预览版.mp4" if download else None
+    return FileResponse(output_path, media_type="video/mp4", filename=filename)
 
 
 @app.get("/api/transcriptions/{job_id}/original-video")
@@ -6838,6 +8893,7 @@ def create_transcript_art_text_track(
     job_id: str,
     request: TranscriptArtTextTrackRequest,
 ) -> dict[str, Any]:
+    live_draft = request.draftTranscript is not None
     with JOBS_LOCK:
         job = JOBS.get(job_id)
         if job is None:
@@ -6851,22 +8907,41 @@ def create_transcript_art_text_track(
         video_path = JOB_FILES.get(job_id)
         if video_path is None:
             raise HTTPException(status_code=404, detail="原视频文件不存在。")
-        try:
-            ensure_original_source_available(job, request.source)
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        if request.source == "edited" and edit.get("status") != "completed":
-            raise HTTPException(status_code=409, detail="请先完成视频剪辑。")
-        if request.source == "edited":
-            duration = float(edit.get("outputDuration") or 0)
-            transcript = copy.deepcopy(edit.get("transcript") or {})
-            input_path = video_path.parent / "edited.mp4"
-        else:
-            duration = float(job["duration"])
-            transcript = copy.deepcopy(job.get("result") or {})
+        if live_draft:
+            draft_segments = request.draftTranscript.get("segments")
+            if request.draftDuration is None:
+                raise HTTPException(status_code=400, detail="剪辑草稿缺少视频时长。")
+            if not isinstance(draft_segments, list) or not draft_segments:
+                raise HTTPException(status_code=400, detail="剪辑草稿没有可用文案。")
+            if any(not isinstance(segment, dict) for segment in draft_segments):
+                raise HTTPException(status_code=400, detail="剪辑草稿文案格式无效。")
+            if len(draft_segments) > 1000 or sum(
+                len(str(segment.get("text") or ""))
+                for segment in draft_segments
+            ) > 50000:
+                raise HTTPException(status_code=400, detail="剪辑草稿文案过长。")
+            duration = float(request.draftDuration)
+            transcript = copy.deepcopy(request.draftTranscript)
             input_path = video_path
+            segmentation_source = f"{request.source}:draft"
+        else:
+            try:
+                ensure_original_source_available(job, request.source)
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            if request.source == "edited" and edit.get("status") != "completed":
+                raise HTTPException(status_code=409, detail="请先完成视频剪辑。")
+            segmentation_source = request.source
+            if request.source == "edited":
+                duration = float(edit.get("outputDuration") or 0)
+                transcript = copy.deepcopy(edit.get("transcript") or {})
+                input_path = video_path.parent / "edited.mp4"
+            else:
+                duration = float(job["duration"])
+                transcript = copy.deepcopy(job.get("result") or {})
+                input_path = video_path
         segmentation_cache = copy.deepcopy(
-            (job.get("artTranscriptSegmentation") or {}).get(request.source)
+            (job.get("artTranscriptSegmentation") or {}).get(segmentation_source)
         )
 
     if not input_path.is_file():
@@ -6878,14 +8953,15 @@ def create_transcript_art_text_track(
         semantic_breaks: list[int] | None = None
         segmentation_method = "local"
         if (
-            isinstance(segmentation_cache, dict)
+            not live_draft
+            and isinstance(segmentation_cache, dict)
             and segmentation_cache.get("key") == segmentation_key
             and segmentation_cache.get("model") == ART_TEXT_SEGMENTATION_MODEL
             and isinstance(segmentation_cache.get("breakAfter"), list)
         ):
             semantic_breaks = list(segmentation_cache["breakAfter"])
             segmentation_method = "ai"
-        else:
+        elif not live_draft:
             font_path = resolve_art_text_font_path(request.font)
             if font_path is None:
                 raise ValueError("全文艺术字轨道使用的字体不存在或已被删除。")
@@ -6912,7 +8988,7 @@ def create_transcript_art_text_track(
                         current_job.setdefault(
                             "artTranscriptSegmentation",
                             {},
-                        )[request.source] = {
+                        )[segmentation_source] = {
                             "key": segmentation_key,
                             "model": ART_TEXT_SEGMENTATION_MODEL,
                             "breakAfter": list(semantic_breaks),
@@ -6986,6 +9062,9 @@ def create_art_text(
     }
     with JOBS_LOCK:
         JOBS[job_id]["art"] = art
+        JOBS[job_id]["pictureInPicture"] = None
+        JOBS[job_id]["composition"] = None
+        JOBS[job_id]["cancelRequested"] = False
         JOBS[job_id]["updatedAt"] = now
 
     background_tasks.add_task(process_art_text_job, job_id, input_path, overlays)
@@ -7033,10 +9112,8 @@ def create_picture_in_picture_prompt(
             raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
         video_path = JOB_FILES.get(job_id)
         try:
-            source_path, duration, _ = resolve_picture_in_picture_source(
-                job,
-                video_path,
-                request.source,
+            source_path, duration, reference_path, reference_time = (
+                resolve_picture_in_picture_reference(job, video_path, request)
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -7051,13 +9128,9 @@ def create_picture_in_picture_prompt(
     if request.end - request.start < 0.05:
         raise HTTPException(status_code=400, detail="文字片段时长过短。")
 
-    reference_time = min(
-        max(0.0, (float(request.start) + float(request.end)) / 2),
-        max(0.0, duration - 0.01),
-    )
     try:
         reference_image = extract_picture_in_picture_reference_frame(
-            source_path,
+            reference_path,
             reference_time,
         )
         prompt = generate_picture_in_picture_prompt_draft(
@@ -7098,10 +9171,8 @@ def create_picture_in_picture_image(
             raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
         video_path = JOB_FILES.get(job_id)
         try:
-            source_path, duration, _ = resolve_picture_in_picture_source(
-                job,
-                video_path,
-                request.source,
+            source_path, duration, reference_path, reference_time = (
+                resolve_picture_in_picture_reference(job, video_path, request)
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -7136,15 +9207,11 @@ def create_picture_in_picture_image(
         request.mode,
         request.aspectRatio,
     )
-    reference_time = min(
-        max(0.0, (float(request.start) + float(request.end)) / 2),
-        max(0.0, duration - 0.01),
-    )
     image_id = str(uuid.uuid4())
     image_path = source_path.parent / f"picture-in-picture-{image_id}.png"
     try:
         reference_image = extract_picture_in_picture_reference_frame(
-            source_path,
+            reference_path,
             reference_time,
         )
         generate_picture_in_picture_image(
@@ -7234,10 +9301,8 @@ def create_picture_in_picture_video_asset(
             raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
         video_path = JOB_FILES.get(job_id)
         try:
-            source_path, duration, _ = resolve_picture_in_picture_source(
-                job,
-                video_path,
-                request.source,
+            source_path, duration, reference_path, reference_time = (
+                resolve_picture_in_picture_reference(job, video_path, request)
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -7265,13 +9330,9 @@ def create_picture_in_picture_video_asset(
     if request.end - request.start < 0.05:
         raise HTTPException(status_code=400, detail="文字片段时长过短。")
 
-    reference_time = min(
-        max(0.0, (float(request.start) + float(request.end)) / 2),
-        max(0.0, duration - 0.01),
-    )
     try:
         reference_image = extract_picture_in_picture_reference_frame(
-            source_path,
+            reference_path,
             reference_time,
         )
     except RuntimeError as exc:
@@ -7373,6 +9434,156 @@ def get_picture_in_picture_video_asset(job_id: str, asset_id: str) -> FileRespon
     return FileResponse(output_path, media_type="video/mp4")
 
 
+@app.post("/api/transcriptions/{job_id}/compose", status_code=202)
+def create_preview_composition(
+    job_id: str,
+    request: PreviewCompositionRequest,
+    background_tasks: BackgroundTasks,
+) -> JSONResponse:
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        video_path = JOB_FILES.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+        if job.get("status") != "completed":
+            raise HTTPException(status_code=409, detail="文字识别尚未完成。")
+        if video_path is None or not video_path.is_file():
+            raise HTTPException(status_code=404, detail="原视频文件不存在。")
+        for state_name in ("edit", "art", "pictureInPicture", "composition"):
+            state = job.get(state_name) or {}
+            if state.get("status") in {"queued", "processing"}:
+                raise HTTPException(
+                    status_code=409,
+                    detail="当前预览已有生成任务正在处理，请稍候。",
+                )
+        duration = float(job.get("duration") or 0)
+        asset_records = copy.deepcopy(
+            [
+                *(job.get("pictureInPictureImages") or []),
+                *(job.get("pictureInPictureVideos") or []),
+            ]
+        )
+
+    try:
+        requested_ranges = (
+            normalize_delete_ranges(request.ranges, duration)
+            if request.ranges
+            else []
+        )
+        preview_duration = round(
+            duration
+            - sum(item["end"] - item["start"] for item in requested_ranges),
+            3,
+        )
+        if request.target == "art" and not request.artOverlays:
+            raise ValueError("请至少添加一条艺术字。")
+        art_overlays = (
+            normalize_text_overlays(request.artOverlays, preview_duration)
+            if request.artOverlays
+            else []
+        )
+        if request.target == "pip" and not request.pictureInPictureOverlays:
+            raise ValueError("请至少生成并启用一个画中画素材。")
+        picture_in_picture_overlays = (
+            normalize_picture_in_picture_overlays(
+                request.pictureInPictureOverlays,
+                preview_duration,
+                asset_records,
+                video_path.parent,
+                request.pictureInPictureSource,
+            )
+            if request.pictureInPictureOverlays
+            else []
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    now = utc_now()
+    composition = {
+        "status": "queued",
+        "stage": "当前预览生成任务已创建",
+        "progress": 5,
+        "outputUrl": None,
+        "outputDuration": preview_duration,
+        "error": None,
+        "createdAt": now,
+        "updatedAt": now,
+    }
+    edit = {
+        "status": "queued",
+        "stage": "当前预览生成任务已创建",
+        "progress": 5,
+        "historyName": request.historyName,
+        "ranges": copy.deepcopy(requested_ranges),
+        "requestedRanges": requested_ranges,
+        "outputUrl": None,
+        "outputDuration": None,
+        "transcript": None,
+        "composition": True,
+        "error": None,
+        "createdAt": now,
+        "updatedAt": now,
+    }
+    art = (
+        {
+            "status": "queued",
+            "stage": "等待合成当前预览的艺术字",
+            "progress": 5,
+            "historyName": request.historyName,
+            "source": request.artSource,
+            "baseSource": "edited",
+            "composition": True,
+            "overlays": art_overlays,
+            "outputUrl": None,
+            "outputDuration": preview_duration,
+            "error": None,
+            "createdAt": now,
+            "updatedAt": now,
+        }
+        if art_overlays
+        else None
+    )
+    picture_in_picture = (
+        {
+            "status": "queued",
+            "stage": "等待合成当前预览的画中画",
+            "progress": 5,
+            "source": request.pictureInPictureSource,
+            "baseSource": "art" if art_overlays else "edited",
+            "composition": True,
+            "overlays": picture_in_picture_overlays,
+            "outputUrl": None,
+            "outputDuration": preview_duration,
+            "error": None,
+            "createdAt": now,
+            "updatedAt": now,
+        }
+        if request.pictureInPictureOverlays
+        else None
+    )
+    with JOBS_LOCK:
+        latest_job = JOBS.get(job_id)
+        if latest_job is None:
+            raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+        latest_job["edit"] = edit
+        latest_job["art"] = art
+        latest_job["artSuggestion"] = None
+        latest_job["pictureInPicture"] = picture_in_picture
+        latest_job["composition"] = composition
+        latest_job["cancelRequested"] = False
+        latest_job["updatedAt"] = now
+
+    background_tasks.add_task(
+        process_preview_composition_job,
+        job_id,
+        requested_ranges,
+        art_overlays,
+        picture_in_picture_overlays,
+        request.model_dump(mode="json"),
+    )
+    return JSONResponse(copy.deepcopy(composition), status_code=202)
+
+
 @app.post("/api/transcriptions/{job_id}/picture-in-picture", status_code=202)
 def create_picture_in_picture_video(
     job_id: str,
@@ -7427,6 +9638,8 @@ def create_picture_in_picture_video(
     }
     with JOBS_LOCK:
         JOBS[job_id]["pictureInPicture"] = picture_in_picture
+        JOBS[job_id]["composition"] = None
+        JOBS[job_id]["cancelRequested"] = False
         JOBS[job_id]["updatedAt"] = now
 
     background_tasks.add_task(

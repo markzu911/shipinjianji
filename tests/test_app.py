@@ -261,6 +261,7 @@ def test_history_versions_are_persistent_manageable_and_reusable(
     assert use_response.json()["status"] == "completed"
     assert use_response.json()["historySource"]["id"] == art["id"]
     assert reused_job.json()["result"]["text"] == transcript["text"]
+    assert reused_job.json()["result"]["editableSegments"]
     assert delete_response.status_code == 200
     assert not app_module.history_version_directory(edited["id"]).exists()
     assert remaining_response.json()["count"] == 1
@@ -313,6 +314,7 @@ def test_frontend_assets_are_versioned_and_not_cached():
         styles_response = client.get("/styles.css")
         script_response = client.get("/app.js")
         feedback_script_response = client.get("/ui-feedback.js")
+        editor_suite_script_response = client.get("/editor-suite.js")
         art_page_response = client.get("/art-text")
         art_script_response = client.get("/art-text.js")
         pip_page_response = client.get("/picture-in-picture")
@@ -325,18 +327,151 @@ def test_frontend_assets_are_versioned_and_not_cached():
 
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
-    assert "/app.js?v=20260730-03" in page_response.text
-    assert "/styles.css?v=20260730-08" in page_response.text
-    assert "/ui-feedback.js?v=20260729-03" in page_response.text
+    assert "/app.js?v=20260807-01" in page_response.text
+    assert "/styles.css?v=20260810-09" in page_response.text
+    assert "/ui-feedback.js?v=20260807-03" in page_response.text
+    assert "/editor-suite.js?v=20260810-05" in page_response.text
+    assert 'class="preview-grid"' in page_response.text
+    assert 'data-preview-grid-toggle' in page_response.text
+    assert 'data-douyin-preview-toggle' in page_response.text
+    assert 'class="cut-preview-mode-controls"' in page_response.text
+    assert 'id="editorSuiteDouyinChrome"' in page_response.text
+    assert 'class="douyin-status-bar"' not in page_response.text
+    assert 'class="douyin-location"' not in page_response.text
+    assert 'id="page-title" class="sr-only"' in page_response.text
+    assert 'class="hero"' not in page_response.text
+    assert "30 FPS" not in page_response.text
+    assert "剪辑版与艺术字版分别保存，选择任一版本即可继续处理" not in page_response.text
+    assert "汇总文字剪辑、AI 建议、空白剪辑和时间轴" not in page_response.text
+    assert "剪辑是可选步骤，你可以直接为原视频添加艺术字或画中画" not in page_response.text
+    assert "记录当前视频的剪辑操作" not in page_response.text
+    assert "剪辑已完成。你可以基于剪辑视频" not in page_response.text
+    assert "原视频仍保留，可重新选择文字生成新版本" not in page_response.text
+    assert 'class="progress-live-status"' in page_response.text
+    assert 'id="extractStatus">等待处理' in page_response.text
+    assert 'id="transcribeStatus">等待处理' in page_response.text
+    assert "Paraformer 返回句子和词级时间戳" not in page_response.text
+    assert ".progress-live-status {" in styles_response.text
+    assert "counter-reset: process-stage;" in styles_response.text
+    progress_card_rule = styles_response.text.rsplit(
+        "body:not(.has-result) .page-shell:has(#progressCard:not([hidden])) #progressCard {",
+        maxsplit=1,
+    )[1].split("}", maxsplit=1)[0]
+    assert "min-height: 0;" in progress_card_rule
+    assert 'data-editor-suite-nav data-stage="cut"' in page_response.text
+    header_start = page_response.text.index('<header class="site-header">')
+    editor_suite_start = page_response.text.index('data-editor-suite-nav data-stage="cut"')
+    header_actions_start = page_response.text.index('<div class="header-actions">')
+    assert header_start < editor_suite_start < header_actions_start
+    assert editor_suite_script_response.status_code == 200
+    assert "editor-suite:move-finish" in editor_suite_script_response.text
+    assert "job.pictureInPicture?.composition" in editor_suite_script_response.text
+    assert "job.art?.composition" in editor_suite_script_response.text
+    assert "最终导出会同时保留两种效果" in editor_suite_script_response.text
+    assert 'id="editorSuitePreviewOverlay"' in page_response.text
+    assert 'id="editorSuiteTimelineLayer"' in page_response.text
+    assert 'aria-label="艺术字和画中画叠加片段"' in page_response.text
+    assert 'id="editorSuiteInspectorHost"' in page_response.text
+    assert 'id="editorSuiteGenerateDock"' not in page_response.text
+    assert "data-editor-generate=" not in page_response.text
+    assert editor_suite_script_response.text.count("data-editor-suite-generate") == 2
+    assert 'data-generation-kind' not in page_response.text
+    assert editor_suite_script_response.text.count(
+        'class="editor-suite-generate-button"'
+    ) == 1
+    assert "const generateButtons" not in editor_suite_script_response.text
+    assert "const directGenerationSources" not in editor_suite_script_response.text
+    assert 'generateButton?.addEventListener("click", generateCurrentPreview)' in (
+        editor_suite_script_response.text
+    )
+    assert 'id="cut-preview-title"' not in page_response.text
+    assert 'id="editorSuiteTimelineTitle"' not in page_response.text
+    assert 'url.searchParams.set("embedded", "1")' in editor_suite_script_response.text
+    assert 'window.history[method]' in editor_suite_script_response.text
+    assert 'type: "editor-suite:sync-time"' in editor_suite_script_response.text
+    assert 'type: "editor-suite:open-tool"' in editor_suite_script_response.text
+    assert 'data.type === "editor-suite:job-state"' in editor_suite_script_response.text
+    assert "cutTabbar.hidden = !isCut" in editor_suite_script_response.text
+    assert 'type: "editor-suite:generate-video"' not in editor_suite_script_response.text
+    assert 'target: "all"' in editor_suite_script_response.text
+    assert '/compose`' in editor_suite_script_response.text
+    assert "data-editor-suite-download" in editor_suite_script_response.text
+    assert "syncGenerationButton" in editor_suite_script_response.text
+    assert "workspaceSourceTime" in editor_suite_script_response.text
+    assert 'classList.toggle("has-effect-track", nextState.visible)' in editor_suite_script_response.text
+    assert "timelineTrackOffset" in editor_suite_script_response.text
+    assert "timelineTrackCount" in editor_suite_script_response.text
+    assert 'segment.dataset.timelineTrackIndex' in editor_suite_script_response.text
+    assert "select-art-timeline" in editor_suite_script_response.text
+    assert "adjust-art-timeline" in editor_suite_script_response.text
+    assert 'ensureToolFrame("art", artHref);' in editor_suite_script_response.text
+    assert "Math.abs(nextTime - workspaceCurrentTime()) > 0.05" in editor_suite_script_response.text
+    assert "Math.abs(childTime - workspaceCurrentTime()) > 0.05" in editor_suite_script_response.text
+    assert "function syncMirroredPlayback" in editor_suite_script_response.text
+    assert "function scheduleFrameSync" in editor_suite_script_response.text
+    assert 'for (const name of frameEntries.keys()) syncFrameTime(name);' in (
+        editor_suite_script_response.text
+    )
+    frame_sync_start = editor_suite_script_response.text.index(
+        "function scheduleFrameSync()"
+    )
+    frame_sync_end = editor_suite_script_response.text.index(
+        "function renderActiveTool()", frame_sync_start
+    )
+    assert 'if (activeTool === "cut") return;' not in (
+        editor_suite_script_response.text[frame_sync_start:frame_sync_end]
+    )
+    assert 'inspectorHost.classList.toggle("is-background", isCut)' in (
+        editor_suite_script_response.text
+    )
+    assert "renderedPreviewState" in editor_suite_script_response.text
+    assert "function normalizedToolHref" in editor_suite_script_response.text
+    assert 'url.searchParams.delete("embedded")' in editor_suite_script_response.text
+    assert "current.frame.dataset.toolHref !== toolHref" in (
+        editor_suite_script_response.text
+    )
+    assert '["art", "pip"]' in editor_suite_script_response.text
+    assert 'canvas.dataset.effectKind = layer.kind' in (
+        editor_suite_script_response.text
+    )
+    assert 'kind: "shared"' in editor_suite_script_response.text
+    assert "if (effectKind !== activeTool) return;" in (
+        editor_suite_script_response.text
+    )
+    assert 'activeTool !== "cut" && Boolean(state)' not in (
+        editor_suite_script_response.text
+    )
+    assert 'previewVideo?.addEventListener(eventName, scheduleFrameSync)' in editor_suite_script_response.text
+    assert "height: auto !important;" in styles_response.text
+    assert ".editor-suite-inspector-host" in styles_response.text
+    timeline_layer_start = styles_response.text.index(".editor-suite-timeline-layer {")
+    timeline_layer_end = styles_response.text.index("}", timeline_layer_start)
+    timeline_layer_styles = styles_response.text[timeline_layer_start:timeline_layer_end]
+    assert "background: transparent;" in timeline_layer_styles
+    assert "border-bottom: 0;" in timeline_layer_styles
+    assert 'body[data-active-editor-tool="art"] #cutFrameTimelineText' not in styles_response.text
+    assert 'body[data-active-editor-tool="pip"] #cutFrameTimelineText' not in styles_response.text
+    assert ".editor-suite-generate-dock" not in styles_response.text
+    assert ".editor-suite-generate-button" in styles_response.text
+    assert ".editor-suite-generation-runtime" in styles_response.text
+    assert ".editor-suite-nav" in styles_response.text
+    assert "body.has-result .site-header .editor-suite-nav" in styles_response.text
+    assert "body.has-result .site-header .editor-suite-copy" in styles_response.text
+    assert "height: calc(100dvh - 65px);" in styles_response.text
     assert feedback_script_response.status_code == 200
     assert 'className = "app-dialog-shell"' in feedback_script_response.text
     assert "window.appConfirm" in feedback_script_response.text
+    assert "window.appGeneration" in feedback_script_response.text
+    assert "generation-overlay" in styles_response.text
+    assert "window.appGeneration?.show" in art_script_response.text
+    assert "window.appGeneration?.show" in script_response.text
+    assert "window.appGeneration?.show" in pip_script_response.text
     assert "window.confirm" not in script_response.text
     assert 'id="cutOperationLock"' in page_response.text
     assert "setCutOperationLock" in script_response.text
     assert ".cut-operation-lock" in styles_response.text
     assert 'setAttribute("inert", "")' in script_response.text
-    assert 'id="ambientCanvas"' in page_response.text
+    assert 'class="ambient-scan"' in page_response.text
     assert 'id="uploadPreview"' in page_response.text
     assert 'id="selectedVideoPreview"' in page_response.text
     assert 'id="changeFileButton"' in page_response.text
@@ -361,68 +496,223 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert 'id="directToolsPrompt"' in page_response.text
     assert 'id="continuePipButton"' in page_response.text
     assert 'selectAllSuggestionsButton.addEventListener("click"' in script_response.text
-    assert "currentSuggestions.every" in script_response.text
-    assert "一键标记删除" in page_response.text
-    assert "一键标记删除" in script_response.text
-    assert "取消全部标记" in script_response.text
+    assert "一键删除" in page_response.text
+    assert "已全部删除" in script_response.text
+    assert "撤销标记" not in script_response.text
     assert "renderNoSpeechSuggestions" in script_response.text
     assert "selectedNoSpeechRanges" in script_response.text
-    assert "一键标记可删片段" in page_response.text
-    assert "一键标记可删片段" in script_response.text
+    assert "一键删除可删片段" in page_response.text
+    assert "可删片段已删除" in script_response.text
     assert "previewNoSpeechSuggestion" in script_response.text
     assert "setOriginalSourceActionsAllowed(!job.edit?.status);" in script_response.text
     assert "setOriginalSourceActionsAllowed(false);" in script_response.text
     assert "continuePipButton.href" in script_response.text
     assert "source=edited" in script_response.text
     assert 'id="restartProjectButton"' in page_response.text
+    assert 'id="result-title"' not in page_response.text
+    assert 'class="result-stats"' not in page_response.text
+    assert 'id="newUploadButton"' not in page_response.text
+    assert "const newUploadButton" not in script_response.text
     assert 'id="cutPreviewVideo"' in page_response.text
     assert 'id="cutFrameTimeline"' in page_response.text
+    assert 'id="cutFrameTimelineScroll"' in page_response.text
     assert 'id="cutFrameTimelineTrack"' in page_response.text
+    assert 'id="cutFrameTimelineText"' in page_response.text
     assert 'id="cutFrameTimelineThumbnails"' in page_response.text
     assert 'id="cutFrameTimelineRanges"' in page_response.text
-    assert 'id="removeTimelineRangeButton"' in page_response.text
+    assert 'id="timelineRangeConfirmActions"' not in page_response.text
+    assert 'id="cancelTimelineRangeButton"' not in page_response.text
+    assert 'id="confirmTimelineRangeButton"' not in page_response.text
+    assert "松开后弹窗确认" in page_response.text
+    assert "触碰文字时仅吸附完整文字边界" in page_response.text
+    assert 'id="clearSelectionButton" class="secondary-button" type="button" disabled hidden' in page_response.text
+    assert 'clearSelectionButton.addEventListener("click"' not in script_response.text
     assert 'id="textEditorPreviewPane"' in page_response.text
-    assert 'id="transcriptSegmentList"' in page_response.text
-    assert 'id="transcriptEditStatus"' in page_response.text
-    assert "saveTranscriptText" in script_response.text
-    assert 'method: "PUT"' in script_response.text
-    assert "/transcript`" in script_response.text
+    assert 'id="textTranscriptTab"' not in page_response.text
+    assert 'id="textTranscriptPanel"' not in page_response.text
+    assert 'id="transcriptText"' not in page_response.text
+    assert 'id="transcriptSegmentList"' not in page_response.text
+    assert "识别全文" not in page_response.text
+    assert "saveTranscriptText" not in script_response.text
     assert 'class="text-editor-tabbar"' in page_response.text
+    cuts_tab_position = page_response.text.index('data-text-editor-tab="cuts"')
+    suggestions_tab_position = page_response.text.index(
+        'data-text-editor-tab="suggestions"'
+    )
+    silence_tab_position = page_response.text.index('data-text-editor-tab="silence"')
+    history_tab_position = page_response.text.index('data-text-editor-tab="history"')
+    assert (
+        cuts_tab_position
+        < suggestions_tab_position
+        < silence_tab_position
+        < history_tab_position
+    )
+    cuts_tab_markup = page_response.text[
+        page_response.text.index('id="textCutsTab"') : cuts_tab_position
+    ]
+    assert 'aria-selected="true"' in cuts_tab_markup
     assert 'data-text-editor-tab="cuts"' in page_response.text
     assert 'data-text-editor-panel="cuts"' in page_response.text
     assert 'data-text-editor-tab="silence"' in page_response.text
     assert 'data-text-editor-panel="silence"' in page_response.text
+    assert 'id="cutUndoButton"' in page_response.text
+    assert 'id="cutRedoButton"' in page_response.text
+    assert 'id="cutHistoryStatus"' in page_response.text
+    assert 'id="cutHistoryList"' in page_response.text
+    assert 'data-text-editor-tab="history"' in page_response.text
+    assert 'data-text-editor-panel="history"' in page_response.text
+    assert "function undoCutHistory()" in script_response.text
+    assert "function redoCutHistory()" in script_response.text
+    assert "handleGlobalCutHistoryShortcut" in script_response.text
+    assert "video-editor:cut-history:${jobId}" in script_response.text
+    assert 'stageCutHistoryOperation("删除时间轴区间")' in script_response.text
     assert 'aria-controls="textSilencePanel"' in page_response.text
+    assert 'data-text-editor-tab="output"' not in page_response.text
+    assert '>生成结果</button>' not in page_response.text
     output_panel_start = page_response.text.index('id="textOutputPanel"')
-    output_panel_end = page_response.text.index('id="textTranscriptPanel"')
+    output_panel_end = page_response.text.index('id="suggestionsBlock"')
     output_panel_markup = page_response.text[output_panel_start:output_panel_end]
     assert page_response.text.count('id="generateCutButton"') == 1
     assert 'id="generateCutButton"' in output_panel_markup
     assert 'id="outputCutSummary"' in output_panel_markup
     assert 'id="outputCutSelectionDetail"' in output_panel_markup
+    assert 'class="editor-suite-generation-runtime"' in output_panel_markup
+    assert 'aria-hidden="true"' in output_panel_markup
     assert 'id="generateNoSpeechCutButton"' not in page_response.text
     assert "generateNoSpeechCutButton" not in script_response.text
     assert 'generateCutButton.addEventListener("click", generateCut)' in script_response.text
+    assert 'activateTextEditorPanel("output")' not in script_response.text
     assert "updateOriginalSourceActionsVisibility" in script_response.text
     assert "source=original" in script_response.text
     assert "picture-in-picture?job=" in script_response.text
     assert "/original-video`" in script_response.text
     assert "buildCutTimelineThumbnails" in script_response.text
+    assert "renderCutTimelineTextSegments" in script_response.text
+    assert "cutTimelinePixelsPerSecond" in script_response.text
+    assert "CUT_TIMELINE_TEXT_LINES" in script_response.text
+    assert "Math.ceil(total / majorStep) + 1" in script_response.text
+    assert ".cut-timeline-text-segment {" in styles_response.text
+    assert ".cut-frame-timeline .frame-timeline-thumb img {" in styles_response.text
+    assert "background-repeat: repeat-x" in styles_response.text
     assert "beginCutTimelineSelection" in script_response.text
     assert "beginTimelineRangeAdjustment" in script_response.text
+    assert "skipSelectedRangeDuringPlayback" in script_response.text
+    assert "时间轴已自动拼接" in script_response.text
+    assert "function getEditedTimelineSpans" in script_response.text
+    assert "function editedTimeToSourceTime" in script_response.text
+    assert "function sourceTimeToEditedTime" in script_response.text
+    assert "getRetainedSegmentParts" in script_response.text
+    assert "function updateCutSegmentTimestamps" in script_response.text
+    assert 'currentBadge.textContent = "播放中"' in script_response.text
+    assert "function getActiveTranscriptSegmentIndex" in script_response.text
+    assert 'nextItem.setAttribute("aria-current", "true")' in script_response.text
+    assert "scrollActiveTranscriptSegmentIntoView" in script_response.text
+    assert "updateActiveTranscriptSegment(sourceCurrent" in script_response.text
+    assert ".segment-item.is-playback-active" in styles_response.text
+    assert 'id="cutDraftSaveStatus"' in page_response.text
+    assert "function restorePersistedCutDraft" in script_response.text
+    assert "function scheduleCutDraftSave" in script_response.text
+    assert "function clearPersistedCutDraft" in script_response.text
+    assert "function resolvePersistedCutDraft" in script_response.text
+    assert "window.localStorage.setItem(key" in script_response.text
+    assert "/cut-draft`" in script_response.text
+    assert "keepalive: true" in script_response.text
+    assert "resolvePersistedCutDraft(job.cutDraft || null" in script_response.text
+    assert ".cut-draft-save-status" in styles_response.text
+    assert "function updateCutInspectorTimestamps" in script_response.text
+    assert 'time.textContent = "已删除"' in script_response.text
+    assert "sourceTimeToEditedTime(suggestion.start, spans)" in script_response.text
+    assert "window.EditorSuite?.setCutDraft(state)" in script_response.text
+    assert "function buildLiveCutDraftState" in script_response.text
+    assert "sourceDuration: cutTimelineDuration()" in script_response.text
+    assert "ranges: edit.ranges || edit.requestedRanges || []" in script_response.text
+    assert "transcript: edit.transcript || null" in script_response.text
+    assert "sourceStart: part.sourceStart" in script_response.text
+    assert "sourceStart: wordSourceStart" in script_response.text
+    assert "words: part.words" in script_response.text
+    assert "const downstreamReady" in editor_suite_script_response.text
+    assert "按当前剪后时间添加" in editor_suite_script_response.text
+    assert "点击生成视频会一次完成剪辑、艺术字和画中画合成" in (
+        editor_suite_script_response.text
+    )
+    assert "function generationTarget()" not in editor_suite_script_response.text
+    assert "function generateCurrentPreview()" in editor_suite_script_response.text
+    assert 'target: "all"' in editor_suite_script_response.text
+    assert "generationPayload" in editor_suite_script_response.text
+    assert 'type: "editor-suite:cut-draft"' in editor_suite_script_response.text
+    assert "workspaceCurrentTime" in editor_suite_script_response.text
+    assert "setCutDraft," in editor_suite_script_response.text
+    assert "const total = editedCutTimelineDuration(spans);" in script_response.text
+    assert "function previewSelectedCutRange" in script_response.text
+    assert "正在左侧预览裁剪衔接" in script_response.text
+    assert script_response.text.count("previewSelectedCutRange(") >= 6
+    assert "function getRecognizedSpeechRanges" in script_response.text
+    assert "function getRecognizedWordRanges" in script_response.text
+    assert "function expandRangeToAdjacentSilence" in script_response.text
+    assert "function alignManualRangeToTranscript" in script_response.text
+    assert "当前拖动范围落在文字内部" in script_response.text
+    assert "边界落在无法安全裁剪的文字内部" in script_response.text
+    assert "getEditableSegmentCoverageEnd" in script_response.text
+    assert "adjacentSilenceBefore" in script_response.text
+    manual_align_start = script_response.text.index(
+        "function alignManualRangeToTranscript"
+    )
+    manual_align_end = script_response.text.index(
+        "function getMergedTextSelection", manual_align_start
+    )
+    manual_align_script = script_response.text[manual_align_start:manual_align_end]
+    assert "expandRangeToAdjacentSilence" not in manual_align_script
+    assert "adjacentSilenceBefore: 0" in manual_align_script
+    assert "拖动自定义区间" in page_response.text
+    assert "时间轴拖动按自定义区间处理" in page_response.text
+    assert "前后紧邻的无声区" not in page_response.text
     assert "timelineDeleteRanges" in script_response.text
-    assert "...timelineDeleteRanges" in script_response.text
+    assert "getCommittedTimelineDeleteRanges" in script_response.text
+    assert "confirmPendingTimelineRange" in script_response.text
+    assert "cancelPendingTimelineRange" in script_response.text
+    assert "requestTimelineRangeConfirmation" in script_response.text
+    assert "timelineRangeConfirmationOpen" in script_response.text
+    assert 'eyebrow: "时间轴滑动删除"' in script_response.text
+    assert 'title: "删除这个时间轴区间？"' in script_response.text
+    assert 'confirmText: "确认删除"' in script_response.text
+    assert "已取消时间轴选区" not in script_response.text
+    assert "hasPendingRange || !hasCutSelection()" in script_response.text
+    assert "已调整待确认区间" in script_response.text
     assert "CUT_TIMELINE_MIN_RANGE" in script_response.text
     assert "activateTextEditorPanel" in script_response.text
     assert "splitTextIntoCharacterTokens" in script_response.text
     assert "formatPreciseTime" in script_response.text
-    assert "文字列表仅支持整段选择" in page_response.text
-    assert "请选择整段，或在时间轴上拖出删除区间" in page_response.text
+    assert "点击左侧圆圈删除整段，再次点击可撤销" not in page_response.text
+    assert "仅提示疑似口误、重复、语气词和无效片段" not in page_response.text
+    assert "仅检测超过 1.5 秒的无文字区间" not in page_response.text
+    assert "圆圈切换删除，点击文案调整分段" in page_response.text
+    assert "点击文字删除会一并收紧前后无声区" in page_response.text
+    assert "再次点击可撤销" in page_response.text
+    assert 'time.textContent = formatTime(segment.start)' in script_response.text
+    assert 'segmentText.type = "button"' in script_response.text
     assert 'segmentText.className = "segment-text"' in script_response.text
-    assert (
-        'segmentText.className = "segment-text transcript-segment-text"'
-        in script_response.text
-    )
+    assert "segment-edit-hint" not in script_response.text
+    assert "grid-template-columns: 44px 52px minmax(0, 1fr)" in styles_response.text
+    assert "button.disabled = cutControlsLocked;" in script_response.text
+    assert '`${allSelected ? "撤销删除" : "删除"}第' in script_response.text
+    assert 'id="segmentEditDialog"' in page_response.text
+    assert 'id="splitSegmentButton"' in page_response.text
+    assert 'id="mergeSegmentUpButton"' in page_response.text
+    assert 'id="mergeSegmentDownButton"' in page_response.text
+    assert "applyEditableSegmentOperation" in script_response.text
+    assert "/editable-segments`" in script_response.text
+    assert ".segment-edit-dialog {" in styles_response.text
+    assert ".cut-timeline-text-segment-label {" in styles_response.text
+    assert "text-align-last: justify" in styles_response.text
+    assert ".timeline-range-confirm-actions {" not in styles_response.text
+    assert ".cut-timeline-delete-range.is-pending {" in styles_response.text
+    assert "transcript-segment-text" not in script_response.text
+    assert "grid-template-columns: repeat(4, minmax(0, 1fr))" in styles_response.text
+    assert "grid-template-columns: repeat(4, minmax(96px, 1fr))" in styles_response.text
+    assert ".cut-history-toolbar {" in styles_response.text
+    assert "min-height: 44px" in styles_response.text
+    assert 'activateTextEditorPanel("cuts");' in script_response.text
+    assert 'job.edit ? "output" : "cuts"' not in script_response.text
     assert 'words.className = "word-list transcript-word-list"' not in script_response.text
     assert 'characters.className = "word-list"' not in script_response.text
     assert 'event.target.closest(".word-chip")' not in script_response.text
@@ -432,8 +722,14 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert 'toDataURL("image/jpeg"' in script_response.text
     assert page_response.headers["cache-control"] == "no-store, max-age=0"
     assert script_response.headers["cache-control"] == "no-store, max-age=0"
+    assert feedback_script_response.headers["cache-control"] == "no-store, max-age=0"
     assert "--editor-timeline-track-height: 112px" in styles_response.text
     assert "--editor-timeline-ruler-height: 28px" in styles_response.text
+    assert "--editor-timeline-track-height: 74px" in styles_response.text
+    assert "--cut-timeline-text-height: 30px" in styles_response.text
+    assert ".cut-frame-timeline .frame-timeline-tick-label" in styles_response.text
+    assert "top: -7px" in styles_response.text
+    assert "width: 100% !important" in styles_response.text
     assert "transform: rotate(0.55deg)" not in styles_response.text
     assert "margin-left: 13px" not in styles_response.text
     assert "margin-left: 9px" not in styles_response.text
@@ -444,24 +740,71 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert ".output-cut-builder {" in styles_response.text
     assert ".cut-timeline-no-speech-range {" in styles_response.text
     assert "grid-template-columns: minmax(0, 1fr) auto" in styles_response.text
-    assert styles_response.text.count("height: var(--editor-timeline-track-height)") == 3
+    assert styles_response.text.count("height: var(--editor-timeline-track-height)") == 4
     assert "#cutPreviewPlayer:fullscreen .cut-frame-timeline" in styles_response.text
     assert "display: none !important" in styles_response.text
     assert "height: min(72dvh, 840px, calc(100dvh - 112px))" in styles_response.text
     assert art_page_response.status_code == 200
-    assert "/art-text.js?v=20260730-09" in art_page_response.text
+    assert "/art-text.js?v=20260810-03" in art_page_response.text
     assert 'class="cut-progress art-generation-progress full-row"' in art_page_response.text
     assert "art-particle art-particle-1" in art_page_response.text
     assert "解析时间轴" in art_page_response.text
     assert ".art-generation-progress" in styles_response.text
     assert "@keyframes art-particle-float" in styles_response.text
     assert "@keyframes art-panel-scan" in styles_response.text
-    assert "/styles.css?v=20260730-08" in art_page_response.text
-    assert "/ui-feedback.js?v=20260729-03" in art_page_response.text
-    assert "AI 分句生成艺术字字幕" in art_page_response.text
-    assert "每行最多 10 字生成统一字号字幕" in art_script_response.text
-    assert "TRANSCRIPT_TRACK_MAX_CHARS_PER_CUE = 10" in art_script_response.text
-    assert "正在按每行最多 10 字重新整理全文轨道" in art_script_response.text
+    assert "/styles.css?v=20260810-09" in art_page_response.text
+    assert "/ui-feedback.js?v=20260807-03" in art_page_response.text
+    assert 'id="overlayCoordinateReadout"' in art_page_response.text
+    assert 'id="positionPresetGrid"' in art_page_response.text
+    assert "/editor-suite.js?v=20260810-05" in art_page_response.text
+    assert 'class="preview-grid"' in art_page_response.text
+    assert 'data-preview-grid-toggle' in art_page_response.text
+    assert "从保留文案中选择一句" not in art_page_response.text
+    assert "播放或拖动视频进度" not in art_page_response.text
+    assert "AI 会结合口播文案和低清关键帧拼图" not in art_page_response.text
+    assert "关键帧仅临时上传到阿里云百炼，用于本次分析" in art_page_response.text
+    assert "可修改文案、时间、位置和模板" not in art_page_response.text
+    assert "生成后仍可返回修改参数" not in art_page_response.text
+    assert 'data-editor-suite-nav data-stage="art"' in art_page_response.text
+    assert 'data-workbench-tab="transcript"' not in art_page_response.text
+    assert 'id="transcriptTab"' not in art_page_response.text
+    assert 'class="transcript-quick-action"' in art_page_response.text
+    assert "一键添加视频文案" in art_page_response.text
+    assert "默认使用“热血立体”" in art_page_response.text
+    assert "生成统一字号字幕" in art_script_response.text
+    assert "TRANSCRIPT_TRACK_MAX_CHARS_PER_CUE = 12" in art_script_response.text
+    assert "正在自动整理全文艺术字的内容和时间" in art_script_response.text
+    assert "normalizeTranscriptTrackTiming" not in art_script_response.text
+    assert "segments: retainedTranscriptSegments" in art_script_response.text
+    assert "payload.draftTranscript = cutTranscript;" in art_script_response.text
+    assert "Number(pendingCutDraft.duration) || duration" in art_script_response.text
+    assert (
+        art_script_response.text.count(
+            "requestDraftVersion !== transcriptTrackDraftVersion"
+        )
+        == 2
+    )
+    assert "window.setTimeout(addFullTranscriptTrack, 0);" in art_script_response.text
+    assert "comparableCaptionText(pendingTranscript.text)" not in art_script_response.text
+    assert "cutDraftTranscriptTrackCues" in art_script_response.text
+    assert "cutDraftTimedTranscriptWords" in art_script_response.text
+    assert "segmentLower.indexOf(wordLower, textOffset)" in art_script_response.text
+    assert "timedWords.at(-1).text += segmentContent.slice(textOffset)" in (
+        art_script_response.text
+    )
+    assert "replaceTranscriptTrackFromCutDraft" in art_script_response.text
+    assert "不会使用剪辑前的旧文案" in art_script_response.text
+    assert 'type: "editor-suite:request-cut-draft"' in art_script_response.text
+    assert 'data.type === "editor-suite:request-cut-draft"' in (
+        editor_suite_script_response.text
+    )
+    assert "scheduleTranscriptTrackRefresh();" in art_script_response.text
+    assert "trackRefreshPending ||" in art_script_response.text
+    assert (
+        'validationError === "全文艺术字轨道与当前视频文案不一致。"'
+        in art_script_response.text
+    )
+    assert "请删除后重新生成" not in art_script_response.text
     assert "segmentationMethod" in art_script_response.text
     assert "/art-text/transcript-track" in art_script_response.text
     assert "全文艺术字轨道" in art_script_response.text
@@ -476,7 +819,16 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert "y: TRANSCRIPT_TRACK_DEFAULT_POSITION.y" in art_script_response.text
     assert 'class="art-editor-body"' in art_page_response.text
     assert 'data-workbench-tab="ai"' in art_page_response.text
-    assert 'data-workbench-panel="output"' in art_page_response.text
+    assert 'data-workbench-tab="output"' not in art_page_response.text
+    assert 'data-workbench-panel="output"' not in art_page_response.text
+    assert "生成下载" not in art_page_response.text
+    assert 'activateWorkbenchPanel("output")' not in art_script_response.text
+    art_output_runtime = art_page_response.text[
+        art_page_response.text.index('id="outputPanel"') :
+        art_page_response.text.index('id="generateArtVideo"')
+    ]
+    assert 'class="editor-suite-generation-runtime"' in art_output_runtime
+    assert 'aria-hidden="true"' in art_output_runtime
     assert 'id="restartProjectButton"' in art_page_response.text
     assert 'id="aiSuggestionCount"' in art_page_response.text
     assert 'id="aiSuggestionReview"' in art_page_response.text
@@ -507,7 +859,24 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert 'id="frameTimelineThumbnails"' in art_page_response.text
     assert 'id="frameTimelineSegments"' in art_page_response.text
     assert 'aria-label="艺术字时间轴"' in art_page_response.text
+    assert 'id="frameTimelineScroll"' in art_page_response.text
+    assert 'class="frame-timeline editor-layer-timeline"' in art_page_response.text
+    overlay_selection_start = art_page_response.text.index(
+        'class="overlay-selection-block"'
+    )
+    custom_text_start = art_page_response.text.index('class="custom-text-row"')
+    detail_settings_start = art_page_response.text.index('class="art-detail-heading"')
+    overlay_controls_start = art_page_response.text.index('id="overlayControls"')
+    assert (
+        overlay_selection_start
+        < custom_text_start
+        < detail_settings_start
+        < overlay_controls_start
+    )
+    assert "点击选择后，在下方修改" in art_page_response.text
     assert 'id="continuePictureInPicture"' in art_page_response.text
+    assert 'id="transcriptStyleGrid"' in art_page_response.text
+    assert "先选择字幕艺术字类型" in art_page_response.text
     assert "picture-in-picture?job=" in art_script_response.text
     assert 'class="position-grid"' not in art_page_response.text
     assert "positionButtons" not in art_script_response.text
@@ -536,7 +905,7 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert "positionPreviewOverlay" in art_script_response.text
     assert "isOverlayVisibleAtTime" in art_script_response.text
     assert "currentTime < end" in art_script_response.text
-    assert "element.hidden = !isVisible;" in art_script_response.text
+    assert ".filter(({ overlay }) => isOverlayVisibleAtTime(overlay, currentTime))" in art_script_response.text
     assert "loadFontLibrary" in art_script_response.text
     assert "applyRequestedTemplateSelection" in art_script_response.text
     assert "preferredArtTemplateSettings" in art_script_response.text
@@ -551,14 +920,68 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert "fitSelectedArtTimeToTranscript" in art_script_response.text
     assert "文案和时间保持不变" in art_script_response.text
     assert "balanceHorizontalLine" in art_script_response.text
+    assert "setTranscriptTrackTemplate" in art_script_response.text
+    assert 'const TRANSCRIPT_TRACK_DEFAULT_STYLE = "impact";' in art_script_response.text
+    assert "selectedStyle = TRANSCRIPT_TRACK_DEFAULT_STYLE" in art_script_response.text
+    assert "一键添加视频文案" in art_script_response.text
     assert "setupExternalVideoControls" in art_script_response.text
     assert "requestFullscreen" in art_script_response.text
     assert "buildFrameTimelineThumbnails" in art_script_response.text
+    assert "updateFrameTimelineScale" in art_script_response.text
+    assert "editor-layer-timeline-segment-label" in art_script_response.text
     assert "renderFrameTimelineRuler" in art_script_response.text
     assert "parseFrameTimelineTimeInput" in art_script_response.text
     assert "jumpToFrameTimelineTime" in art_script_response.text
     assert "refreshFrameTimeline" in art_script_response.text
     assert "renderFrameTimelineOverlaySegments" in art_script_response.text
+    assert "FRAME_TIMELINE_TRACK_HEIGHT = 30" in art_script_response.text
+    assert "trackIndexes.set(trackKey, trackIndexes.size)" in art_script_response.text
+    assert "segment.dataset.timelineTrackIndex" in art_script_response.text
+    assert "timelineTrackCount" in art_script_response.text
+    assert "beginFrameTimelineSegmentAdjustment" in art_script_response.text
+    assert "updateManualOverlayTimelineRange" in art_script_response.text
+    assert "data-art-time-drag" in art_script_response.text
+    assert "segment.dataset.effectStart" in art_script_response.text
+    assert "segment.dataset.effectEnd" in art_script_response.text
+    assert 'kind: "art"' in art_script_response.text
+    assert 'type: "editor-suite:tool-state"' in art_script_response.text
+    assert "updateEditorSuiteJobState" in art_script_response.text
+    assert "artGenerationObserver" in art_script_response.text
+    assert "applyEditorCutDraft" in art_script_response.text
+    assert "function retainedTimelineSpans" in art_script_response.text
+    assert "function editedRangeForSourceOverlay" in art_script_response.text
+    assert "anchorOverlayToSourceTimeline" in art_script_response.text
+    assert "buildTranscriptWordMatchIndex" in art_script_response.text
+    assert "matchOverlayToTranscriptWords" in art_script_response.text
+    assert "previous.end = current.start;" in art_script_response.text
+    assert "已按剪后文案的词级时间匹配" in art_script_response.text
+    assert "persistEmbeddedArtDraft" in art_script_response.text
+    assert "sourceStart: segment.sourceStart" in art_script_response.text
+    assert "payload.draftTranscript =" in art_script_response.text
+    assert "scheduleTranscriptTrackRefresh" in art_script_response.text
+    cut_sync_start = art_script_response.text.index(
+        "function applyEditorCutDraft(data)"
+    )
+    cut_sync_end = art_script_response.text.index(
+        "function handleEditorHostMessage", cut_sync_start
+    )
+    cut_sync_script = art_script_response.text[cut_sync_start:cut_sync_end]
+    assert "scheduleTranscriptTrackRefresh();" not in cut_sync_script
+    assert "replaceTranscriptTrackFromCutDraft(" in cut_sync_script
+    assert "editorHostCurrentTime" in art_script_response.text
+    assert "previewVisibilitySignature" in art_script_response.text
+    assert "renderPreview({ timeOnly: true })" in art_script_response.text
+    art_sync_start = art_script_response.text.index(
+        'if (data.type === "editor-suite:sync-time")'
+    )
+    art_sync_end = art_script_response.text.index(
+        'if (data.type !== "editor-suite:move-effect"', art_sync_start
+    )
+    art_sync_script = art_script_response.text[art_sync_start:art_sync_end]
+    assert "artVideo.currentTime = nextTime" not in art_sync_script
+    assert "artVideo.pause()" not in art_sync_script
+    assert "已按当前剪后文案实时同步" in art_script_response.text
+    assert "剪辑视频生成后即可使用 AI 全文分句" not in art_script_response.text
     assert "beginFrameTimelineScrub" in art_script_response.text
     assert "toDataURL(\"image/jpeg\"" in art_script_response.text
     assert "const edgeOffset = Math.min(0.04, total / 2)" in art_script_response.text
@@ -566,12 +989,22 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert art_page_response.headers["cache-control"] == "no-store, max-age=0"
     assert art_script_response.headers["cache-control"] == "no-store, max-age=0"
     assert pip_page_response.status_code == 200
-    assert "/picture-in-picture.js?v=20260730-01" in pip_page_response.text
-    assert "/ui-feedback.js?v=20260729-03" in pip_page_response.text
+    assert "/picture-in-picture.js?v=20260810-10" in pip_page_response.text
+    assert "/ui-feedback.js?v=20260807-03" in pip_page_response.text
+    assert "/styles.css?v=20260810-09" in pip_page_response.text
+    assert "/editor-suite.js?v=20260810-05" in pip_page_response.text
+    assert 'class="preview-grid"' in pip_page_response.text
+    assert 'data-preview-grid-toggle' in pip_page_response.text
+    assert 'data-editor-suite-nav data-stage="pip"' in pip_page_response.text
     assert 'name="assetType" value="video"' in pip_page_response.text
     assert "Seedance 动态镜头" in pip_page_response.text
     assert 'class="pip-editor-body"' in pip_page_response.text
+    assert 'id="pipTimelineScroll"' in pip_page_response.text
+    assert 'class="frame-timeline editor-layer-timeline pip-timeline"' in pip_page_response.text
     assert 'id="segmentList"' in pip_page_response.text
+    assert "time.textContent = formatTime(segment.start)" in pip_script_response.text
+    assert "grid-template-columns: 28px minmax(0, 1fr)" in styles_response.text
+    assert "grid-template-columns: 46px minmax(0, 1fr)" in styles_response.text
     assert 'id="pipPrompt"' in pip_page_response.text
     assert 'id="writePipPrompt"' in pip_page_response.text
     assert 'id="promptWriterStatus"' in pip_page_response.text
@@ -583,12 +1016,46 @@ def test_frontend_assets_are_versioned_and_not_cached():
     for aspect_ratio in ("1:1", "3:4", "4:3", "16:9", "9:16"):
         assert f'value="{aspect_ratio}"' in pip_page_response.text
     assert 'id="generatePipImage"' in pip_page_response.text
+    assert "applyEditorCutDraft" in pip_script_response.text
+    assert "persistEmbeddedPipDraft" in pip_script_response.text
+    assert "start: item.start" in pip_script_response.text
+    assert "sourceStart: segment.sourceStart ?? null" in pip_script_response.text
     assert 'id="imageProgress" class="pip-inline-progress pip-tech-progress"' in pip_page_response.text
     assert "pip-tech-particle pip-tech-particle-5" in pip_page_response.text
     assert 'id="generatedList"' in pip_page_response.text
     assert 'id="pipOverlayLayer"' in pip_page_response.text
+    assert "选择一段口播文字，生成对应画面" not in pip_page_response.text
+    assert "每个画中画独立一条轨道" not in pip_page_response.text
+    assert "时间轴显示当前视频" not in pip_page_response.text
+    assert "画中画出现后可直接按住拖动摆放" not in pip_page_response.text
+    assert "previewHint" not in pip_script_response.text
+    assert "PIP_TIMELINE_TRACK_HEIGHT = 30" in pip_script_response.text
+    assert "segment.dataset.timelineTrackIndex" in pip_script_response.text
+    assert 'const trackLabel = `画中画${index + 1}`;' in pip_script_response.text
+    assert "label.textContent = trackLabel" in pip_script_response.text
+    assert (
+        'segment.title = `${trackLabel} ${formatRange(item.start, item.end)}`'
+        in pip_script_response.text
+    )
+    assert "timelineTrackCount" in pip_script_response.text
+    assert 'type: "editor-suite:select-pip-timeline"' in editor_suite_script_response.text
+    assert 'data.type === "editor-suite:select-pip-timeline"' in pip_script_response.text
+    assert "拖动边框缩放" in pip_page_response.text
+    assert "beginPictureResize" in pip_script_response.text
+    assert "pictureResizeWidth" in pip_script_response.text
+    assert 'handle.className = "pip-resize-handle"' in pip_script_response.text
+    assert 'data.type === "editor-suite:resize-effect"' in pip_script_response.text
+    assert 'type: "editor-suite:resize-effect"' in editor_suite_script_response.text
+    assert ".pip-resize-handle" in styles_response.text
+    assert '[data-pip-resize="se"]' in styles_response.text
+    assert 'kind: "pip"' in pip_script_response.text
+    assert 'type: "editor-suite:tool-state"' in pip_script_response.text
+    assert "updateEditorSuiteJobState" in pip_script_response.text
+    assert "pipGenerationObserver" in pip_script_response.text
     assert 'id="pipTimelineThumbnails"' in pip_page_response.text
     assert 'id="generatePipVideo"' in pip_page_response.text
+    assert 'class="pip-output-section editor-suite-generation-runtime"' in pip_page_response.text
+    assert 'document.querySelector(".pip-output-section")?.scrollIntoView' not in pip_script_response.text
     assert "Seedream · Seedance" in pip_page_response.text
     assert 'assetType === "video" ? "videos" : "images"' in pip_script_response.text
     assert "pollGeneratedAssets" in pip_script_response.text
@@ -600,12 +1067,30 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert "start: timeRange.start" in pip_script_response.text
     assert "end: timeRange.end" in pip_script_response.text
     assert "/picture-in-picture/prompt" in pip_script_response.text
-    assert "/picture-in-picture`" in pip_script_response.text
+    assert 'const endpoint = useComposition ? "compose" : "picture-in-picture"' in (
+        pip_script_response.text
+    )
+    assert "pictureInPictureOverlays: overlays" in pip_script_response.text
+    assert 'const endpoint = useComposition ? "compose" : "art-text"' in (
+        art_script_response.text
+    )
     assert "AI 根据文字智能生成" in pip_script_response.text
     assert "aspectRatio: currentImageAspectRatio()" in pip_script_response.text
     assert '"original", "edited", "art"' in pip_script_response.text
     assert "source: requestedSource" in pip_script_response.text
     assert "renderPreview" in pip_script_response.text
+    assert "editorHostCurrentTime" in pip_script_response.text
+    assert "previewVisibilitySignature" in pip_script_response.text
+    assert "renderPreview({ timeOnly: true })" in pip_script_response.text
+    pip_sync_start = pip_script_response.text.index(
+        'if (data.type === "editor-suite:sync-time")'
+    )
+    pip_sync_end = pip_script_response.text.index(
+        'if (data.type !== "editor-suite:move-effect"', pip_sync_start
+    )
+    pip_sync_script = pip_script_response.text[pip_sync_start:pip_sync_end]
+    assert "pipVideo.currentTime = nextTime" not in pip_sync_script
+    assert "pipVideo.pause()" not in pip_sync_script
     assert "buildPipTimelineThumbnails" in pip_script_response.text
     assert 'toDataURL("image/jpeg"' in pip_script_response.text
     assert "beginPictureDrag" in pip_script_response.text
@@ -620,10 +1105,14 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert ".pip-generated-card.is-processing .pip-image-preview-button::after" in styles_response.text
     assert "#pipVideoPlayer:fullscreen .pip-video-stage" in styles_response.text
     assert "height: calc(100dvh - 88px)" in styles_response.text
+    assert "updatePipTimelineScale" in pip_script_response.text
+    assert "pipTimelineMajorStep" in pip_script_response.text
     assert pip_page_response.headers["cache-control"] == "no-store, max-age=0"
+    assert editor_suite_script_response.headers["cache-control"] == "no-store, max-age=0"
     assert pip_script_response.headers["cache-control"] == "no-store, max-age=0"
     assert template_page_response.status_code == 200
-    assert "/art-template-library.js?v=" in template_page_response.text
+    assert "/styles.css?v=20260810-09" in template_page_response.text
+    assert "/art-template-library.js?v=20260810-01" in template_page_response.text
     assert 'id="templateCardGrid"' in template_page_response.text
     assert 'id="useTemplateButton"' in template_page_response.text
     assert 'id="openTemplateUpload"' in template_page_response.text
@@ -631,6 +1120,10 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert 'id="renameTemplateButton"' in template_page_response.text
     assert 'id="deleteTemplateButton"' in template_page_response.text
     assert "艺术字效果模板库" in template_page_response.text
+    assert "上传和管理可编辑效果模板" not in template_page_response.text
+    assert "templateDetailNote" not in template_page_response.text
+    assert "templateDetailNote" not in template_script_response.text
+    assert "点击恢复后重新出现在模板库" in template_page_response.text
     assert "/api/art-templates" in template_script_response.text
     assert "preferredArtTemplateSettings" in template_script_response.text
     assert 'method: "PATCH"' in template_script_response.text
@@ -648,13 +1141,87 @@ def test_frontend_assets_are_versioned_and_not_cached():
         for template in template_api_response.json()["templates"]
     } == app_module.ART_TEXT_STYLES
     assert font_page_response.status_code == 200
+    assert "/styles.css?v=20260810-09" in font_page_response.text
     assert "/font-manager.js?v=" in font_page_response.text
     assert 'id="fontUploadForm"' in font_page_response.text
     assert 'id="fontCardGrid"' in font_page_response.text
+    assert "上传 TTF 或 OTF 字体" not in font_page_response.text
+    assert "可以查看完整预览、设置默认字体" not in font_page_response.text
+    assert "请确认拥有字体使用权" in font_page_response.text
     assert "/api/fonts" in font_script_response.text
     assert "registerUploadedFont" in font_script_response.text
     assert font_page_response.headers["cache-control"] == "no-store, max-age=0"
     assert font_script_response.headers["cache-control"] == "no-store, max-age=0"
+    assert ".hero" not in styles_response.text
+    assert "studio-wave-breathe" not in styles_response.text
+    assert ".section-helper" not in styles_response.text
+    assert ".next-step-copy" not in styles_response.text
+    assert ".output-note" not in styles_response.text
+    assert ".template-library-note" not in styles_response.text
+
+
+def test_douyin_preview_is_inline_only():
+    with TestClient(app_module.app) as client:
+        page_response = client.get("/")
+        removed_page_response = client.get("/douyin-preview")
+        removed_script_response = client.get("/douyin-preview.js")
+        styles_response = client.get("/styles.css")
+        editor_suite_script_response = client.get("/editor-suite.js")
+        feedback_script_response = client.get("/ui-feedback.js")
+
+    assert page_response.status_code == 200
+    assert removed_page_response.status_code == 404
+    assert removed_script_response.status_code == 404
+    assert styles_response.status_code == 200
+    assert editor_suite_script_response.status_code == 200
+    assert feedback_script_response.status_code == 200
+
+    assert 'data-douyin-preview-toggle' in page_response.text
+    assert 'id="editorSuiteDouyinChrome"' in page_response.text
+    assert 'class="douyin-action-bar"' in page_response.text
+    assert 'class="douyin-bottom-nav"' in page_response.text
+    assert ".douyin-caption-block {" in styles_response.text
+    assert ".douyin-action-bar {" in styles_response.text
+    assert ".douyin-top-bar {" in styles_response.text
+    assert ".douyin-feed-tabs {" in styles_response.text
+    assert ".douyin-status-bar {" not in styles_response.text
+    assert 'class="douyin-status-bar"' not in page_response.text
+    assert 'class="douyin-content-type"' not in page_response.text
+    assert "font-size: clamp(8px, 3.8cqw, 13px)" in styles_response.text
+    assert "font-size: clamp(7px, 3.2cqw, 11px)" in styles_response.text
+    assert ".douyin-shoot-same {" in styles_response.text
+    assert ".douyin-location {" not in styles_response.text
+    assert ".douyin-content-type {" not in styles_response.text
+    assert "--douyin-video-top: 8%" in styles_response.text
+    assert "--douyin-video-bottom: 6%" in styles_response.text
+    assert "aspect-ratio: 9 / 18.6 !important" in styles_response.text
+    assert "bottom: calc(var(--douyin-video-bottom) + 1%)" in styles_response.text
+    assert "object-fit: contain" in styles_response.text
+    assert ".cut-video-stage.is-douyin-preview .editor-suite-preview-overlay" in (
+        styles_response.text
+    )
+    assert "width: min(100%, 360px) !important" in styles_response.text
+    assert ".editor-suite-douyin-base-video" in styles_response.text
+    assert "grid-template-rows: minmax(0, 1fr)" in styles_response.text
+    assert "container-type: inline-size" in styles_response.text
+    assert "clamp(11px, 7.4cqw, 25px)" in styles_response.text
+    assert "clamp(19px, 11cqw, 38px)" in styles_response.text
+    assert "clamp(20px, 10cqw, 34px)" in styles_response.text
+    assert ".douyin-music-disc {" in styles_response.text
+    assert ".douyin-safety-zone" not in styles_response.text
+
+    assert 'data-douyin-preview href' not in editor_suite_script_response.text
+    assert "setDouyinPreviewLink" not in editor_suite_script_response.text
+    assert "setDouyinPreviewAvailable" in editor_suite_script_response.text
+    assert "setDouyinPreviewEnabled" in editor_suite_script_response.text
+    assert "function updateDouyinBaseVideo" in editor_suite_script_response.text
+    assert "has-douyin-edited-base" in editor_suite_script_response.text
+    assert "douyinVideoZoom" not in editor_suite_script_response.text
+    assert "is-douyin-preview" in editor_suite_script_response.text
+    assert "/douyin-preview?job=" not in editor_suite_script_response.text
+    assert "repeat(3, minmax(0, 1fr))" in styles_response.text
+    assert "is-douyin-preview" in feedback_script_response.text
+    assert "stage.parentElement?.querySelector" in feedback_script_response.text
 
 
 def test_art_template_library_upload_rename_render_and_delete(tmp_path: Path):
@@ -746,6 +1313,109 @@ def test_art_template_library_rejects_font_upload():
         )
     assert response.status_code == 400
     assert "不支持字体文件" in response.json()["detail"]
+
+
+def test_art_template_hide_and_restore():
+    with TestClient(app_module.app) as client:
+        before = client.get("/api/art-templates").json()
+        assert before["hiddenCount"] == 0
+        assert any(t["id"] == "impact" for t in before["templates"])
+
+        hide_response = client.delete("/api/art-templates/impact")
+        assert hide_response.status_code == 200
+        assert hide_response.json() == {"status": "hidden"}
+
+        hidden = client.get("/api/art-templates").json()
+        assert hidden["hiddenCount"] == 1
+        assert hidden["builtinCount"] == before["builtinCount"] - 1
+        assert not any(t["id"] == "impact" for t in hidden["templates"])
+        assert any(t["id"] == "impact" for t in hidden["hiddenBuiltins"])
+
+        restore_response = client.post("/api/art-templates/impact/restore")
+        assert restore_response.status_code == 200
+        assert restore_response.json() == {"status": "restored"}
+
+        restored = client.get("/api/art-templates").json()
+        assert restored["hiddenCount"] == 0
+        assert any(t["id"] == "impact" for t in restored["templates"])
+
+        missing_delete = client.delete("/api/art-templates/not-a-template")
+        assert missing_delete.status_code == 404
+        missing_restore = client.post(
+            "/api/art-templates/not-a-template/restore"
+        )
+        assert missing_restore.status_code == 404
+
+
+def test_art_position_presets_crud():
+    with TestClient(app_module.app) as client:
+        create_response = client.post(
+            "/api/art-position-presets",
+            json={"name": "右上角", "x": 0.8, "y": 0.2},
+        )
+        assert create_response.status_code == 201
+        created = create_response.json()
+        assert created["id"].startswith("pos-")
+        assert created["name"] == "右上角"
+        assert created["x"] == 0.8
+        assert created["y"] == 0.2
+        assert created["createdAt"] is not None
+
+        list_response = client.get("/api/art-position-presets")
+        assert list_response.status_code == 200
+        assert list_response.json()["count"] == 1
+        assert list_response.json()["presets"][0]["id"] == created["id"]
+
+        patch_response = client.patch(
+            f"/api/art-position-presets/{created['id']}",
+            json={"name": "右上标题", "x": 0.82, "y": 0.18},
+        )
+        assert patch_response.status_code == 200
+        updated = patch_response.json()
+        assert updated["name"] == "右上标题"
+        assert updated["x"] == 0.82
+        assert updated["y"] == 0.18
+
+        delete_response = client.delete(
+            f"/api/art-position-presets/{created['id']}"
+        )
+        assert delete_response.status_code == 200
+        assert delete_response.json() == {"status": "deleted"}
+
+        missing_response = client.delete(
+            f"/api/art-position-presets/{created['id']}"
+        )
+        assert missing_response.status_code == 404
+
+
+def test_art_position_presets_validation():
+    with TestClient(app_module.app) as client:
+        empty_name_response = client.post(
+            "/api/art-position-presets",
+            json={"name": "   ", "x": 0.5, "y": 0.5},
+        )
+        assert empty_name_response.status_code == 400
+        assert "名称不能为空" in empty_name_response.json()["detail"]
+
+        clamp_response = client.post(
+            "/api/art-position-presets",
+            json={"name": "越界坐标", "x": 1.5, "y": -0.3},
+        )
+        assert clamp_response.status_code == 201
+        assert clamp_response.json()["x"] == 0.95
+        assert clamp_response.json()["y"] == 0.05
+
+        duplicate_name_response = client.post(
+            "/api/art-position-presets",
+            json={"name": "重复名称", "x": 0.5, "y": 0.5},
+        )
+        assert duplicate_name_response.status_code == 201
+
+        missing_patch_response = client.patch(
+            "/api/art-position-presets/pos-does-not-exist",
+            json={"name": "改名"},
+        )
+        assert missing_patch_response.status_code == 404
 
 
 def test_font_library_upload_rename_render_and_delete(tmp_path: Path):
@@ -953,6 +1623,42 @@ def test_punctuation_polish_rebuilds_sentence_segments():
     assert segments[0]["end"] == 2.8
     assert segments[1]["start"] == 2.8
     assert segments[1]["end"] == 3.8
+
+
+def test_editable_transcript_segments_follow_clause_boundaries():
+    words = [
+        {"text": "\u4f60\u957f\u671f", "start": 0.0, "end": 0.4},
+        {"text": "\u5f85\u5728", "start": 0.4, "end": 0.8},
+        {"text": "\u4ec0\u4e48\u6837\u7684\u73af\u5883\u91cc\uff0c", "start": 0.8, "end": 1.8},
+        {"text": "\u88ab\u4ec0\u4e48\u6837\u7684\u8ba4\u77e5", "start": 1.8, "end": 2.7},
+        {"text": "\u80c6\u91cf\u548c\u6807\u51c6\u5f71\u54cd\u7740\u3002", "start": 2.7, "end": 3.8},
+        {"text": "\u4f46\u662f", "start": 4.0, "end": 4.5},
+        {"text": "\u597d\u7684\u73af\u5883\u4f1a\u5e2e\u4f60\u3002", "start": 4.5, "end": 5.5},
+    ]
+    source = [
+        {
+            "id": 0,
+            "start": words[0]["start"],
+            "end": words[-1]["end"],
+            "text": "".join(word["text"] for word in words),
+            "words": words,
+        }
+    ]
+
+    editable = app_module.build_editable_transcript_segments(source)
+
+    assert [item["text"] for item in editable] == [
+        "\u4f60\u957f\u671f\u5f85\u5728\u4ec0\u4e48\u6837\u7684\u73af\u5883\u91cc\uff0c",
+        "\u88ab\u4ec0\u4e48\u6837\u7684\u8ba4\u77e5\u80c6\u91cf\u548c\u6807\u51c6\u5f71\u54cd\u7740\u3002",
+        "\u4f46\u662f\u597d\u7684\u73af\u5883\u4f1a\u5e2e\u4f60\u3002",
+    ]
+    assert "".join(item["text"] for item in editable) == source[0]["text"]
+    assert all(
+        item["words"]
+        and item["start"] == item["words"][0]["start"]
+        and item["end"] == item["words"][-1]["end"]
+        for item in editable
+    )
 
 
 def test_semantic_tokenization_replaces_mechanical_asr_chunks():
@@ -1215,6 +1921,179 @@ def test_repeated_restart_is_detected_even_when_ai_returns_no_suggestion(
             {"text": "你好。", "start": 0.5, "end": 1.0},
         ]
     ) == []
+
+
+def test_abandoned_opinion_leadin_is_removed_without_touching_main_clause(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    tokens = [
+        "你",
+        "觉得",
+        "你",
+        "身边",
+        "人人",
+        "都",
+        "觉得",
+        "一个月",
+        "赚",
+        "一万",
+        "就",
+        "顶天",
+        "了，",
+        "你",
+        "很",
+        "难",
+        "真的",
+        "坚信",
+        "自己",
+        "能",
+        "赚",
+        "十万。",
+    ]
+    words = [
+        {
+            "text": token,
+            "start": round(index * 0.2, 3),
+            "end": round((index + 1) * 0.2, 3),
+        }
+        for index, token in enumerate(tokens)
+    ]
+    segments = [
+        {
+            "id": 0,
+            "start": words[0]["start"],
+            "end": words[-1]["end"],
+            "text": "".join(tokens),
+            "words": words,
+        }
+    ]
+
+    class FakeGeneration:
+        @staticmethod
+        def call(**options):
+            class Response:
+                status_code = 200
+                output = type(
+                    "Output",
+                    (),
+                    {
+                        "choices": [
+                            type(
+                                "Choice",
+                                (),
+                                {
+                                    "message": type(
+                                        "Message",
+                                        (),
+                                        {"content": '{"suggestions":[]}'},
+                                    )()
+                                },
+                            )()
+                        ]
+                    },
+                )()
+
+            return Response()
+
+    monkeypatch.setattr(app_module, "Generation", FakeGeneration)
+
+    suggestions, status = app_module.suggest_deletions(segments, "test-key")
+
+    assert status == "completed"
+    assert len(suggestions) == 1
+    assert suggestions[0]["type"] == "错句"
+    assert suggestions[0]["startIndex"] == 0
+    assert suggestions[0]["endIndex"] == 1
+    assert suggestions[0]["text"] == "你觉得"
+    retained = app_module.build_retained_transcript(
+        segments,
+        suggestions[0]["ranges"],
+        words[-1]["end"] - suggestions[0]["end"],
+    )
+    assert retained["text"] == (
+        "你身边人人都觉得一个月赚一万就顶天了，"
+        "你很难真的坚信自己能赚十万。"
+    )
+
+
+def test_repetition_rule_protects_the_copy_it_intends_to_keep(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    tokens = ["在", "在", "另一群", "人", "眼中", "就是", "家常便饭。"]
+    words = [
+        {
+            "text": token,
+            "start": round(index * 0.2, 3),
+            "end": round((index + 1) * 0.2, 3),
+        }
+        for index, token in enumerate(tokens)
+    ]
+    segments = [
+        {
+            "id": 0,
+            "start": words[0]["start"],
+            "end": words[-1]["end"],
+            "text": "".join(tokens),
+            "words": words,
+        }
+    ]
+
+    class FakeGeneration:
+        @staticmethod
+        def call(**options):
+            class Response:
+                status_code = 200
+                output = type(
+                    "Output",
+                    (),
+                    {
+                        "choices": [
+                            type(
+                                "Choice",
+                                (),
+                                {
+                                    "message": type(
+                                        "Message",
+                                        (),
+                                        {
+                                            "content": json.dumps(
+                                                {
+                                                    "suggestions": [
+                                                        {
+                                                            "start_index": 1,
+                                                            "end_index": 1,
+                                                            "type": "重复",
+                                                            "reason": "重复的在",
+                                                            "confidence": 0.99,
+                                                        }
+                                                    ]
+                                                },
+                                                ensure_ascii=False,
+                                            )
+                                        },
+                                    )()
+                                },
+                            )()
+                        ]
+                    },
+                )()
+
+            return Response()
+
+    monkeypatch.setattr(app_module, "Generation", FakeGeneration)
+
+    suggestions, status = app_module.suggest_deletions(segments, "test-key")
+
+    assert status == "completed"
+    assert len(suggestions) == 1
+    assert suggestions[0]["startIndex"] == 0
+    assert suggestions[0]["endIndex"] == 0
+    retained = app_module.build_retained_transcript(
+        segments,
+        suggestions[0]["ranges"],
+        words[-1]["end"] - suggestions[0]["end"],
+    )
+    assert retained["text"] == "在另一群人眼中就是家常便饭。"
 
 
 def test_repetition_rules_override_partial_ai_ranges_and_merge_abandoned_restarts(
@@ -1682,6 +2561,11 @@ def test_full_transcript_edits_are_aligned_to_the_matching_words():
             },
             "art": {"status": "completed", "overlays": []},
             "artSuggestion": {"status": "completed", "suggestions": []},
+            "pictureInPicture": {
+                "status": "completed",
+                "source": "art",
+                "overlays": [],
+            },
         }
 
     with TestClient(app_module.app) as client:
@@ -1708,6 +2592,312 @@ def test_full_transcript_edits_are_aligned_to_the_matching_words():
     assert refreshed["edit"]["transcript"]["text"] == "少年应有凌云智。生如鲜花。"
     assert refreshed["art"] is None
     assert refreshed["artSuggestion"] is None
+    assert refreshed["pictureInPicture"] is None
+
+
+def test_cut_draft_is_persisted_versioned_restored_and_cleared():
+    job_id = "33333333-3333-4333-8333-333333333333"
+    job_dir = app_module.jobs_directory() / job_id
+    job_dir.mkdir(parents=True)
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "status": "completed",
+            "duration": 10.0,
+            "result": {"segments": []},
+            "cutDraft": None,
+        }
+
+    payload = {
+        "revision": 0,
+        "textRanges": [
+            {
+                "key": "1.000-2.000",
+                "start": 0.8,
+                "end": 2.2,
+                "text": "删除这一段",
+                "originalStart": 1.0,
+                "originalEnd": 2.0,
+                "adjacentSilenceBefore": 0.2,
+                "adjacentSilenceAfter": 0.2,
+            }
+        ],
+        "noSpeechRanges": [
+            {"key": "silence-1", "start": 4.0, "end": 5.5}
+        ],
+        "timelineRanges": [{"start": 7.0, "end": 8.0}],
+    }
+
+    with TestClient(app_module.app) as client:
+        saved = client.put(
+            f"/api/transcriptions/{job_id}/cut-draft",
+            json=payload,
+        )
+        draft_file_exists_after_save = app_module.cut_draft_path(job_id).is_file()
+        stale = client.put(
+            f"/api/transcriptions/{job_id}/cut-draft",
+            json=payload,
+        )
+        with app_module.JOBS_LOCK:
+            app_module.JOBS[job_id]["cutDraft"] = None
+        restored = client.get(
+            f"/api/transcriptions/{job_id}/cut-draft"
+        )
+        rendered_job = client.get(f"/api/transcriptions/{job_id}")
+        cleared = client.delete(
+            f"/api/transcriptions/{job_id}/cut-draft"
+        )
+        after_clear = client.get(
+            f"/api/transcriptions/{job_id}/cut-draft"
+        )
+
+    assert saved.status_code == 200
+    draft = saved.json()["cutDraft"]
+    assert draft["schemaVersion"] == 1
+    assert draft["revision"] == 1
+    assert draft["textRanges"][0]["key"] == "1.000-2.000"
+    assert draft["textRanges"][0]["start"] == 0.8
+    assert draft["noSpeechRanges"] == [
+        {"key": "silence-1", "start": 4.0, "end": 5.5}
+    ]
+    assert draft["timelineRanges"] == [{"start": 7.0, "end": 8.0}]
+    assert draft_file_exists_after_save is True
+    assert stale.status_code == 409
+    assert "其他页面更新" in stale.json()["detail"]
+    assert restored.status_code == 200
+    assert restored.json()["cutDraft"] == draft
+    assert rendered_job.json()["cutDraft"] == draft
+    assert cleared.status_code == 200
+    assert cleared.json() == {"status": "cleared"}
+    assert after_clear.json()["cutDraft"] is None
+    assert not app_module.cut_draft_path(job_id).exists()
+
+
+def test_editable_transcript_segments_can_split_and_merge_by_selected_text():
+    job_id = "44444444-4444-4444-8444-444444444444"
+    source_segments = [
+        {
+            "id": 0,
+            "start": 0.0,
+            "end": 1.4,
+            "text": "少年应有凌云志。",
+            "words": [
+                {"text": "少年", "start": 0.0, "end": 0.4},
+                {"text": "应有", "start": 0.4, "end": 0.8},
+                {"text": "凌云志。", "start": 0.8, "end": 1.4},
+            ],
+        }
+    ]
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "status": "completed",
+            "result": {
+                "text": "少年应有凌云志。",
+                "segments": source_segments,
+                "editableSegments": app_module.build_editable_transcript_segments(
+                    source_segments
+                ),
+            },
+            "edit": None,
+            "art": None,
+        }
+
+    with TestClient(app_module.app) as client:
+        invalid_merge = client.put(
+            f"/api/transcriptions/{job_id}/editable-segments",
+            json={"segmentIndex": 0, "action": "merge_up"},
+        )
+        split_response = client.put(
+            f"/api/transcriptions/{job_id}/editable-segments",
+            json={
+                "segmentIndex": 0,
+                "action": "split",
+                "selectionStart": 2,
+                "selectionEnd": 4,
+            },
+        )
+        merge_up_response = client.put(
+            f"/api/transcriptions/{job_id}/editable-segments",
+            json={"segmentIndex": 1, "action": "merge_up"},
+        )
+        merge_down_response = client.put(
+            f"/api/transcriptions/{job_id}/editable-segments",
+            json={"segmentIndex": 0, "action": "merge_down"},
+        )
+
+    assert invalid_merge.status_code == 400
+    assert invalid_merge.json()["detail"] == "第一段没有可向上合并的段落。"
+
+    assert split_response.status_code == 200
+    split_segments = split_response.json()["editableSegments"]
+    assert [segment["text"] for segment in split_segments] == [
+        "少年",
+        "应有",
+        "凌云志。",
+    ]
+    assert [(segment["start"], segment["end"]) for segment in split_segments] == [
+        (0.0, 0.4),
+        (0.4, 0.8),
+        (0.8, 1.4),
+    ]
+
+    assert merge_up_response.status_code == 200
+    assert [
+        segment["text"]
+        for segment in merge_up_response.json()["editableSegments"]
+    ] == ["少年应有", "凌云志。"]
+
+    assert merge_down_response.status_code == 200
+    merged_segments = merge_down_response.json()["editableSegments"]
+    assert [segment["id"] for segment in merged_segments] == [0]
+    assert merged_segments[0]["text"] == "少年应有凌云志。"
+    assert merged_segments[0]["start"] == 0.0
+    assert merged_segments[0]["end"] == 1.4
+
+
+def test_editable_transcript_segments_can_update_text_and_sync_source():
+    job_id = "55555555-5555-5555-8555-555555555555"
+    source_segments = [
+        {
+            "id": 0,
+            "start": 0.0,
+            "end": 1.4,
+            "text": "少年应有凌云志。",
+            "words": [
+                {"text": "少年", "start": 0.0, "end": 0.4},
+                {"text": "应有", "start": 0.4, "end": 0.8},
+                {"text": "凌云志。", "start": 0.8, "end": 1.4},
+            ],
+        }
+    ]
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "status": "completed",
+            "result": {
+                "text": "少年应有凌云志。",
+                "segments": source_segments,
+                "editableSegments": app_module.build_editable_transcript_segments(
+                    source_segments
+                ),
+            },
+            "edit": None,
+            "art": None,
+        }
+
+    with TestClient(app_module.app) as client:
+        response = client.put(
+            f"/api/transcriptions/{job_id}/editable-segments",
+            json={"segmentIndex": 0, "action": "text", "text": "少年应怀凌云志。"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["editableSegments"][0]["text"] == "少年应怀凌云志。"
+    with app_module.JOBS_LOCK:
+        job = app_module.JOBS[job_id]
+    assert job["result"]["segments"][0]["text"] == "少年应怀凌云志。"
+    assert app_module.content_characters(
+        "".join(word["text"] for word in job["result"]["segments"][0]["words"])
+    ) == app_module.content_characters("少年应怀凌云志。")
+    assert job["result"]["text"] == "少年应怀凌云志。"
+
+
+def test_editing_text_keeps_track_timeline_stable():
+    job_id = "66666666-6666-6666-8666-666666666666"
+    source_segments = [
+        {
+            "id": 0,
+            "start": 0.0,
+            "end": 1.0,
+            "text": "我们相信AI很强。",
+            "words": [
+                {"text": "我们", "start": 0.0, "end": 0.3},
+                {"text": "相信", "start": 0.3, "end": 0.5},
+                {"text": "AI", "start": 0.5, "end": 0.7},
+                {"text": "很强。", "start": 0.7, "end": 1.0},
+            ],
+        },
+        {
+            "id": 1,
+            "start": 1.0,
+            "end": 2.0,
+            "text": "第二段内容。",
+            "words": [
+                {"text": "第二", "start": 1.0, "end": 1.4},
+                {"text": "段", "start": 1.4, "end": 1.7},
+                {"text": "内容。", "start": 1.7, "end": 2.0},
+            ],
+        },
+    ]
+    shared = {
+        "trackType": "transcript",
+        "trackId": "transcript-full",
+        "font": "bold",
+        "fontSize": 54,
+        "color": "#FFFFFF",
+        "strokeColor": "#071018",
+        "strokeWidth": 0,
+        "shadow": True,
+        "x": 0.5,
+        "y": 0.82,
+        "direction": "horizontal",
+        "textAlign": "center",
+        "charsPerLine": 0,
+        "letterSpacing": 0,
+        "lineSpacing": 0,
+        "artStyle": "impact",
+    }
+    track_overlays = [
+        {**shared, "text": "我们相信AI很强", "start": 0.0, "end": 1.0},
+        {**shared, "text": "第二段内容", "start": 1.0, "end": 2.0},
+    ]
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "status": "completed",
+            "duration": 2.0,
+            "result": {
+                "text": "我们相信AI很强。\n第二段内容。",
+                "segments": source_segments,
+                "editableSegments": app_module.build_editable_transcript_segments(
+                    source_segments
+                ),
+            },
+            "art": {"overlays": track_overlays, "status": "completed"},
+            "edit": None,
+        }
+    try:
+        with TestClient(app_module.app) as client:
+            response = client.put(
+                f"/api/transcriptions/{job_id}/editable-segments",
+                json={
+                    "segmentIndex": 0,
+                    "action": "text",
+                    "text": "我们相信AI很厉害。",
+                },
+            )
+        assert response.status_code == 200
+        with app_module.JOBS_LOCK:
+            job = app_module.JOBS[job_id]
+        cue_a = job["art"]["overlays"][0]
+        cue_b = job["art"]["overlays"][1]
+
+        # The edited segment's cue text updates...
+        assert "很厉害" in cue_a["text"]
+        # ...but its TIMES stay exactly the same.
+        assert cue_a["start"] == 0.0
+        assert cue_a["end"] == 1.0
+        # The untouched segment's cue is completely unchanged.
+        assert cue_b["text"] == "第二段内容"
+        assert cue_b["start"] == 1.0
+        assert cue_b["end"] == 2.0
+        # The old rendered art video is stale; it must be regenerated.
+        assert job["art"]["status"] is None
+        assert job["art"]["outputUrl"] is None
+    finally:
+        with app_module.JOBS_LOCK:
+            app_module.JOBS.pop(job_id, None)
 
 
 def test_delete_ranges_are_merged_and_cannot_remove_everything():
@@ -1778,7 +2968,7 @@ def test_media_cut_boundaries_snap_to_waveform_valleys_without_changing_text():
     assert retained["segments"][0]["words"][1]["start"] == media_ranges[0]["start"]
 
 
-def test_media_cut_boundaries_do_not_cross_retained_word_edges():
+def test_media_cut_boundaries_can_reach_a_delayed_acoustic_tail_boundary():
     sample_rate = 16_000
     samples = array("h", [6_000]) * (sample_rate * 2)
     for valley in (0.10, 1.60):
@@ -1804,6 +2994,7 @@ def test_media_cut_boundaries_do_not_cross_retained_word_edges():
         segments,
         requested_ranges,
         2.0,
+        end_tail_guard_seconds=app_module.CUT_END_TAIL_GUARD_SECONDS,
     )
 
     media_ranges = app_module.snap_delete_ranges_to_samples(
@@ -1816,17 +3007,231 @@ def test_media_cut_boundaries_do_not_cross_retained_word_edges():
     retained = app_module.build_retained_transcript(
         segments,
         requested_ranges,
-        1.5,
+        0.9,
         timeline_delete_ranges=media_ranges,
     )
 
-    assert boundary_limits == [{"start": 0.5, "end": 1.0}]
-    assert media_ranges == requested_ranges
+    assert boundary_limits == [{"start": 0.5, "end": 1.75}]
+    assert media_ranges[0]["start"] == requested_ranges[0]["start"]
+    assert 1.58 <= media_ranges[0]["end"] <= 1.62
     assert retained["text"] == "保留保留"
     assert all(
         word["end"] > word["start"]
         for word in retained["segments"][0]["words"]
     )
+
+
+def test_media_cut_boundaries_extend_to_remove_a_high_energy_word_tail():
+    sample_rate = 16_000
+    samples = array("h", [6_000]) * (sample_rate * 3)
+    for valley in (1.12, 2.14):
+        start = round((valley - 0.03) * sample_rate)
+        end = round((valley + 0.03) * sample_rate)
+        samples[start:end] = array("h", [0]) * (end - start)
+
+    requested_ranges = [{"start": 1.0, "end": 2.0}]
+    segments = [
+        {
+            "id": 0,
+            "start": 0.0,
+            "end": 3.0,
+            "text": "保留删除保留",
+            "words": [
+                {"text": "保留", "start": 0.0, "end": 1.0},
+                {"text": "删除", "start": 1.0, "end": 2.0},
+                {"text": "保留", "start": 2.0, "end": 3.0},
+            ],
+        }
+    ]
+    boundary_limits = app_module.build_transcript_delete_boundary_limits(
+        segments,
+        requested_ranges,
+        3.0,
+        end_tail_guard_seconds=app_module.CUT_END_TAIL_GUARD_SECONDS,
+    )
+    media_ranges = app_module.snap_delete_ranges_to_samples(
+        requested_ranges,
+        3.0,
+        samples,
+        sample_rate,
+        boundary_limits=boundary_limits,
+    )
+
+    assert boundary_limits == [{"start": 1.0, "end": 2.75}]
+    assert media_ranges[0]["start"] == requested_ranges[0]["start"]
+    assert 2.12 <= media_ranges[0]["end"] <= 2.16
+    assert media_ranges[0]["end"] >= requested_ranges[0]["end"]
+
+
+def test_ai_suggestion_ranges_do_not_extend_into_next_retained_word():
+    sample_rate = 16_000
+    samples = array("h", [6_000]) * (sample_rate * 3)
+    for valley in (1.12, 2.14):
+        start = round((valley - 0.03) * sample_rate)
+        end = round((valley + 0.03) * sample_rate)
+        samples[start:end] = array("h", [0]) * (end - start)
+
+    segments = [
+        {
+            "id": 0,
+            "start": 0.0,
+            "end": 3.0,
+            "text": "保留删除保留",
+            "words": [
+                {"text": "保留", "start": 0.0, "end": 1.0},
+                {"text": "删除", "start": 1.0, "end": 2.0},
+                {"text": "保留", "start": 2.0, "end": 3.0},
+            ],
+        }
+    ]
+    suggestions = [
+        {
+            "id": "suggestion-1-1",
+            "type": "重复",
+            "reason": "检测到相邻内容重复，保留后一次表达",
+            "confidence": 0.99,
+            "text": "删除",
+            "start": 1.0,
+            "end": 2.0,
+            "ranges": [{"start": 1.0, "end": 2.0}],
+        }
+    ]
+
+    # A quiet valley at 2.14 sits inside the retained "保留" (2.0-3.0). A
+    # suggestion must never extend past the next retained word's start (2.0),
+    # otherwise the cut would swallow a kept character (e.g. "你身边..." would
+    # become "身边...").
+    snapped = app_module.snap_suggestion_ranges_to_audio(
+        segments,
+        suggestions,
+        3.0,
+        samples,
+    )
+    assert snapped[0]["start"] == suggestions[0]["start"]
+    assert snapped[0]["end"] == suggestions[0]["end"]
+    assert snapped[0]["ranges"][0]["start"] == snapped[0]["start"]
+    assert snapped[0]["ranges"][0]["end"] == snapped[0]["end"]
+
+    # Without decoded audio the suggestion must pass through unchanged so the
+    # ASR ranges remain usable even when boundary analysis is unavailable.
+    unchanged = app_module.snap_suggestion_ranges_to_audio(
+        segments,
+        suggestions,
+        3.0,
+        None,
+    )
+    assert unchanged == suggestions
+
+
+def test_ai_suggestion_ranges_remove_gap_tail_without_crossing_next_word():
+    sample_rate = 16_000
+    samples = array("h", [4_000]) * (sample_rate * 3)
+    for valley in (0.9, 1.6):
+        start = round((valley - 0.03) * sample_rate)
+        end = round((valley + 0.03) * sample_rate)
+        samples[start:end] = array("h", [0]) * (end - start)
+
+    segments = [
+        {
+            "id": 0,
+            "start": 0.0,
+            "end": 2.8,
+            "text": "保留删除保留",
+            "words": [
+                {"text": "保留", "start": 0.0, "end": 0.9},
+                {"text": "删除", "start": 1.0, "end": 1.5},
+                {"text": "保留", "start": 1.8, "end": 2.8},
+            ],
+        }
+    ]
+    suggestions = [
+        {
+            "id": "suggestion-1-1",
+            "type": "重复",
+            "reason": "检测到相邻内容重复，保留后一次表达",
+            "confidence": 0.99,
+            "text": "删除",
+            "start": 1.0,
+            "end": 1.5,
+            "ranges": [{"start": 1.0, "end": 1.5}],
+        }
+    ]
+
+    # The deleted word's ASR end (1.5) leaves a gap before the retained word
+    # (1.8). A quiet valley at 1.6 in that gap removes the residual tail, but
+    # the end must stay before the next retained word's start (1.8).
+    snapped = app_module.snap_suggestion_ranges_to_audio(
+        segments,
+        suggestions,
+        2.8,
+        samples,
+    )
+    assert 1.55 <= snapped[0]["end"] <= 1.8
+    assert snapped[0]["end"] >= suggestions[0]["end"]
+    assert snapped[0]["end"] < 1.8
+
+
+def test_media_cut_boundaries_extend_back_to_remove_an_early_word_head():
+    sample_rate = 16_000
+    samples = array("h", [6_000]) * (sample_rate * 3)
+    for valley in (0.78, 2.0):
+        start = round((valley - 0.03) * sample_rate)
+        end = round((valley + 0.03) * sample_rate)
+        samples[start:end] = array("h", [0]) * (end - start)
+
+    requested_ranges = [{"start": 1.0, "end": 2.0}]
+    segments = [
+        {
+            "id": 0,
+            "start": 0.0,
+            "end": 3.0,
+            "text": "保留删除保留",
+            "words": [
+                {"text": "保留", "start": 0.0, "end": 1.0},
+                {"text": "删除", "start": 1.0, "end": 2.0},
+                {"text": "保留", "start": 2.0, "end": 3.0},
+            ],
+        }
+    ]
+    boundary_limits = app_module.build_transcript_delete_boundary_limits(
+        segments,
+        requested_ranges,
+        3.0,
+        start_head_guard_seconds=app_module.CUT_START_HEAD_GUARD_SECONDS,
+    )
+    media_ranges = app_module.snap_delete_ranges_to_samples(
+        requested_ranges,
+        3.0,
+        samples,
+        sample_rate,
+        boundary_limits=boundary_limits,
+    )
+
+    assert boundary_limits == [{"start": 0.5, "end": 2.0}]
+    assert 0.76 <= media_ranges[0]["start"] <= 0.8
+    assert media_ranges[0]["start"] <= requested_ranges[0]["start"]
+    assert media_ranges[0]["end"] == requested_ranges[0]["end"]
+
+
+def test_media_cut_boundaries_leave_an_already_quiet_word_end_unchanged():
+    sample_rate = 16_000
+    samples = array("h", [6_000]) * (sample_rate * 2)
+    for valley in (1.0, 1.2):
+        start = round((valley - 0.03) * sample_rate)
+        end = round((valley + 0.03) * sample_rate)
+        samples[start:end] = array("h", [0]) * (end - start)
+
+    requested_ranges = [{"start": 0.5, "end": 1.0}]
+    boundary_limits = [{"start": 0.5, "end": 1.3}]
+    media_ranges = app_module.snap_delete_ranges_to_samples(
+        requested_ranges,
+        2.0,
+        samples,
+        sample_rate,
+        boundary_limits=boundary_limits,
+    )
+
+    assert media_ranges == requested_ranges
 
 
 def test_retained_transcript_uses_edited_video_timeline():
@@ -1857,6 +3262,60 @@ def test_retained_transcript_uses_edited_video_timeline():
     assert result["segments"][0]["words"] == [
         {"text": "保留", "start": 0.0, "end": 0.25},
         {"text": "保留", "start": 0.25, "end": 0.7},
+    ]
+
+
+def test_retained_transcript_retimes_after_text_and_silence_deletions():
+    segments = [
+        {
+            "id": 0,
+            "start": 0.5,
+            "end": 1.0,
+            "text": "甲",
+            "words": [{"text": "甲", "start": 0.5, "end": 1.0}],
+        },
+        {
+            "id": 1,
+            "start": 2.0,
+            "end": 3.0,
+            "text": "删除",
+            "words": [{"text": "删除", "start": 2.0, "end": 3.0}],
+        },
+        {
+            "id": 2,
+            "start": 5.0,
+            "end": 6.0,
+            "text": "乙",
+            "words": [{"text": "乙", "start": 5.0, "end": 6.0}],
+        },
+        {
+            "id": 3,
+            "start": 8.0,
+            "end": 9.0,
+            "text": "丙",
+            "words": [{"text": "丙", "start": 8.0, "end": 9.0}],
+        },
+    ]
+
+    result = app_module.build_retained_transcript(
+        segments,
+        [{"start": 2.0, "end": 3.0}],
+        6.2,
+        timeline_delete_ranges=[
+            {"start": 1.2, "end": 4.0},
+            {"start": 6.0, "end": 7.0},
+        ],
+    )
+
+    assert result["text"] == "甲乙丙"
+    assert result["duration"] == 6.2
+    assert [
+        (segment["text"], segment["start"], segment["end"])
+        for segment in result["segments"]
+    ] == [
+        ("甲", 0.5, 1.0),
+        ("乙", 2.2, 3.2),
+        ("丙", 4.2, 5.2),
     ]
 
 
@@ -1923,9 +3382,9 @@ def test_cut_endpoint_renders_preview_video(
     monkeypatch.setattr(
         app_module,
         "snap_delete_ranges_to_audio",
-        lambda media_path, ranges, duration, boundary_limits: [
-            {"start": 0.225, "end": 0.61}
-        ],
+        lambda *args, **kwargs: pytest.fail(
+            "生成视频不应再次改变当前预览的剪辑区间"
+        ),
     )
 
     with TestClient(app_module.app) as client, sample_video.open("rb") as handle:
@@ -1934,6 +3393,12 @@ def test_cut_endpoint_renders_preview_video(
             files={"file": (sample_video.name, handle, "video/mp4")},
         )
         job_id = upload_response.json()["id"]
+        with app_module.JOBS_LOCK:
+            app_module.JOBS[job_id]["pictureInPicture"] = {
+                "status": "completed",
+                "source": "original",
+                "overlays": [],
+            }
 
         cut_response = client.post(
             f"/api/transcriptions/{job_id}/cuts",
@@ -1946,6 +3411,12 @@ def test_cut_endpoint_renders_preview_video(
         video_response = client.get(
             f"/api/transcriptions/{job_id}/edited-video"
         )
+        with app_module.JOBS_LOCK:
+            app_module.JOBS[job_id]["pictureInPicture"] = {
+                "status": "completed",
+                "source": "edited",
+                "overlays": [],
+            }
         art_response = client.post(
             f"/api/transcriptions/{job_id}/art-text",
             json={
@@ -1982,14 +3453,15 @@ def test_cut_endpoint_renders_preview_video(
     assert cut_response.status_code == 202
     edit = job_response.json()["edit"]
     assert edit["status"] == "completed"
-    assert edit["ranges"] == [{"start": 0.225, "end": 0.61}]
+    assert job_response.json()["pictureInPicture"] is None
+    assert edit["ranges"] == [{"start": 0.25, "end": 0.55}]
     assert edit["requestedRanges"] == [{"start": 0.25, "end": 0.55}]
-    assert edit["outputDuration"] == 0.615
+    assert edit["outputDuration"] == 0.7
     assert edit["transcript"]["text"] == "保留保留"
     assert edit["transcript"]["segments"][0]["words"][1] == {
         "text": "保留",
-        "start": 0.225,
-        "end": 0.615,
+        "start": 0.25,
+        "end": 0.7,
     }
     assert video_response.status_code == 200
     assert video_response.headers["content-type"] == "video/mp4"
@@ -1997,6 +3469,7 @@ def test_cut_endpoint_renders_preview_video(
     assert output_path.is_file()
     assert 0.45 < app_module.probe_video(output_path) < 0.8
     assert art_response.status_code == 202
+    assert final_job_response.json()["pictureInPicture"] is None
     art = final_job_response.json()["art"]
     assert art["status"] == "completed"
     assert art["source"] == "edited"
@@ -2287,6 +3760,73 @@ def test_picture_in_picture_generates_image_with_requested_seedream_model(
     assert response.json()["styleReferenceTime"] == 0.45
     assert image_response.status_code == 200
     assert image_response.headers["content-type"] == "image/png"
+
+
+def test_picture_in_picture_image_uses_source_anchor_without_edited_video(
+    sample_video: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    job_id = "44444444-4444-4444-4444-444444444444"
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "filename": sample_video.name,
+            "duration": 1.0,
+            "status": "completed",
+            "result": {"text": "测试文案", "duration": 1.0, "segments": []},
+            "edit": None,
+            "art": None,
+            "artSuggestion": None,
+            "pictureInPictureImages": [],
+            "pictureInPicture": None,
+        }
+        app_module.JOB_FILES[job_id] = sample_video
+
+    image_buffer = io.BytesIO()
+    Image.new("RGB", (160, 90), "#38cfa4").save(image_buffer, "PNG")
+    encoded_image = base64.b64encode(image_buffer.getvalue()).decode("ascii")
+
+    class FakeSeedreamResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "model": "doubao-seedream-5-0-lite-260128",
+                "data": [{"b64_json": encoded_image}],
+            }
+
+    monkeypatch.setenv("ARK_API_KEY", "test-ark-key")
+    monkeypatch.setattr(
+        app_module.httpx,
+        "post",
+        lambda url, **kwargs: FakeSeedreamResponse(),
+    )
+
+    with TestClient(app_module.app) as client:
+        response = client.post(
+            f"/api/transcriptions/{job_id}/picture-in-picture/images",
+            json={
+                "text": "青年应当勇于创新。",
+                "start": 0.1,
+                "end": 0.4,
+                "mode": "auto",
+                "prompt": "",
+                # The "edited" video does not exist (edit is None), but the
+                # source anchors let the style reference fall back to the
+                # original video so PiP material can still be generated.
+                "source": "edited",
+                "sourceStart": 0.2,
+                "sourceEnd": 0.6,
+                "aspectRatio": "3:4",
+            },
+        )
+
+    assert response.status_code == 201
+    assert response.json()["source"] == "edited"
+    assert response.json()["styleMatched"] is True
+    # Reference frame midpoint comes from the original source anchors.
+    assert response.json()["styleReferenceTime"] == 0.4
 
 
 def test_picture_in_picture_generation_requires_ark_key(sample_video: Path):
@@ -2659,6 +4199,259 @@ def test_picture_in_picture_video_is_rendered_for_selected_text_time(
     assert 0.8 < app_module.probe_video(output_path) < 1.2
 
 
+def test_picture_in_picture_overlay_accepts_live_retimed_range(tmp_path: Path):
+    asset_id = "draft-retimed-asset"
+    (tmp_path / f"picture-in-picture-{asset_id}.png").write_bytes(b"png")
+    overlay = app_module.PictureInPictureOverlay(
+        assetId=asset_id,
+        start=0.4,
+        end=0.9,
+        x=0.78,
+        y=0.22,
+        width=0.32,
+    )
+
+    normalized = app_module.normalize_picture_in_picture_overlays(
+        [overlay],
+        1.0,
+        [
+            {
+                "id": asset_id,
+                "type": "image",
+                "source": "edited",
+                "start": 1.2,
+                "end": 1.8,
+                "assetUrl": "/asset.png",
+            }
+        ],
+        tmp_path,
+        "edited",
+    )
+
+    assert normalized[0]["start"] == 0.4
+    assert normalized[0]["end"] == 0.9
+
+
+def test_preview_composition_renders_cut_art_and_pip_in_one_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    job_id = "77777777-7777-4777-8777-777777777777"
+    video_path = tmp_path / "source.mp4"
+    video_path.write_bytes(b"source")
+    asset_id = "preview-composition-image"
+    (tmp_path / f"picture-in-picture-{asset_id}.png").write_bytes(b"png")
+    calls: list[tuple[str, Path, Path, list[dict[str, object]]]] = []
+
+    def fake_cut(
+        input_path: Path,
+        output_path: Path,
+        ranges: list[dict[str, float]],
+        duration: float,
+    ) -> None:
+        calls.append(("cut", input_path, output_path, ranges))
+        output_path.write_bytes(b"edited")
+
+    def fake_art(
+        input_path: Path,
+        output_path: Path,
+        overlays: list[dict[str, object]],
+    ) -> None:
+        calls.append(("art", input_path, output_path, overlays))
+        output_path.write_bytes(b"art")
+
+    def fake_pip(
+        input_path: Path,
+        output_path: Path,
+        overlays: list[dict[str, object]],
+    ) -> None:
+        calls.append(("pip", input_path, output_path, overlays))
+        output_path.write_bytes(b"pip")
+
+    monkeypatch.setattr(
+        app_module,
+        "snap_delete_ranges_to_audio",
+        lambda *args, **kwargs: pytest.fail(
+            "组合生成不应再次改变当前预览的剪辑区间"
+        ),
+    )
+    monkeypatch.setattr(app_module, "render_cut_video", fake_cut)
+    monkeypatch.setattr(app_module, "render_art_text_video", fake_art)
+    monkeypatch.setattr(app_module, "render_picture_in_picture_video", fake_pip)
+
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "filename": "source.mp4",
+            "duration": 1.0,
+            "status": "completed",
+            "result": {
+                "text": "删除保留字幕",
+                "duration": 1.0,
+                "segments": [
+                    {
+                        "id": 0,
+                        "start": 0.0,
+                        "end": 1.0,
+                        "text": "删除保留字幕",
+                        "words": [
+                            {"text": "删除", "start": 0.2, "end": 0.4},
+                            {"text": "保留字幕", "start": 0.6, "end": 0.9},
+                        ],
+                    }
+                ],
+            },
+            "edit": None,
+            "art": None,
+            "artSuggestion": None,
+            "pictureInPictureImages": [
+                {
+                    "id": asset_id,
+                    "text": "保留字幕",
+                    "prompt": "测试插图",
+                    "source": "original",
+                    "start": 0.4,
+                    "end": 0.7,
+                    "imageUrl": f"/api/transcriptions/{job_id}/picture-in-picture/images/{asset_id}",
+                }
+            ],
+            "pictureInPictureVideos": [],
+            "pictureInPicture": None,
+        }
+        app_module.JOB_FILES[job_id] = video_path
+
+    with TestClient(app_module.app) as client:
+        response = client.post(
+            f"/api/transcriptions/{job_id}/compose",
+            json={
+                "target": "all",
+                "ranges": [{"start": 0.2, "end": 0.4}],
+                "artSource": "original",
+                "artOverlays": [
+                    {
+                        "text": "保留字幕",
+                        "font": "bold",
+                        "fontSize": 42,
+                        "color": "#FFD84D",
+                        "strokeColor": "#071018",
+                        "strokeWidth": 3,
+                        "shadow": True,
+                        "x": 0.5,
+                        "y": 0.8,
+                        "start": 0.4,
+                        "end": 0.7,
+                        "artStyle": "impact",
+                        "sourceStart": 0.6,
+                        "sourceEnd": 0.9,
+                    }
+                ],
+                "pictureInPictureSource": "original",
+                "pictureInPictureOverlays": [
+                    {
+                        "assetId": asset_id,
+                        "start": 0.4,
+                        "end": 0.7,
+                        "sourceStart": 0.6,
+                        "sourceEnd": 0.9,
+                        "x": 0.78,
+                        "y": 0.22,
+                        "width": 0.32,
+                    }
+                ],
+            },
+        )
+        job_response = client.get(f"/api/transcriptions/{job_id}")
+
+    assert response.status_code == 202
+    assert [call[0] for call in calls] == ["cut", "art", "pip"]
+    assert calls[1][1] == tmp_path / "edited.mp4"
+    assert calls[2][1] == tmp_path / "art-text.mp4"
+    assert calls[0][3] == [{"start": 0.2, "end": 0.4}]
+    assert calls[1][3][0]["start"] == 0.4
+    assert calls[1][3][0]["end"] == 0.7
+    assert calls[2][3][0]["start"] == 0.4
+    assert calls[2][3][0]["end"] == 0.7
+    payload = job_response.json()
+    assert payload["edit"]["status"] == "completed"
+    assert payload["edit"]["outputDuration"] == 0.8
+    assert payload["art"]["status"] == "completed"
+    assert payload["pictureInPicture"]["status"] == "completed"
+    assert payload["pictureInPicture"]["stage"] == "当前预览已生成视频"
+    assert payload["composition"]["status"] == "completed"
+    assert payload["composition"]["outputUrl"].endswith("/composition-video")
+    assert (tmp_path / "composition.mp4").read_bytes() == b"pip"
+
+    with TestClient(app_module.app) as client:
+        output_response = client.get(
+            f"/api/transcriptions/{job_id}/composition-video"
+        )
+    assert output_response.status_code == 200
+    assert output_response.content == b"pip"
+
+
+def test_preview_composition_allows_unchanged_timeline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    job_id = "88888888-8888-4888-8888-888888888888"
+    video_path = tmp_path / "source.mp4"
+    video_path.write_bytes(b"source")
+    calls: list[list[dict[str, float]]] = []
+
+    def fake_cut(
+        input_path: Path,
+        output_path: Path,
+        ranges: list[dict[str, float]],
+        duration: float,
+    ) -> None:
+        calls.append(ranges)
+        output_path.write_bytes(b"unchanged")
+
+    monkeypatch.setattr(app_module, "render_cut_video", fake_cut)
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "filename": "source.mp4",
+            "duration": 1.0,
+            "status": "completed",
+            "result": {
+                "text": "保留全部",
+                "segments": [
+                    {
+                        "id": 0,
+                        "start": 0.0,
+                        "end": 1.0,
+                        "text": "保留全部",
+                        "words": [
+                            {"text": "保留全部", "start": 0.0, "end": 1.0}
+                        ],
+                    }
+                ],
+            },
+            "edit": None,
+            "art": None,
+            "artSuggestion": None,
+            "pictureInPictureImages": [],
+            "pictureInPictureVideos": [],
+            "pictureInPicture": None,
+            "composition": None,
+        }
+        app_module.JOB_FILES[job_id] = video_path
+
+    with TestClient(app_module.app) as client:
+        response = client.post(
+            f"/api/transcriptions/{job_id}/compose",
+            json={"target": "all", "ranges": []},
+        )
+        payload = client.get(f"/api/transcriptions/{job_id}").json()
+
+    assert response.status_code == 202
+    assert calls == [[]]
+    assert payload["edit"]["outputDuration"] == 1.0
+    assert payload["composition"]["status"] == "completed"
+    assert (tmp_path / "composition.mp4").read_bytes() == b"unchanged"
+
+
 def test_art_text_rejects_invalid_overlay_time():
     overlay = app_module.TextOverlay(
         text="标题",
@@ -2676,6 +4469,61 @@ def test_art_text_rejects_invalid_overlay_time():
 
     with pytest.raises(ValueError, match="时间超出视频范围"):
         app_module.normalize_text_overlays([overlay], 1.0)
+
+
+def test_art_text_preserves_original_timeline_anchor():
+    overlay = app_module.TextOverlay(
+        text="剪后同步",
+        font="modern",
+        fontSize=48,
+        color="#FFFFFF",
+        strokeColor="#000000",
+        strokeWidth=2,
+        shadow=True,
+        x=0.5,
+        y=0.2,
+        start=1.0,
+        end=2.0,
+        sourceStart=3.5,
+        sourceEnd=4.5,
+    )
+
+    normalized = app_module.normalize_text_overlays([overlay], 3.0)
+
+    assert normalized[0]["start"] == 1.0
+    assert normalized[0]["end"] == 2.0
+    assert normalized[0]["sourceStart"] == 3.5
+    assert normalized[0]["sourceEnd"] == 4.5
+
+
+def test_transcript_art_text_overlap_ends_at_next_real_start_time():
+    shared = {
+        "font": "modern",
+        "fontSize": 48,
+        "color": "#FFFFFF",
+        "strokeColor": "#000000",
+        "strokeWidth": 2,
+        "shadow": True,
+        "x": 0.5,
+        "y": 0.9,
+        "direction": "horizontal",
+        "textAlign": "center",
+        "charsPerLine": 0,
+        "lineSpacing": 0,
+        "artStyle": "impact",
+        "trackId": "transcript-full",
+        "trackType": "transcript",
+    }
+    overlays = [
+        app_module.TextOverlay(text="第一句", start=0.4, end=0.8, **shared),
+        app_module.TextOverlay(text="第二句", start=0.75, end=1.1, **shared),
+    ]
+
+    normalized = app_module.normalize_text_overlays(overlays, 2.0)
+
+    assert normalized[0]["end"] == 0.75
+    assert normalized[1]["start"] == 0.75
+    assert normalized[0]["end"] <= normalized[1]["start"]
 
 
 def test_ai_art_suggestions_are_normalized_and_filled_to_requested_count():
@@ -2865,7 +4713,7 @@ def test_full_transcript_art_track_uses_word_times_and_single_line_cues():
         {"text": "你", "start": 0.28, "end": 0.42},
         {"text": "圈子", "start": 0.42, "end": 0.72},
         {"text": "里", "start": 0.72, "end": 0.86},
-        {"text": "从来", "start": 0.86, "end": 1.12},
+        {"text": "从来", "start": 0.82, "end": 1.12},
         {"text": "没有人", "start": 1.12, "end": 1.48},
         {"text": "拿到过", "start": 1.48, "end": 1.82},
         {"text": "结果，", "start": 1.82, "end": 2.16},
@@ -2911,11 +4759,10 @@ def test_full_transcript_art_track_uses_word_times_and_single_line_cues():
         app_module.content_characters(transcript["text"])
     )
     assert [cue["text"] for cue in result["cues"]] == [
-        "如果你圈子里",
-        "从来没有人拿到过结果",
+        "如果你圈子里从来没有人",
+        "拿到过结果",
         "那你第一次碰到机会",
-        "第一反应肯定",
-        "不是冲上去",
+        "第一反应肯定不是冲上去",
         "而是先怀疑",
     ]
     assert all(
@@ -2929,6 +4776,8 @@ def test_full_transcript_art_track_uses_word_times_and_single_line_cues():
         for previous, current in zip(result["cues"], result["cues"][1:])
     )
     assert result["cues"][0]["start"] == words[0]["start"]
+    assert result["cues"][0]["end"] == words[5]["end"]
+    assert result["cues"][1]["start"] == words[5]["end"]
     assert result["cues"][-1]["end"] == words[-1]["end"]
 
 def test_full_transcript_art_track_keeps_complete_sentences_and_avoids_orphans():
@@ -3146,7 +4995,10 @@ def test_ai_transcript_art_text_segmentation_returns_valid_word_boundaries(
     assert captured["timeout"] == 12
     assert captured["enable_thinking"] is False
     system_prompt = captured["messages"][0]["content"]
-    assert "10 个汉字是硬性上限" in system_prompt
+    # The prompt must prefer a whole sentence on one line and only split a
+    # sentence that exceeds the requested budget (12 here).
+    assert "整句作为一条字幕" in system_prompt
+    assert "12 个汉字时，才" in system_prompt
     assert "不能从一个词中间硬切" in system_prompt
 
 
@@ -3166,7 +5018,7 @@ def test_ai_transcript_art_text_segmentation_returns_valid_word_boundaries(
                 "能力。",
             ],
             [2, 8],
-            ["人这辈子最难突破的", "从来不是自己的能力"],
+            ["人这辈子最难", "突破的从来", "不是自己的能力"],
         ),
         (
             [
@@ -3181,7 +5033,7 @@ def test_ai_transcript_art_text_segmentation_returns_valid_word_boundaries(
                 "能力。",
             ],
             [1, 8],
-            ["人这辈子最难突破的", "从来不是自己的能力"],
+            ["人这辈子最难", "突破的从来", "不是自己的能力"],
         ),
         (
             [
@@ -3198,7 +5050,7 @@ def test_ai_transcript_art_text_segmentation_returns_valid_word_boundaries(
                 "了。",
             ],
             [6, 10],
-            ["你身边人人都觉得", "一个月赚一万就顶天了"],
+            ["你身边人人都", "觉得一个月赚", "一万就顶天了"],
         ),
     ],
 )
@@ -3244,6 +5096,213 @@ def test_full_transcript_art_track_repairs_ai_breaks_inside_phrases(
         len(app_module.content_characters(cue["text"]))
         <= app_module.TRANSCRIPT_ART_TEXT_MAX_CHARS_PER_CUE
         for cue in result["cues"]
+    )
+
+
+def _build_track_words(tokens: list[str]) -> list[dict[str, object]]:
+    return [
+        {
+            "text": token,
+            "start": round(index * 0.3, 3),
+            "end": round((index + 1) * 0.3, 3),
+        }
+        for index, token in enumerate(tokens)
+    ]
+
+
+def test_transcript_art_text_track_keeps_two_short_sentences_separate():
+    tokens = ["我同意。", "走吧。"]
+    words = _build_track_words(tokens)
+    transcript = {
+        "text": "".join(tokens),
+        "segments": [
+            {
+                "text": "".join(tokens),
+                "start": 0.0,
+                "end": words[-1]["end"],
+                "words": words,
+            }
+        ],
+    }
+    result = app_module.build_transcript_art_text_track(
+        transcript,
+        words[-1]["end"],
+        1080,
+        font_id="bold",
+        font_size=54,
+        letter_spacing=0,
+        stroke_width=3,
+    )
+
+    # Two complete short sentences must not be jammed onto one line.
+    assert [cue["text"] for cue in result["cues"]] == ["我同意", "走吧"]
+
+
+def test_transcript_art_text_track_folds_single_character_sentence_into_next():
+    tokens = ["对。", "我们今天出发。"]
+    words = _build_track_words(tokens)
+    transcript = {
+        "text": "".join(tokens),
+        "segments": [
+            {
+                "text": "".join(tokens),
+                "start": 0.0,
+                "end": words[-1]["end"],
+                "words": words,
+            }
+        ],
+    }
+    result = app_module.build_transcript_art_text_track(
+        transcript,
+        words[-1]["end"],
+        1080,
+        font_id="bold",
+        font_size=54,
+        letter_spacing=0,
+        stroke_width=3,
+    )
+
+    # A single-character sentence becomes a spoken lead-in instead of a lone
+    # one-character line.
+    assert [cue["text"] for cue in result["cues"]] == ["对我们今天出发"]
+
+
+def test_transcript_art_text_track_splits_unpunctuated_long_phrase_naturally():
+    tokens = [
+        "我",
+        "觉得",
+        "这个",
+        "世界",
+        "真的",
+        "很",
+        "美好",
+        "我们",
+        "一定",
+        "要",
+        "坚持",
+        "到底",
+    ]
+    words = _build_track_words(tokens)
+    transcript = {
+        "text": "".join(tokens),
+        "segments": [
+            {
+                "text": "".join(tokens),
+                "start": 0.0,
+                "end": words[-1]["end"],
+                "words": words,
+            }
+        ],
+    }
+    result = app_module.build_transcript_art_text_track(
+        transcript,
+        words[-1]["end"],
+        1080,
+        font_id="bold",
+        font_size=54,
+        letter_spacing=0,
+        stroke_width=3,
+    )
+    cues = [cue["text"] for cue in result["cues"]]
+
+    assert len(cues) >= 2
+    assert "".join(cues) == app_module.content_characters(transcript["text"])
+    assert all(
+        2
+        <= len(app_module.content_characters(cue["text"]))
+        <= app_module.TRANSCRIPT_ART_TEXT_MAX_CHARS_PER_CUE
+        for cue in result["cues"]
+    )
+
+
+def test_transcript_art_text_character_limit_adapts_to_font_and_width():
+    font_path = app_module.resolve_art_text_font_path("bold")
+    small_font = app_module.ImageFont.truetype(str(font_path), 54)
+    big_font = app_module.ImageFont.truetype(str(font_path), 90)
+
+    small_limit = app_module.transcript_art_text_character_limit(
+        small_font,
+        1080,
+        0,
+        3,
+    )
+    big_limit = app_module.transcript_art_text_character_limit(
+        big_font,
+        1080,
+        0,
+        3,
+    )
+
+    # The 54px font fits the safe line fully (up to the semantic ceiling); the
+    # 90px font is width-bound to fewer characters per line.
+    assert 10 <= small_limit <= app_module.TRANSCRIPT_ART_TEXT_MAX_CHARS_PER_CUE
+    assert 6 <= big_limit < small_limit
+
+
+def test_art_text_splitter_prefers_audio_pause_boundaries():
+    # No punctuation, but the audio pauses at the natural phrase boundaries.
+    # The splitter must honor those pauses — a general, content-independent
+    # signal — instead of falling back to an arbitrary balanced cut.
+    tokens = [
+        "咱们",
+        "判断",
+        "一件事",
+        "靠不靠谱",
+        "很少",
+        "去琢磨",
+        "这件事",
+        "本身",
+        "行不行",
+        "第一",
+        "反应",
+        "都是",
+        "身边",
+        "也没有",
+        "人干成过",
+    ]
+    pause_after = {"靠不靠谱", "行不行", "都是"}
+    words = []
+    cursor = 0.0
+    for token in tokens:
+        words.append(
+            {
+                "text": token,
+                "start": round(cursor, 3),
+                "end": round(cursor + 0.3, 3),
+                "segmentIndex": 0,
+            }
+        )
+        cursor += 0.3
+        if token in pause_after:
+            cursor += 0.4
+    transcript = {
+        "text": "".join(tokens),
+        "segments": [
+            {
+                "text": "".join(tokens),
+                "start": 0.0,
+                "end": cursor,
+                "words": words,
+            }
+        ],
+    }
+
+    result = app_module.build_transcript_art_text_track(
+        transcript,
+        cursor,
+        1080,
+        font_id="bold",
+        font_size=54,
+        letter_spacing=0,
+        stroke_width=3,
+    )
+    cues = [cue["text"] for cue in result["cues"]]
+
+    # The pause after "靠不靠谱" makes it the first break even though a
+    # balanced cut would prefer a point closer to the arithmetic middle.
+    assert cues[0] == "咱们判断一件事靠不靠谱"
+    assert all(
+        2 <= len(app_module.content_characters(cue)) <= 12 for cue in cues
     )
 
 
@@ -3449,7 +5508,10 @@ def test_transcript_track_rejects_legacy_long_cue_before_rendering():
         **shared,
     )
 
-    with pytest.raises(ValueError, match="最多只能显示 10 个字"):
+    with pytest.raises(
+        ValueError,
+        match=f"最多只能显示 {app_module.TRANSCRIPT_ART_TEXT_MAX_CHARS_PER_CUE} 个字",
+    ):
         app_module.normalize_text_overlays([overlay], 3.0)
 
 
@@ -3500,6 +5562,119 @@ def test_transcript_track_endpoint_uses_selected_video_transcript(
     assert response.status_code == 200
     assert response.json()["trackType"] == "transcript"
     assert "".join(cue["text"] for cue in response.json()["cues"]) == "词级同步"
+
+
+def test_transcript_track_endpoint_uses_live_cut_draft_with_source_anchors(
+    sample_video: Path,
+):
+    job_id = "32323232-3232-3232-3232-323232323232"
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "filename": sample_video.name,
+            "duration": 1.0,
+            "status": "completed",
+            "result": {"text": "原始文案", "duration": 1.0, "segments": []},
+            "edit": None,
+            "art": None,
+        }
+        app_module.JOB_FILES[job_id] = sample_video
+
+    draft_words = [
+        {
+            "text": "实时",
+            "start": 0.0,
+            "end": 0.25,
+            "sourceStart": 0.2,
+            "sourceEnd": 0.45,
+        },
+        {
+            "text": "同步。",
+            "start": 0.25,
+            "end": 0.6,
+            "sourceStart": 0.45,
+            "sourceEnd": 0.8,
+        },
+    ]
+    draft_transcript = {
+        "text": "实时同步。",
+        "segments": [
+            {
+                "text": "实时同步。",
+                "start": 0.0,
+                "end": 0.6,
+                "sourceStart": 0.2,
+                "sourceEnd": 0.8,
+                "words": draft_words,
+            }
+        ],
+    }
+
+    with TestClient(app_module.app) as client:
+        response = client.post(
+            f"/api/transcriptions/{job_id}/art-text/transcript-track",
+            json={
+                "source": "original",
+                "font": "bold",
+                "fontSize": 42,
+                "letterSpacing": 0,
+                "strokeWidth": 3,
+                "draftTranscript": draft_transcript,
+                "draftDuration": 0.6,
+            },
+        )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["segmentationMethod"] == "local"
+    cues = result["cues"]
+    assert "".join(cue["text"] for cue in cues) == "实时同步"
+    assert cues[0]["start"] == 0.0
+    assert cues[-1]["end"] == 0.6
+    assert cues[0]["sourceStart"] == 0.2
+    assert cues[-1]["sourceEnd"] == 0.8
+
+    updated_draft = {
+        "text": "同步。",
+        "segments": [
+            {
+                "text": "同步。",
+                "start": 0.0,
+                "end": 0.35,
+                "sourceStart": 0.45,
+                "sourceEnd": 0.8,
+                "words": [
+                    {
+                        "text": "同步。",
+                        "start": 0.0,
+                        "end": 0.35,
+                        "sourceStart": 0.45,
+                        "sourceEnd": 0.8,
+                    }
+                ],
+            }
+        ],
+    }
+    with TestClient(app_module.app) as client:
+        updated_response = client.post(
+            f"/api/transcriptions/{job_id}/art-text/transcript-track",
+            json={
+                "source": "original",
+                "font": "bold",
+                "fontSize": 42,
+                "letterSpacing": 0,
+                "strokeWidth": 3,
+                "draftTranscript": updated_draft,
+                "draftDuration": 0.35,
+            },
+        )
+
+    assert updated_response.status_code == 200
+    updated_cues = updated_response.json()["cues"]
+    assert "".join(cue["text"] for cue in updated_cues) == "同步"
+    assert updated_cues[0]["start"] == 0.0
+    assert updated_cues[-1]["end"] == 0.35
+    assert updated_cues[0]["sourceStart"] == 0.45
 
 
 def test_art_text_balances_lines_and_keeps_closing_punctuation_off_line_start():

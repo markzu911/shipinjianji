@@ -8,3 +8,9 @@ data/models/*
 data/fonts/*
 !data/jobs/.gitkeep
 !data/models/.gitkeep
+# 构建产物
+build/
+
+# Python 缓存
+*.pyc
+*.pyo

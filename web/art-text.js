@@ -22,6 +22,16 @@ const artVideo = document.querySelector("#artVideo");
 const videoStage = document.querySelector("#videoStage");
 const videoTime = document.querySelector("#videoTime");
 const overlayLayer = document.querySelector("#overlayLayer");
+const overlayCoordinateReadout = document.querySelector(
+  "#overlayCoordinateReadout",
+);
+const positionPresetGrid = document.querySelector("#positionPresetGrid");
+const positionPresetName = document.querySelector("#positionPresetName");
+const savePositionPreset = document.querySelector("#savePositionPreset");
+const positionPresetMessage = document.querySelector(
+  "#positionPresetMessage",
+);
+const positionPresetHint = document.querySelector("#positionPresetHint");
 const overlayCount = document.querySelector("#overlayCount");
 const customText = document.querySelector("#customText");
 const addCustomText = document.querySelector("#addCustomText");
@@ -58,6 +68,8 @@ const applyAllSettingsMessage = document.querySelector(
 const deleteOverlay = document.querySelector("#deleteOverlay");
 const artStyleGrid = document.querySelector("#artStyleGrid");
 let artStyleButtons = [...document.querySelectorAll(".art-style-option")];
+const transcriptStyleGrid = document.querySelector("#transcriptStyleGrid");
+let transcriptStyleButtons = [];
 const overlayList = document.querySelector("#overlayList");
 const retainedText = document.querySelector("#retainedText");
 const saveRetainedText = document.querySelector("#saveRetainedText");
@@ -86,7 +98,6 @@ const artProgressPercent = document.querySelector("#artProgressPercent");
 const artProgressTrack = document.querySelector("#artProgressTrack");
 const artProgressBar = document.querySelector("#artProgressBar");
 const artResult = document.querySelector("#artResult");
-const artResultTitle = document.querySelector("#art-result-title");
 const artResultDuration = document.querySelector("#artResultDuration");
 const finalVideo = document.querySelector("#finalVideo");
 const downloadFinalVideo = document.querySelector("#downloadFinalVideo");
@@ -126,6 +137,7 @@ const frameTimelineSeek = document.querySelector("#frameTimelineSeek");
 const frameTimelineTime = document.querySelector("#frameTimelineTime");
 const frameTimelineJumpInput = document.querySelector("#frameTimelineJumpInput");
 const frameTimelineJumpButton = document.querySelector("#frameTimelineJumpButton");
+const frameTimelineScroll = document.querySelector("#frameTimelineScroll");
 const frameTimelineTrack = document.querySelector(".frame-timeline-track");
 const frameTimelineRuler = document.querySelector("#frameTimelineRuler");
 const frameTimelineThumbnails = document.querySelector(
@@ -134,16 +146,20 @@ const frameTimelineThumbnails = document.querySelector(
 const frameTimelineSegments = document.querySelector("#frameTimelineSegments");
 const frameTimelinePlayhead = document.querySelector("#frameTimelinePlayhead");
 const frameTimelineStatus = document.querySelector("#frameTimelineStatus");
-const outputPanel = document.querySelector("#outputPanel");
 
 const query = new URLSearchParams(window.location.search);
+const embeddedEditor = query.get("embedded") === "1";
+document.documentElement.classList.toggle("editor-tool-embedded", embeddedEditor);
 const jobId = query.get("job") || "";
 const videoSource = query.get("source") === "original" ? "original" : "edited";
-const TRANSCRIPT_TRACK_MAX_CHARS_PER_CUE = 10;
+const TRANSCRIPT_TRACK_MAX_CHARS_PER_CUE = 12;
+const TRANSCRIPT_TRACK_DEFAULT_STYLE = "impact";
 let job = null;
 let duration = 0;
 let overlays = [];
+let cutSuppressedOverlays = [];
 let selectedOverlayId = null;
+let generationModalActive = false;
 let nextOverlayId = 1;
 let pollTimer = null;
 let aiPollTimer = null;
@@ -157,12 +173,22 @@ let preferredArtFontId = "bold";
 let retainedTranscriptSegments = [];
 let selectedRetainedSegmentKeys = new Set();
 let transcriptTrackBusy = false;
+let transcriptTrackRefreshTimer = null;
+let transcriptTrackDraftVersion = 0;
+let transcriptTrackTemplateId = TRANSCRIPT_TRACK_DEFAULT_STYLE;
 let transcriptSaveBusy = false;
 let retainedSavedText = "";
 let frameTimelineBuildId = 0;
 let frameTimelineSignature = "";
 let frameTimelineRulerSignature = "";
 let frameTimelineResizeTimer = null;
+let editorHostCurrentTime = null;
+let editorHostStateSignature = "";
+let previewVisibilitySignature = "";
+let cutDraftActive = false;
+let pendingCutDraft = null;
+let appliedCutDraftState = null;
+let artEditorReady = false;
 let preferredArtTemplateSettings = {
   id: "impact",
   color: "#FFD84D",
@@ -264,28 +290,7 @@ async function loadArtTemplateLibrary() {
     };
     ART_STYLE_BASES[template.id] = template.baseStyle || template.id;
 
-    const button = document.createElement("button");
-    button.className = "art-style-option";
-    button.type = "button";
-    button.dataset.artStyle = template.id;
-    button.setAttribute("aria-pressed", "false");
-    const sample = document.createElement("span");
-    sample.className =
-      `art-style-sample style-${template.baseStyle || template.id}`;
-    sample.textContent = template.sample;
-    sample.style.setProperty("--template-color", template.color);
-    sample.style.setProperty("--template-stroke", template.strokeColor);
-    const copy = document.createElement("span");
-    const name = document.createElement("strong");
-    name.textContent = template.name;
-    const description = document.createElement("small");
-    description.textContent =
-      template.source === "uploaded"
-        ? `我的模板 · ${template.description}`
-        : template.description;
-    copy.append(name, description);
-    button.append(sample, copy);
-    buttons.push(button);
+    buttons.push(createArtStyleButton(template));
   }
   artStyleGrid.replaceChildren(...buttons);
   artStyleButtons = buttons;
@@ -297,6 +302,7 @@ async function loadArtTemplateLibrary() {
       ...ART_STYLE_PALETTES.impact,
     };
   }
+  renderTranscriptStyleGrid(templates);
 }
 
 function replaceUnavailableOverlayTemplates() {
@@ -318,6 +324,121 @@ function normalizedTemplateColor(value, fallback) {
   return /^#[0-9a-f]{6}$/i.test(String(value || ""))
     ? String(value).toUpperCase()
     : fallback;
+}
+
+function createArtStyleButton(template, extraClass = "") {
+  const button = document.createElement("button");
+  button.className = ["art-style-option", extraClass].filter(Boolean).join(" ");
+  button.type = "button";
+  button.dataset.artStyle = template.id;
+  button.setAttribute("aria-pressed", "false");
+  const descriptionText =
+    template.source === "uploaded"
+      ? `我的模板 · ${template.description}`
+      : template.description;
+  button.title = `${template.name}：${descriptionText}`;
+  button.setAttribute("aria-label", `选择${template.name}，${descriptionText}`);
+  const sample = document.createElement("span");
+  sample.className =
+    `art-style-sample style-${template.baseStyle || template.id}`;
+  sample.textContent = template.sample;
+  sample.style.setProperty("--template-color", template.color);
+  sample.style.setProperty("--template-stroke", template.strokeColor);
+  const copy = document.createElement("span");
+  const name = document.createElement("strong");
+  name.textContent = template.name;
+  const description = document.createElement("small");
+  description.textContent = descriptionText;
+  copy.append(name, description);
+  button.append(sample, copy);
+  return button;
+}
+
+function updateTranscriptStyleButtons() {
+  const hasTrack = currentTranscriptTrack().length > 0;
+  for (const button of transcriptStyleButtons) {
+    const isSelected = button.dataset.artStyle === transcriptTrackTemplateId;
+    button.setAttribute("aria-pressed", String(isSelected));
+    button.disabled = transcriptTrackBusy || hasTrack;
+  }
+}
+
+function selectedTranscriptTemplateName() {
+  const button = transcriptStyleButtons.find(
+    (item) => item.dataset.artStyle === transcriptTrackTemplateId,
+  );
+  return button?.querySelector("strong")?.textContent || "所选类型";
+}
+
+function setTranscriptTrackTemplate(artStyle, options = {}) {
+  if (!ART_STYLE_PALETTES[artStyle] || !availableArtTemplateIds.has(artStyle)) {
+    return false;
+  }
+  transcriptTrackTemplateId = artStyle;
+  preferredArtTemplateSettings = {
+    ...preferredArtTemplateSettings,
+    id: artStyle,
+    ...ART_STYLE_PALETTES[artStyle],
+  };
+  try {
+    window.localStorage.setItem(
+      "preferredArtTemplateSettings",
+      JSON.stringify(preferredArtTemplateSettings),
+    );
+    window.localStorage.setItem("preferredArtTemplateId", artStyle);
+  } catch {
+    // The current session can still use the selected subtitle template.
+  }
+  updateTranscriptStyleButtons();
+  updateRetainedBulkControls();
+  if (options.announce) {
+    showRetainedBulkMessage(
+      `已选择“${selectedTranscriptTemplateName()}”，现在可以生成整条字幕。`,
+    );
+  }
+  return true;
+}
+
+function renderTranscriptStyleGrid(templates) {
+  if (!transcriptStyleGrid) return;
+  const buttons = templates.map((template) =>
+    createArtStyleButton(template, "transcript-style-option"),
+  );
+  transcriptStyleGrid.replaceChildren(...buttons);
+  transcriptStyleButtons = buttons;
+  if (
+    transcriptTrackTemplateId &&
+    !availableArtTemplateIds.has(transcriptTrackTemplateId)
+  ) {
+    transcriptTrackTemplateId = "";
+  }
+  updateTranscriptStyleButtons();
+}
+
+function fallbackTemplatesFromStyleButtons() {
+  return artStyleButtons
+    .map((button) => {
+      const id = button.dataset.artStyle;
+      if (!id || !ART_STYLE_PALETTES[id]) return null;
+      return {
+        id,
+        baseStyle: id,
+        sample: button.querySelector(".art-style-sample")?.textContent || id,
+        name: button.querySelector("strong")?.textContent || id,
+        description: button.querySelector("small")?.textContent || "",
+        source: "builtin",
+        ...ART_STYLE_PALETTES[id],
+      };
+    })
+    .filter(Boolean);
+}
+
+function syncTranscriptTemplateFromExistingTrack() {
+  const trackSeed = currentTranscriptTrack()[0];
+  if (trackSeed?.artStyle && ART_STYLE_PALETTES[trackSeed.artStyle]) {
+    transcriptTrackTemplateId = trackSeed.artStyle;
+  }
+  updateTranscriptStyleButtons();
 }
 
 function applyRequestedTemplateSelection() {
@@ -372,6 +493,7 @@ function applyRequestedTemplateSelection() {
   } catch {
     // The selected template still applies for the current editor session.
   }
+  setTranscriptTrackTemplate(preferredArtTemplateSettings.id);
 }
 
 function activateWorkbenchPanel(name, options = {}) {
@@ -448,9 +570,15 @@ const AI_STYLE_LABELS = {
 
 const FRAME_TIMELINE_STEP = 1 / 30;
 const FRAME_THUMBNAIL_MIN = 8;
-const FRAME_THUMBNAIL_MAX = 18;
-const FRAME_THUMBNAIL_WIDTH = 68;
+const FRAME_THUMBNAIL_MAX = 180;
 const FRAME_TIMELINE_MAJOR_TICK_WIDTH = 72;
+const FRAME_TIMELINE_MIN_PIXELS_PER_SECOND = 22;
+const FRAME_TIMELINE_TEXT_CHAR_WIDTH = 10;
+const FRAME_TIMELINE_TEXT_LINES = 2;
+const FRAME_TIMELINE_TRACK_HEIGHT = 30;
+const FRAME_TIMELINE_BASE_HEIGHT = 44;
+const FRAME_TIMELINE_MIN_OVERLAY_DURATION = 0.1;
+const FRAME_TIMELINE_DRAG_THRESHOLD = 3;
 
 function clamp(value, minimum, maximum) {
   return Math.min(maximum, Math.max(minimum, value));
@@ -598,6 +726,42 @@ function frameTimelineDuration() {
   return Number.isFinite(artVideo.duration) ? Math.max(0, artVideo.duration) : 0;
 }
 
+function frameTimelinePixelsPerSecond() {
+  let pixelsPerSecond = FRAME_TIMELINE_MIN_PIXELS_PER_SECOND;
+  const previewDraft = aiDraftSuggestions.find(
+    (item) => item.draftId === previewDraftId,
+  );
+  const items = [...overlays, ...(previewDraft ? [previewDraft] : [])];
+  for (const overlay of items) {
+    const itemDuration = Math.max(
+      0.05,
+      (Number(overlay.end) || 0) - (Number(overlay.start) || 0),
+    );
+    const characterCount = Array.from(
+      String(overlay.text || "").replace(/\s+/g, ""),
+    ).length;
+    const requiredWidth =
+      Math.ceil(characterCount / FRAME_TIMELINE_TEXT_LINES) *
+        FRAME_TIMELINE_TEXT_CHAR_WIDTH +
+      16;
+    pixelsPerSecond = Math.max(pixelsPerSecond, requiredWidth / itemDuration);
+  }
+  return Math.ceil(pixelsPerSecond);
+}
+
+function updateFrameTimelineScale() {
+  const total = frameTimelineDuration();
+  const viewportWidth = frameTimelineScroll?.clientWidth || 0;
+  if (total <= 0 || viewportWidth <= 0) {
+    frameTimelineTrack.style.removeProperty("width");
+    return;
+  }
+  frameTimelineTrack.style.width = `${Math.max(
+    viewportWidth,
+    Math.round(total * frameTimelinePixelsPerSecond()),
+  )}px`;
+}
+
 function updateFrameTimelineStatus(message, tone = "neutral", source = "system") {
   if (!frameTimelineStatus) return;
   frameTimelineStatus.textContent = message;
@@ -683,6 +847,7 @@ function frameTimelineMajorStep(total, width) {
 function renderFrameTimelineRuler() {
   if (!frameTimelineRuler || !frameTimelineTrack) return;
   const total = frameTimelineDuration();
+  updateFrameTimelineScale();
   const width = frameTimelineTrack.clientWidth;
   if (total <= 0 || width <= 0) {
     frameTimelineRuler.replaceChildren();
@@ -723,6 +888,7 @@ function updateFrameTimelinePlayhead() {
   const current = clamp(artVideo.currentTime || 0, 0, total || 0);
   const progress = total > 0 ? current / total : 0;
   frameTimeline.hidden = total <= 0;
+  updateFrameTimelineScale();
   frameTimelineSeek.max = String(total);
   frameTimelineSeek.step = String(FRAME_TIMELINE_STEP);
   frameTimelineSeek.value = String(current);
@@ -736,11 +902,22 @@ function updateFrameTimelinePlayhead() {
   if (frameTimelineTime) {
     frameTimelineTime.value = `${formatTime(current)} / ${formatTime(total)}`;
   }
+  if (!artVideo.paused && frameTimelineScroll?.clientWidth > 0) {
+    const playheadX = progress * frameTimelineTrack.clientWidth;
+    const viewportStart = frameTimelineScroll.scrollLeft;
+    const viewportEnd = viewportStart + frameTimelineScroll.clientWidth;
+    if (playheadX < viewportStart || playheadX > viewportEnd) {
+      frameTimelineScroll.scrollLeft = Math.max(
+        0,
+        playheadX - frameTimelineScroll.clientWidth * 0.5,
+      );
+    }
+  }
 }
 
 function seekArtVideoPreview(seconds) {
   const total = frameTimelineDuration();
-  artVideo.currentTime = clamp(Number(seconds) || 0, 0, total);
+  seekEditorPreview(clamp(Number(seconds) || 0, 0, total));
   updateFrameTimelinePlayhead();
   renderPreview();
 }
@@ -754,7 +931,9 @@ function timelineSecondsFromClientX(clientX) {
 }
 
 function beginFrameTimelineScrub(event) {
-  if (event.button !== 0) return;
+  if (event.button !== 0 || event.target.closest(".frame-timeline-segment")) {
+    return;
+  }
   event.preventDefault();
   frameTimelineSeek?.focus({ preventScroll: true });
   seekArtVideoPreview(timelineSecondsFromClientX(event.clientX));
@@ -783,9 +962,12 @@ function renderFrameTimelinePlaceholders(count) {
 }
 
 function desiredFrameThumbnailCount() {
+  const total = frameTimelineDuration();
   const width = frameTimelineTrack?.clientWidth || 640;
+  if (total <= 0) return FRAME_THUMBNAIL_MIN;
+  const majorStep = frameTimelineMajorStep(total, width);
   return clamp(
-    Math.round(width / FRAME_THUMBNAIL_WIDTH),
+    Math.ceil(total / majorStep) + 1,
     FRAME_THUMBNAIL_MIN,
     FRAME_THUMBNAIL_MAX,
   );
@@ -931,7 +1113,10 @@ function renderFrameTimelineOverlaySegments() {
   if (!frameTimelineSegments) return;
   frameTimelineSegments.replaceChildren();
   const total = frameTimelineDuration();
-  if (total <= 0) return;
+  if (total <= 0) {
+    notifyEditorHost();
+    return;
+  }
 
   const previewDraft = aiDraftSuggestions.find(
     (item) => item.draftId === previewDraftId,
@@ -940,31 +1125,201 @@ function renderFrameTimelineOverlaySegments() {
     ...overlays.map((overlay) => ({ overlay, isDraft: false })),
     ...(previewDraft ? [{ overlay: previewDraft, isDraft: true }] : []),
   ];
+  const trackIndexes = new Map();
+  for (const { overlay, isDraft } of items) {
+    const trackKey = isDraft
+      ? `draft:${overlay.draftId}`
+      : isTranscriptTrackOverlay(overlay)
+        ? `transcript:${overlay.trackId}`
+        : `overlay:${overlay.id}`;
+    if (!trackIndexes.has(trackKey)) {
+      trackIndexes.set(trackKey, trackIndexes.size);
+    }
+  }
+  const trackCount = Math.max(1, trackIndexes.size);
+  const trackAreaHeight = trackCount * FRAME_TIMELINE_TRACK_HEIGHT;
+  frameTimelineSegments.style.height = `${trackAreaHeight}px`;
+  frameTimelineTrack.style.setProperty(
+    "--editor-layer-timeline-height",
+    `${trackAreaHeight}px`,
+  );
+  frameTimelineTrack.style.setProperty(
+    "--editor-timeline-track-height",
+    `${FRAME_TIMELINE_BASE_HEIGHT + trackAreaHeight}px`,
+  );
   const selected = selectedOverlay();
 
   for (const { overlay, isDraft } of items) {
     const start = clamp(Number(overlay.start) || 0, 0, total);
     const end = clamp(Number(overlay.end) || start, start, total);
-    const segment = document.createElement("span");
+    const segment = document.createElement(isDraft ? "span" : "button");
+    if (!isDraft) {
+      segment.type = "button";
+      segment.dataset.overlayId = String(overlay.id);
+      segment.dataset.effectStart = String(start);
+      segment.dataset.effectEnd = String(end);
+      segment.setAttribute(
+        "aria-label",
+        `${overlay.text || "艺术字"}，${formatRange(start, end)}`,
+      );
+    }
     segment.className = "frame-timeline-segment";
-    segment.classList.toggle(
-      "is-selected",
+    const isSelected =
       overlay.id === selectedOverlayId ||
         (
           isTranscriptTrackOverlay(overlay) &&
           isTranscriptTrackOverlay(selected) &&
           overlay.trackId === selected.trackId
-        ),
-    );
+        );
+    segment.classList.toggle("is-selected", isSelected);
+    if (!isDraft) segment.setAttribute("aria-pressed", String(isSelected));
     segment.classList.toggle("is-draft", isDraft);
+    const isEditable = !isDraft && !isTranscriptTrackOverlay(overlay);
+    if (isEditable) segment.dataset.timelineEditable = "true";
+    const trackKey = isDraft
+      ? `draft:${overlay.draftId}`
+      : isTranscriptTrackOverlay(overlay)
+        ? `transcript:${overlay.trackId}`
+        : `overlay:${overlay.id}`;
+    const trackIndex = trackIndexes.get(trackKey) || 0;
+    segment.dataset.timelineTrackIndex = String(trackIndex);
+    segment.style.top = `${trackIndex * FRAME_TIMELINE_TRACK_HEIGHT + 2}px`;
     segment.style.left = `${(start / total) * 100}%`;
     segment.style.width = `${Math.max(0.8, ((end - start) / total) * 100)}%`;
     segment.title = `${overlay.text || ""} ${formatRange(start, end)}`.trim();
+    const label = document.createElement("span");
+    label.className = "editor-layer-timeline-segment-label";
+    label.textContent = overlay.text || "艺术字";
+    segment.append(label);
+    if (isEditable) {
+      for (const mode of ["start", "end"]) {
+        const handle = document.createElement("span");
+        handle.className = `art-timeline-handle is-${mode}`;
+        handle.dataset.artTimeDrag = mode;
+        handle.setAttribute("aria-hidden", "true");
+        segment.append(handle);
+      }
+    }
     frameTimelineSegments.append(segment);
   }
+  notifyEditorHost();
+}
+
+function updateManualOverlayTimelineRange(overlay, start, end) {
+  if (!overlay || isTranscriptTrackOverlay(overlay)) return false;
+  const safeStart = clamp(
+    Number(start) || 0,
+    0,
+    Math.max(0, duration - FRAME_TIMELINE_MIN_OVERLAY_DURATION),
+  );
+  const safeEnd = clamp(
+    Number(end) || safeStart + FRAME_TIMELINE_MIN_OVERLAY_DURATION,
+    safeStart + FRAME_TIMELINE_MIN_OVERLAY_DURATION,
+    duration,
+  );
+  Object.assign(overlay, { start: safeStart, end: safeEnd });
+  anchorOverlayToSourceTimeline(
+    overlay,
+    appliedCutDraftState || pendingCutDraft,
+    true,
+  );
+  selectedOverlayId = overlay.id;
+  return true;
+}
+
+function beginFrameTimelineSegmentAdjustment(event) {
+  const segment = event.target.closest(
+    ".frame-timeline-segment[data-overlay-id]",
+  );
+  if (!segment || event.button !== 0) return;
+  const overlay = overlays.find(
+    (item) => String(item.id) === segment.dataset.overlayId,
+  );
+  if (!overlay) return;
+  event.preventDefault();
+  event.stopPropagation();
+  selectedOverlayId = overlay.id;
+  seekEditorPreview(overlay.start);
+
+  if (segment.dataset.timelineEditable !== "true") {
+    renderEditor();
+    updateFrameTimelineStatus("已选中全文艺术字轨道；逐字时间由文案自动同步。", "neutral");
+    return;
+  }
+
+  const mode =
+    event.target.closest("[data-art-time-drag]")?.dataset.artTimeDrag ||
+    "move";
+  const original = { start: overlay.start, end: overlay.end };
+  const startClientX = event.clientX;
+  const total = frameTimelineDuration();
+  let moved = false;
+  segment.classList.add("is-selected");
+  renderControls();
+
+  const move = (moveEvent) => {
+    if (
+      !moved &&
+      Math.abs(moveEvent.clientX - startClientX) < FRAME_TIMELINE_DRAG_THRESHOLD
+    ) {
+      return;
+    }
+    moved = true;
+    const bounds = frameTimelineTrack.getBoundingClientRect();
+    const delta = ((moveEvent.clientX - startClientX) / bounds.width) * total;
+    let start = original.start;
+    let end = original.end;
+    if (mode === "start") {
+      start = clamp(
+        original.start + delta,
+        0,
+        original.end - FRAME_TIMELINE_MIN_OVERLAY_DURATION,
+      );
+    } else if (mode === "end") {
+      end = clamp(
+        original.end + delta,
+        original.start + FRAME_TIMELINE_MIN_OVERLAY_DURATION,
+        total,
+      );
+    } else {
+      const length = original.end - original.start;
+      start = clamp(original.start + delta, 0, total - length);
+      end = start + length;
+    }
+    if (!updateManualOverlayTimelineRange(overlay, start, end)) return;
+    segment.classList.add("is-dragging");
+    segment.style.left = `${(overlay.start / total) * 100}%`;
+    segment.style.width = `${Math.max(
+      0.8,
+      ((overlay.end - overlay.start) / total) * 100,
+    )}%`;
+    seekEditorPreview(mode === "end" ? overlay.end : overlay.start);
+    renderControls();
+    updateFrameTimelineStatus(
+      `正在调整“${overlay.text || "艺术字"}” ${formatRange(overlay.start, overlay.end)}`,
+      "neutral",
+    );
+  };
+
+  const finish = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", finish);
+    window.removeEventListener("pointercancel", finish);
+    renderEditor();
+    updateFrameTimelineStatus(
+      moved
+        ? `已调整“${overlay.text || "艺术字"}” ${formatRange(overlay.start, overlay.end)}`
+        : `已选中“${overlay.text || "艺术字"}”`,
+      moved ? "success" : "neutral",
+    );
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", finish, { once: true });
+  window.addEventListener("pointercancel", finish, { once: true });
 }
 
 function refreshFrameTimeline(options = {}) {
+  updateFrameTimelineScale();
   updateFrameTimelinePlayhead();
   renderFrameTimelineRuler();
   renderFrameTimelineOverlaySegments();
@@ -974,6 +1329,7 @@ function refreshFrameTimeline(options = {}) {
 function scheduleFrameTimelineRebuild() {
   window.clearTimeout(frameTimelineResizeTimer);
   frameTimelineResizeTimer = window.setTimeout(() => {
+    updateFrameTimelineScale();
     frameTimelineRulerSignature = "";
     renderFrameTimelineRuler();
     buildFrameTimelineThumbnails();
@@ -1046,7 +1402,9 @@ function currentTranscriptTrack() {
 }
 
 function manualOverlayCount() {
-  return overlays.filter((overlay) => !isTranscriptTrackOverlay(overlay)).length;
+  return [...overlays, ...cutSuppressedOverlays].filter(
+    (overlay) => !isTranscriptTrackOverlay(overlay),
+  ).length;
 }
 
 function selectedTrackOverlays() {
@@ -1056,7 +1414,7 @@ function selectedTrackOverlays() {
     : [];
 }
 
-function activeTrackCue(trackItems, currentTime = artVideo.currentTime || 0) {
+function activeTrackCue(trackItems, currentTime = previewPlaybackTime()) {
   return (
     trackItems.find((overlay) => isOverlayVisibleAtTime(overlay, currentTime)) ||
     trackItems[0] ||
@@ -1208,6 +1566,129 @@ function normalizeOverlayRange(start, end) {
   return { start: safeStart, end: safeEnd };
 }
 
+function overlayCutContext(state = null) {
+  const edit = job?.edit || {};
+  const useEditedJob = !state && videoSource === "edited";
+  const rawRanges = Array.isArray(state?.ranges)
+    ? state.ranges
+    : useEditedJob
+      ? edit.ranges || edit.requestedRanges || []
+      : [];
+  const sourceDuration = Math.max(
+    0,
+    Number(state?.sourceDuration) || Number(job?.duration) || duration,
+  );
+  const ranges = rawRanges
+    .map((range) => ({
+      start: clamp(Number(range.start) || 0, 0, sourceDuration),
+      end: clamp(Number(range.end) || 0, 0, sourceDuration),
+    }))
+    .filter((range) => range.end > range.start)
+    .sort((left, right) => left.start - right.start)
+    .reduce((merged, range) => {
+      const previous = merged.at(-1);
+      if (!previous || range.start > previous.end) {
+        merged.push({ ...range });
+      } else {
+        previous.end = Math.max(previous.end, range.end);
+      }
+      return merged;
+    }, []);
+  return { ranges, sourceDuration };
+}
+
+function retainedTimelineSpans(context) {
+  const spans = [];
+  let sourceCursor = 0;
+  let editedCursor = 0;
+  for (const range of context.ranges) {
+    if (range.start > sourceCursor) {
+      const spanDuration = range.start - sourceCursor;
+      spans.push({
+        sourceStart: sourceCursor,
+        sourceEnd: range.start,
+        editedStart: editedCursor,
+        editedEnd: editedCursor + spanDuration,
+      });
+      editedCursor += spanDuration;
+    }
+    sourceCursor = Math.max(sourceCursor, range.end);
+  }
+  if (sourceCursor < context.sourceDuration) {
+    spans.push({
+      sourceStart: sourceCursor,
+      sourceEnd: context.sourceDuration,
+      editedStart: editedCursor,
+      editedEnd: editedCursor + context.sourceDuration - sourceCursor,
+    });
+  }
+  return spans;
+}
+
+function editedTimeToSourceTime(seconds, spans, edge = "start") {
+  const editedDuration = spans.at(-1)?.editedEnd || 0;
+  const time = clamp(Number(seconds) || 0, 0, editedDuration);
+  for (const span of spans) {
+    const insideSpan =
+      edge === "end"
+        ? time <= span.editedEnd + 0.0001
+        : time < span.editedEnd - 0.0001;
+    if (insideSpan) {
+      return span.sourceStart + time - span.editedStart;
+    }
+  }
+  return spans.at(-1)?.sourceEnd ?? null;
+}
+
+function sourceRangeForEditedOverlay(overlay, state = null) {
+  const spans = retainedTimelineSpans(overlayCutContext(state));
+  if (!spans.length) return null;
+  const sourceStart = editedTimeToSourceTime(overlay.start, spans, "start");
+  const sourceEnd = editedTimeToSourceTime(overlay.end, spans, "end");
+  if (
+    !Number.isFinite(sourceStart) ||
+    !Number.isFinite(sourceEnd) ||
+    sourceEnd <= sourceStart
+  ) {
+    return null;
+  }
+  return { sourceStart, sourceEnd };
+}
+
+function anchorOverlayToSourceTimeline(overlay, state = null, force = false) {
+  const hasAnchor =
+    Number.isFinite(Number(overlay.sourceStart)) &&
+    Number.isFinite(Number(overlay.sourceEnd)) &&
+    Number(overlay.sourceEnd) > Number(overlay.sourceStart);
+  if (hasAnchor && !force) return true;
+  const sourceRange = sourceRangeForEditedOverlay(overlay, state);
+  if (!sourceRange) return false;
+  Object.assign(overlay, sourceRange);
+  return true;
+}
+
+function editedRangeForSourceOverlay(overlay, state) {
+  const sourceStart = Number(overlay.sourceStart);
+  const sourceEnd = Number(overlay.sourceEnd);
+  if (!Number.isFinite(sourceStart) || !Number.isFinite(sourceEnd)) return null;
+  const intersections = retainedTimelineSpans(overlayCutContext(state))
+    .map((span) => {
+      const start = Math.max(sourceStart, span.sourceStart);
+      const end = Math.min(sourceEnd, span.sourceEnd);
+      if (end <= start) return null;
+      return {
+        start: span.editedStart + start - span.sourceStart,
+        end: span.editedStart + end - span.sourceStart,
+      };
+    })
+    .filter(Boolean);
+  if (!intersections.length) return null;
+  return {
+    start: intersections[0].start,
+    end: intersections.at(-1).end,
+  };
+}
+
 function createOverlay(text, start, end, values = {}, options = {}) {
   const isTranscriptCue =
     values.trackType === TRANSCRIPT_TRACK_TYPE && Boolean(values.trackId);
@@ -1271,12 +1752,22 @@ function createOverlay(text, start, end, values = {}, options = {}) {
     artStyle: values.artStyle || preferredStyle,
     trackId: isTranscriptCue ? String(values.trackId) : null,
     trackType: isTranscriptCue ? TRANSCRIPT_TRACK_TYPE : null,
+    sourceStart: Number.isFinite(Number(values.sourceStart))
+      ? Number(values.sourceStart)
+      : null,
+    sourceEnd: Number.isFinite(Number(values.sourceEnd))
+      ? Number(values.sourceEnd)
+      : null,
   };
+  anchorOverlayToSourceTimeline(
+    overlay,
+    appliedCutDraftState || (artEditorReady ? pendingCutDraft : null),
+  );
   overlays.push(overlay);
   selectedOverlayId = overlay.id;
   showApplyAllSettingsMessage("");
   if (!options.deferRender) {
-    artVideo.currentTime = safeStart;
+    seekEditorPreview(safeStart);
     showFormError("");
     renderEditor();
   }
@@ -1284,6 +1775,7 @@ function createOverlay(text, start, end, values = {}, options = {}) {
 }
 
 function addExistingOverlays(items) {
+  cutSuppressedOverlays = [];
   overlays = (items || []).map((item) => ({
     direction: "horizontal",
     textAlign: "center",
@@ -1296,7 +1788,41 @@ function addExistingOverlays(items) {
     ...item,
     id: nextOverlayId++,
   }));
+  for (const overlay of overlays) anchorOverlayToSourceTimeline(overlay);
   selectedOverlayId = overlays[0]?.id || null;
+}
+
+function embeddedArtDraftKey() {
+  return `editor-suite:art-draft:${jobId}`;
+}
+
+function persistEmbeddedArtDraft() {
+  if (!embeddedEditor || !jobId) return;
+  try {
+    window.sessionStorage.setItem(
+      embeddedArtDraftKey(),
+      JSON.stringify({
+        overlays: [...overlays, ...cutSuppressedOverlays],
+        selectedOverlayId,
+      }),
+    );
+  } catch {
+    // The editor remains usable when private browsing blocks session storage.
+  }
+}
+
+function restoreEmbeddedArtDraft() {
+  if (!embeddedEditor || !jobId) return false;
+  try {
+    const saved = JSON.parse(
+      window.sessionStorage.getItem(embeddedArtDraftKey()) || "null",
+    );
+    if (!saved || !Array.isArray(saved.overlays)) return false;
+    addExistingOverlays(saved.overlays);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function overlayScale() {
@@ -1499,7 +2025,7 @@ function applyPreviewStyle(element, overlay) {
   }
 }
 
-function positionPreviewOverlay(element, overlay) {
+function positionPreviewOverlay(element, overlay, cachedSize = null) {
   const layerWidth = overlayLayer.clientWidth;
   const layerHeight = overlayLayer.clientHeight;
   if (!layerWidth || !layerHeight || element.hidden) return;
@@ -1508,8 +2034,14 @@ function positionPreviewOverlay(element, overlay) {
   const safeMarginY = layerHeight * 0.04;
   const safeWidth = layerWidth - safeMarginX * 2;
   const safeHeight = layerHeight - safeMarginY * 2;
-  const elementWidth = Math.max(1, element.offsetWidth);
-  const elementHeight = Math.max(1, element.offsetHeight);
+  // A drag reuses the size captured at drag start to avoid a per-move layout
+  // read; other callers (e.g. the initial preview render) measure fresh.
+  const elementWidth = cachedSize
+    ? cachedSize.width
+    : Math.max(1, element.offsetWidth);
+  const elementHeight = cachedSize
+    ? cachedSize.height
+    : Math.max(1, element.offsetHeight);
   const fitScale = Math.min(
     1,
     safeWidth / elementWidth,
@@ -1533,25 +2065,235 @@ function positionPreviewOverlay(element, overlay) {
   element.style.transform = `translate(-50%, -50%) scale(${fitScale})`;
 }
 
+// Live coordinate readout for the selected art text: normalized percentages
+// plus the pixel center on the overlay layer. Shown in the top-left corner of
+// the stage while an overlay is selected; updates during drag.
+function syncOverlayCoordinateReadout() {
+  const readout = overlayCoordinateReadout;
+  if (!readout) return;
+  const overlay = selectedOverlay();
+  if (!overlay || !overlayLayer.clientWidth || !overlayLayer.clientHeight) {
+    readout.hidden = true;
+    if (positionPresetHint) {
+      positionPresetHint.textContent = "把当前坐标存起来，之后一键套用";
+    }
+    return;
+  }
+  const percentX = Math.round(overlay.x * 100);
+  const percentY = Math.round(overlay.y * 100);
+  const pixelX = Math.round(overlay.x * overlayLayer.clientWidth);
+  const pixelY = Math.round(overlay.y * overlayLayer.clientHeight);
+  readout.textContent =
+    `横向 ${percentX}% · 纵向 ${percentY}%（X ${pixelX}px · Y ${pixelY}px）`;
+  readout.hidden = false;
+  if (positionPresetHint) {
+    positionPresetHint.textContent = `当前坐标：横向 ${percentX}% · 纵向 ${percentY}%`;
+  }
+}
+
+let positionPresets = [];
+
+function renderPositionPresetMessage(text, tone = "neutral") {
+  const message = positionPresetMessage;
+  if (!message) return;
+  if (text) {
+    message.textContent = text;
+    message.dataset.tone = tone;
+    message.hidden = false;
+  } else {
+    message.hidden = true;
+  }
+}
+
+function renderPositionPresets() {
+  const grid = positionPresetGrid;
+  if (!grid) return;
+  grid.replaceChildren();
+  for (const preset of positionPresets) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "position-preset-chip";
+    chip.title =
+      `套用坐标：横向 ${Math.round(preset.x * 100)}% · ` +
+      `纵向 ${Math.round(preset.y * 100)}%`;
+    chip.dataset.presetId = preset.id;
+    chip.textContent = preset.name;
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "position-preset-chip-delete";
+    deleteButton.setAttribute("aria-label", `删除预设“${preset.name}”`);
+    deleteButton.textContent = "✕";
+    chip.append(deleteButton);
+    chip.addEventListener("click", (event) => {
+      if (event.target === deleteButton) {
+        deletePositionPreset(preset.id);
+        return;
+      }
+      applyPositionPreset(preset.id);
+    });
+    grid.append(chip);
+  }
+}
+
+async function loadPositionPresets() {
+  try {
+    const response = await fetch("/api/art-position-presets");
+    if (!response.ok) throw new Error("无法读取坐标预设。");
+    const payload = await response.json();
+    positionPresets = Array.isArray(payload.presets) ? payload.presets : [];
+  } catch {
+    positionPresets = [];
+  }
+  renderPositionPresets();
+}
+
+function applyPositionPreset(presetId) {
+  const overlay = selectedOverlay();
+  const preset = positionPresets.find((item) => item.id === presetId);
+  if (!overlay || !preset) return;
+  updateSelectedOverlay({ x: preset.x, y: preset.y });
+  renderPositionPresetMessage(
+    `已将“${preset.name}”坐标（横向 ${Math.round(preset.x * 100)}% · ` +
+      `纵向 ${Math.round(preset.y * 100)}%）套用到当前艺术字。`,
+    "success",
+  );
+}
+
+async function saveCurrentPositionPreset() {
+  const overlay = selectedOverlay();
+  if (!overlay) return;
+  const name = positionPresetName.value.trim();
+  if (!name) {
+    renderPositionPresetMessage("请先输入预设名称。", "warning");
+    positionPresetName.focus();
+    return;
+  }
+  try {
+    const response = await fetch("/api/art-position-presets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name,
+        x: Math.round(overlay.x * 10000) / 10000,
+        y: Math.round(overlay.y * 10000) / 10000,
+      }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.detail || "保存坐标失败。");
+    await loadPositionPresets();
+    positionPresetName.value = "";
+    renderPositionPresetMessage(
+      `已保存坐标预设“${payload.name}”：横向 ` +
+        `${Math.round(payload.x * 100)}% · 纵向 ${Math.round(payload.y * 100)}%。`,
+      "success",
+    );
+  } catch (error) {
+    renderPositionPresetMessage(error.message, "warning");
+  }
+}
+
+async function deletePositionPreset(presetId) {
+  const preset = positionPresets.find((item) => item.id === presetId);
+  const confirmed = await window.appConfirm({
+    eyebrow: "删除坐标预设",
+    title: "确定删除该坐标预设？",
+    message: preset ? `将删除“${preset.name}”。此操作不可撤销。` : "",
+    confirmText: "删除",
+    tone: "danger",
+  });
+  if (!confirmed) return;
+  try {
+    const response = await fetch(
+      `/api/art-position-presets/${encodeURIComponent(presetId)}`,
+      { method: "DELETE" },
+    );
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.detail || "删除坐标预设失败。");
+    }
+    await loadPositionPresets();
+    renderPositionPresetMessage("坐标预设已删除。", "success");
+  } catch (error) {
+    renderPositionPresetMessage(error.message, "warning");
+  }
+}
+
+let lastOverlayTap = null;
+
 function beginOverlayDrag(event, overlayId) {
   event.preventDefault();
+  // A quick second tap on the same art text is a double-click to edit. The
+  // native dblclick event is suppressed by preventDefault() above, so detect
+  // the double-click from pointerdown timing instead.
+  const now = Date.now();
+  if (
+    lastOverlayTap &&
+    lastOverlayTap.id === overlayId &&
+    now - lastOverlayTap.time < 400
+  ) {
+    lastOverlayTap = null;
+    beginInlineOverlayEdit(overlayId);
+    return;
+  }
+  lastOverlayTap = { id: overlayId, time: now };
   selectedOverlayId = overlayId;
   renderControls();
   renderOverlayList();
   renderPreview();
 
+  // Re-resolve the element after renderPreview() rebuilt the overlay layer, and
+  // capture the grab offset — the pointer's distance from the art-text center —
+  // plus the layer bounds and element size once. Dragging then keeps the grabbed
+  // point under the pointer (1:1) instead of snapping the center onto it, and
+  // never re-reads layout per move.
+  const overlay = overlays.find((item) => item.id === overlayId);
+  if (!overlay) return;
+  const element = overlayLayer.querySelector(`[data-overlay-id="${overlayId}"]`);
+  if (!element) return;
+  const bounds = overlayLayer.getBoundingClientRect();
+  const elementRect = element.getBoundingClientRect();
+  const grabOffsetX = event.clientX - (elementRect.left + elementRect.width / 2);
+  const grabOffsetY = event.clientY - (elementRect.top + elementRect.height / 2);
+  const cachedSize = {
+    width: Math.max(1, element.offsetWidth),
+    height: Math.max(1, element.offsetHeight),
+  };
+  let framePending = false;
+
   const move = (moveEvent) => {
-    const overlay = overlays.find((item) => item.id === overlayId);
-    if (!overlay) return;
-    const bounds = videoStage.getBoundingClientRect();
-    const x = clamp((moveEvent.clientX - bounds.left) / bounds.width, 0.05, 0.95);
-    const y = clamp((moveEvent.clientY - bounds.top) / bounds.height, 0.05, 0.95);
-    const targets = isTranscriptTrackOverlay(overlay)
-      ? transcriptTrackOverlays(overlay.trackId)
-      : [overlay];
-    for (const target of targets) Object.assign(target, { x, y });
-    const element = overlayLayer.querySelector(`[data-overlay-id="${overlayId}"]`);
-    if (element) positionPreviewOverlay(element, overlay);
+    // Moving the pointer means this was a drag, not a double-click.
+    if (
+      Math.abs(moveEvent.clientX - event.clientX) > 6 ||
+      Math.abs(moveEvent.clientY - event.clientY) > 6
+    ) {
+      lastOverlayTap = null;
+    }
+    if (framePending) return;
+    framePending = true;
+    // Coalesce to one write per animation frame so the drag stays smooth.
+    window.requestAnimationFrame(() => {
+      framePending = false;
+      const targets = isTranscriptTrackOverlay(overlay)
+        ? transcriptTrackOverlays(overlay.trackId)
+        : [overlay];
+      if (!targets.length) return;
+      const x = clamp(
+        (moveEvent.clientX - grabOffsetX - bounds.left) / bounds.width,
+        0.05,
+        0.95,
+      );
+      const y = clamp(
+        (moveEvent.clientY - grabOffsetY - bounds.top) / bounds.height,
+        0.05,
+        0.95,
+      );
+      for (const target of targets) Object.assign(target, { x, y });
+      const currentElement = overlayLayer.querySelector(
+        `[data-overlay-id="${overlayId}"]`,
+      );
+      if (currentElement) positionPreviewOverlay(currentElement, overlay, cachedSize);
+      syncOverlayCoordinateReadout();
+    });
   };
 
   const finish = () => {
@@ -1564,24 +2306,157 @@ function beginOverlayDrag(event, overlayId) {
   window.addEventListener("pointerup", finish, { once: true });
 }
 
+let inlineOverlayEditor = null;
+
+function closeInlineOverlayEditor(options = {}) {
+  const editor = inlineOverlayEditor;
+  inlineOverlayEditor = null;
+  if (!editor || !editor.isConnected) return;
+  const overlayId = Number(editor.dataset.overlayId);
+  const overlay = Number.isFinite(overlayId)
+    ? overlays.find((item) => item.id === overlayId)
+    : null;
+  const value = editor.value.trim();
+  if (options.commit && overlay && value) {
+    selectedOverlayId = overlay.id;
+    renderControls();
+    updateSelectedOverlay({ text: value });
+    editor.remove();
+    return;
+  }
+  if (options.warnEmpty && overlay && !value) {
+    inlineOverlayEditor = editor;
+    showRetainedBulkMessage("文案不能为空。", "warning");
+    editor.focus();
+    return;
+  }
+  editor.remove();
+  if (!options.commit) renderPreview();
+}
+
+function beginInlineOverlayEdit(overlayId) {
+  if (inlineOverlayEditor) closeInlineOverlayEditor();
+  const overlay = overlays.find((item) => item.id === overlayId);
+  if (!overlay) return;
+  if (isTranscriptTrackOverlay(overlay)) {
+    window.appAlert?.({
+      title: "全文艺术字轨道不能单独修改文案",
+      message:
+        "整条 AI 分句字幕的文案来自转写内容并保持整轨同步，不能单独改其中一条。" +
+        "如需自定义文案，请删除轨道后手动添加艺术字。",
+    });
+    return;
+  }
+  artVideo.pause();
+  selectedOverlayId = overlay.id;
+  renderControls();
+  renderOverlayList();
+  renderPreview();
+  const overlayElement = overlayLayer.querySelector(
+    `[data-overlay-id="${overlayId}"]`,
+  );
+  if (!overlayElement) return;
+
+  const editor = document.createElement("textarea");
+  editor.className = "art-inline-editor";
+  editor.dataset.overlayId = String(overlayId);
+  editor.value = String(overlay.text || "");
+  editor.maxLength = 60;
+  editor.rows = 1;
+  const layerRect = overlayLayer.getBoundingClientRect();
+  const elementRect = overlayElement.getBoundingClientRect();
+  const editorWidth = Math.min(
+    Math.max(160, Math.ceil(elementRect.width) + 12),
+    Math.max(160, layerRect.width * 0.9),
+  );
+  const editorHeight = Math.min(
+    Math.max(42, Math.ceil(elementRect.height) + 8),
+    160,
+  );
+  editor.style.left = `${
+    elementRect.left - layerRect.left + elementRect.width / 2 - editorWidth / 2
+  }px`;
+  editor.style.top = `${
+    elementRect.top - layerRect.top + elementRect.height / 2 - editorHeight / 2
+  }px`;
+  editor.style.width = `${editorWidth}px`;
+  editor.style.minHeight = `${editorHeight}px`;
+  const displayFontSize = Number(getComputedStyle(overlayElement).fontSize) || 20;
+  editor.style.fontSize = `${Math.max(14, Math.round(displayFontSize * 0.92))}px`;
+  editor.addEventListener("pointerdown", (event) => event.stopPropagation());
+  editor.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      closeInlineOverlayEditor(
+        editor.value.trim() ? { commit: true } : { warnEmpty: true },
+      );
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      closeInlineOverlayEditor();
+    }
+  });
+  editor.addEventListener("blur", () => {
+    if (inlineOverlayEditor === editor) {
+      closeInlineOverlayEditor({ commit: true });
+    }
+  });
+  inlineOverlayEditor = editor;
+  overlayLayer.append(editor);
+  editor.focus();
+  editor.select();
+}
+
 function isOverlayVisibleAtTime(overlay, currentTime) {
   const start = Number(overlay.start) || 0;
   const end = Number(overlay.end) || start;
   return currentTime >= start && currentTime < end;
 }
 
-function renderPreview() {
-  const currentTime = artVideo.currentTime || 0;
-  overlayLayer.replaceChildren();
+function previewPlaybackTime() {
+  const current =
+    embeddedEditor && Number.isFinite(editorHostCurrentTime)
+      ? editorHostCurrentTime
+      : Number(artVideo.currentTime) || 0;
+  return clamp(current, 0, duration || Infinity);
+}
+
+function seekEditorPreview(seconds) {
+  const nextTime = clamp(Number(seconds) || 0, 0, duration || Infinity);
+  if (embeddedEditor && window.parent !== window) {
+    editorHostCurrentTime = nextTime;
+    window.parent.postMessage(
+      {
+        type: "editor-suite:seek",
+        kind: "art",
+        currentTime: nextTime,
+      },
+      window.location.origin,
+    );
+  } else {
+    artVideo.currentTime = nextTime;
+  }
+  return nextTime;
+}
+
+function renderPreview(options = {}) {
+  const currentTime = previewPlaybackTime();
   const previewDraft = aiDraftSuggestions.find(
     (item) => item.draftId === previewDraftId,
   );
-  const items = [
+  const visibleItems = [
     ...overlays.map((overlay) => ({ overlay, isDraft: false })),
     ...(previewDraft ? [{ overlay: previewDraft, isDraft: true }] : []),
-  ];
+  ].filter(({ overlay }) => isOverlayVisibleAtTime(overlay, currentTime));
+  const nextVisibilitySignature = visibleItems
+    .map(({ overlay, isDraft }) => `${isDraft ? "draft" : "overlay"}:${overlay.id ?? overlay.draftId}`)
+    .join("|");
+  if (options.timeOnly && nextVisibilitySignature === previewVisibilitySignature) {
+    return;
+  }
+  previewVisibilitySignature = nextVisibilitySignature;
+  overlayLayer.replaceChildren();
   const selected = selectedOverlay();
-  for (const { overlay, isDraft } of items) {
+  for (const { overlay, isDraft } of visibleItems) {
     const element = document.createElement("div");
     const isSelected =
       isDraft ||
@@ -1591,14 +2466,11 @@ function renderPreview() {
         isTranscriptTrackOverlay(selected) &&
         overlay.trackId === selected.trackId
       );
-    const isVisible = isOverlayVisibleAtTime(overlay, currentTime);
     element.className = "preview-overlay";
     if (!isDraft) element.dataset.overlayId = String(overlay.id);
     element.textContent = formatOverlayText(overlay) || "请输入文字";
     element.classList.toggle("is-draft", isDraft);
     element.classList.toggle("is-selected", isSelected);
-    element.classList.toggle("is-outside-time", !isVisible);
-    element.hidden = !isVisible;
     applyPreviewStyle(element, overlay);
     if (!isDraft) {
       element.addEventListener("pointerdown", (event) => {
@@ -1608,11 +2480,461 @@ function renderPreview() {
     overlayLayer.append(element);
     positionPreviewOverlay(element, overlay);
   }
+  notifyEditorHost();
+  syncOverlayCoordinateReadout();
 }
+
+function notifyEditorHost(options = {}) {
+  const state = {
+    overlayHtml: overlayLayer.innerHTML,
+    overlayWidth: overlayLayer.clientWidth,
+    overlayHeight: overlayLayer.clientHeight,
+    timelineHtml: frameTimelineSegments?.innerHTML || "",
+    timelineTrackCount: Math.max(
+      1,
+      ...Array.from(
+        frameTimelineSegments?.querySelectorAll("[data-timeline-track-index]") || [],
+        (segment) => Number(segment.dataset.timelineTrackIndex) + 1,
+      ),
+    ),
+    generationDisabled: generateArtVideo.disabled,
+    generationLabel: generateArtVideo.textContent.trim(),
+    generationBusy: !artProgress.hidden,
+    generationError: artFormError.hidden ? "" : artFormError.textContent.trim(),
+    generationPayload: {
+      source: videoSource,
+      historyName: artHistoryName.value.trim() || null,
+      overlays: overlays.map(({ id, ...overlay }) => overlay),
+    },
+  };
+  const signature = JSON.stringify(state);
+  if (!options.force && signature === editorHostStateSignature) return;
+  editorHostStateSignature = signature;
+  if (!embeddedEditor || window.parent === window) {
+    document.dispatchEvent(
+      new CustomEvent("editor-suite:tool-state", {
+        detail: { kind: "art", ...state },
+      }),
+    );
+    return;
+  }
+  window.parent.postMessage(
+    {
+      type: "editor-suite:tool-state",
+      kind: "art",
+      currentTime: previewPlaybackTime(),
+      ...state,
+    },
+    window.location.origin,
+  );
+}
+
+function updateEditorSuiteJobState(payload) {
+  window.EditorSuite?.update(payload);
+  if (!embeddedEditor || window.parent === window) return;
+  window.parent.postMessage(
+    { type: "editor-suite:job-state", job: payload },
+    window.location.origin,
+  );
+}
+
+async function refreshArtAfterTranscriptUpdate() {
+  if (!jobId) return;
+  try {
+    const response = await fetch(
+      `/api/transcriptions/${encodeURIComponent(jobId)}`,
+    );
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || "无法刷新艺术字。");
+    job = payload;
+    updateEditorSuiteJobState(payload);
+    const transcript = payload.result || {};
+    const nextDuration = Math.max(0, Number(payload.duration) || duration);
+    duration = nextDuration;
+    if (Array.isArray(transcript.segments) && transcript.segments.length) {
+      renderRetainedTranscript({
+        text: transcript.text || "",
+        segments: transcript.segments.map((segment) => ({
+          ...segment,
+          start: clamp(Number(segment.start) || 0, 0, nextDuration),
+          end: clamp(Number(segment.end) || 0, 0, nextDuration),
+        })),
+      });
+    }
+    const art = payload.art || {};
+    // Always load the server's track overlays (edited text with stable times),
+    // then retime them to the edited timeline when a cut draft is active.
+    if (Array.isArray(art.overlays) && art.overlays.length) {
+      cutSuppressedOverlays = [];
+      overlays = art.overlays.map((item) => ({
+        ...item,
+        id: nextOverlayId++,
+      }));
+      selectedOverlayId = overlays[0]?.id || null;
+      if (cutDraftActive && pendingCutDraft) {
+        retimeDraftAnchoredOverlays(pendingCutDraft);
+      }
+    }
+    renderEditor();
+    renderPreview({ force: true });
+    showRetainedBulkMessage("已同步剪后文案，全文艺术字字幕已更新。", "success");
+  } catch (error) {
+    showRetainedBulkMessage("刷新艺术字失败，请手动重新生成轨道。", "warning");
+  }
+}
+
+function buildTranscriptWordMatchIndex(transcript) {
+  const wordByStartOffset = new Map();
+  const wordByEndOffset = new Map();
+  let text = "";
+  for (const segment of transcript?.segments || []) {
+    const segmentWords = Array.isArray(segment.words) && segment.words.length
+      ? segment.words
+      : [segment];
+    for (const word of segmentWords) {
+      const comparableText = comparableCaptionText(word.text);
+      const start = Number(word.start);
+      const end = Number(word.end);
+      if (
+        !comparableText ||
+        !Number.isFinite(start) ||
+        !Number.isFinite(end) ||
+        end <= start
+      ) {
+        continue;
+      }
+      const item = {
+        start,
+        end,
+        textStart: text.length,
+        textEnd: text.length + comparableText.length,
+        sourceStart: Number.isFinite(Number(word.sourceStart))
+          ? Number(word.sourceStart)
+          : null,
+        sourceEnd: Number.isFinite(Number(word.sourceEnd))
+          ? Number(word.sourceEnd)
+          : null,
+      };
+      text += comparableText;
+      wordByStartOffset.set(item.textStart, item);
+      wordByEndOffset.set(item.textEnd, item);
+    }
+  }
+  return { text, wordByStartOffset, wordByEndOffset };
+}
+
+function matchOverlayToTranscriptWords(overlay, index, state) {
+  const target = comparableCaptionText(overlay.text);
+  if (!target || !index.text) return null;
+  const expectedRange = editedRangeForSourceOverlay(overlay, state);
+  const expectedStart = expectedRange?.start ?? (Number(overlay.start) || 0);
+  const expectedEnd =
+    expectedRange?.end ?? (Number(overlay.end) || expectedStart);
+  const overlaySourceStart = Number(overlay.sourceStart);
+  const overlaySourceEnd = Number(overlay.sourceEnd);
+  let bestMatch = null;
+  let bestSourceDistance = Number.POSITIVE_INFINITY;
+  let bestTimelineDistance = Number.POSITIVE_INFINITY;
+  let offset = index.text.indexOf(target);
+
+  while (offset >= 0) {
+    const firstWord = index.wordByStartOffset.get(offset);
+    const lastWord = index.wordByEndOffset.get(offset + target.length);
+    if (firstWord && lastWord) {
+      const hasSourceMatch =
+        Number.isFinite(overlaySourceStart) &&
+        Number.isFinite(overlaySourceEnd) &&
+        Number.isFinite(firstWord.sourceStart) &&
+        Number.isFinite(lastWord.sourceEnd);
+      const sourceDistance = hasSourceMatch
+        ? Math.abs(firstWord.sourceStart - overlaySourceStart) +
+          Math.abs(lastWord.sourceEnd - overlaySourceEnd)
+        : Number.POSITIVE_INFINITY;
+      const timelineDistance =
+        Math.abs(firstWord.start - expectedStart) +
+        Math.abs(lastWord.end - expectedEnd);
+      if (
+        sourceDistance < bestSourceDistance - 0.0001 ||
+        (
+          Math.abs(sourceDistance - bestSourceDistance) <= 0.0001 &&
+          timelineDistance < bestTimelineDistance
+        ) ||
+        (
+          !Number.isFinite(sourceDistance) &&
+          !Number.isFinite(bestSourceDistance) &&
+          timelineDistance < bestTimelineDistance
+        )
+      ) {
+        bestSourceDistance = sourceDistance;
+        bestTimelineDistance = timelineDistance;
+        bestMatch = {
+          start: firstWord.start,
+          end: lastWord.end,
+          sourceStart: firstWord.sourceStart,
+          sourceEnd: lastWord.sourceEnd,
+        };
+      }
+    }
+    offset = index.text.indexOf(target, offset + 1);
+  }
+  return bestMatch;
+}
+
+function retimeDraftAnchoredOverlays(data) {
+  const previousState = appliedCutDraftState;
+  const transcriptIndex = buildTranscriptWordMatchIndex(data.transcript);
+  const retained = [];
+  const suppressed = [];
+  const previouslySuppressedIds = new Set(
+    cutSuppressedOverlays.map((overlay) => overlay.id),
+  );
+  let removedCount = 0;
+  let matchedCount = 0;
+  for (const overlay of [...overlays, ...cutSuppressedOverlays]) {
+    const hasSourceAnchor = anchorOverlayToSourceTimeline(
+      overlay,
+      previousState,
+    );
+    const wordMatch = matchOverlayToTranscriptWords(
+      overlay,
+      transcriptIndex,
+      data,
+    );
+    if (wordMatch) {
+      overlay.start = clamp(wordMatch.start, 0, Math.max(0, duration - 0.02));
+      overlay.end = clamp(wordMatch.end, overlay.start + 0.02, duration);
+      if (
+        Number.isFinite(wordMatch.sourceStart) &&
+        Number.isFinite(wordMatch.sourceEnd)
+      ) {
+        overlay.sourceStart = wordMatch.sourceStart;
+        overlay.sourceEnd = wordMatch.sourceEnd;
+      }
+      retained.push(overlay);
+      matchedCount += 1;
+      continue;
+    }
+    if (!hasSourceAnchor) {
+      retained.push(overlay);
+      continue;
+    }
+    if (isTranscriptTrackOverlay(overlay)) {
+      retained.push(overlay);
+      continue;
+    }
+    const range = editedRangeForSourceOverlay(overlay, data);
+    const minimumDuration = isTranscriptTrackOverlay(overlay) ? 0.02 : 0.05;
+    if (
+      isTranscriptTrackOverlay(overlay) ||
+      !range ||
+      range.end - range.start < minimumDuration
+    ) {
+      suppressed.push(overlay);
+      if (!previouslySuppressedIds.has(overlay.id)) removedCount += 1;
+      continue;
+    }
+    overlay.start = clamp(range.start, 0, Math.max(0, duration - minimumDuration));
+    overlay.end = clamp(range.end, overlay.start + minimumDuration, duration);
+    retained.push(overlay);
+  }
+  const transcriptItems = retained
+    .filter(isTranscriptTrackOverlay)
+    .sort((left, right) => left.start - right.start);
+  for (let index = 1; index < transcriptItems.length; index += 1) {
+    const previous = transcriptItems[index - 1];
+    const current = transcriptItems[index];
+    if (
+      current.start < previous.end - 0.001 &&
+      current.start - previous.start >= 0.019
+    ) {
+      previous.end = current.start;
+    }
+  }
+  overlays = retained;
+  cutSuppressedOverlays = suppressed;
+  if (!overlays.some((overlay) => overlay.id === selectedOverlayId)) {
+    selectedOverlayId = overlays[0]?.id || null;
+  }
+  return { matchedCount, removedCount };
+}
+
+function cutDraftTimingSignature(state) {
+  return JSON.stringify([
+    Boolean(state?.active),
+    (state?.ranges || []).map((range) => `${range.start}-${range.end}`),
+    Number(state?.sourceDuration) || 0,
+    Number(state?.duration) || 0,
+  ]);
+}
+
+function applyEditorCutDraft(data) {
+  pendingCutDraft = data;
+  transcriptTrackDraftVersion += 1;
+  cutDraftActive = Boolean(data.active);
+  if (!artEditorReady || !data.transcript) return;
+  duration = Math.max(0, Number(data.duration) || 0);
+  const segments = (data.transcript.segments || []).map((segment) => ({
+    ...segment,
+    start: clamp(Number(segment.start) || 0, 0, duration),
+    end: clamp(Number(segment.end) || 0, 0, duration),
+  }));
+  // When only the transcript text changed (same cut ranges/durations), the
+  // server already kept the subtitle times stable, so re-segmenting here would
+  // re-flow every cue and shift the timeline. Keep the existing track in that
+  // case; the server's updated text is loaded separately.
+  const timingUnchanged =
+    cutDraftTimingSignature(appliedCutDraftState) ===
+    cutDraftTimingSignature(data);
+  const textChanged =
+    appliedCutDraftState?.transcript?.text !== data.transcript?.text;
+  const isTextOnlyChange = timingUnchanged && textChanged;
+  const trackSeed = currentTranscriptTrack()[0];
+  const locallyRebuiltTrack =
+    trackSeed && !isTextOnlyChange
+      ? replaceTranscriptTrackFromCutDraft(
+          trackSeed,
+          transcriptTrackSharedStyle(trackSeed),
+          data,
+        )
+      : [];
+  const { matchedCount, removedCount } = retimeDraftAnchoredOverlays(data);
+  appliedCutDraftState = data;
+  renderRetainedTranscript({
+    ...data.transcript,
+    segments,
+  });
+  if (embeddedEditor) {
+    editorHostCurrentTime = clamp(previewPlaybackTime(), 0, duration);
+  } else {
+    artVideo.currentTime = clamp(artVideo.currentTime || 0, 0, duration);
+  }
+  frameTimelineSeek.max = String(duration);
+  frameTimelineSignature = "";
+  frameTimelineRulerSignature = "";
+  showRetainedBulkMessage(
+    cutDraftActive
+      ? `已按剪后文案的词级时间匹配 ${matchedCount} 条艺术字；点击生成视频会按当前预览一次合成。${
+          removedCount ? ` 已隐藏 ${removedCount} 条文字已被删除的艺术字。` : ""
+        }`
+      : removedCount
+        ? `已按剪后文案的词级时间同步，并隐藏 ${removedCount} 条文字已被删除的艺术字。`
+        : `已按剪后文案的词级时间匹配 ${matchedCount} 条艺术字。`,
+    cutDraftActive ? "warning" : "success",
+  );
+  renderEditor();
+  if (!locallyRebuiltTrack.length && trackSeed) {
+    showRetainedBulkMessage(
+      "当前剪后文案缺少可用的词级时间，全文艺术字未被旧数据覆盖。",
+      "warning",
+    );
+  }
+  window.requestAnimationFrame(() => refreshFrameTimeline({ force: true }));
+}
+
+function handleEditorHostMessage(event) {
+  if (
+    !embeddedEditor ||
+    event.origin !== window.location.origin ||
+    event.source !== window.parent
+  ) {
+    return;
+  }
+  const data = event.data || {};
+  if (data.type === "editor-suite:cut-draft") {
+    applyEditorCutDraft(data);
+    return;
+  }
+  if (data.type === "editor-suite:generate-video" && data.kind === "art") {
+    if (generateArtVideo.disabled) return;
+    generateVideo(data.composition || null);
+    return;
+  }
+  if (data.type === "editor-suite:sync-time") {
+    const nextTime = clamp(Number(data.currentTime) || 0, 0, duration || Infinity);
+    editorHostCurrentTime = nextTime;
+    renderPreview({ timeOnly: true });
+    return;
+  }
+  if (data.type === "editor-suite:transcript-updated") {
+    void refreshArtAfterTranscriptUpdate();
+    return;
+  }
+  if (data.type === "editor-suite:select-art-timeline") {
+    const overlay = overlays.find(
+      (item) => String(item.id) === String(data.id),
+    );
+    if (!overlay) return;
+    selectedOverlayId = overlay.id;
+    editorHostCurrentTime = clamp(
+      Number(data.currentTime) || overlay.start,
+      0,
+      duration,
+    );
+    renderEditor();
+    return;
+  }
+  if (data.type === "editor-suite:adjust-art-timeline") {
+    const overlay = overlays.find(
+      (item) => String(item.id) === String(data.id),
+    );
+    if (
+      !updateManualOverlayTimelineRange(overlay, data.start, data.end)
+    ) {
+      return;
+    }
+    editorHostCurrentTime = clamp(
+      Number(data.currentTime) || overlay.start,
+      0,
+      duration,
+    );
+    renderControls();
+    renderPreview();
+    return;
+  }
+  if (data.type === "editor-suite:move-finish" && data.kind === "art") {
+    // The host drove a drag directly on its mirrored element; the data model
+    // was already updated by the move-effect messages, so just refresh the
+    // controls, list, and preview here instead of on every pointermove.
+    renderEditor();
+    return;
+  }
+  if (data.type !== "editor-suite:move-effect" || data.kind !== "art") return;
+  const overlay = overlays.find((item) => String(item.id) === String(data.id));
+  if (!overlay) return;
+  const targets = isTranscriptTrackOverlay(overlay)
+    ? transcriptTrackOverlays(overlay.trackId)
+    : [overlay];
+  for (const target of targets) {
+    target.x = clamp(Number(data.x) || 0.5, 0.05, 0.95);
+    target.y = clamp(Number(data.y) || 0.5, 0.05, 0.95);
+  }
+  selectedOverlayId = overlay.id;
+}
+
+window.addEventListener("message", handleEditorHostMessage);
+
+const artGenerationObserver = new MutationObserver(notifyEditorHost);
+artGenerationObserver.observe(generateArtVideo, {
+  attributes: true,
+  childList: true,
+  subtree: true,
+  attributeFilter: ["disabled"],
+});
+artGenerationObserver.observe(artProgress, {
+  attributes: true,
+  attributeFilter: ["hidden"],
+});
+artGenerationObserver.observe(artFormError, {
+  attributes: true,
+  childList: true,
+  subtree: true,
+  attributeFilter: ["hidden"],
+});
 
 function renderControls() {
   const overlay = selectedOverlay();
   const hasSelection = Boolean(overlay);
+  syncOverlayCoordinateReadout();
   const trackItems = selectedTrackOverlays();
   const isTrack = trackItems.length > 0;
   overlayControls.disabled = !hasSelection;
@@ -1729,10 +3051,10 @@ function renderOverlayList() {
       if (
         entry.type !== "track" ||
         !entry.overlays.some((cue) =>
-          isOverlayVisibleAtTime(cue, artVideo.currentTime || 0),
+          isOverlayVisibleAtTime(cue, previewPlaybackTime()),
         )
       ) {
-        artVideo.currentTime = active.start;
+        seekEditorPreview(active.start);
       }
       showArtTimeFitMessage("");
       showApplyAllSettingsMessage("");
@@ -1750,6 +3072,7 @@ function renderEditor() {
   renderControls();
   renderOverlayList();
   renderPreview();
+  persistEmbeddedArtDraft();
 }
 
 function showApplyAllSettingsMessage(message) {
@@ -1771,6 +3094,349 @@ function comparableCaptionText(value) {
 
 function transcriptCueTextLength(value) {
   return comparableCaptionText(value).length;
+}
+
+function currentCutDraftTranscript() {
+  const transcript = pendingCutDraft?.transcript;
+  return Array.isArray(transcript?.segments) && transcript.segments.length
+    ? transcript
+    : null;
+}
+
+function transcriptTrackSharedStyle(trackSeed) {
+  return {
+    font: trackSeed.font,
+    fontSize: Number(trackSeed.fontSize) || 54,
+    color: trackSeed.color,
+    strokeColor: trackSeed.strokeColor,
+    strokeWidth: Number(trackSeed.strokeWidth) || 0,
+    shadow: trackSeed.shadow,
+    x: Number(trackSeed.x),
+    y: Number(trackSeed.y),
+    direction: "horizontal",
+    textAlign: trackSeed.textAlign || "center",
+    charsPerLine: 0,
+    letterSpacing: Number(trackSeed.letterSpacing) || 0,
+    lineSpacing: 0,
+    artStyle: trackSeed.artStyle,
+  };
+}
+
+function transcriptTrackDisplayText(words) {
+  return words
+    .map((word) => String(word.text || ""))
+    .join("")
+    .replace(/\p{P}/gu, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function cutDraftTimedTranscriptWords(segment) {
+  const rawWords = Array.isArray(segment.words) && segment.words.length
+    ? segment.words
+    : [segment];
+  // Preserve the original letter case while matching case-insensitively, so
+  // latin words like "AI" or "OK" stay capitalized in the generated subtitles.
+  const segmentContent = String(segment.text || "")
+    .replace(/[\s\p{P}\p{S}]/gu, "");
+  const segmentLower = segmentContent.toLowerCase();
+  if (!segmentContent) return [];
+
+  const timedWords = [];
+  let textOffset = 0;
+  for (const [index, word] of rawWords.entries()) {
+    const wordLower = String(word.text || "")
+      .replace(/[\s\p{P}\p{S}]/gu, "")
+      .toLowerCase();
+    const start = Number(word.start);
+    const end = Number(word.end);
+    if (!wordLower || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+      continue;
+    }
+    const matchOffset = segmentLower.indexOf(wordLower, textOffset);
+    let nextOffset = matchOffset >= textOffset
+      ? matchOffset + wordLower.length
+      : Math.min(segmentLower.length, textOffset + wordLower.length);
+    if (index === rawWords.length - 1) nextOffset = segmentLower.length;
+    const text = segmentContent.slice(textOffset, nextOffset);
+    if (text) timedWords.push({ ...word, text });
+    textOffset = nextOffset;
+  }
+  if (textOffset < segmentContent.length && timedWords.length) {
+    timedWords.at(-1).text += segmentContent.slice(textOffset);
+  }
+  return timedWords;
+}
+
+function transcriptTrackMaxCharsPerCue(style = {}) {
+  const videoWidth = Number(artVideo?.videoWidth) || 1920;
+  const fontSize = Math.max(1, Number(style.fontSize) || 54);
+  const strokeWidth = Math.max(0, Number(style.strokeWidth) || 0);
+  const padding = Math.max(48, Math.floor(fontSize / 2), (strokeWidth + 7) * 3);
+  const safeWidth = Math.max(1, videoWidth * 0.88);
+  const fitted = Math.floor((safeWidth - padding * 2) / fontSize);
+  return Math.max(6, Math.min(TRANSCRIPT_TRACK_MAX_CHARS_PER_CUE, fitted));
+}
+
+function cutDraftTranscriptTrackCues(data, maxChars = TRANSCRIPT_TRACK_MAX_CHARS_PER_CUE) {
+  const cues = [];
+  const closingMarks = /[”’》〉】」』）)\]]+$/;
+  const strongBoundary = (word) =>
+    /[。！？!?；;]$/.test(String(word.text || "").replace(closingMarks, ""));
+  const softBoundary = (word) =>
+    /[，、,:：]$/.test(String(word.text || "").replace(closingMarks, ""));
+  const groupLength = (group) =>
+    group.reduce((total, word) => total + transcriptCueTextLength(word.text), 0);
+
+  const flush = (group) => {
+    if (!group.length) return;
+    const text = transcriptTrackDisplayText(group);
+    const start = Number(group[0].start);
+    const end = Number(group.at(-1).end);
+    if (text && Number.isFinite(start) && Number.isFinite(end) && end > start) {
+      const cue = { text, start, end };
+      const sourceStart = Number(group[0].sourceStart);
+      const sourceEnd = Number(group.at(-1).sourceEnd);
+      if (
+        Number.isFinite(sourceStart) &&
+        Number.isFinite(sourceEnd) &&
+        sourceEnd > sourceStart
+      ) {
+        Object.assign(cue, { sourceStart, sourceEnd });
+      }
+      cues.push(cue);
+    }
+  };
+
+  // A cue may only come from one spoken sentence, so split the words into
+  // sentences first and never pack across a strong sentence boundary.
+  const sentences = [];
+  for (const segment of data?.transcript?.segments || []) {
+    let sentence = [];
+    for (const word of cutDraftTimedTranscriptWords(segment)) {
+      sentence.push(word);
+      if (strongBoundary(word)) {
+        if (sentence.length) sentences.push(sentence);
+        sentence = [];
+      }
+    }
+    if (sentence.length) sentences.push(sentence);
+  }
+
+  const splitClauses = (words) => {
+    const clauses = [];
+    let current = [];
+    for (const word of words) {
+      current.push(word);
+      if (softBoundary(word)) {
+        clauses.push(current);
+        current = [];
+      }
+    }
+    if (current.length) clauses.push(current);
+    return clauses;
+  };
+
+  const splitLongClauseBalanced = (clause) => {
+    const chunks = [];
+    let remaining = [...clause];
+    while (remaining.length) {
+      if (groupLength(remaining) <= maxChars) {
+        chunks.push(remaining);
+        break;
+      }
+      let maxTake = 0;
+      let length = 0;
+      for (let index = 0; index < remaining.length; index += 1) {
+        const wordLength = transcriptCueTextLength(remaining[index].text);
+        if (length + wordLength > maxChars) break;
+        maxTake += 1;
+        length += wordLength;
+      }
+      if (maxTake === 0) maxTake = 1;
+      const totalLength = groupLength(remaining);
+      let bestTake = 1;
+      let bestScore = Infinity;
+      for (let take = 1; take <= maxTake; take += 1) {
+        const leftLength = groupLength(remaining.slice(0, take));
+        const rightLength = totalLength - leftLength;
+        if (leftLength < 2 || (rightLength > 0 && rightLength < 2)) continue;
+        // Audio pauses are the general signal for a natural phrase boundary.
+        const pause = Math.max(
+          0,
+          Number(remaining[take]?.start || 0) -
+            Number(remaining[take - 1]?.end || 0),
+        );
+        let score;
+        if (pause >= 0.5) score = -90;
+        else if (pause >= 0.3) score = -70;
+        else if (pause >= 0.18) score = -50;
+        else if (pause >= 0.1) score = -35;
+        else if (pause >= 0.05) score = -18;
+        else score = 0;
+        if (softBoundary(remaining[take - 1])) score -= 25;
+        // Balance only breaks ties between otherwise-equal boundaries.
+        score += Math.abs(leftLength - rightLength);
+        if (score < bestScore) {
+          bestScore = score;
+          bestTake = take;
+        }
+      }
+      chunks.push(remaining.slice(0, bestTake));
+      remaining = remaining.slice(bestTake);
+    }
+    return chunks;
+  };
+
+  const leadingPhrases = new Set([
+    "说实话",
+    "坦白说",
+    "老实说",
+    "换句话说",
+    "也就是说",
+    "所以说",
+    "所以说啊",
+    "简单来说",
+    "总的来说",
+    "事实上",
+    "实际上",
+    "比如说",
+    "记住一句话",
+  ]);
+
+  const packedAll = [];
+  for (const sentence of sentences) {
+    const words = sentence.filter((word) => transcriptCueTextLength(word.text) > 0);
+    const clauses = splitClauses(words);
+    // A discourse-marker clause (e.g. "说实话，") leads the following clause.
+    const mergedClauses = [];
+    for (let index = 0; index < clauses.length; index += 1) {
+      const clause = clauses[index];
+      if (
+        leadingPhrases.has(transcriptTrackDisplayText(clause)) &&
+        index + 1 < clauses.length
+      ) {
+        mergedClauses.push([...clause, ...clauses[index + 1]]);
+        index += 1;
+      } else {
+        mergedClauses.push(clause);
+      }
+    }
+    // Pack whole clauses onto one line up to the budget so a sentence is not
+    // fragmented at every comma.
+    let current = [];
+    for (const clause of mergedClauses) {
+      if (
+        current.length &&
+        groupLength(current) + groupLength(clause) > maxChars
+      ) {
+        packedAll.push(current);
+        current = [];
+      }
+      current.push(...clause);
+    }
+    if (current.length) packedAll.push(current);
+  }
+
+  // A single clause that alone exceeds the budget is split balanced.
+  const packedLines = [];
+  for (const line of packedAll) {
+    if (groupLength(line) <= maxChars) {
+      packedLines.push(line);
+    } else {
+      packedLines.push(...splitLongClauseBalanced(line));
+    }
+  }
+
+  // A single-character piece leads into the following cue instead of standing
+  // on its own line, across the whole track so a one-character sentence is
+  // folded forward even when it is the only content of its own sentence.
+  const finalGroups = [];
+  let pendingFold = null;
+  for (const current of packedLines) {
+    if (groupLength(current) === 1 && pendingFold === null) {
+      pendingFold = current;
+      continue;
+    }
+    if (pendingFold !== null) {
+      const combined = [...pendingFold, ...current];
+      if (groupLength(combined) <= maxChars) {
+        finalGroups.push(combined);
+      } else if (current.length > 1) {
+        finalGroups.push([...pendingFold, current[0]]);
+        finalGroups.push(current.slice(1));
+      } else {
+        finalGroups.push(combined);
+      }
+      pendingFold = null;
+      continue;
+    }
+    finalGroups.push(current);
+  }
+  if (pendingFold !== null) {
+    if (finalGroups.length) {
+      finalGroups[finalGroups.length - 1] = [
+        ...finalGroups.at(-1),
+        ...pendingFold,
+      ];
+    } else {
+      finalGroups.push(pendingFold);
+    }
+  }
+  finalGroups.forEach(flush);
+
+  for (let index = 1; index < cues.length; index += 1) {
+    const previous = cues[index - 1];
+    const current = cues[index];
+    if (current.start >= previous.end - 0.001) continue;
+    if (current.start - previous.start < 0.019) return [];
+    previous.end = current.start;
+  }
+  return cues;
+}
+
+function replaceTranscriptTrackFromCutDraft(trackSeed, sharedStyle, data) {
+  const maxChars = transcriptTrackMaxCharsPerCue(sharedStyle);
+  const cues = cutDraftTranscriptTrackCues(data, maxChars);
+  if (!cues.length) return [];
+  const existingIds = new Set(currentTranscriptTrack().map((overlay) => overlay.id));
+  const trackId = trackSeed?.trackId || "transcript-full";
+  const created = [];
+  for (const cue of cues) {
+    const overlay = createOverlay(
+      cue.text,
+      cue.start,
+      cue.end,
+      {
+        ...sharedStyle,
+        trackId,
+        trackType: TRANSCRIPT_TRACK_TYPE,
+        sourceStart: cue.sourceStart,
+        sourceEnd: cue.sourceEnd,
+      },
+      { deferRender: true },
+    );
+    if (overlay) created.push(overlay);
+  }
+  if (created.length !== cues.length) {
+    const createdIds = new Set(created.map((overlay) => overlay.id));
+    overlays = overlays.filter((overlay) => !createdIds.has(overlay.id));
+    return [];
+  }
+  overlays = overlays.filter((overlay) => !existingIds.has(overlay.id));
+  cutSuppressedOverlays = cutSuppressedOverlays.filter(
+    (overlay) => !isTranscriptTrackOverlay(overlay),
+  );
+  selectedOverlayId = activeTrackCue(created)?.id || created[0].id;
+  return created;
+}
+
+function requestLatestEditorCutDraft() {
+  if (!embeddedEditor || window.parent === window) return;
+  window.parent.postMessage(
+    { type: "editor-suite:request-cut-draft", kind: "art" },
+    window.location.origin,
+  );
 }
 
 function matchingTranscriptSegment(overlay) {
@@ -1832,8 +3498,25 @@ function fitSelectedArtTimeToTranscript() {
     return;
   }
   const range = normalizeOverlayRange(segment.start, segment.end);
-  Object.assign(overlay, range);
-  artVideo.currentTime = range.start;
+  Object.assign(overlay, range, {
+    sourceStart: Number.isFinite(Number(segment.sourceStart))
+      ? Number(segment.sourceStart)
+      : overlay.sourceStart,
+    sourceEnd: Number.isFinite(Number(segment.sourceEnd))
+      ? Number(segment.sourceEnd)
+      : overlay.sourceEnd,
+  });
+  if (
+    !Number.isFinite(Number(segment.sourceStart)) ||
+    !Number.isFinite(Number(segment.sourceEnd))
+  ) {
+    anchorOverlayToSourceTimeline(
+      overlay,
+      appliedCutDraftState || pendingCutDraft,
+      true,
+    );
+  }
+  seekEditorPreview(range.start);
   renderEditor();
   showArtTimeFitMessage(
     `已贴合文案“${String(segment.text).trim()}”：${formatRange(range.start, range.end)}。`,
@@ -1860,8 +3543,15 @@ function updateSelectedOverlay(changes, options = {}) {
     }
   } else {
     Object.assign(overlay, changes);
+    if (Object.hasOwn(changes, "start") || Object.hasOwn(changes, "end")) {
+      anchorOverlayToSourceTimeline(
+        overlay,
+        appliedCutDraftState || pendingCutDraft,
+        true,
+      );
+    }
   }
-  if (options.seek) artVideo.currentTime = overlay.start;
+  if (options.seek) seekEditorPreview(overlay.start);
   renderOverlayList();
   renderPreview();
 }
@@ -1969,12 +3659,17 @@ function updateRetainedBulkControls() {
   addAllRetainedSegments.disabled =
     transcriptTrackBusy ||
     trackItems.length > 0 ||
-    retainedTranscriptSegments.length === 0;
+    retainedTranscriptSegments.length === 0 ||
+    (embeddedEditor && !currentCutDraftTranscript()) ||
+    !availableArtTemplateIds.has(TRANSCRIPT_TRACK_DEFAULT_STYLE);
   addAllRetainedSegments.textContent = transcriptTrackBusy
-    ? "AI 正在识别分句…"
+    ? "正在生成视频文案…"
     : trackItems.length > 0
-      ? "AI 分句艺术字已添加"
-      : "AI 分句生成艺术字字幕";
+      ? "视频文案已添加"
+      : "一键添加视频文案";
+  generateArtVideo.disabled = transcriptTrackBusy || overlays.length === 0;
+  updateTranscriptStyleButtons();
+  window.queueMicrotask(notifyEditorHost);
 }
 
 function comparableTranscriptEditorText(value) {
@@ -2049,6 +3744,10 @@ function renderRetainedSegmentList() {
         segment.text,
         segment.start,
         segment.end,
+        {
+          sourceStart: segment.sourceStart,
+          sourceEnd: segment.sourceEnd,
+        },
       );
       if (!overlay) return;
       selectedRetainedSegmentKeys.delete(key);
@@ -2093,7 +3792,10 @@ function addRetainedSegmentsAsOverlays(segments) {
         segment.text,
         segment.start,
         segment.end,
-        {},
+        {
+          sourceStart: segment.sourceStart,
+          sourceEnd: segment.sourceEnd,
+        },
         { deferRender: true },
       )
     ) {
@@ -2113,7 +3815,7 @@ function addRetainedSegmentsAsOverlays(segments) {
   }
 
   const selected = selectedOverlay();
-  if (selected) artVideo.currentTime = selected.start;
+  if (selected) seekEditorPreview(selected.start);
   if (additions.length < candidates.length) {
     showRetainedBulkMessage(
       `已添加 ${addedCount} 条，达到 ${MANUAL_OVERLAY_LIMIT} 条自定义艺术字上限，其余文案未添加。`,
@@ -2130,28 +3832,46 @@ function addRetainedSegmentsAsOverlays(segments) {
 
 async function addFullTranscriptTrack() {
   if (transcriptTrackBusy || currentTranscriptTrack().length > 0) return;
+  if (embeddedEditor && !currentCutDraftTranscript()) {
+    requestLatestEditorCutDraft();
+    showRetainedBulkMessage(
+      "正在读取当前剪后文案，请稍候再试。不会使用剪辑前的旧文案。",
+      "warning",
+    );
+    updateRetainedBulkControls();
+    return;
+  }
+  if (!availableArtTemplateIds.has(TRANSCRIPT_TRACK_DEFAULT_STYLE)) {
+    showRetainedBulkMessage(
+      "默认的“热血立体”艺术字暂不可用，请刷新后重试。",
+      "warning",
+    );
+    updateRetainedBulkControls();
+    return;
+  }
   const selected = selectedOverlay();
-  const preferredStyle = ART_STYLE_PALETTES[preferredArtTemplateSettings.id]
-    ? preferredArtTemplateSettings.id
-    : "impact";
-  const palette = ART_STYLE_PALETTES[preferredStyle];
+  const selectedStyle = TRANSCRIPT_TRACK_DEFAULT_STYLE;
+  transcriptTrackTemplateId = selectedStyle;
+  const palette = ART_STYLE_PALETTES[selectedStyle];
+  const chosenTemplateSettings =
+    preferredArtTemplateSettings.id === selectedStyle
+      ? preferredArtTemplateSettings
+      : {};
   const sharedStyle = {
     font:
+      chosenTemplateSettings.font ||
       selected?.font ||
-      preferredArtTemplateSettings.font ||
       preferredArtFontId ||
       "bold",
     fontSize:
+      Number(chosenTemplateSettings.fontSize) ||
       Number(selected?.fontSize) ||
-      Number(preferredArtTemplateSettings.fontSize) ||
       54,
     color:
-      selected?.color ||
-      preferredArtTemplateSettings.color ||
+      chosenTemplateSettings.color ||
       palette.color,
     strokeColor:
-      selected?.strokeColor ||
-      preferredArtTemplateSettings.strokeColor ||
+      chosenTemplateSettings.strokeColor ||
       palette.strokeColor,
     strokeWidth: Number.isFinite(Number(selected?.strokeWidth))
       ? Number(selected.strokeWidth)
@@ -2164,12 +3884,43 @@ async function addFullTranscriptTrack() {
     charsPerLine: 0,
     letterSpacing: Number(selected?.letterSpacing) || 0,
     lineSpacing: 0,
-    artStyle: selected?.artStyle || preferredStyle,
+    artStyle: selectedStyle,
   };
 
+  const cutTranscript = currentCutDraftTranscript();
+  if (cutTranscript) {
+    transcriptTrackBusy = true;
+    updateRetainedBulkControls();
+    const created = replaceTranscriptTrackFromCutDraft(
+      null,
+      sharedStyle,
+      pendingCutDraft,
+    );
+    transcriptTrackBusy = false;
+    if (!created.length) {
+      showRetainedBulkMessage(
+        "当前剪后文案缺少可用的词级时间，无法生成全文艺术字。",
+        "warning",
+      );
+      updateRetainedBulkControls();
+      return;
+    }
+    seekEditorPreview(created[0].start);
+    selectedRetainedSegmentKeys.clear();
+    showRetainedBulkMessage(
+      `已直接使用当前剪后文案和词级时间生成 ${created.length} 个艺术字片段。`,
+    );
+    renderEditor();
+    renderRetainedSegmentList();
+    revealSettingsPanel();
+    return;
+  }
+
   transcriptTrackBusy = true;
+  const requestDraftVersion = transcriptTrackDraftVersion;
+  const requestPayload = transcriptTrackRequestPayload(sharedStyle);
   showRetainedBulkMessage(
-    "AI 正在按语气、停顿和每行最多 10 字生成统一字号字幕…",
+    `AI 正在使用“${selectedTranscriptTemplateName()}”生成统一字号字幕…`,
   );
   updateRetainedBulkControls();
   try {
@@ -2178,18 +3929,16 @@ async function addFullTranscriptTrack() {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          source: videoSource,
-          font: sharedStyle.font,
-          fontSize: sharedStyle.fontSize,
-          letterSpacing: sharedStyle.letterSpacing,
-          strokeWidth: sharedStyle.strokeWidth,
-        }),
+        body: JSON.stringify(requestPayload),
       },
     );
     const result = await response.json();
     if (!response.ok) {
       throw new Error(result.detail || "无法生成全文单行艺术字轨道。");
+    }
+    if (requestDraftVersion !== transcriptTrackDraftVersion) {
+      window.setTimeout(addFullTranscriptTrack, 0);
+      return;
     }
 
     const created = [];
@@ -2203,6 +3952,8 @@ async function addFullTranscriptTrack() {
           fontSize: result.fontSize,
           trackId: result.trackId,
           trackType: result.trackType,
+          sourceStart: cue.sourceStart,
+          sourceEnd: cue.sourceEnd,
         },
         { deferRender: true },
       );
@@ -2216,7 +3967,7 @@ async function addFullTranscriptTrack() {
     }
 
     selectedOverlayId = created[0].id;
-    artVideo.currentTime = created[0].start;
+    seekEditorPreview(created[0].start);
     selectedRetainedSegmentKeys.clear();
     const segmentationLabel =
       result.segmentationMethod === "ai"
@@ -2237,7 +3988,45 @@ async function addFullTranscriptTrack() {
   }
 }
 
-async function rebuildTranscriptTrackLayout() {
+function transcriptTrackRequestPayload(sharedStyle) {
+  const payload = {
+    source: videoSource,
+    font: sharedStyle.font,
+    fontSize: sharedStyle.fontSize,
+    letterSpacing: sharedStyle.letterSpacing,
+    strokeWidth: sharedStyle.strokeWidth,
+  };
+  const cutTranscript = pendingCutDraft?.transcript;
+  if (Array.isArray(cutTranscript?.segments) && cutTranscript.segments.length) {
+    payload.draftTranscript = cutTranscript;
+    payload.draftDuration = Math.max(
+      0.001,
+      Number(pendingCutDraft.duration) || duration,
+    );
+  } else if (retainedTranscriptSegments.length) {
+    payload.draftTranscript = {
+      text: retainedSavedText,
+      segments: retainedTranscriptSegments,
+    };
+    payload.draftDuration = duration;
+  }
+  return payload;
+}
+
+function scheduleTranscriptTrackRefresh() {
+  window.clearTimeout(transcriptTrackRefreshTimer);
+  if (!currentTranscriptTrack().length) return;
+  transcriptTrackRefreshTimer = window.setTimeout(async () => {
+    transcriptTrackRefreshTimer = null;
+    if (transcriptTrackBusy) {
+      scheduleTranscriptTrackRefresh();
+      return;
+    }
+    await rebuildTranscriptTrackLayout({ liveSync: true });
+  }, 240);
+}
+
+async function rebuildTranscriptTrackLayout(options = {}) {
   const selected = selectedOverlay();
   const trackSeed = isTranscriptTrackOverlay(selected)
     ? selected
@@ -2247,27 +4036,36 @@ async function rebuildTranscriptTrackLayout() {
   const existingTrack = transcriptTrackOverlays(trackSeed.trackId);
   if (!existingTrack.length) return false;
 
-  const sharedStyle = {
-    font: trackSeed.font,
-    fontSize: Number(trackSeed.fontSize) || 54,
-    color: trackSeed.color,
-    strokeColor: trackSeed.strokeColor,
-    strokeWidth: Number(trackSeed.strokeWidth) || 0,
-    shadow: trackSeed.shadow,
-    x: Number(trackSeed.x),
-    y: Number(trackSeed.y),
-    direction: "horizontal",
-    textAlign: trackSeed.textAlign || "center",
-    charsPerLine: 0,
-    letterSpacing: Number(trackSeed.letterSpacing) || 0,
-    lineSpacing: 0,
-    artStyle: trackSeed.artStyle,
-  };
+  const sharedStyle = transcriptTrackSharedStyle(trackSeed);
+  if (currentCutDraftTranscript()) {
+    const created = replaceTranscriptTrackFromCutDraft(
+      trackSeed,
+      sharedStyle,
+      pendingCutDraft,
+    );
+    if (!created.length) {
+      showRetainedBulkMessage(
+        "当前剪后文案缺少可用的词级时间，全文艺术字保持原状。",
+        "warning",
+      );
+      return false;
+    }
+    showRetainedBulkMessage(
+      `已按当前剪后文案即时重排，共 ${created.length} 个艺术字片段。`,
+    );
+    renderEditor();
+    renderRetainedSegmentList();
+    return true;
+  }
   const previousIds = new Set(existingTrack.map((overlay) => overlay.id));
   const created = [];
   transcriptTrackBusy = true;
+  const requestDraftVersion = transcriptTrackDraftVersion;
+  const requestPayload = transcriptTrackRequestPayload(sharedStyle);
   showRetainedBulkMessage(
-    `正在保持语义边界，并按每行最多 10 字、${sharedStyle.fontSize} 号字重排…`,
+    options.liveSync
+      ? "剪辑方案已更新，正在同步全文艺术字内容和时间…"
+      : `正在保持语义边界，并按每行最多 10 字、${sharedStyle.fontSize} 号字重排…`,
   );
   updateRetainedBulkControls();
   try {
@@ -2276,18 +4074,16 @@ async function rebuildTranscriptTrackLayout() {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          source: videoSource,
-          font: sharedStyle.font,
-          fontSize: sharedStyle.fontSize,
-          letterSpacing: sharedStyle.letterSpacing,
-          strokeWidth: sharedStyle.strokeWidth,
-        }),
+        body: JSON.stringify(requestPayload),
       },
     );
     const result = await response.json();
     if (!response.ok) {
       throw new Error(result.detail || "无法根据字号重新整理全文轨道。");
+    }
+    if (requestDraftVersion !== transcriptTrackDraftVersion) {
+      scheduleTranscriptTrackRefresh();
+      return false;
     }
 
     for (const cue of result.cues || []) {
@@ -2300,6 +4096,8 @@ async function rebuildTranscriptTrackLayout() {
           fontSize: result.fontSize,
           trackId: result.trackId,
           trackType: result.trackType,
+          sourceStart: cue.sourceStart,
+          sourceEnd: cue.sourceEnd,
         },
         { deferRender: true },
       );
@@ -2310,13 +4108,15 @@ async function rebuildTranscriptTrackLayout() {
     }
 
     overlays = overlays.filter((overlay) => !previousIds.has(overlay.id));
-    const activeCue = activeTrackCue(created, artVideo.currentTime);
+    const activeCue = activeTrackCue(created, previewPlaybackTime());
     selectedOverlayId = activeCue?.id || created[0].id;
     const segmentationLabel =
       result.segmentationMethod === "ai" ? "AI 语义分句" : "自然分句";
     showRetainedBulkMessage(
-      `已保持 ${result.fontSize} 号字、每行最多 10 字和${segmentationLabel}，` +
-        `共 ${created.length} 个单行片段。`,
+      options.liveSync
+        ? `已按当前剪后文案实时同步，共 ${created.length} 个艺术字片段。`
+        : `已保持 ${result.fontSize} 号字、每行最多 10 字和${segmentationLabel}，` +
+            `共 ${created.length} 个单行片段。`,
     );
     renderEditor();
     renderRetainedSegmentList();
@@ -2566,7 +4366,7 @@ function renderAiSuggestionReview() {
       );
       startInput.value = suggestion.start.toFixed(1);
       timeBadge.textContent = formatRange(suggestion.start, suggestion.end);
-      artVideo.currentTime = suggestion.start;
+      seekEditorPreview(suggestion.start);
       renderPreview();
     });
     endInput.addEventListener("change", () => {
@@ -2591,7 +4391,7 @@ function renderAiSuggestionReview() {
     });
     previewButton.addEventListener("click", () => {
       previewDraftId = suggestion.draftId;
-      artVideo.currentTime = suggestion.start;
+      seekEditorPreview(suggestion.start);
       renderAiSuggestionReview();
       renderPreview();
     });
@@ -2612,7 +4412,7 @@ function loadAiDraftSuggestions(items) {
   }));
   previewDraftId = aiDraftSuggestions[0]?.draftId || null;
   if (aiDraftSuggestions[0]) {
-    artVideo.currentTime = aiDraftSuggestions[0].start;
+    seekEditorPreview(aiDraftSuggestions[0].start);
   }
   renderAiSuggestionReview();
   renderPreview();
@@ -2665,6 +4465,12 @@ async function pollAiSuggestionJob() {
 }
 
 async function requestAiSuggestions() {
+  if (cutDraftActive) {
+    showAiSuggestionError(
+      "请先生成剪辑视频再获取 AI 推荐；当前可从剪后文案直接添加艺术字。",
+    );
+    return;
+  }
   const remaining = MANUAL_OVERLAY_LIMIT - manualOverlayCount();
   const count = Number(aiSuggestionCount.value);
   if (!Number.isInteger(count) || count < 1 || count > remaining) {
@@ -2772,6 +4578,7 @@ function confirmAiSuggestionDrafts() {
 function showFormError(message) {
   artFormError.textContent = message;
   artFormError.hidden = !message;
+  window.queueMicrotask(notifyEditorHost);
 }
 
 function validateOverlays() {
@@ -2784,7 +4591,8 @@ function validateOverlays() {
   if (overlays.length === 0) return "请至少添加一条艺术字。";
   for (const [index, overlay] of overlays.entries()) {
     if (!overlay.text.trim()) return `第 ${index + 1} 条艺术字内容不能为空。`;
-    if (overlay.end - overlay.start < 0.05) {
+    const minimumDuration = isTranscriptTrackOverlay(overlay) ? 0.02 : 0.05;
+    if (overlay.end - overlay.start < minimumDuration) {
       return `第 ${index + 1} 条艺术字的结束时间必须晚于开始时间。`;
     }
     if (overlay.start < 0 || overlay.end > duration + 0.01) {
@@ -2826,7 +4634,7 @@ function validateOverlays() {
       retainedTranscriptSegments.map((segment) => segment.text).join(""),
     );
     if (!trackText || trackText !== transcriptText) {
-      return "全文艺术字轨道与当前视频文案不一致，请删除后重新生成。";
+      return "全文艺术字轨道与当前视频文案不一致。";
     }
   }
   return "";
@@ -2840,13 +4648,27 @@ function setArtProgress(value, message) {
   artStatus.textContent = message || "正在生成艺术字视频…";
 }
 
-function renderArtJob(art, shouldScroll = false) {
+function renderArtJob(art) {
   if (!art) return;
   if (["queued", "processing"].includes(art.status)) {
     artProgress.hidden = false;
     artResult.hidden = true;
     generateArtVideo.disabled = true;
     setArtProgress(art.progress, art.stage);
+    if (!generationModalActive) {
+      generationModalActive = true;
+      window.appGeneration?.show({
+        title: "生成艺术字视频",
+        progress: art.progress,
+        status: art.stage || "正在生成艺术字视频…",
+        onClose: () => {
+          generationModalActive = false;
+        },
+        onCancel: () => void cancelArtGeneration(),
+      });
+    } else {
+      window.appGeneration?.setProgress(art.progress, art.stage);
+    }
     return;
   }
 
@@ -2860,23 +4682,28 @@ function renderArtJob(art, shouldScroll = false) {
     continuePictureInPicture.href =
       `/picture-in-picture?job=${encodeURIComponent(jobId)}&source=art`;
     artResultDuration.textContent = `成片 ${formatTime(art.outputDuration)}`;
-    if (shouldScroll) {
-      activateWorkbenchPanel("output");
-      window.requestAnimationFrame(() => {
-        if (window.innerWidth > 1000) {
-          outputPanel.scrollTo({
-            top: artResult.offsetTop,
-            behavior: "smooth",
-          });
-        } else {
-          artResult.scrollIntoView({ behavior: "smooth", block: "start" });
-        }
-        artResultTitle.focus({ preventScroll: true });
+    if (generationModalActive) {
+      generationModalActive = false;
+      window.appGeneration?.complete({
+        videoUrl: art.outputUrl,
+        downloadUrl: `${art.outputUrl}?download=true`,
+        duration: formatTime(art.outputDuration),
+        redirectOnClose: embeddedEditor ? null : "/",
       });
     }
   } else if (art.status === "failed") {
     artProgress.hidden = true;
     showFormError(art.error || "艺术字视频生成失败，请重新尝试。");
+    if (generationModalActive) {
+      generationModalActive = false;
+      window.appGeneration?.fail(
+        art.error || "艺术字视频生成失败，请重新尝试。",
+      );
+    }
+  } else if (art.status === "cancelled") {
+    artProgress.hidden = true;
+    generateArtVideo.disabled = overlays.length === 0;
+    showFormError("已取消生成。");
   }
 }
 
@@ -2891,8 +4718,9 @@ async function pollArtJob() {
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "无法读取生成进度。");
     job = payload;
+    updateEditorSuiteJobState(payload);
     const art = getSourceArt(payload.art);
-    renderArtJob(art, true);
+    renderArtJob(art);
     if (["queued", "processing"].includes(art?.status)) {
       pollTimer = window.setTimeout(pollArtJob, 1200);
     }
@@ -2903,12 +4731,38 @@ async function pollArtJob() {
   }
 }
 
-async function generateVideo() {
+async function cancelArtGeneration() {
+  if (!jobId) return;
+  if (pollTimer) window.clearTimeout(pollTimer);
+  try {
+    const response = await fetch(
+      `/api/transcriptions/${encodeURIComponent(jobId)}/cancel`,
+      { method: "POST" },
+    );
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || "无法取消生成。");
+    renderArtJob(payload.art);
+    window.appGeneration?.fail("已取消生成。");
+  } catch (error) {
+    window.appGeneration?.fail(error.message || "取消失败，请重试。");
+  }
+}
+
+async function generateVideo(composition = null) {
+  const trackRefreshPending =
+    transcriptTrackRefreshTimer !== null && currentTranscriptTrack().length > 0;
+  if (trackRefreshPending) {
+    window.clearTimeout(transcriptTrackRefreshTimer);
+    transcriptTrackRefreshTimer = null;
+  }
   let validationError = validateOverlays();
   if (
-    validationError === "全文艺术字轨道每段最多 10 个字，请重新生成全文轨道。"
+    trackRefreshPending ||
+    validationError === "全文艺术字轨道每段最多 10 个字，请重新生成全文轨道。" ||
+    validationError === "全文艺术字轨道存在重叠时间，请重新生成。" ||
+    validationError === "全文艺术字轨道与当前视频文案不一致。"
   ) {
-    showFormError("正在按每行最多 10 字重新整理全文轨道…");
+    showFormError("正在自动整理全文艺术字的内容和时间…");
     const rebuilt = await rebuildTranscriptTrackLayout();
     if (!rebuilt) {
       showFormError(validationError);
@@ -2932,13 +4786,33 @@ async function generateVideo() {
     historyName: artHistoryName.value.trim() || null,
     overlays: overlays.map(({ id, ...overlay }) => overlay),
   };
+  const compositionRanges = Array.isArray(composition?.ranges)
+    ? composition.ranges
+    : Array.isArray(pendingCutDraft?.ranges)
+      ? pendingCutDraft.ranges
+      : Array.isArray(job?.edit?.requestedRanges)
+        ? job.edit.requestedRanges
+      : [];
+  const useComposition =
+    compositionRanges.length > 0 &&
+    (cutDraftActive || Boolean(composition) || Boolean(job?.edit?.composition));
+  const endpoint = useComposition ? "compose" : "art-text";
+  const requestPayload = useComposition
+    ? {
+        target: "art",
+        ranges: compositionRanges,
+        artOverlays: payload.overlays,
+        artSource: videoSource,
+        historyName: payload.historyName,
+      }
+    : payload;
   try {
     const response = await fetch(
-      `/api/transcriptions/${encodeURIComponent(jobId)}/art-text`,
+      `/api/transcriptions/${encodeURIComponent(jobId)}/${endpoint}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(requestPayload),
       },
     );
     const result = await response.json();
@@ -2974,6 +4848,7 @@ async function initialize() {
     await loadArtTemplateLibrary();
   } catch {
     availableArtTemplateIds = new Set(Object.keys(ART_STYLE_PALETTES));
+    renderTranscriptStyleGrid(fallbackTemplatesFromStyleButtons());
   }
 
   try {
@@ -2991,6 +4866,7 @@ async function initialize() {
     }
 
     job = payload;
+    updateEditorSuiteJobState(payload);
     const originalVideoUrl =
       `/api/transcriptions/${encodeURIComponent(jobId)}/original-video`;
     const videoUrl =
@@ -3010,9 +4886,11 @@ async function initialize() {
     renderRetainedTranscript(transcript);
     const art = getSourceArt(payload.art);
     if (art?.overlays?.length) addExistingOverlays(art.overlays);
+    else restoreEmbeddedArtDraft();
     replaceUnavailableOverlayFonts();
     replaceUnavailableOverlayTemplates();
     applyRequestedTemplateSelection();
+    syncTranscriptTemplateFromExistingTrack();
     renderRetainedSegmentList();
     renderEditor();
     renderArtJob(art);
@@ -3022,14 +4900,15 @@ async function initialize() {
     pageLoading.hidden = true;
     pageError.hidden = true;
     artWorkspace.hidden = false;
+    artEditorReady = true;
+    if (pendingCutDraft?.transcript) applyEditorCutDraft(pendingCutDraft);
+    loadPositionPresets();
     window.requestAnimationFrame(() => {
       syncVideoStageLayout();
       refreshFrameTimeline({ force: true });
     });
     if (["queued", "processing"].includes(suggestion?.status)) {
       activateWorkbenchPanel("ai");
-    } else if (["queued", "processing"].includes(art?.status)) {
-      activateWorkbenchPanel("output");
     } else {
       activateWorkbenchPanel("settings");
     }
@@ -3069,7 +4948,7 @@ addCustomText.addEventListener("click", () => {
     return;
   }
   const start = clamp(
-    artVideo.currentTime || 0,
+    previewPlaybackTime(),
     0,
     Math.max(0, duration - 0.1),
   );
@@ -3144,6 +5023,16 @@ endTime.addEventListener("change", () => {
   updateSelectedOverlay({ end });
 });
 fitArtToTranscript.addEventListener("click", fitSelectedArtTimeToTranscript);
+savePositionPreset.addEventListener("click", saveCurrentPositionPreset);
+positionPresetName.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    saveCurrentPositionPreset();
+  }
+});
+positionPresetName.addEventListener("input", () => {
+  renderPositionPresetMessage("");
+});
 
 const ART_STYLE_PALETTES = {
   impact: { color: "#FFD84D", strokeColor: "#15110A" },
@@ -3169,6 +5058,14 @@ artStyleGrid.addEventListener("click", (event) => {
     ...ART_STYLE_PALETTES[artStyle],
   });
   renderControls();
+});
+
+transcriptStyleGrid?.addEventListener("click", (event) => {
+  const button = event.target.closest(".art-style-option");
+  if (!button || !transcriptStyleGrid.contains(button) || button.disabled) {
+    return;
+  }
+  setTranscriptTrackTemplate(button.dataset.artStyle, { announce: true });
 });
 
 for (const [index, tab] of workbenchTabs.entries()) {
@@ -3267,6 +5164,21 @@ artVideo.addEventListener("loadedmetadata", () => {
   renderPreview();
 });
 artVideo.addEventListener("seeking", () => {
+  if (embeddedEditor) {
+    editorHostCurrentTime = clamp(
+      Number(artVideo.currentTime) || 0,
+      0,
+      duration || Infinity,
+    );
+    window.parent.postMessage(
+      {
+        type: "editor-suite:seek",
+        kind: "art",
+        currentTime: artVideo.currentTime || 0,
+      },
+      window.location.origin,
+    );
+  }
   videoTime.textContent = `${formatTime(artVideo.currentTime)} / ${formatTime(duration)}`;
   updateFrameTimelinePlayhead();
   renderPreview();
@@ -3297,6 +5209,10 @@ frameTimelineJumpInput.addEventListener("input", () => {
     updateFrameTimelineStatus("");
   }
 });
+frameTimelineSegments?.addEventListener(
+  "pointerdown",
+  beginFrameTimelineSegmentAdjustment,
+);
 frameTimelineTrack?.addEventListener("pointerdown", beginFrameTimelineScrub);
 generateArtVideo.addEventListener("click", generateVideo);
 generateAiSuggestions.addEventListener("click", requestAiSuggestions);
@@ -3332,4 +5248,5 @@ for (const container of mediaControlGroups) {
   setupExternalVideoControls(container);
 }
 
+requestLatestEditorCutDraft();
 initialize();
