@@ -353,10 +353,11 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert "Paraformer 返回句子和词级时间戳" not in page_response.text
     assert ".progress-live-status {" in styles_response.text
     assert "counter-reset: process-stage;" in styles_response.text
-    assert (
-        "body:not(.has-result) .page-shell:has(#progressCard:not([hidden])) #progressCard {\n"
-        "    min-height: 0;"
-    ) in styles_response.text
+    progress_card_rule = styles_response.text.rsplit(
+        "body:not(.has-result) .page-shell:has(#progressCard:not([hidden])) #progressCard {",
+        maxsplit=1,
+    )[1].split("}", maxsplit=1)[0]
+    assert "min-height: 0;" in progress_card_rule
     assert 'data-editor-suite-nav data-stage="cut"' in page_response.text
     header_start = page_response.text.index('<header class="site-header">')
     editor_suite_start = page_response.text.index('data-editor-suite-nav data-stage="cut"')
