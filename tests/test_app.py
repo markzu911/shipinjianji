@@ -327,12 +327,43 @@ def test_frontend_assets_are_versioned_and_not_cached():
 
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
-    assert "/app.js?v=20260805-02" in page_response.text
-    assert "/styles.css?v=20260805-01" in page_response.text
-    assert "/ui-feedback.js?v=20260806-01" in page_response.text
-    assert "/editor-suite.js?v=20260805-05" in page_response.text
+    assert "/app.js?v=20260807-01" in page_response.text
+    assert "/styles.css?v=20260810-09" in page_response.text
+    assert "/ui-feedback.js?v=20260807-03" in page_response.text
+    assert "/editor-suite.js?v=20260810-05" in page_response.text
+    assert 'class="preview-grid"' in page_response.text
+    assert 'data-preview-grid-toggle' in page_response.text
+    assert 'data-douyin-preview-toggle' in page_response.text
+    assert 'class="cut-preview-mode-controls"' in page_response.text
+    assert 'id="editorSuiteDouyinChrome"' in page_response.text
+    assert 'class="douyin-status-bar"' not in page_response.text
+    assert 'class="douyin-location"' not in page_response.text
+    assert 'id="page-title" class="sr-only"' in page_response.text
+    assert 'class="hero"' not in page_response.text
+    assert "30 FPS" not in page_response.text
+    assert "剪辑版与艺术字版分别保存，选择任一版本即可继续处理" not in page_response.text
+    assert "汇总文字剪辑、AI 建议、空白剪辑和时间轴" not in page_response.text
+    assert "剪辑是可选步骤，你可以直接为原视频添加艺术字或画中画" not in page_response.text
+    assert "记录当前视频的剪辑操作" not in page_response.text
+    assert "剪辑已完成。你可以基于剪辑视频" not in page_response.text
+    assert "原视频仍保留，可重新选择文字生成新版本" not in page_response.text
+    assert 'class="progress-live-status"' in page_response.text
+    assert 'id="extractStatus">等待处理' in page_response.text
+    assert 'id="transcribeStatus">等待处理' in page_response.text
+    assert "Paraformer 返回句子和词级时间戳" not in page_response.text
+    assert ".progress-live-status {" in styles_response.text
+    assert "counter-reset: process-stage;" in styles_response.text
+    assert (
+        "body:not(.has-result) .page-shell:has(#progressCard:not([hidden])) #progressCard {\n"
+        "    min-height: 0;"
+    ) in styles_response.text
     assert 'data-editor-suite-nav data-stage="cut"' in page_response.text
+    header_start = page_response.text.index('<header class="site-header">')
+    editor_suite_start = page_response.text.index('data-editor-suite-nav data-stage="cut"')
+    header_actions_start = page_response.text.index('<div class="header-actions">')
+    assert header_start < editor_suite_start < header_actions_start
     assert editor_suite_script_response.status_code == 200
+    assert "editor-suite:move-finish" in editor_suite_script_response.text
     assert "job.pictureInPicture?.composition" in editor_suite_script_response.text
     assert "job.art?.composition" in editor_suite_script_response.text
     assert "最终导出会同时保留两种效果" in editor_suite_script_response.text
@@ -367,6 +398,11 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert "syncGenerationButton" in editor_suite_script_response.text
     assert "workspaceSourceTime" in editor_suite_script_response.text
     assert 'classList.toggle("has-effect-track", nextState.visible)' in editor_suite_script_response.text
+    assert "timelineTrackOffset" in editor_suite_script_response.text
+    assert "timelineTrackCount" in editor_suite_script_response.text
+    assert 'segment.dataset.timelineTrackIndex' in editor_suite_script_response.text
+    assert "select-art-timeline" in editor_suite_script_response.text
+    assert "adjust-art-timeline" in editor_suite_script_response.text
     assert 'ensureToolFrame("art", artHref);' in editor_suite_script_response.text
     assert "Math.abs(nextTime - workspaceCurrentTime()) > 0.05" in editor_suite_script_response.text
     assert "Math.abs(childTime - workspaceCurrentTime()) > 0.05" in editor_suite_script_response.text
@@ -418,6 +454,9 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert ".editor-suite-generate-button" in styles_response.text
     assert ".editor-suite-generation-runtime" in styles_response.text
     assert ".editor-suite-nav" in styles_response.text
+    assert "body.has-result .site-header .editor-suite-nav" in styles_response.text
+    assert "body.has-result .site-header .editor-suite-copy" in styles_response.text
+    assert "height: calc(100dvh - 65px);" in styles_response.text
     assert feedback_script_response.status_code == 200
     assert 'className = "app-dialog-shell"' in feedback_script_response.text
     assert "window.appConfirm" in feedback_script_response.text
@@ -431,7 +470,7 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert "setCutOperationLock" in script_response.text
     assert ".cut-operation-lock" in styles_response.text
     assert 'setAttribute("inert", "")' in script_response.text
-    assert 'id="ambientCanvas"' in page_response.text
+    assert 'class="ambient-scan"' in page_response.text
     assert 'id="uploadPreview"' in page_response.text
     assert 'id="selectedVideoPreview"' in page_response.text
     assert 'id="changeFileButton"' in page_response.text
@@ -625,7 +664,7 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert "adjacentSilenceBefore: 0" in manual_align_script
     assert "拖动自定义区间" in page_response.text
     assert "时间轴拖动按自定义区间处理" in page_response.text
-    assert "前后紧邻的无声区" in page_response.text
+    assert "前后紧邻的无声区" not in page_response.text
     assert "timelineDeleteRanges" in script_response.text
     assert "getCommittedTimelineDeleteRanges" in script_response.text
     assert "confirmPendingTimelineRange" in script_response.text
@@ -642,7 +681,9 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert "activateTextEditorPanel" in script_response.text
     assert "splitTextIntoCharacterTokens" in script_response.text
     assert "formatPreciseTime" in script_response.text
-    assert "点击左侧圆圈删除整段，再次点击可撤销" in page_response.text
+    assert "点击左侧圆圈删除整段，再次点击可撤销" not in page_response.text
+    assert "仅提示疑似口误、重复、语气词和无效片段" not in page_response.text
+    assert "仅检测超过 1.5 秒的无文字区间" not in page_response.text
     assert "圆圈切换删除，点击文案调整分段" in page_response.text
     assert "点击文字删除会一并收紧前后无声区" in page_response.text
     assert "再次点击可撤销" in page_response.text
@@ -703,16 +744,26 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert "display: none !important" in styles_response.text
     assert "height: min(72dvh, 840px, calc(100dvh - 112px))" in styles_response.text
     assert art_page_response.status_code == 200
-    assert "/art-text.js?v=20260805-19" in art_page_response.text
+    assert "/art-text.js?v=20260810-03" in art_page_response.text
     assert 'class="cut-progress art-generation-progress full-row"' in art_page_response.text
     assert "art-particle art-particle-1" in art_page_response.text
     assert "解析时间轴" in art_page_response.text
     assert ".art-generation-progress" in styles_response.text
     assert "@keyframes art-particle-float" in styles_response.text
     assert "@keyframes art-panel-scan" in styles_response.text
-    assert "/styles.css?v=20260804-17" in art_page_response.text
-    assert "/ui-feedback.js?v=20260806-01" in art_page_response.text
-    assert "/editor-suite.js?v=20260805-05" in art_page_response.text
+    assert "/styles.css?v=20260810-09" in art_page_response.text
+    assert "/ui-feedback.js?v=20260807-03" in art_page_response.text
+    assert 'id="overlayCoordinateReadout"' in art_page_response.text
+    assert 'id="positionPresetGrid"' in art_page_response.text
+    assert "/editor-suite.js?v=20260810-05" in art_page_response.text
+    assert 'class="preview-grid"' in art_page_response.text
+    assert 'data-preview-grid-toggle' in art_page_response.text
+    assert "从保留文案中选择一句" not in art_page_response.text
+    assert "播放或拖动视频进度" not in art_page_response.text
+    assert "AI 会结合口播文案和低清关键帧拼图" not in art_page_response.text
+    assert "关键帧仅临时上传到阿里云百炼，用于本次分析" in art_page_response.text
+    assert "可修改文案、时间、位置和模板" not in art_page_response.text
+    assert "生成后仍可返回修改参数" not in art_page_response.text
     assert 'data-editor-suite-nav data-stage="art"' in art_page_response.text
     assert 'data-workbench-tab="transcript"' not in art_page_response.text
     assert 'id="transcriptTab"' not in art_page_response.text
@@ -809,6 +860,19 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert 'aria-label="艺术字时间轴"' in art_page_response.text
     assert 'id="frameTimelineScroll"' in art_page_response.text
     assert 'class="frame-timeline editor-layer-timeline"' in art_page_response.text
+    overlay_selection_start = art_page_response.text.index(
+        'class="overlay-selection-block"'
+    )
+    custom_text_start = art_page_response.text.index('class="custom-text-row"')
+    detail_settings_start = art_page_response.text.index('class="art-detail-heading"')
+    overlay_controls_start = art_page_response.text.index('id="overlayControls"')
+    assert (
+        overlay_selection_start
+        < custom_text_start
+        < detail_settings_start
+        < overlay_controls_start
+    )
+    assert "点击选择后，在下方修改" in art_page_response.text
     assert 'id="continuePictureInPicture"' in art_page_response.text
     assert 'id="transcriptStyleGrid"' in art_page_response.text
     assert "先选择字幕艺术字类型" in art_page_response.text
@@ -869,6 +933,15 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert "jumpToFrameTimelineTime" in art_script_response.text
     assert "refreshFrameTimeline" in art_script_response.text
     assert "renderFrameTimelineOverlaySegments" in art_script_response.text
+    assert "FRAME_TIMELINE_TRACK_HEIGHT = 30" in art_script_response.text
+    assert "trackIndexes.set(trackKey, trackIndexes.size)" in art_script_response.text
+    assert "segment.dataset.timelineTrackIndex" in art_script_response.text
+    assert "timelineTrackCount" in art_script_response.text
+    assert "beginFrameTimelineSegmentAdjustment" in art_script_response.text
+    assert "updateManualOverlayTimelineRange" in art_script_response.text
+    assert "data-art-time-drag" in art_script_response.text
+    assert "segment.dataset.effectStart" in art_script_response.text
+    assert "segment.dataset.effectEnd" in art_script_response.text
     assert 'kind: "art"' in art_script_response.text
     assert 'type: "editor-suite:tool-state"' in art_script_response.text
     assert "updateEditorSuiteJobState" in art_script_response.text
@@ -915,10 +988,12 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert art_page_response.headers["cache-control"] == "no-store, max-age=0"
     assert art_script_response.headers["cache-control"] == "no-store, max-age=0"
     assert pip_page_response.status_code == 200
-    assert "/picture-in-picture.js?v=20260805-02" in pip_page_response.text
-    assert "/ui-feedback.js?v=20260806-01" in pip_page_response.text
-    assert "/styles.css?v=20260805-02" in pip_page_response.text
-    assert "/editor-suite.js?v=20260805-05" in pip_page_response.text
+    assert "/picture-in-picture.js?v=20260810-10" in pip_page_response.text
+    assert "/ui-feedback.js?v=20260807-03" in pip_page_response.text
+    assert "/styles.css?v=20260810-09" in pip_page_response.text
+    assert "/editor-suite.js?v=20260810-05" in pip_page_response.text
+    assert 'class="preview-grid"' in pip_page_response.text
+    assert 'data-preview-grid-toggle' in pip_page_response.text
     assert 'data-editor-suite-nav data-stage="pip"' in pip_page_response.text
     assert 'name="assetType" value="video"' in pip_page_response.text
     assert "Seedance 动态镜头" in pip_page_response.text
@@ -943,11 +1018,35 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert "applyEditorCutDraft" in pip_script_response.text
     assert "persistEmbeddedPipDraft" in pip_script_response.text
     assert "start: item.start" in pip_script_response.text
-    assert "当前可继续选择文案和填写内容" in pip_script_response.text
+    assert "sourceStart: segment.sourceStart ?? null" in pip_script_response.text
     assert 'id="imageProgress" class="pip-inline-progress pip-tech-progress"' in pip_page_response.text
     assert "pip-tech-particle pip-tech-particle-5" in pip_page_response.text
     assert 'id="generatedList"' in pip_page_response.text
     assert 'id="pipOverlayLayer"' in pip_page_response.text
+    assert "选择一段口播文字，生成对应画面" not in pip_page_response.text
+    assert "每个画中画独立一条轨道" not in pip_page_response.text
+    assert "时间轴显示当前视频" not in pip_page_response.text
+    assert "画中画出现后可直接按住拖动摆放" not in pip_page_response.text
+    assert "previewHint" not in pip_script_response.text
+    assert "PIP_TIMELINE_TRACK_HEIGHT = 30" in pip_script_response.text
+    assert "segment.dataset.timelineTrackIndex" in pip_script_response.text
+    assert 'const trackLabel = `画中画${index + 1}`;' in pip_script_response.text
+    assert "label.textContent = trackLabel" in pip_script_response.text
+    assert (
+        'segment.title = `${trackLabel} ${formatRange(item.start, item.end)}`'
+        in pip_script_response.text
+    )
+    assert "timelineTrackCount" in pip_script_response.text
+    assert 'type: "editor-suite:select-pip-timeline"' in editor_suite_script_response.text
+    assert 'data.type === "editor-suite:select-pip-timeline"' in pip_script_response.text
+    assert "拖动边框缩放" in pip_page_response.text
+    assert "beginPictureResize" in pip_script_response.text
+    assert "pictureResizeWidth" in pip_script_response.text
+    assert 'handle.className = "pip-resize-handle"' in pip_script_response.text
+    assert 'data.type === "editor-suite:resize-effect"' in pip_script_response.text
+    assert 'type: "editor-suite:resize-effect"' in editor_suite_script_response.text
+    assert ".pip-resize-handle" in styles_response.text
+    assert '[data-pip-resize="se"]' in styles_response.text
     assert 'kind: "pip"' in pip_script_response.text
     assert 'type: "editor-suite:tool-state"' in pip_script_response.text
     assert "updateEditorSuiteJobState" in pip_script_response.text
@@ -1011,7 +1110,8 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert editor_suite_script_response.headers["cache-control"] == "no-store, max-age=0"
     assert pip_script_response.headers["cache-control"] == "no-store, max-age=0"
     assert template_page_response.status_code == 200
-    assert "/art-template-library.js?v=" in template_page_response.text
+    assert "/styles.css?v=20260810-09" in template_page_response.text
+    assert "/art-template-library.js?v=20260810-01" in template_page_response.text
     assert 'id="templateCardGrid"' in template_page_response.text
     assert 'id="useTemplateButton"' in template_page_response.text
     assert 'id="openTemplateUpload"' in template_page_response.text
@@ -1019,6 +1119,10 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert 'id="renameTemplateButton"' in template_page_response.text
     assert 'id="deleteTemplateButton"' in template_page_response.text
     assert "艺术字效果模板库" in template_page_response.text
+    assert "上传和管理可编辑效果模板" not in template_page_response.text
+    assert "templateDetailNote" not in template_page_response.text
+    assert "templateDetailNote" not in template_script_response.text
+    assert "点击恢复后重新出现在模板库" in template_page_response.text
     assert "/api/art-templates" in template_script_response.text
     assert "preferredArtTemplateSettings" in template_script_response.text
     assert 'method: "PATCH"' in template_script_response.text
@@ -1036,13 +1140,87 @@ def test_frontend_assets_are_versioned_and_not_cached():
         for template in template_api_response.json()["templates"]
     } == app_module.ART_TEXT_STYLES
     assert font_page_response.status_code == 200
+    assert "/styles.css?v=20260810-09" in font_page_response.text
     assert "/font-manager.js?v=" in font_page_response.text
     assert 'id="fontUploadForm"' in font_page_response.text
     assert 'id="fontCardGrid"' in font_page_response.text
+    assert "上传 TTF 或 OTF 字体" not in font_page_response.text
+    assert "可以查看完整预览、设置默认字体" not in font_page_response.text
+    assert "请确认拥有字体使用权" in font_page_response.text
     assert "/api/fonts" in font_script_response.text
     assert "registerUploadedFont" in font_script_response.text
     assert font_page_response.headers["cache-control"] == "no-store, max-age=0"
     assert font_script_response.headers["cache-control"] == "no-store, max-age=0"
+    assert ".hero" not in styles_response.text
+    assert "studio-wave-breathe" not in styles_response.text
+    assert ".section-helper" not in styles_response.text
+    assert ".next-step-copy" not in styles_response.text
+    assert ".output-note" not in styles_response.text
+    assert ".template-library-note" not in styles_response.text
+
+
+def test_douyin_preview_is_inline_only():
+    with TestClient(app_module.app) as client:
+        page_response = client.get("/")
+        removed_page_response = client.get("/douyin-preview")
+        removed_script_response = client.get("/douyin-preview.js")
+        styles_response = client.get("/styles.css")
+        editor_suite_script_response = client.get("/editor-suite.js")
+        feedback_script_response = client.get("/ui-feedback.js")
+
+    assert page_response.status_code == 200
+    assert removed_page_response.status_code == 404
+    assert removed_script_response.status_code == 404
+    assert styles_response.status_code == 200
+    assert editor_suite_script_response.status_code == 200
+    assert feedback_script_response.status_code == 200
+
+    assert 'data-douyin-preview-toggle' in page_response.text
+    assert 'id="editorSuiteDouyinChrome"' in page_response.text
+    assert 'class="douyin-action-bar"' in page_response.text
+    assert 'class="douyin-bottom-nav"' in page_response.text
+    assert ".douyin-caption-block {" in styles_response.text
+    assert ".douyin-action-bar {" in styles_response.text
+    assert ".douyin-top-bar {" in styles_response.text
+    assert ".douyin-feed-tabs {" in styles_response.text
+    assert ".douyin-status-bar {" not in styles_response.text
+    assert 'class="douyin-status-bar"' not in page_response.text
+    assert 'class="douyin-content-type"' not in page_response.text
+    assert "font-size: clamp(8px, 3.8cqw, 13px)" in styles_response.text
+    assert "font-size: clamp(7px, 3.2cqw, 11px)" in styles_response.text
+    assert ".douyin-shoot-same {" in styles_response.text
+    assert ".douyin-location {" not in styles_response.text
+    assert ".douyin-content-type {" not in styles_response.text
+    assert "--douyin-video-top: 8%" in styles_response.text
+    assert "--douyin-video-bottom: 6%" in styles_response.text
+    assert "aspect-ratio: 9 / 18.6 !important" in styles_response.text
+    assert "bottom: calc(var(--douyin-video-bottom) + 1%)" in styles_response.text
+    assert "object-fit: contain" in styles_response.text
+    assert ".cut-video-stage.is-douyin-preview .editor-suite-preview-overlay" in (
+        styles_response.text
+    )
+    assert "width: min(100%, 360px) !important" in styles_response.text
+    assert ".editor-suite-douyin-base-video" in styles_response.text
+    assert "grid-template-rows: minmax(0, 1fr)" in styles_response.text
+    assert "container-type: inline-size" in styles_response.text
+    assert "clamp(11px, 7.4cqw, 25px)" in styles_response.text
+    assert "clamp(19px, 11cqw, 38px)" in styles_response.text
+    assert "clamp(20px, 10cqw, 34px)" in styles_response.text
+    assert ".douyin-music-disc {" in styles_response.text
+    assert ".douyin-safety-zone" not in styles_response.text
+
+    assert 'data-douyin-preview href' not in editor_suite_script_response.text
+    assert "setDouyinPreviewLink" not in editor_suite_script_response.text
+    assert "setDouyinPreviewAvailable" in editor_suite_script_response.text
+    assert "setDouyinPreviewEnabled" in editor_suite_script_response.text
+    assert "function updateDouyinBaseVideo" in editor_suite_script_response.text
+    assert "has-douyin-edited-base" in editor_suite_script_response.text
+    assert "douyinVideoZoom" not in editor_suite_script_response.text
+    assert "is-douyin-preview" in editor_suite_script_response.text
+    assert "/douyin-preview?job=" not in editor_suite_script_response.text
+    assert "repeat(3, minmax(0, 1fr))" in styles_response.text
+    assert "is-douyin-preview" in feedback_script_response.text
+    assert "stage.parentElement?.querySelector" in feedback_script_response.text
 
 
 def test_art_template_library_upload_rename_render_and_delete(tmp_path: Path):
@@ -1134,6 +1312,109 @@ def test_art_template_library_rejects_font_upload():
         )
     assert response.status_code == 400
     assert "不支持字体文件" in response.json()["detail"]
+
+
+def test_art_template_hide_and_restore():
+    with TestClient(app_module.app) as client:
+        before = client.get("/api/art-templates").json()
+        assert before["hiddenCount"] == 0
+        assert any(t["id"] == "impact" for t in before["templates"])
+
+        hide_response = client.delete("/api/art-templates/impact")
+        assert hide_response.status_code == 200
+        assert hide_response.json() == {"status": "hidden"}
+
+        hidden = client.get("/api/art-templates").json()
+        assert hidden["hiddenCount"] == 1
+        assert hidden["builtinCount"] == before["builtinCount"] - 1
+        assert not any(t["id"] == "impact" for t in hidden["templates"])
+        assert any(t["id"] == "impact" for t in hidden["hiddenBuiltins"])
+
+        restore_response = client.post("/api/art-templates/impact/restore")
+        assert restore_response.status_code == 200
+        assert restore_response.json() == {"status": "restored"}
+
+        restored = client.get("/api/art-templates").json()
+        assert restored["hiddenCount"] == 0
+        assert any(t["id"] == "impact" for t in restored["templates"])
+
+        missing_delete = client.delete("/api/art-templates/not-a-template")
+        assert missing_delete.status_code == 404
+        missing_restore = client.post(
+            "/api/art-templates/not-a-template/restore"
+        )
+        assert missing_restore.status_code == 404
+
+
+def test_art_position_presets_crud():
+    with TestClient(app_module.app) as client:
+        create_response = client.post(
+            "/api/art-position-presets",
+            json={"name": "右上角", "x": 0.8, "y": 0.2},
+        )
+        assert create_response.status_code == 201
+        created = create_response.json()
+        assert created["id"].startswith("pos-")
+        assert created["name"] == "右上角"
+        assert created["x"] == 0.8
+        assert created["y"] == 0.2
+        assert created["createdAt"] is not None
+
+        list_response = client.get("/api/art-position-presets")
+        assert list_response.status_code == 200
+        assert list_response.json()["count"] == 1
+        assert list_response.json()["presets"][0]["id"] == created["id"]
+
+        patch_response = client.patch(
+            f"/api/art-position-presets/{created['id']}",
+            json={"name": "右上标题", "x": 0.82, "y": 0.18},
+        )
+        assert patch_response.status_code == 200
+        updated = patch_response.json()
+        assert updated["name"] == "右上标题"
+        assert updated["x"] == 0.82
+        assert updated["y"] == 0.18
+
+        delete_response = client.delete(
+            f"/api/art-position-presets/{created['id']}"
+        )
+        assert delete_response.status_code == 200
+        assert delete_response.json() == {"status": "deleted"}
+
+        missing_response = client.delete(
+            f"/api/art-position-presets/{created['id']}"
+        )
+        assert missing_response.status_code == 404
+
+
+def test_art_position_presets_validation():
+    with TestClient(app_module.app) as client:
+        empty_name_response = client.post(
+            "/api/art-position-presets",
+            json={"name": "   ", "x": 0.5, "y": 0.5},
+        )
+        assert empty_name_response.status_code == 400
+        assert "名称不能为空" in empty_name_response.json()["detail"]
+
+        clamp_response = client.post(
+            "/api/art-position-presets",
+            json={"name": "越界坐标", "x": 1.5, "y": -0.3},
+        )
+        assert clamp_response.status_code == 201
+        assert clamp_response.json()["x"] == 0.95
+        assert clamp_response.json()["y"] == 0.05
+
+        duplicate_name_response = client.post(
+            "/api/art-position-presets",
+            json={"name": "重复名称", "x": 0.5, "y": 0.5},
+        )
+        assert duplicate_name_response.status_code == 201
+
+        missing_patch_response = client.patch(
+            "/api/art-position-presets/pos-does-not-exist",
+            json={"name": "改名"},
+        )
+        assert missing_patch_response.status_code == 404
 
 
 def test_font_library_upload_rename_render_and_delete(tmp_path: Path):
@@ -2521,7 +2802,7 @@ def test_editable_transcript_segments_can_update_text_and_sync_source():
     assert job["result"]["text"] == "少年应怀凌云志。"
 
 
-def test_resegment_transcript_art_track_follows_edited_text(sample_video: Path):
+def test_editing_text_keeps_track_timeline_stable():
     job_id = "66666666-6666-6666-8666-666666666666"
     source_segments = [
         {
@@ -2535,9 +2816,20 @@ def test_resegment_transcript_art_track_follows_edited_text(sample_video: Path):
                 {"text": "AI", "start": 0.5, "end": 0.7},
                 {"text": "很强。", "start": 0.7, "end": 1.0},
             ],
-        }
+        },
+        {
+            "id": 1,
+            "start": 1.0,
+            "end": 2.0,
+            "text": "第二段内容。",
+            "words": [
+                {"text": "第二", "start": 1.0, "end": 1.4},
+                {"text": "段", "start": 1.4, "end": 1.7},
+                {"text": "内容。", "start": 1.7, "end": 2.0},
+            ],
+        },
     ]
-    track_overlay = {
+    shared = {
         "trackType": "transcript",
         "trackId": "transcript-full",
         "font": "bold",
@@ -2554,55 +2846,57 @@ def test_resegment_transcript_art_track_follows_edited_text(sample_video: Path):
         "letterSpacing": 0,
         "lineSpacing": 0,
         "artStyle": "impact",
-        "text": "我们相信AI的能力",
-        "start": 0.0,
-        "end": 1.0,
-        "sourceStart": 0.0,
-        "sourceEnd": 1.0,
     }
+    track_overlays = [
+        {**shared, "text": "我们相信AI很强", "start": 0.0, "end": 1.0},
+        {**shared, "text": "第二段内容", "start": 1.0, "end": 2.0},
+    ]
     with app_module.JOBS_LOCK:
         app_module.JOBS[job_id] = {
             "id": job_id,
             "status": "completed",
-            "duration": 1.0,
+            "duration": 2.0,
             "result": {
-                "text": "我们相信AI很强。",
+                "text": "我们相信AI很强。\n第二段内容。",
                 "segments": source_segments,
+                "editableSegments": app_module.build_editable_transcript_segments(
+                    source_segments
+                ),
             },
-            "art": {"overlays": [track_overlay], "status": "completed"},
+            "art": {"overlays": track_overlays, "status": "completed"},
             "edit": None,
         }
-        app_module.JOB_FILES[job_id] = sample_video
     try:
-        with app_module.JOBS_LOCK:
-            app_module.resegment_transcript_art_text_track(
-                app_module.JOBS[job_id],
-                app_module.JOBS[job_id]["result"],
+        with TestClient(app_module.app) as client:
+            response = client.put(
+                f"/api/transcriptions/{job_id}/editable-segments",
+                json={
+                    "segmentIndex": 0,
+                    "action": "text",
+                    "text": "我们相信AI很厉害。",
+                },
             )
+        assert response.status_code == 200
         with app_module.JOBS_LOCK:
             job = app_module.JOBS[job_id]
-        track_texts = [
-            overlay["text"]
-            for overlay in job["art"]["overlays"]
-            if overlay.get("trackType") == "transcript"
-        ]
-        assert track_texts
-        assert "很强" in "".join(track_texts)
-        assert all(
-            overlay.get("font") == "bold"
-            for overlay in job["art"]["overlays"]
-        )
-        assert all(
-            overlay.get("trackId") == "transcript-full"
-            for overlay in job["art"]["overlays"]
-        )
+        cue_a = job["art"]["overlays"][0]
+        cue_b = job["art"]["overlays"][1]
+
+        # The edited segment's cue text updates...
+        assert "很厉害" in cue_a["text"]
+        # ...but its TIMES stay exactly the same.
+        assert cue_a["start"] == 0.0
+        assert cue_a["end"] == 1.0
+        # The untouched segment's cue is completely unchanged.
+        assert cue_b["text"] == "第二段内容"
+        assert cue_b["start"] == 1.0
+        assert cue_b["end"] == 2.0
         # The old rendered art video is stale; it must be regenerated.
         assert job["art"]["status"] is None
         assert job["art"]["outputUrl"] is None
     finally:
         with app_module.JOBS_LOCK:
             app_module.JOBS.pop(job_id, None)
-            app_module.JOB_FILES.pop(job_id, None)
 
 
 def test_delete_ranges_are_merged_and_cannot_remove_everything():
@@ -3465,6 +3759,73 @@ def test_picture_in_picture_generates_image_with_requested_seedream_model(
     assert response.json()["styleReferenceTime"] == 0.45
     assert image_response.status_code == 200
     assert image_response.headers["content-type"] == "image/png"
+
+
+def test_picture_in_picture_image_uses_source_anchor_without_edited_video(
+    sample_video: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    job_id = "44444444-4444-4444-4444-444444444444"
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "filename": sample_video.name,
+            "duration": 1.0,
+            "status": "completed",
+            "result": {"text": "测试文案", "duration": 1.0, "segments": []},
+            "edit": None,
+            "art": None,
+            "artSuggestion": None,
+            "pictureInPictureImages": [],
+            "pictureInPicture": None,
+        }
+        app_module.JOB_FILES[job_id] = sample_video
+
+    image_buffer = io.BytesIO()
+    Image.new("RGB", (160, 90), "#38cfa4").save(image_buffer, "PNG")
+    encoded_image = base64.b64encode(image_buffer.getvalue()).decode("ascii")
+
+    class FakeSeedreamResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "model": "doubao-seedream-5-0-lite-260128",
+                "data": [{"b64_json": encoded_image}],
+            }
+
+    monkeypatch.setenv("ARK_API_KEY", "test-ark-key")
+    monkeypatch.setattr(
+        app_module.httpx,
+        "post",
+        lambda url, **kwargs: FakeSeedreamResponse(),
+    )
+
+    with TestClient(app_module.app) as client:
+        response = client.post(
+            f"/api/transcriptions/{job_id}/picture-in-picture/images",
+            json={
+                "text": "青年应当勇于创新。",
+                "start": 0.1,
+                "end": 0.4,
+                "mode": "auto",
+                "prompt": "",
+                # The "edited" video does not exist (edit is None), but the
+                # source anchors let the style reference fall back to the
+                # original video so PiP material can still be generated.
+                "source": "edited",
+                "sourceStart": 0.2,
+                "sourceEnd": 0.6,
+                "aspectRatio": "3:4",
+            },
+        )
+
+    assert response.status_code == 201
+    assert response.json()["source"] == "edited"
+    assert response.json()["styleMatched"] is True
+    # Reference frame midpoint comes from the original source anchors.
+    assert response.json()["styleReferenceTime"] == 0.4
 
 
 def test_picture_in_picture_generation_requires_ark_key(sample_video: Path):

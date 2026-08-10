@@ -32,7 +32,6 @@ const pipTimelineThumbnails = document.querySelector("#pipTimelineThumbnails");
 const pipTimelineSegments = document.querySelector("#pipTimelineSegments");
 const pipTimelinePlayhead = document.querySelector("#pipTimelinePlayhead");
 const pipTimelineSeek = document.querySelector("#pipTimelineSeek");
-const previewHint = document.querySelector("#previewHint");
 const segmentList = document.querySelector("#segmentList");
 const selectedSegmentTime = document.querySelector("#selectedSegmentTime");
 const assetTypeInputs = [
@@ -83,6 +82,10 @@ const PIP_TIMELINE_MAJOR_TICK_WIDTH = 72;
 const PIP_TIMELINE_MIN_PIXELS_PER_SECOND = 22;
 const PIP_TIMELINE_TEXT_CHAR_WIDTH = 10;
 const PIP_TIMELINE_TEXT_LINES = 2;
+const PIP_TIMELINE_TRACK_HEIGHT = 30;
+const PIP_TIMELINE_BASE_HEIGHT = 44;
+const PIP_MIN_WIDTH = 0.2;
+const PIP_MAX_WIDTH = 0.55;
 
 const query = new URLSearchParams(window.location.search);
 const embeddedEditor = query.get("embedded") === "1";
@@ -106,6 +109,7 @@ let showingFinalVideo = false;
 let generationModalActive = false;
 let selectedPictureItemId = "";
 let activePictureDrag = null;
+let activePictureResize = null;
 let pipTimelineBuildId = 0;
 let pipTimelineSignature = "";
 let pipTimelineRulerSignature = "";
@@ -264,17 +268,71 @@ function presetKeyForCoordinates(x, y) {
 function constrainPictureItemToStage(
   item,
   imageAspectRatio = numericAspectRatio(item.aspectRatio),
+  bounds = null,
 ) {
-  const bounds = pipOverlayLayer.getBoundingClientRect();
-  if (bounds.width <= 0 || bounds.height <= 0) return;
+  const layerBounds = bounds || pipOverlayLayer.getBoundingClientRect();
+  if (layerBounds.width <= 0 || layerBounds.height <= 0) return;
   const halfWidth = Math.min(0.49, item.width / 2);
   const normalizedHeight =
-    (item.width * bounds.width) /
+    (item.width * layerBounds.width) /
     Math.max(0.1, imageAspectRatio) /
-    bounds.height;
+    layerBounds.height;
   const halfHeight = Math.min(0.49, normalizedHeight / 2);
   item.x = clamp(item.x, halfWidth, 1 - halfWidth);
   item.y = clamp(item.y, halfHeight, 1 - halfHeight);
+}
+
+function pictureItemAspectRatio(item, element) {
+  const media = element.querySelector("img, video");
+  if (media?.naturalWidth && media?.naturalHeight) {
+    return media.naturalWidth / media.naturalHeight;
+  }
+  if (media?.videoWidth && media?.videoHeight) {
+    return media.videoWidth / media.videoHeight;
+  }
+  return numericAspectRatio(item.aspectRatio);
+}
+
+function maximumPictureWidthAtPosition(item, imageAspectRatio, bounds) {
+  const horizontalRoom = 2 * Math.min(item.x, 1 - item.x);
+  const verticalRoom =
+    (2 * Math.min(item.y, 1 - item.y) * imageAspectRatio * bounds.height) /
+    bounds.width;
+  return Math.max(
+    0.05,
+    Math.min(PIP_MAX_WIDTH, horizontalRoom, verticalRoom),
+  );
+}
+
+function pictureResizeWidth(resize, event) {
+  const deltaX = event.clientX - resize.startClientX;
+  const deltaY = event.clientY - resize.startClientY;
+  const horizontalDirection = resize.direction.includes("e")
+    ? 1
+    : resize.direction.includes("w")
+      ? -1
+      : 0;
+  const verticalDirection = resize.direction.includes("s")
+    ? 1
+    : resize.direction.includes("n")
+      ? -1
+      : 0;
+  const horizontalChange =
+    (horizontalDirection * deltaX * 2) / resize.bounds.width;
+  const verticalChange =
+    (verticalDirection * deltaY * 2 * resize.imageAspectRatio) /
+    resize.bounds.width;
+  const widthChange =
+    horizontalDirection && verticalDirection
+      ? Math.abs(horizontalChange) >= Math.abs(verticalChange)
+        ? horizontalChange
+        : verticalChange
+      : horizontalChange || verticalChange;
+  return clamp(
+    resize.startWidth + widthChange,
+    Math.min(PIP_MIN_WIDTH, resize.maximumWidth),
+    resize.maximumWidth,
+  );
 }
 
 function updatePictureDrag(event) {
@@ -285,11 +343,25 @@ function updatePictureDrag(event) {
   if (!drag.moved && Math.hypot(deltaX, deltaY) < 3) return;
   drag.moved = true;
   drag.element.classList.add("is-dragging");
-  drag.item.x = drag.startX + deltaX / drag.bounds.width;
-  drag.item.y = drag.startY + deltaY / drag.bounds.height;
-  constrainPictureItemToStage(drag.item, drag.imageAspectRatio);
-  drag.element.style.left = `${drag.item.x * 100}%`;
-  drag.element.style.top = `${drag.item.y * 100}%`;
+  drag.targetX = drag.startX + deltaX / drag.bounds.width;
+  drag.targetY = drag.startY + deltaY / drag.bounds.height;
+  if (drag.framePending) return;
+  drag.framePending = true;
+  // Coalesce to one style write per animation frame and reuse the bounds
+  // captured at drag start (no per-move layout read) for smooth dragging.
+  window.requestAnimationFrame(() => {
+    drag.framePending = false;
+    if (activePictureDrag !== drag) return;
+    drag.item.x = drag.targetX;
+    drag.item.y = drag.targetY;
+    constrainPictureItemToStage(
+      drag.item,
+      drag.imageAspectRatio,
+      drag.bounds,
+    );
+    drag.element.style.left = `${drag.item.x * 100}%`;
+    drag.element.style.top = `${drag.item.y * 100}%`;
+  });
 }
 
 function finishPictureDrag(event) {
@@ -304,6 +376,7 @@ function finishPictureDrag(event) {
   drag.element.removeEventListener("pointercancel", finishPictureDrag);
   activePictureDrag = null;
   renderGeneratedList();
+  renderTimelineSegments();
   renderPreview();
 }
 
@@ -313,13 +386,7 @@ function beginPictureDrag(event, item, element) {
   pipVideo.pause();
   selectedPictureItemId = item.id;
   const bounds = pipOverlayLayer.getBoundingClientRect();
-  const media = element.querySelector("img, video");
-  const imageAspectRatio =
-    media?.naturalWidth && media?.naturalHeight
-      ? media.naturalWidth / media.naturalHeight
-      : media?.videoWidth && media?.videoHeight
-        ? media.videoWidth / media.videoHeight
-        : numericAspectRatio(item.aspectRatio);
+  const imageAspectRatio = pictureItemAspectRatio(item, element);
   activePictureDrag = {
     pointerId: event.pointerId,
     item,
@@ -339,6 +406,73 @@ function beginPictureDrag(event, item, element) {
   element.addEventListener("pointercancel", finishPictureDrag);
 }
 
+function updatePictureResize(event) {
+  const resize = activePictureResize;
+  if (!resize || resize.pointerId !== event.pointerId) return;
+  const deltaX = event.clientX - resize.startClientX;
+  const deltaY = event.clientY - resize.startClientY;
+  if (!resize.moved && Math.hypot(deltaX, deltaY) < 3) return;
+  resize.moved = true;
+  resize.element.classList.add("is-resizing");
+  resize.targetWidth = pictureResizeWidth(resize, event);
+  if (resize.framePending) return;
+  resize.framePending = true;
+  window.requestAnimationFrame(() => {
+    resize.framePending = false;
+    if (activePictureResize !== resize) return;
+    resize.item.width = resize.targetWidth;
+    resize.element.style.width = `${resize.item.width * 100}%`;
+  });
+}
+
+function finishPictureResize(event) {
+  const resize = activePictureResize;
+  if (!resize || resize.pointerId !== event.pointerId) return;
+  resize.item.width = resize.targetWidth;
+  resize.element.style.width = `${resize.item.width * 100}%`;
+  if (resize.element.hasPointerCapture(event.pointerId)) {
+    resize.element.releasePointerCapture(event.pointerId);
+  }
+  resize.element.classList.remove("is-resizing");
+  resize.element.removeEventListener("pointermove", updatePictureResize);
+  window.removeEventListener("pointerup", finishPictureResize);
+  window.removeEventListener("pointercancel", finishPictureResize);
+  activePictureResize = null;
+  renderGeneratedList();
+  renderTimelineSegments();
+  renderPreview();
+}
+
+function beginPictureResize(event, item, element, direction) {
+  if (event.button !== 0 || showingFinalVideo) return;
+  event.preventDefault();
+  event.stopPropagation();
+  pipVideo.pause();
+  selectedPictureItemId = item.id;
+  const bounds = pipOverlayLayer.getBoundingClientRect();
+  const imageAspectRatio = pictureItemAspectRatio(item, element);
+  activePictureResize = {
+    pointerId: event.pointerId,
+    item,
+    element,
+    direction,
+    bounds,
+    imageAspectRatio,
+    maximumWidth: maximumPictureWidthAtPosition(item, imageAspectRatio, bounds),
+    startClientX: event.clientX,
+    startClientY: event.clientY,
+    startWidth: item.width,
+    targetWidth: item.width,
+    moved: false,
+    framePending: false,
+  };
+  element.classList.add("is-selected");
+  element.setPointerCapture(event.pointerId);
+  element.addEventListener("pointermove", updatePictureResize);
+  window.addEventListener("pointerup", finishPictureResize);
+  window.addEventListener("pointercancel", finishPictureResize);
+}
+
 function setVideoSource(url, isFinal = false) {
   if (!url) return;
   const currentTime = clamp(pipVideo.currentTime || 0, 0, duration);
@@ -347,9 +481,6 @@ function setVideoSource(url, isFinal = false) {
   pipVideo.src = `${url}${url.includes("?") ? "&" : "?"}v=${Date.now()}`;
   pipOverlayLayer.hidden = isFinal;
   previewFinalVideo.textContent = isFinal ? "返回编辑预览" : "预览成片";
-  previewHint.textContent = isFinal
-    ? "正在预览已经合成的最终视频。返回编辑预览可继续调整画中画。"
-    : "生成画中画后会立即出现在预览中，无需等待视频合成。";
   pipVideo.addEventListener(
     "loadedmetadata",
     () => {
@@ -644,27 +775,56 @@ function schedulePipTimelineRebuild() {
 function renderTimelineSegments() {
   updatePipTimelineScale();
   pipTimelineSegments.replaceChildren();
+  const enabledItems = pictureItems
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) => item.enabled);
+  const trackCount = Math.max(1, enabledItems.length);
+  const trackAreaHeight = trackCount * PIP_TIMELINE_TRACK_HEIGHT;
+  pipTimelineSegments.style.height = `${trackAreaHeight}px`;
+  pipTimelineTrack.style.setProperty(
+    "--editor-layer-timeline-height",
+    `${trackAreaHeight}px`,
+  );
+  pipTimelineTrack.style.setProperty(
+    "--editor-timeline-track-height",
+    `${PIP_TIMELINE_BASE_HEIGHT + trackAreaHeight}px`,
+  );
   if (duration <= 0) {
     notifyEditorHost();
     return;
   }
-  for (const [index, item] of pictureItems.entries()) {
-    if (!item.enabled) continue;
+  for (const [trackIndex, { item, index }] of enabledItems.entries()) {
+    const trackLabel = `画中画${index + 1}`;
     const segment = document.createElement("button");
     segment.type = "button";
     segment.className = "pip-timeline-segment";
+    segment.dataset.pictureId = String(item.id);
+    segment.dataset.effectStart = String(item.start);
+    segment.dataset.effectEnd = String(item.end);
+    segment.dataset.timelineTrackIndex = String(trackIndex);
+    segment.style.top = `${trackIndex * PIP_TIMELINE_TRACK_HEIGHT + 2}px`;
     segment.style.left = `${(item.start / duration) * 100}%`;
     segment.style.width = `${Math.max(1, ((item.end - item.start) / duration) * 100)}%`;
-    segment.title = `${item.text} ${formatRange(item.start, item.end)}`;
-    segment.setAttribute("aria-label", `定位到画中画：${item.text}`);
+    const isSelected = item.id === selectedPictureItemId;
+    segment.classList.toggle("is-selected", isSelected);
+    segment.setAttribute("aria-pressed", String(isSelected));
+    segment.title = `${trackLabel} ${formatRange(item.start, item.end)}`;
+    segment.setAttribute(
+      "aria-label",
+      `${trackLabel}，${formatRange(item.start, item.end)}`,
+    );
     const label = document.createElement("span");
     label.className = "editor-layer-timeline-segment-label";
-    label.textContent = item.text || "画中画";
+    label.textContent = trackLabel;
     segment.append(label);
     segment.addEventListener("click", (event) => {
       event.stopPropagation();
-      seekEditorPreview(item.start);
+      selectedPictureItemId = item.id;
+      seekToPictureItem(item);
       generatedList.children[index]?.scrollIntoView({ block: "nearest" });
+      renderGeneratedList();
+      renderTimelineSegments();
+      renderPreview();
     });
     pipTimelineSegments.append(segment);
   }
@@ -713,13 +873,33 @@ function createPicturePreviewElement(item) {
   }
   const dragHint = document.createElement("span");
   dragHint.className = "pip-drag-hint";
-  dragHint.textContent = "拖动摆放";
-  overlay.append(media, dragHint);
+  dragHint.textContent = "拖动摆放 · 边角缩放";
+  const resizeHandles = ["nw", "n", "ne", "e", "se", "s", "sw", "w"].map(
+    (direction) => {
+      const handle = document.createElement("span");
+      handle.className = "pip-resize-handle";
+      handle.dataset.pipResize = direction;
+      handle.setAttribute("aria-hidden", "true");
+      return handle;
+    },
+  );
+  overlay.append(media, dragHint, ...resizeHandles);
   overlay.addEventListener("pointerdown", (event) => {
     const activeItem = pictureItems.find(
       (candidate) => candidate.id === overlay.dataset.pictureId,
     );
-    if (activeItem) beginPictureDrag(event, activeItem, overlay);
+    if (!activeItem) return;
+    const resizeHandle = event.target.closest("[data-pip-resize]");
+    if (resizeHandle) {
+      beginPictureResize(
+        event,
+        activeItem,
+        overlay,
+        resizeHandle.dataset.pipResize,
+      );
+      return;
+    }
+    beginPictureDrag(event, activeItem, overlay);
   });
   return overlay;
 }
@@ -763,7 +943,7 @@ function seekEditorPreview(seconds) {
 function renderPreview(options = {}) {
   const current = previewPlaybackTime();
   if (!embeddedEditor) renderTimelinePlayhead(current);
-  if (activePictureDrag) return;
+  if (activePictureDrag || activePictureResize) return;
   if (showingFinalVideo) {
     if (options.timeOnly && previewVisibilitySignature === "final") return;
     previewVisibilitySignature = "final";
@@ -798,9 +978,9 @@ function renderPreview(options = {}) {
     overlay.classList.toggle("is-selected", item.id === selectedPictureItemId);
     overlay.setAttribute(
       "aria-label",
-      `拖动“${item.text}”画中画调整位置，当前横向 ${Math.round(item.x * 100)}%，纵向 ${Math.round(item.y * 100)}%`,
+      `拖动“${item.text}”画中画调整位置，拖动边框控制点缩放，当前横向 ${Math.round(item.x * 100)}%，纵向 ${Math.round(item.y * 100)}%，大小 ${Math.round(item.width * 100)}%`,
     );
-    overlay.title = "按住并拖动调整画中画位置";
+    overlay.title = "拖动画面调整位置，拖动边框控制点缩放";
     overlay.style.left = `${item.x * 100}%`;
     overlay.style.top = `${item.y * 100}%`;
     overlay.style.width = `${item.width * 100}%`;
@@ -817,6 +997,13 @@ function notifyEditorHost(options = {}) {
     overlayWidth: pipOverlayLayer.clientWidth,
     overlayHeight: pipOverlayLayer.clientHeight,
     timelineHtml: pipTimelineSegments?.innerHTML || "",
+    timelineTrackCount: Math.max(
+      1,
+      ...Array.from(
+        pipTimelineSegments?.querySelectorAll("[data-timeline-track-index]") || [],
+        (segment) => Number(segment.dataset.timelineTrackIndex) + 1,
+      ),
+    ),
     generationDisabled: generatePipVideo.disabled,
     generationLabel: generatePipVideo.textContent.trim(),
     generationBusy: !outputProgress.hidden,
@@ -1038,14 +1225,40 @@ function handleEditorHostMessage(event) {
     renderPreview({ timeOnly: true });
     return;
   }
+  if (data.type === "editor-suite:select-pip-timeline" && data.kind === "pip") {
+    const item = pictureItems.find(
+      (candidate) => String(candidate.id) === String(data.id),
+    );
+    if (!item) return;
+    selectedPictureItemId = item.id;
+    seekEditorPreview(Number(data.currentTime) || item.start);
+    renderGeneratedList();
+    renderTimelineSegments();
+    renderPreview();
+    return;
+  }
+  if (data.type === "editor-suite:move-finish" && data.kind === "pip") {
+    // The host drove a drag directly on its mirrored element; sync the list
+    // readout and preview once here instead of on every pointermove.
+    renderGeneratedList();
+    renderPreview();
+    return;
+  }
+  if (data.type === "editor-suite:resize-effect" && data.kind === "pip") {
+    const item = pictureItems.find(
+      (candidate) => String(candidate.id) === String(data.id),
+    );
+    if (!item) return;
+    item.width = clamp(Number(data.width) || item.width, PIP_MIN_WIDTH, PIP_MAX_WIDTH);
+    selectedPictureItemId = item.id;
+    return;
+  }
   if (data.type !== "editor-suite:move-effect" || data.kind !== "pip") return;
   const item = pictureItems.find((candidate) => String(candidate.id) === String(data.id));
   if (!item) return;
   item.x = clamp(Number(data.x) || 0.5, 0.05, 0.95);
   item.y = clamp(Number(data.y) || 0.5, 0.05, 0.95);
   selectedPictureItemId = item.id;
-  renderGeneratedList();
-  renderPreview();
 }
 
 window.addEventListener("message", handleEditorHostMessage);
@@ -1213,6 +1426,7 @@ function renderGeneratedList() {
       selectedPictureItemId = item.id;
       seekToPictureItem(item);
       renderGeneratedList();
+      renderTimelineSegments();
       renderPreview();
     });
 
@@ -1325,13 +1539,6 @@ function showPromptWriterStatus(message, state = "") {
 }
 
 async function writePromptDraft() {
-  if (cutDraftActive) {
-    showPromptWriterStatus(
-      "当前选择已保留；请先生成剪辑视频，再让 AI 读取正确的视频画面。",
-      "warning",
-    );
-    return;
-  }
   const segment = selectedSegment();
   if (!segment) {
     showPromptWriterStatus("请先选择要插入画中画的文字片段。", "error");
@@ -1365,6 +1572,8 @@ async function writePromptDraft() {
           assetType,
           source: requestedSource,
           aspectRatio: currentImageAspectRatio(),
+          sourceStart: segment.sourceStart ?? null,
+          sourceEnd: segment.sourceEnd ?? null,
         }),
       },
     );
@@ -1389,14 +1598,6 @@ async function writePromptDraft() {
 }
 
 async function generateAsset() {
-  if (cutDraftActive) {
-    showMessage(
-      imageError,
-      "当前可继续选择文案和填写内容；请先生成剪辑视频，再生成画中画素材。",
-    );
-    persistEmbeddedPipDraft();
-    return;
-  }
   const segment = selectedSegment();
   if (!segment) {
     showMessage(imageError, "请先选择要插入画中画的文字片段。");
@@ -1445,6 +1646,8 @@ async function generateAsset() {
           prompt,
           source: requestedSource,
           aspectRatio: currentImageAspectRatio(),
+          sourceStart: segment.sourceStart ?? null,
+          sourceEnd: segment.sourceEnd ?? null,
         }),
       },
     );
@@ -1551,6 +1754,7 @@ function renderPictureInPictureJob(pictureInPicture) {
         onClose: () => {
           generationModalActive = false;
         },
+        onCancel: () => void cancelPipGeneration(),
       });
     } else {
       window.appGeneration?.setProgress(
@@ -1576,6 +1780,7 @@ function renderPictureInPictureJob(pictureInPicture) {
       window.appGeneration?.complete({
         videoUrl: pictureInPicture.outputUrl,
         downloadUrl: `${pictureInPicture.outputUrl}?download=true`,
+        redirectOnClose: embeddedEditor ? null : "/",
       });
     }
     return;
@@ -1593,6 +1798,32 @@ function renderPictureInPictureJob(pictureInPicture) {
         pictureInPicture.error || "画中画视频生成失败，请重试。",
       );
     }
+  }
+  if (pictureInPicture.status === "cancelled") {
+    outputProgress.hidden = true;
+    outputStatusChip.hidden = true;
+    generatePipVideo.disabled = !pictureItems.some(
+      (item) => item.enabled && isReadyAsset(item),
+    );
+    showMessage(outputError, "已取消生成。");
+  }
+}
+
+async function cancelPipGeneration() {
+  if (!jobId) return;
+  if (pollTimer) window.clearTimeout(pollTimer);
+  try {
+    const response = await fetch(
+      `/api/transcriptions/${encodeURIComponent(jobId)}/cancel`,
+      { method: "POST" },
+    );
+    const payload = await parseResponse(response, "无法取消生成。");
+    job = payload;
+    updateEditorSuiteJobState(payload);
+    renderPictureInPictureJob(pictureInPictureForSource(payload));
+    window.appGeneration?.fail("已取消生成。");
+  } catch (error) {
+    window.appGeneration?.fail(error.message || "取消失败，请重试。");
   }
 }
 

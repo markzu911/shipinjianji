@@ -21,8 +21,11 @@ const resultCard = document.querySelector("#resultCard");
 const progressBar = document.querySelector("#progressBar");
 const progressTrack = document.querySelector("#progressTrack");
 const progressPercent = document.querySelector("#progressPercent");
+const progressTitle = document.querySelector("#progress-title");
 const liveStatus = document.querySelector("#liveStatus");
 const uploadStatus = document.querySelector("#uploadStatus");
+const extractStatus = document.querySelector("#extractStatus");
+const transcribeStatus = document.querySelector("#transcribeStatus");
 const stepUpload = document.querySelector("#stepUpload");
 const stepExtract = document.querySelector("#stepExtract");
 const stepTranscribe = document.querySelector("#stepTranscribe");
@@ -109,7 +112,6 @@ const cutOperationLockTargets = [
   document.querySelector("#main"),
   document.querySelector(".site-footer"),
 ].filter(Boolean);
-const ambientCanvas = document.querySelector("#ambientCanvas");
 const localSourceTab = document.querySelector("#localSourceTab");
 const historySourceTab = document.querySelector("#historySourceTab");
 const localSourcePanel = document.querySelector("#localSourcePanel");
@@ -853,8 +855,11 @@ async function saveSegmentText() {
     updateSelectionSummary();
     setSegmentOperationBusy(false);
     closeSegmentEditDialog();
-    setSegmentStructureStatus("已保存这段文字，全文艺术字字幕已同步。", "success");
+    setSegmentStructureStatus("已保存这段文字，正在刷新页面同步艺术字…", "success");
     broadcastTranscriptUpdated();
+    // Reload once so every view (including the art-text track) re-reads the
+    // updated transcript and its stable subtitle timeline from the server.
+    window.setTimeout(() => window.location.reload(), 500);
   } catch (error) {
     setSegmentOperationBusy(false);
     segmentEditSelectionStatus.textContent = error.message;
@@ -2595,6 +2600,7 @@ function updateCutTimelineStatus(
 
 function syncCutVideoStageLayout() {
   if (!cutPreviewVideo.videoWidth || !cutPreviewVideo.videoHeight) return;
+  if (cutVideoStage.classList.contains("is-douyin-preview")) return;
   const ratio = cutPreviewVideo.videoWidth / cutPreviewVideo.videoHeight;
   cutVideoStage.style.aspectRatio = `${cutPreviewVideo.videoWidth} / ${cutPreviewVideo.videoHeight}`;
   cutVideoStage.style.width =
@@ -3710,6 +3716,7 @@ async function useHistoryVersion(version) {
   resultCard.hidden = true;
   jobError.hidden = true;
   setProgress(72);
+  progressTitle.textContent = "正在恢复项目";
   liveStatus.textContent = "正在恢复历史视频和文字时间轴…";
   try {
     const response = await fetch(
@@ -3938,19 +3945,31 @@ function renderJob(job) {
   jobError.hidden = true;
 
   if (job.status === "queued" || job.status === "extracting") {
+    progressTitle.textContent = "正在提取音频";
+    uploadStatus.textContent = "已完成";
+    extractStatus.textContent = "处理中";
+    transcribeStatus.textContent = "等待处理";
     setStepState(stepUpload, "complete");
     setStepState(stepExtract, "active");
     setStepState(stepTranscribe, "pending");
   } else if (job.status === "transcribing") {
+    progressTitle.textContent = "正在识别文字";
+    uploadStatus.textContent = "已完成";
+    extractStatus.textContent = "已完成";
+    transcribeStatus.textContent = "处理中";
     setStepState(stepUpload, "complete");
     setStepState(stepExtract, "complete");
     setStepState(stepTranscribe, "active");
   } else if (job.status === "completed") {
+    uploadStatus.textContent = "已完成";
+    extractStatus.textContent = "已完成";
+    transcribeStatus.textContent = "已完成";
     setStepState(stepUpload, "complete");
     setStepState(stepExtract, "complete");
     setStepState(stepTranscribe, "complete");
     renderResult(job);
   } else if (job.status === "failed") {
+    progressTitle.textContent = "处理遇到问题";
     jobErrorText.textContent = job.error || "未知错误，请重新尝试。";
     jobError.hidden = false;
     liveStatus.textContent = "处理失败";
@@ -4099,6 +4118,7 @@ function renderEdit(edit) {
         onClose: () => {
           generationModalActive = false;
         },
+        onCancel: () => void cancelEditGeneration(),
       });
     } else {
       window.appGeneration?.setProgress(edit.progress, edit.stage);
@@ -4138,6 +4158,7 @@ function renderEdit(edit) {
         videoUrl: edit.outputUrl,
         downloadUrl: `${edit.outputUrl}?download=true`,
         duration: formatTime(edit.outputDuration),
+        redirectOnClose: "/",
       });
     }
   } else if (edit.status === "failed") {
@@ -4152,6 +4173,13 @@ function renderEdit(edit) {
         edit.error || "视频剪辑失败，请重新尝试。",
       );
     }
+  } else if (edit.status === "cancelled") {
+    setCutOperationLock(false);
+    cutProgress.hidden = true;
+    cutError.textContent = "已取消生成。";
+    cutError.hidden = false;
+    setCutControlsDisabled(false);
+    generateCutButton.querySelector("span").textContent = "生成剪辑视频";
   }
 }
 
@@ -4175,6 +4203,23 @@ async function pollEdit(jobId) {
     cutError.hidden = true;
     setCutOperationLock(true, "连接暂时中断，正在重新获取剪辑状态…");
     editPollTimer = window.setTimeout(() => pollEdit(jobId), 1800);
+  }
+}
+
+async function cancelEditGeneration() {
+  if (!currentJobId) return;
+  if (editPollTimer) window.clearTimeout(editPollTimer);
+  try {
+    const response = await fetch(
+      `/api/transcriptions/${encodeURIComponent(currentJobId)}/cancel`,
+      { method: "POST" },
+    );
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || "无法取消生成。");
+    renderEdit(payload.edit);
+    window.appGeneration?.fail("已取消生成。");
+  } catch (error) {
+    window.appGeneration?.fail(error.message || "取消失败，请重试。");
   }
 }
 
@@ -4250,6 +4295,10 @@ function startUpload(file) {
   resultCard.hidden = true;
   jobError.hidden = true;
   setProgress(0);
+  progressTitle.textContent = "正在上传视频";
+  uploadStatus.textContent = "已上传 0%";
+  extractStatus.textContent = "等待处理";
+  transcribeStatus.textContent = "等待处理";
   setStepState(stepUpload, "active");
   setStepState(stepExtract, "pending");
   setStepState(stepTranscribe, "pending");
@@ -4265,6 +4314,7 @@ function startUpload(file) {
   request.addEventListener("load", () => {
     const payload = request.response || {};
     if (request.status < 200 || request.status >= 300) {
+      progressTitle.textContent = "上传遇到问题";
       jobErrorText.textContent = payload.detail || "上传失败，请检查视频后重试。";
       jobError.hidden = false;
       liveStatus.textContent = "上传失败";
@@ -4277,170 +4327,13 @@ function startUpload(file) {
   });
 
   request.addEventListener("error", () => {
+    progressTitle.textContent = "上传遇到问题";
     jobErrorText.textContent = "网络连接中断，请重新选择视频上传。";
     jobError.hidden = false;
     liveStatus.textContent = "上传失败";
   });
 
   request.send(formData);
-}
-
-function setupAmbientParticles() {
-  const context = ambientCanvas?.getContext("2d");
-  if (!ambientCanvas || !context) return;
-
-  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
-  let points = [];
-  let streaks = [];
-  let width = 0;
-  let height = 0;
-  let frameId = 0;
-  let lastFrame = 0;
-  let resizeFrame = 0;
-
-  function seedPoints() {
-    const count = Math.max(34, Math.min(76, Math.round(width / 31)));
-    points = Array.from({ length: count }, (_, index) => ({
-      x: Math.random() * width,
-      y: Math.random() * height,
-      vx: (Math.random() - 0.5) * 0.17,
-      vy: (Math.random() - 0.5) * 0.13,
-      radius: index % 10 === 0 ? 2.2 : 0.85 + Math.random() * 1.05,
-      warm: index % 7 === 0,
-      layer: index % 4,
-      phase: Math.random() * Math.PI * 2,
-    }));
-    streaks = Array.from(
-      { length: Math.max(4, Math.min(12, Math.round(width / 150))) },
-      (_, index) => ({
-        x: Math.random() * width,
-        y: Math.random() * height,
-        length: 78 + Math.random() * 160,
-        speed: 0.24 + Math.random() * 0.42,
-        warm: index % 3 === 0,
-        phase: Math.random() * Math.PI * 2,
-      }),
-    );
-  }
-
-  function resizeCanvas() {
-    const bounds = ambientCanvas.getBoundingClientRect();
-    width = Math.max(1, bounds.width);
-    height = Math.max(1, bounds.height);
-    const ratio = Math.min(window.devicePixelRatio || 1, 1.5);
-    ambientCanvas.width = Math.round(width * ratio);
-    ambientCanvas.height = Math.round(height * ratio);
-    context.setTransform(ratio, 0, 0, ratio, 0, 0);
-    seedPoints();
-    drawParticles(0, false);
-  }
-
-  function drawParticles(timestamp, advance = true) {
-    context.clearRect(0, 0, width, height);
-    const interfaceBusy =
-      document.body.classList.contains("is-cut-operation-locked") ||
-      (progressCard && !progressCard.hidden);
-    const activity = interfaceBusy ? 1.42 : 1;
-    const linkDistance = (width > 1100 ? 190 : 126) * activity;
-    const delta = lastFrame ? Math.min(2.2, (timestamp - lastFrame) / 16.67) : 1;
-    lastFrame = timestamp;
-
-    if (advance) {
-      for (const point of points) {
-        const drift =
-          0.68 + Math.sin(timestamp * 0.00032 + point.phase) * 0.24 + point.layer * 0.06;
-        point.x += point.vx * delta * drift * activity;
-        point.y += point.vy * delta * drift * activity;
-        if (point.x < -8) point.x = width + 8;
-        if (point.x > width + 8) point.x = -8;
-        if (point.y < -8) point.y = height + 8;
-        if (point.y > height + 8) point.y = -8;
-      }
-      for (const streak of streaks) {
-        const glide = 0.62 + Math.sin(timestamp * 0.00028 + streak.phase) * 0.18;
-        streak.x += streak.speed * delta * glide * activity;
-        if (streak.x - streak.length > width + 60) {
-          streak.x = -streak.length - Math.random() * 140;
-          streak.y = Math.random() * height;
-        }
-      }
-    }
-
-    context.save();
-    context.globalCompositeOperation = "lighter";
-    for (const streak of streaks) {
-      const alpha =
-        (streak.warm ? 0.12 : 0.095) *
-        activity *
-        (0.7 + Math.sin(timestamp * 0.001 + streak.phase) * 0.3);
-      context.beginPath();
-      context.moveTo(streak.x, streak.y);
-      context.lineTo(streak.x + streak.length, streak.y - streak.length * 0.04);
-      context.strokeStyle = streak.warm
-        ? `rgba(211, 117, 55, ${alpha})`
-        : `rgba(203, 226, 101, ${alpha})`;
-      context.lineWidth = streak.warm ? 0.9 : 0.7;
-      context.stroke();
-    }
-    context.restore();
-
-    for (let index = 0; index < points.length; index += 1) {
-      const point = points[index];
-      for (let neighborIndex = index + 1; neighborIndex < points.length; neighborIndex += 1) {
-        const neighbor = points[neighborIndex];
-        const distance = Math.hypot(point.x - neighbor.x, point.y - neighbor.y);
-        if (distance >= linkDistance) continue;
-        context.beginPath();
-        context.moveTo(point.x, point.y);
-        context.lineTo(neighbor.x, neighbor.y);
-        const alpha = (1 - distance / linkDistance) * (point.warm || neighbor.warm ? 0.18 : 0.12);
-        context.strokeStyle = point.warm || neighbor.warm
-          ? `rgba(211, 117, 55, ${alpha})`
-          : `rgba(196, 210, 111, ${alpha})`;
-        context.lineWidth = point.layer === neighbor.layer ? 0.72 : 0.5;
-        context.stroke();
-      }
-    }
-
-    for (const point of points) {
-      const pulse = 0.76 + Math.sin(timestamp * 0.0012 + point.phase) * 0.24;
-      context.beginPath();
-      context.arc(point.x, point.y, point.radius * pulse, 0, Math.PI * 2);
-      context.fillStyle = point.warm
-        ? "rgba(220, 126, 68, 0.64)"
-        : "rgba(210, 225, 128, 0.62)";
-      context.fill();
-    }
-  }
-
-  function animate(timestamp) {
-    drawParticles(timestamp, !reducedMotion.matches);
-    if (!reducedMotion.matches && !document.hidden) {
-      frameId = window.requestAnimationFrame(animate);
-    }
-  }
-
-  function restartAnimation() {
-    window.cancelAnimationFrame(frameId);
-    lastFrame = 0;
-    if (reducedMotion.matches || document.hidden) {
-      drawParticles(0, false);
-      return;
-    }
-    frameId = window.requestAnimationFrame(animate);
-  }
-
-  window.addEventListener("resize", () => {
-    window.cancelAnimationFrame(resizeFrame);
-    resizeFrame = window.requestAnimationFrame(() => {
-      resizeCanvas();
-      restartAnimation();
-    });
-  });
-  document.addEventListener("visibilitychange", restartAnimation);
-  reducedMotion.addEventListener?.("change", restartAnimation);
-  resizeCanvas();
-  restartAnimation();
 }
 
 fileInput.addEventListener("change", () => setSelectedFile(fileInput.files?.[0]));
@@ -4810,7 +4703,6 @@ for (const tab of textEditorTabs) {
 }
 setupCutPreviewControls();
 window.addEventListener("resize", scheduleCutTimelineResize);
-setupAmbientParticles();
 loadHistoryVersions();
 
 const rememberedJobId = getRememberedJobId();
@@ -4821,6 +4713,7 @@ if (rememberedJobId) {
   resultCard.hidden = true;
   jobError.hidden = true;
   setProgress(0);
+  progressTitle.textContent = "正在恢复项目";
   liveStatus.textContent = "正在恢复转写结果…";
   pollJob(rememberedJobId);
 }

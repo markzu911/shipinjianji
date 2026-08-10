@@ -135,6 +135,11 @@
   // a download button.
   let generationOverlay = null;
   let generationOnClose = null;
+  // Invoked when the user clicks "取消生成" while a video is rendering.
+  let generationOnCancel = null;
+  // When set, the "知道了" button navigates here after the completion modal
+  // closes (used to return to the upload page after a video is generated).
+  let generationRedirectOnClose = null;
 
   function clampPercent(value) {
     const number = Number(value);
@@ -161,14 +166,35 @@
           <p id="generationVideoMeta" class="generation-video-meta"></p>
         </div>
         <div class="generation-actions">
+          <button id="generationCancel" class="generation-button is-secondary is-cancel" type="button" hidden>取消生成</button>
           <a id="generationDownload" class="generation-button is-primary" href="#" download hidden>下载成片</a>
           <button id="generationClose" class="generation-button is-secondary" type="button" hidden>知道了</button>
         </div>
       </div>
     `;
     document.body.append(overlay);
+    overlay.querySelector("#generationCancel").addEventListener("click", () => {
+      if (generationOnCancel) {
+        const callback = generationOnCancel;
+        generationOnCancel = null;
+        callback();
+      }
+    });
     overlay.querySelector("#generationClose").addEventListener("click", () => {
+      const redirect = generationRedirectOnClose;
+      generationRedirectOnClose = null;
       hideGenerationModal();
+      if (redirect) {
+        // Returning to the upload page: forget the remembered job so the
+        // landing page shows a fresh upload form instead of restoring the
+        // just-finished project (history is still preserved on the server).
+        try {
+          window.sessionStorage.removeItem("currentTranscriptionJobId");
+        } catch {
+          // Best-effort; the query-parameter fallback is not set on a fresh load.
+        }
+        window.location.href = redirect;
+      }
     });
     return overlay;
   }
@@ -185,6 +211,7 @@
       videoWrap: generationOverlay.querySelector("#generationVideoWrap"),
       video: generationOverlay.querySelector("#generationVideo"),
       videoMeta: generationOverlay.querySelector("#generationVideoMeta"),
+      cancel: generationOverlay.querySelector("#generationCancel"),
       download: generationOverlay.querySelector("#generationDownload"),
       close: generationOverlay.querySelector("#generationClose"),
     };
@@ -192,6 +219,7 @@
 
   function showGenerationModal(options = {}) {
     const els = generationEls();
+    generationRedirectOnClose = null;
     els.title.textContent = options.title || "生成视频";
     els.status.textContent = options.status || "正在准备…";
     els.status.classList.remove("is-error");
@@ -210,6 +238,8 @@
     els.download.hidden = true;
     els.close.hidden = true;
     generationOnClose = options.onClose || null;
+    generationOnCancel = options.onCancel || null;
+    els.cancel.hidden = !options.onCancel;
     els.overlay.hidden = false;
     document.body.classList.add("has-generation-modal");
   }
@@ -226,6 +256,8 @@
 
   function completeGeneration(options = {}) {
     const els = generationEls();
+    generationOnCancel = null;
+    els.cancel.hidden = true;
     els.bar.classList.remove("is-indeterminate");
     els.bar.style.width = "100%";
     els.percent.textContent = "100%";
@@ -245,10 +277,14 @@
       els.download.hidden = false;
     }
     els.close.hidden = false;
+    generationRedirectOnClose = options.redirectOnClose || null;
   }
 
   function failGeneration(message) {
     const els = generationEls();
+    generationRedirectOnClose = null;
+    generationOnCancel = null;
+    els.cancel.hidden = true;
     els.bar.classList.remove("is-indeterminate");
     els.status.classList.add("is-error");
     els.status.textContent = message || "生成失败，请重试。";
@@ -258,6 +294,9 @@
   function hideGenerationModal() {
     if (!generationOverlay) return;
     const els = generationEls();
+    generationRedirectOnClose = null;
+    generationOnCancel = null;
+    els.cancel.hidden = true;
     els.video.pause();
     els.video.removeAttribute("src");
     els.video.load();
@@ -278,4 +317,110 @@
     fail: failGeneration,
     hide: hideGenerationModal,
   };
+
+  // --- Rule-of-thirds preview grid -----------------------------------------
+  // Sizes and positions the grid to the video's actual display area, so the
+  // guide lines cover the video frame (not any letterbox bars around it).
+  const PREVIEW_GRID_STORAGE_KEY = "preview-grid-enabled";
+
+  function readPreviewGridPreference() {
+    try {
+      return localStorage.getItem(PREVIEW_GRID_STORAGE_KEY) !== "off";
+    } catch {
+      // Storage unavailable (private mode etc.): default to shown.
+      return true;
+    }
+  }
+
+  function writePreviewGridPreference(enabled) {
+    try {
+      localStorage.setItem(PREVIEW_GRID_STORAGE_KEY, enabled ? "on" : "off");
+    } catch {
+      // Best-effort; the in-session toggle still works.
+    }
+  }
+
+  function applyPreviewGridVisibility(grid, toggle, enabled) {
+    grid.hidden = !enabled;
+    toggle?.setAttribute("aria-pressed", enabled ? "true" : "false");
+  }
+
+  function fitPreviewGridToVideo(stage, video, grid) {
+    const rect = stage.getBoundingClientRect();
+    const videoWidth = Number(video.videoWidth) || 0;
+    const videoHeight = Number(video.videoHeight) || 0;
+    if (
+      !videoWidth ||
+      !videoHeight ||
+      rect.width <= 1 ||
+      rect.height <= 1
+    ) {
+      return;
+    }
+    if (stage.classList.contains("is-douyin-preview")) {
+      grid.style.left = "0px";
+      grid.style.top = "0px";
+      grid.style.width = `${rect.width}px`;
+      grid.style.height = `${rect.height}px`;
+      return;
+    }
+    const stageRatio = rect.width / rect.height;
+    const videoRatio = videoWidth / videoHeight;
+    let width;
+    let height;
+    let left;
+    let top;
+    if (videoRatio > stageRatio) {
+      // Video is wider than the stage: letterbox bars on top/bottom.
+      height = rect.width / videoRatio;
+      width = rect.width;
+      left = 0;
+      top = (rect.height - height) / 2;
+    } else {
+      // Video is taller than the stage: letterbox bars on left/right.
+      width = rect.height * videoRatio;
+      height = rect.height;
+      left = (rect.width - width) / 2;
+      top = 0;
+    }
+    grid.style.left = `${left}px`;
+    grid.style.top = `${top}px`;
+    grid.style.width = `${width}px`;
+    grid.style.height = `${height}px`;
+  }
+
+  function wirePreviewGrids() {
+    document.querySelectorAll(".video-stage").forEach((stage) => {
+      const video = stage.querySelector("video");
+      const grid = stage.querySelector(".preview-grid");
+      if (!video || !grid) return;
+      const fit = () => fitPreviewGridToVideo(stage, video, grid);
+      video.addEventListener("loadedmetadata", fit);
+      video.addEventListener("loadeddata", fit);
+      if (typeof ResizeObserver !== "undefined") {
+        const observer = new ResizeObserver(fit);
+        observer.observe(stage);
+        observer.observe(video);
+      }
+      window.addEventListener("resize", fit);
+      fit();
+
+      const toggle =
+        stage.querySelector("[data-preview-grid-toggle]") ||
+        stage.parentElement?.querySelector("[data-preview-grid-toggle]");
+      let enabled = readPreviewGridPreference();
+      applyPreviewGridVisibility(grid, toggle, enabled);
+      toggle?.addEventListener("click", () => {
+        enabled = !enabled;
+        writePreviewGridPreference(enabled);
+        applyPreviewGridVisibility(grid, toggle, enabled);
+      });
+    });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", wirePreviewGrids);
+  } else {
+    wirePreviewGrids();
+  }
 })();

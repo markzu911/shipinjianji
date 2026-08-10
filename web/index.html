@@ -8,16 +8,15 @@
       content="上传口播视频，自动提取中文语音、识别疑似口误并按文字完成粗剪。"
     />
     <title>视频文字剪辑 · MVP</title>
-    <link rel="stylesheet" href="/styles.css?v=20260805-01" />
+    <link rel="stylesheet" href="/styles.css?v=20260810-09" />
     <script src="https://code.iconify.design/iconify-icon/3.0.0/iconify-icon.min.js" defer></script>
-    <script src="/ui-feedback.js?v=20260806-01" defer></script>
-    <script src="/editor-suite.js?v=20260805-05" defer></script>
-    <script src="/app.js?v=20260805-02" defer></script>
+    <script src="/ui-feedback.js?v=20260807-03" defer></script>
+    <script src="/editor-suite.js?v=20260810-05" defer></script>
+    <script src="/app.js?v=20260807-01" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main">跳到主要内容</a>
     <div class="home-ambient" aria-hidden="true">
-      <canvas id="ambientCanvas"></canvas>
       <span class="ambient-scan"></span>
       <span class="ambient-orbit ambient-orbit-one"></span>
       <span class="ambient-orbit ambient-orbit-two"></span>
@@ -30,6 +29,7 @@
           </span>
           <span>视频文字剪辑</span>
         </a>
+        <div class="editor-suite-slot" data-editor-suite-nav data-stage="cut"></div>
         <div class="header-actions">
           <a class="header-restart-button header-link-button" href="/fonts">
             艺术字模板库
@@ -48,69 +48,7 @@
     </header>
 
     <main id="main" class="page-shell">
-      <div class="editor-suite-slot" data-editor-suite-nav data-stage="cut"></div>
-      <section class="hero" aria-labelledby="page-title">
-        <div class="hero-content">
-          <p class="eyebrow">中文口播智能处理</p>
-          <h1 id="page-title">上传视频，用文字完成剪辑</h1>
-          <p class="hero-copy">
-            自动识别口播并对齐时间轴，通过文字删减视频内容，再用 AI 为重点片段添加艺术字。
-          </p>
-          <div class="hero-trust-row" aria-label="产品特点">
-            <span>原视频不覆盖</span>
-            <span>AI 建议需确认</span>
-            <span>成片可直接下载</span>
-          </div>
-          <div class="hero-signal-readout" aria-label="处理能力">
-            <span><b>30 FPS</b><small>画面级预览</small></span>
-            <span><b>WORD SYNC</b><small>词级时间对齐</small></span>
-            <span><b>SAFE CUT</b><small>原片始终保留</small></span>
-          </div>
-          <div class="hero-studio-board" aria-label="剪辑信号概览">
-            <div class="studio-board-head">
-              <span>LIVE CUT DESK</span>
-              <strong>片段在这里被听见</strong>
-            </div>
-            <div class="studio-waveform" aria-hidden="true">
-              <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
-              <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
-            </div>
-            <div class="studio-rhythm">
-              <span>
-                <iconify-icon icon="ph:waveform-bold" aria-hidden="true"></iconify-icon>
-                词块对齐
-              </span>
-              <span>
-                <iconify-icon icon="ph:scissors-bold" aria-hidden="true"></iconify-icon>
-                断点预览
-              </span>
-              <span>
-                <iconify-icon icon="ph:sparkle-bold" aria-hidden="true"></iconify-icon>
-                艺术字候选
-              </span>
-            </div>
-            <ol class="studio-cut-map" aria-label="剪辑检查点">
-              <li><b>00.0</b><span>保留原片</span></li>
-              <li><b>12.8</b><span>删掉停顿</span></li>
-              <li><b>37.2</b><span>标出重点</span></li>
-            </ol>
-          </div>
-        </div>
-        <ol class="hero-flow" aria-label="视频制作流程">
-          <li>
-            <span class="hero-flow-index">01</span>
-            <span><strong>语音转写</strong><small>生成词级时间轴</small></span>
-          </li>
-          <li>
-            <span class="hero-flow-index">02</span>
-            <span><strong>文字剪辑</strong><small>选中文字即可删减</small></span>
-          </li>
-          <li>
-            <span class="hero-flow-index">03</span>
-            <span><strong>艺术字增强</strong><small>AI 推荐并由你确认</small></span>
-          </li>
-        </ol>
-      </section>
+      <h1 id="page-title" class="sr-only">视频文字剪辑</h1>
 
       <section id="uploadCard" class="panel upload-panel" aria-labelledby="upload-title">
         <div class="panel-heading">
@@ -231,7 +169,6 @@
             <div>
               <p class="step-label">已保存版本</p>
               <h3>从上次成片继续</h3>
-              <p>剪辑版与艺术字版分别保存，选择任一版本即可继续处理。</p>
             </div>
             <button id="refreshHistoryButton" class="history-refresh-button" type="button">
               <iconify-icon icon="ph:arrows-clockwise-bold" aria-hidden="true"></iconify-icon>
@@ -252,7 +189,7 @@
         <div class="panel-heading">
           <div>
             <p class="step-label">02 · 自动处理</p>
-            <h2 id="progress-title">正在提取文字</h2>
+            <h2 id="progress-title">准备处理视频</h2>
           </div>
           <span id="progressPercent" class="progress-percent">0%</span>
         </div>
@@ -276,15 +213,18 @@
           </li>
           <li id="stepExtract" class="process-step">
             <span class="step-dot" aria-hidden="true"></span>
-            <span><strong>提取音频</strong><small>转换为轻量 MP3</small></span>
+            <span><strong>提取音频</strong><small id="extractStatus">等待处理</small></span>
           </li>
           <li id="stepTranscribe" class="process-step">
             <span class="step-dot" aria-hidden="true"></span>
-            <span><strong>语音识别</strong><small>Paraformer 返回句子和词级时间戳</small></span>
+            <span><strong>语音识别</strong><small id="transcribeStatus">等待处理</small></span>
           </li>
         </ol>
 
-        <p id="liveStatus" class="live-status" aria-live="polite">正在上传视频…</p>
+        <div class="progress-live-status">
+          <span class="progress-live-dot" aria-hidden="true"></span>
+          <p id="liveStatus" class="live-status" aria-live="polite">正在上传视频…</p>
+        </div>
         <div id="jobError" class="job-error" role="alert" hidden>
           <strong>处理没有完成</strong>
           <p id="jobErrorText"></p>
@@ -385,7 +325,6 @@
               <div>
                 <p class="step-label">统一生成</p>
                 <h3 id="output-cut-builder-title">生成剪辑视频</h3>
-                <p>汇总文字剪辑、AI 建议、空白剪辑和时间轴中的全部已选区间。</p>
               </div>
               <span class="output-cut-builder-chip">原视频保留</span>
             </div>
@@ -414,7 +353,6 @@
             <div>
               <p class="step-label">无需先剪辑</p>
               <h3 id="direct-tools-title">直接使用原视频继续创作</h3>
-              <p>剪辑是可选步骤，你可以直接为原视频添加艺术字或画中画。</p>
             </div>
             <div class="direct-tool-actions">
               <a id="skipToArtButton" class="primary-button compact-button" href="#">
@@ -441,9 +379,6 @@
             <div>
               <p class="step-label">05 · AI 初筛</p>
               <h3 id="suggestions-title">AI 删减建议</h3>
-              <p class="section-helper">
-                仅提示疑似口误、重复、语气词和无效片段。点击删除后会连同前后紧邻的无声区立即移除，可通过全局撤销恢复。
-              </p>
             </div>
             <div class="suggestions-heading-actions">
               <span class="ai-model-chip">Qwen 分析</span>
@@ -478,9 +413,6 @@
               <div>
                 <p class="step-label">06 · 空白剪辑</p>
                 <h3 id="no-speech-title">检查长时间没有说话的画面</h3>
-                <p class="section-helper">
-                  仅检测超过 1.5 秒的无文字区间，并保留说话边界缓冲。点击删除后立即生效，可通过全局撤销恢复。
-                </p>
               </div>
               <button
                 id="selectAllNoSpeechButton"
@@ -518,7 +450,6 @@
             <div>
               <p class="step-label">全局历史</p>
               <h3>操作记录</h3>
-              <p class="section-helper">记录当前视频的剪辑操作。撤销后继续编辑，会自动清除对应的重做分支。</p>
             </div>
             <span class="cut-history-shortcut">Ctrl+Z / Ctrl+Y</span>
           </div>
@@ -537,7 +468,6 @@
             <div>
               <p class="step-label">04 · 文字剪辑</p>
               <h3>删除不需要的文字段落</h3>
-              <p class="section-helper">点击左侧圆圈删除整段，再次点击可撤销；点击文案可调整分段。删除时会连同前后紧邻的无声区一起处理。</p>
             </div>
             <div class="segment-heading-actions">
               <span id="cutDraftSaveStatus" class="cut-draft-save-status" data-tone="neutral" role="status" aria-live="polite">剪辑草稿自动保存</span>
@@ -554,21 +484,126 @@
           </div>
 
           <section class="cut-preview-panel" aria-label="视频预览">
-            <div class="cut-preview-heading">
-              <span class="cut-timeline-legend">
-                <i aria-hidden="true"></i>
-                三个工具共用这一处预览
-              </span>
-            </div>
-
             <div id="cutPreviewPlayer" class="media-player-shell cut-preview-player">
+              <div class="cut-preview-mode-controls" aria-label="预览辅助功能">
+                <button
+                  type="button"
+                  class="preview-grid-toggle"
+                  data-preview-grid-toggle
+                  aria-label="九宫格构图辅助线"
+                  aria-pressed="true"
+                  title="九宫格构图辅助线"
+                >
+                  <iconify-icon icon="ph:grid-four-bold" aria-hidden="true"></iconify-icon>
+                </button>
+                <button
+                  type="button"
+                  class="preview-grid-toggle douyin-preview-toggle"
+                  data-douyin-preview-toggle
+                  aria-label="抖音发布预览"
+                  aria-pressed="false"
+                  title="抖音发布预览"
+                  disabled
+                >
+                  <iconify-icon icon="ph:device-mobile-bold" aria-hidden="true"></iconify-icon>
+                </button>
+              </div>
               <div id="cutVideoStage" class="video-stage cut-video-stage">
                 <video
                   id="cutPreviewVideo"
                   preload="metadata"
                   playsinline
+                  disablepictureinpicture
+                  disableremoteplayback
+                  controlslist="nodownload noplaybackrate nofullscreen noremoteplayback"
                   aria-label="公共视频预览"
                 ></video>
+                <div class="preview-grid" aria-hidden="true"></div>
+                <div
+                  id="editorSuiteDouyinChrome"
+                  class="douyin-chrome editor-suite-douyin-chrome"
+                  aria-hidden="true"
+                  hidden
+                >
+                  <div class="douyin-top-bar">
+                    <span class="douyin-top-menu">
+                      <iconify-icon icon="ph:list-bold" aria-hidden="true"></iconify-icon>
+                      <i>1</i>
+                    </span>
+                    <span class="douyin-top-divider" aria-hidden="true"></span>
+                    <div class="douyin-feed-tabs">
+                      <span>团购</span>
+                      <span>精选</span>
+                      <span>商城</span>
+                      <span>关注</span>
+                      <span class="is-active">推荐</span>
+                    </div>
+                    <span class="douyin-top-search">
+                      <iconify-icon icon="ph:magnifying-glass-bold" aria-hidden="true"></iconify-icon>
+                    </span>
+                  </div>
+                  <div class="douyin-action-bar">
+                    <div class="douyin-author">
+                      <span class="douyin-avatar">
+                        <iconify-icon icon="ph:user-fill" aria-hidden="true"></iconify-icon>
+                      </span>
+                      <span class="douyin-follow-badge">+</span>
+                    </div>
+                    <button type="button">
+                      <iconify-icon icon="ph:heart-fill" aria-hidden="true"></iconify-icon>
+                      <small>94</small>
+                    </button>
+                    <button type="button">
+                      <iconify-icon icon="ph:chat-teardrop-dots-fill" aria-hidden="true"></iconify-icon>
+                      <small>70</small>
+                    </button>
+                    <button type="button">
+                      <iconify-icon icon="ph:star-fill" aria-hidden="true"></iconify-icon>
+                      <small>10</small>
+                    </button>
+                    <button type="button">
+                      <iconify-icon icon="ph:share-fat-fill" aria-hidden="true"></iconify-icon>
+                      <small>63</small>
+                    </button>
+                    <div class="douyin-shoot-same">
+                      <span><iconify-icon icon="ph:camera-fill" aria-hidden="true"></iconify-icon></span>
+                      <small>拍同款</small>
+                    </div>
+                  </div>
+                  <div class="douyin-caption-block">
+                    <div class="douyin-account-row">
+                      <p class="douyin-account">@视频文字剪辑</p>
+                    </div>
+                    <p class="douyin-caption-text">
+                      注意了，发布前先检查画面
+                      <span class="douyin-hashtag">#视频剪辑</span>
+                      <span class="douyin-hashtag">#抖音热点</span>
+                      <span class="douyin-expand">展开</span>
+                    </p>
+                    <div class="douyin-disclaimer">
+                      <iconify-icon icon="ph:megaphone-simple-fill" aria-hidden="true"></iconify-icon>
+                      <span>作者声明：个人观点，仅供参考</span>
+                    </div>
+                  </div>
+                  <div class="douyin-bottom-nav">
+                    <span class="is-active">
+                      <em>首页⌁</em>
+                    </span>
+                    <span>
+                      <em>朋友</em>
+                    </span>
+                    <span class="is-create">
+                      <iconify-icon icon="ph:plus-bold" aria-hidden="true"></iconify-icon>
+                    </span>
+                    <span class="douyin-message-tab">
+                      <em>消息</em>
+                      <i>1</i>
+                    </span>
+                    <span>
+                      <em>我</em>
+                    </span>
+                  </div>
+                </div>
                 <div
                   id="editorSuitePreviewOverlay"
                   class="editor-suite-preview-overlay"
@@ -685,7 +720,6 @@
               <span id="cutDuration" class="result-chip"></span>
             </div>
             <video id="editedVideo" controls preload="metadata"></video>
-            <p class="next-step-copy">剪辑已完成。你可以基于剪辑视频添加艺术字、插入画中画或直接下载。</p>
             <div class="result-actions">
               <a id="continueArtButton" class="primary-button compact-button" href="#">
                 <iconify-icon icon="ph:text-aa-bold" aria-hidden="true"></iconify-icon>
@@ -700,7 +734,6 @@
                 <span>直接下载</span>
               </a>
             </div>
-            <span class="output-note">原视频仍保留，可重新选择文字生成新版本。</span>
           </section>
         </div>
             </div>

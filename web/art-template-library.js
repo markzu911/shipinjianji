@@ -29,6 +29,10 @@ const templateLibraryLoading = document.querySelector(
 );
 const templateLibraryEmpty = document.querySelector("#templateLibraryEmpty");
 const templateCardGrid = document.querySelector("#templateCardGrid");
+const hiddenTemplatesSection = document.querySelector(
+  "#hiddenTemplatesSection",
+);
+const hiddenTemplatesGrid = document.querySelector("#hiddenTemplatesGrid");
 const templateDetailCategory = document.querySelector(
   "#templateDetailCategory",
 );
@@ -55,7 +59,6 @@ const uploadedTemplateActions = document.querySelector(
 );
 const renameTemplateButton = document.querySelector("#renameTemplateButton");
 const deleteTemplateButton = document.querySelector("#deleteTemplateButton");
-const templateDetailNote = document.querySelector("#templateDetailNote");
 const templateUploadDialog = document.querySelector("#templateUploadDialog");
 const templateUploadForm = document.querySelector("#templateUploadForm");
 const templateUploadFile = document.querySelector("#templateUploadFile");
@@ -82,6 +85,7 @@ const videoSource = query.get("source") === "original" ? "original" : "edited";
 const loadedFontFamilies = new Map();
 const fontNames = new Map();
 let templates = [];
+let hiddenBuiltins = [];
 let activeTemplateId = "impact";
 let preferredTemplateId = "impact";
 let activeFilter = "all";
@@ -217,7 +221,19 @@ function createTemplateCard(template) {
   useButton.addEventListener("click", () => useTemplate(template.id));
   actions.append(viewButton, useButton);
 
-  card.append(badge, preview, copy, actions);
+  const deleteButton = document.createElement("button");
+  deleteButton.type = "button";
+  deleteButton.className = "template-card-delete";
+  deleteButton.setAttribute("aria-label", `删除模板 ${template.name}`);
+  deleteButton.title = template.source === "uploaded" ? "删除模板" : "从模板库隐藏";
+  deleteButton.innerHTML =
+    '<iconify-icon icon="ph:x-bold" aria-hidden="true"></iconify-icon>';
+  deleteButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    deleteTemplateById(template.id);
+  });
+
+  card.append(badge, preview, copy, actions, deleteButton);
   return card;
 }
 
@@ -252,9 +268,7 @@ function renderTemplateDetail() {
     template.id === preferredTemplateId ? "当前默认模板" : "使用此模板";
   const isUploaded = template.source === "uploaded";
   uploadedTemplateActions.hidden = !isUploaded;
-  templateDetailNote.textContent = isUploaded
-    ? "这是你上传的艺术字效果模板，可以修改名称或删除；文字、字号和颜色仍可在编辑器中调整。"
-    : "内置模板不会被修改或删除；这里的调整只会作为本次艺术字参数带入编辑器。";
+  deleteTemplateButton.textContent = isUploaded ? "删除模板" : "从模板库隐藏";
 }
 
 function render() {
@@ -317,9 +331,13 @@ async function loadTemplates(options = {}) {
     throw new Error(payload.detail || "无法读取艺术字模板库。");
   }
   templates = payload.templates || [];
+  hiddenBuiltins = Array.isArray(payload.hiddenBuiltins)
+    ? payload.hiddenBuiltins
+    : [];
   templateCount.textContent = `内置模板 ${payload.builtinCount || 0}`;
   uploadedTemplateCount.textContent =
     `我的模板 ${payload.uploadedCount || 0}`;
+  renderHiddenTemplates();
 
   if (!templates.some((template) => template.id === preferredTemplateId)) {
     preferredTemplateId = "impact";
@@ -444,14 +462,19 @@ async function renameTemplate(event) {
   }
 }
 
-async function deleteTemplate() {
-  const template = currentTemplate();
-  if (!template || template.source !== "uploaded") return;
+async function deleteTemplateById(templateId) {
+  const template = templates.find((item) => item.id === templateId);
+  if (!template) return;
+  const isUploaded = template.source === "uploaded";
   const confirmed = await window.appConfirm({
-    eyebrow: "删除艺术字模板",
-    title: `删除“${template.name}”？`,
-    message: "删除后将无法再使用该艺术字效果，此操作不能撤销。",
-    confirmText: "确认删除",
+    eyebrow: isUploaded ? "删除艺术字模板" : "隐藏内置模板",
+    title: isUploaded
+      ? `删除“${template.name}”？`
+      : `从模板库隐藏“${template.name}”？`,
+    message: isUploaded
+      ? "删除后将无法再使用该艺术字效果，此操作不能撤销。"
+      : "隐藏后不再显示在模板库中，可在底部「已隐藏的内置模板」里恢复。",
+    confirmText: isUploaded ? "确认删除" : "隐藏",
     tone: "danger",
   });
   if (!confirmed) return;
@@ -475,7 +498,11 @@ async function deleteTemplate() {
       }
     }
     await loadTemplates({ activeId: preferredTemplateId });
-    announce(`已删除艺术字模板 ${template.name}。`);
+    announce(
+      isUploaded
+        ? `已删除艺术字模板 ${template.name}。`
+        : `已隐藏内置模板 ${template.name}。`,
+    );
   } catch (error) {
     announce(error.message);
     await window.appAlert({
@@ -484,6 +511,55 @@ async function deleteTemplate() {
     });
   } finally {
     deleteTemplateButton.disabled = false;
+  }
+}
+
+function deleteTemplate() {
+  const template = currentTemplate();
+  if (template) deleteTemplateById(template.id);
+}
+
+function renderHiddenTemplates() {
+  if (!hiddenTemplatesSection || !hiddenTemplatesGrid) return;
+  hiddenTemplatesSection.hidden = hiddenBuiltins.length === 0;
+  hiddenTemplatesGrid.replaceChildren();
+  for (const template of hiddenBuiltins) {
+    const chip = document.createElement("div");
+    chip.className = "hidden-template-chip";
+    chip.title = `内置模板 · ${template.category}`;
+    const name = document.createElement("span");
+    name.textContent = template.name;
+    const restoreButton = document.createElement("button");
+    restoreButton.type = "button";
+    restoreButton.className = "hidden-template-restore";
+    restoreButton.textContent = "恢复";
+    restoreButton.addEventListener("click", () => {
+      restoreTemplate(template.id);
+    });
+    chip.append(name, restoreButton);
+    hiddenTemplatesGrid.append(chip);
+  }
+}
+
+async function restoreTemplate(templateId) {
+  try {
+    const response = await fetch(
+      `/api/art-templates/${encodeURIComponent(templateId)}/restore`,
+      { method: "POST" },
+    );
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.detail || "艺术字模板恢复失败。");
+    }
+    const restored = hiddenBuiltins.find((item) => item.id === templateId);
+    await loadTemplates({ activeId: preferredTemplateId });
+    if (restored) announce(`已恢复内置模板 ${restored.name}。`);
+  } catch (error) {
+    announce(error.message);
+    await window.appAlert({
+      title: "艺术字模板恢复失败",
+      message: error.message,
+    });
   }
 }
 

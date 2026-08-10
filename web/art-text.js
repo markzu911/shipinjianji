@@ -22,6 +22,16 @@ const artVideo = document.querySelector("#artVideo");
 const videoStage = document.querySelector("#videoStage");
 const videoTime = document.querySelector("#videoTime");
 const overlayLayer = document.querySelector("#overlayLayer");
+const overlayCoordinateReadout = document.querySelector(
+  "#overlayCoordinateReadout",
+);
+const positionPresetGrid = document.querySelector("#positionPresetGrid");
+const positionPresetName = document.querySelector("#positionPresetName");
+const savePositionPreset = document.querySelector("#savePositionPreset");
+const positionPresetMessage = document.querySelector(
+  "#positionPresetMessage",
+);
+const positionPresetHint = document.querySelector("#positionPresetHint");
 const overlayCount = document.querySelector("#overlayCount");
 const customText = document.querySelector("#customText");
 const addCustomText = document.querySelector("#addCustomText");
@@ -565,6 +575,10 @@ const FRAME_TIMELINE_MAJOR_TICK_WIDTH = 72;
 const FRAME_TIMELINE_MIN_PIXELS_PER_SECOND = 22;
 const FRAME_TIMELINE_TEXT_CHAR_WIDTH = 10;
 const FRAME_TIMELINE_TEXT_LINES = 2;
+const FRAME_TIMELINE_TRACK_HEIGHT = 30;
+const FRAME_TIMELINE_BASE_HEIGHT = 44;
+const FRAME_TIMELINE_MIN_OVERLAY_DURATION = 0.1;
+const FRAME_TIMELINE_DRAG_THRESHOLD = 3;
 
 function clamp(value, minimum, maximum) {
   return Math.min(maximum, Math.max(minimum, value));
@@ -917,7 +931,9 @@ function timelineSecondsFromClientX(clientX) {
 }
 
 function beginFrameTimelineScrub(event) {
-  if (event.button !== 0) return;
+  if (event.button !== 0 || event.target.closest(".frame-timeline-segment")) {
+    return;
+  }
   event.preventDefault();
   frameTimelineSeek?.focus({ preventScroll: true });
   seekArtVideoPreview(timelineSecondsFromClientX(event.clientX));
@@ -1109,23 +1125,65 @@ function renderFrameTimelineOverlaySegments() {
     ...overlays.map((overlay) => ({ overlay, isDraft: false })),
     ...(previewDraft ? [{ overlay: previewDraft, isDraft: true }] : []),
   ];
+  const trackIndexes = new Map();
+  for (const { overlay, isDraft } of items) {
+    const trackKey = isDraft
+      ? `draft:${overlay.draftId}`
+      : isTranscriptTrackOverlay(overlay)
+        ? `transcript:${overlay.trackId}`
+        : `overlay:${overlay.id}`;
+    if (!trackIndexes.has(trackKey)) {
+      trackIndexes.set(trackKey, trackIndexes.size);
+    }
+  }
+  const trackCount = Math.max(1, trackIndexes.size);
+  const trackAreaHeight = trackCount * FRAME_TIMELINE_TRACK_HEIGHT;
+  frameTimelineSegments.style.height = `${trackAreaHeight}px`;
+  frameTimelineTrack.style.setProperty(
+    "--editor-layer-timeline-height",
+    `${trackAreaHeight}px`,
+  );
+  frameTimelineTrack.style.setProperty(
+    "--editor-timeline-track-height",
+    `${FRAME_TIMELINE_BASE_HEIGHT + trackAreaHeight}px`,
+  );
   const selected = selectedOverlay();
 
   for (const { overlay, isDraft } of items) {
     const start = clamp(Number(overlay.start) || 0, 0, total);
     const end = clamp(Number(overlay.end) || start, start, total);
-    const segment = document.createElement("span");
+    const segment = document.createElement(isDraft ? "span" : "button");
+    if (!isDraft) {
+      segment.type = "button";
+      segment.dataset.overlayId = String(overlay.id);
+      segment.dataset.effectStart = String(start);
+      segment.dataset.effectEnd = String(end);
+      segment.setAttribute(
+        "aria-label",
+        `${overlay.text || "艺术字"}，${formatRange(start, end)}`,
+      );
+    }
     segment.className = "frame-timeline-segment";
-    segment.classList.toggle(
-      "is-selected",
+    const isSelected =
       overlay.id === selectedOverlayId ||
         (
           isTranscriptTrackOverlay(overlay) &&
           isTranscriptTrackOverlay(selected) &&
           overlay.trackId === selected.trackId
-        ),
-    );
+        );
+    segment.classList.toggle("is-selected", isSelected);
+    if (!isDraft) segment.setAttribute("aria-pressed", String(isSelected));
     segment.classList.toggle("is-draft", isDraft);
+    const isEditable = !isDraft && !isTranscriptTrackOverlay(overlay);
+    if (isEditable) segment.dataset.timelineEditable = "true";
+    const trackKey = isDraft
+      ? `draft:${overlay.draftId}`
+      : isTranscriptTrackOverlay(overlay)
+        ? `transcript:${overlay.trackId}`
+        : `overlay:${overlay.id}`;
+    const trackIndex = trackIndexes.get(trackKey) || 0;
+    segment.dataset.timelineTrackIndex = String(trackIndex);
+    segment.style.top = `${trackIndex * FRAME_TIMELINE_TRACK_HEIGHT + 2}px`;
     segment.style.left = `${(start / total) * 100}%`;
     segment.style.width = `${Math.max(0.8, ((end - start) / total) * 100)}%`;
     segment.title = `${overlay.text || ""} ${formatRange(start, end)}`.trim();
@@ -1133,9 +1191,131 @@ function renderFrameTimelineOverlaySegments() {
     label.className = "editor-layer-timeline-segment-label";
     label.textContent = overlay.text || "艺术字";
     segment.append(label);
+    if (isEditable) {
+      for (const mode of ["start", "end"]) {
+        const handle = document.createElement("span");
+        handle.className = `art-timeline-handle is-${mode}`;
+        handle.dataset.artTimeDrag = mode;
+        handle.setAttribute("aria-hidden", "true");
+        segment.append(handle);
+      }
+    }
     frameTimelineSegments.append(segment);
   }
   notifyEditorHost();
+}
+
+function updateManualOverlayTimelineRange(overlay, start, end) {
+  if (!overlay || isTranscriptTrackOverlay(overlay)) return false;
+  const safeStart = clamp(
+    Number(start) || 0,
+    0,
+    Math.max(0, duration - FRAME_TIMELINE_MIN_OVERLAY_DURATION),
+  );
+  const safeEnd = clamp(
+    Number(end) || safeStart + FRAME_TIMELINE_MIN_OVERLAY_DURATION,
+    safeStart + FRAME_TIMELINE_MIN_OVERLAY_DURATION,
+    duration,
+  );
+  Object.assign(overlay, { start: safeStart, end: safeEnd });
+  anchorOverlayToSourceTimeline(
+    overlay,
+    appliedCutDraftState || pendingCutDraft,
+    true,
+  );
+  selectedOverlayId = overlay.id;
+  return true;
+}
+
+function beginFrameTimelineSegmentAdjustment(event) {
+  const segment = event.target.closest(
+    ".frame-timeline-segment[data-overlay-id]",
+  );
+  if (!segment || event.button !== 0) return;
+  const overlay = overlays.find(
+    (item) => String(item.id) === segment.dataset.overlayId,
+  );
+  if (!overlay) return;
+  event.preventDefault();
+  event.stopPropagation();
+  selectedOverlayId = overlay.id;
+  seekEditorPreview(overlay.start);
+
+  if (segment.dataset.timelineEditable !== "true") {
+    renderEditor();
+    updateFrameTimelineStatus("已选中全文艺术字轨道；逐字时间由文案自动同步。", "neutral");
+    return;
+  }
+
+  const mode =
+    event.target.closest("[data-art-time-drag]")?.dataset.artTimeDrag ||
+    "move";
+  const original = { start: overlay.start, end: overlay.end };
+  const startClientX = event.clientX;
+  const total = frameTimelineDuration();
+  let moved = false;
+  segment.classList.add("is-selected");
+  renderControls();
+
+  const move = (moveEvent) => {
+    if (
+      !moved &&
+      Math.abs(moveEvent.clientX - startClientX) < FRAME_TIMELINE_DRAG_THRESHOLD
+    ) {
+      return;
+    }
+    moved = true;
+    const bounds = frameTimelineTrack.getBoundingClientRect();
+    const delta = ((moveEvent.clientX - startClientX) / bounds.width) * total;
+    let start = original.start;
+    let end = original.end;
+    if (mode === "start") {
+      start = clamp(
+        original.start + delta,
+        0,
+        original.end - FRAME_TIMELINE_MIN_OVERLAY_DURATION,
+      );
+    } else if (mode === "end") {
+      end = clamp(
+        original.end + delta,
+        original.start + FRAME_TIMELINE_MIN_OVERLAY_DURATION,
+        total,
+      );
+    } else {
+      const length = original.end - original.start;
+      start = clamp(original.start + delta, 0, total - length);
+      end = start + length;
+    }
+    if (!updateManualOverlayTimelineRange(overlay, start, end)) return;
+    segment.classList.add("is-dragging");
+    segment.style.left = `${(overlay.start / total) * 100}%`;
+    segment.style.width = `${Math.max(
+      0.8,
+      ((overlay.end - overlay.start) / total) * 100,
+    )}%`;
+    seekEditorPreview(mode === "end" ? overlay.end : overlay.start);
+    renderControls();
+    updateFrameTimelineStatus(
+      `正在调整“${overlay.text || "艺术字"}” ${formatRange(overlay.start, overlay.end)}`,
+      "neutral",
+    );
+  };
+
+  const finish = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", finish);
+    window.removeEventListener("pointercancel", finish);
+    renderEditor();
+    updateFrameTimelineStatus(
+      moved
+        ? `已调整“${overlay.text || "艺术字"}” ${formatRange(overlay.start, overlay.end)}`
+        : `已选中“${overlay.text || "艺术字"}”`,
+      moved ? "success" : "neutral",
+    );
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", finish, { once: true });
+  window.addEventListener("pointercancel", finish, { once: true });
 }
 
 function refreshFrameTimeline(options = {}) {
@@ -1845,7 +2025,7 @@ function applyPreviewStyle(element, overlay) {
   }
 }
 
-function positionPreviewOverlay(element, overlay) {
+function positionPreviewOverlay(element, overlay, cachedSize = null) {
   const layerWidth = overlayLayer.clientWidth;
   const layerHeight = overlayLayer.clientHeight;
   if (!layerWidth || !layerHeight || element.hidden) return;
@@ -1854,8 +2034,14 @@ function positionPreviewOverlay(element, overlay) {
   const safeMarginY = layerHeight * 0.04;
   const safeWidth = layerWidth - safeMarginX * 2;
   const safeHeight = layerHeight - safeMarginY * 2;
-  const elementWidth = Math.max(1, element.offsetWidth);
-  const elementHeight = Math.max(1, element.offsetHeight);
+  // A drag reuses the size captured at drag start to avoid a per-move layout
+  // read; other callers (e.g. the initial preview render) measure fresh.
+  const elementWidth = cachedSize
+    ? cachedSize.width
+    : Math.max(1, element.offsetWidth);
+  const elementHeight = cachedSize
+    ? cachedSize.height
+    : Math.max(1, element.offsetHeight);
   const fitScale = Math.min(
     1,
     safeWidth / elementWidth,
@@ -1877,6 +2063,159 @@ function positionPreviewOverlay(element, overlay) {
   element.style.left = `${centerX}px`;
   element.style.top = `${centerY}px`;
   element.style.transform = `translate(-50%, -50%) scale(${fitScale})`;
+}
+
+// Live coordinate readout for the selected art text: normalized percentages
+// plus the pixel center on the overlay layer. Shown in the top-left corner of
+// the stage while an overlay is selected; updates during drag.
+function syncOverlayCoordinateReadout() {
+  const readout = overlayCoordinateReadout;
+  if (!readout) return;
+  const overlay = selectedOverlay();
+  if (!overlay || !overlayLayer.clientWidth || !overlayLayer.clientHeight) {
+    readout.hidden = true;
+    if (positionPresetHint) {
+      positionPresetHint.textContent = "把当前坐标存起来，之后一键套用";
+    }
+    return;
+  }
+  const percentX = Math.round(overlay.x * 100);
+  const percentY = Math.round(overlay.y * 100);
+  const pixelX = Math.round(overlay.x * overlayLayer.clientWidth);
+  const pixelY = Math.round(overlay.y * overlayLayer.clientHeight);
+  readout.textContent =
+    `横向 ${percentX}% · 纵向 ${percentY}%（X ${pixelX}px · Y ${pixelY}px）`;
+  readout.hidden = false;
+  if (positionPresetHint) {
+    positionPresetHint.textContent = `当前坐标：横向 ${percentX}% · 纵向 ${percentY}%`;
+  }
+}
+
+let positionPresets = [];
+
+function renderPositionPresetMessage(text, tone = "neutral") {
+  const message = positionPresetMessage;
+  if (!message) return;
+  if (text) {
+    message.textContent = text;
+    message.dataset.tone = tone;
+    message.hidden = false;
+  } else {
+    message.hidden = true;
+  }
+}
+
+function renderPositionPresets() {
+  const grid = positionPresetGrid;
+  if (!grid) return;
+  grid.replaceChildren();
+  for (const preset of positionPresets) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "position-preset-chip";
+    chip.title =
+      `套用坐标：横向 ${Math.round(preset.x * 100)}% · ` +
+      `纵向 ${Math.round(preset.y * 100)}%`;
+    chip.dataset.presetId = preset.id;
+    chip.textContent = preset.name;
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "position-preset-chip-delete";
+    deleteButton.setAttribute("aria-label", `删除预设“${preset.name}”`);
+    deleteButton.textContent = "✕";
+    chip.append(deleteButton);
+    chip.addEventListener("click", (event) => {
+      if (event.target === deleteButton) {
+        deletePositionPreset(preset.id);
+        return;
+      }
+      applyPositionPreset(preset.id);
+    });
+    grid.append(chip);
+  }
+}
+
+async function loadPositionPresets() {
+  try {
+    const response = await fetch("/api/art-position-presets");
+    if (!response.ok) throw new Error("无法读取坐标预设。");
+    const payload = await response.json();
+    positionPresets = Array.isArray(payload.presets) ? payload.presets : [];
+  } catch {
+    positionPresets = [];
+  }
+  renderPositionPresets();
+}
+
+function applyPositionPreset(presetId) {
+  const overlay = selectedOverlay();
+  const preset = positionPresets.find((item) => item.id === presetId);
+  if (!overlay || !preset) return;
+  updateSelectedOverlay({ x: preset.x, y: preset.y });
+  renderPositionPresetMessage(
+    `已将“${preset.name}”坐标（横向 ${Math.round(preset.x * 100)}% · ` +
+      `纵向 ${Math.round(preset.y * 100)}%）套用到当前艺术字。`,
+    "success",
+  );
+}
+
+async function saveCurrentPositionPreset() {
+  const overlay = selectedOverlay();
+  if (!overlay) return;
+  const name = positionPresetName.value.trim();
+  if (!name) {
+    renderPositionPresetMessage("请先输入预设名称。", "warning");
+    positionPresetName.focus();
+    return;
+  }
+  try {
+    const response = await fetch("/api/art-position-presets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name,
+        x: Math.round(overlay.x * 10000) / 10000,
+        y: Math.round(overlay.y * 10000) / 10000,
+      }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.detail || "保存坐标失败。");
+    await loadPositionPresets();
+    positionPresetName.value = "";
+    renderPositionPresetMessage(
+      `已保存坐标预设“${payload.name}”：横向 ` +
+        `${Math.round(payload.x * 100)}% · 纵向 ${Math.round(payload.y * 100)}%。`,
+      "success",
+    );
+  } catch (error) {
+    renderPositionPresetMessage(error.message, "warning");
+  }
+}
+
+async function deletePositionPreset(presetId) {
+  const preset = positionPresets.find((item) => item.id === presetId);
+  const confirmed = await window.appConfirm({
+    eyebrow: "删除坐标预设",
+    title: "确定删除该坐标预设？",
+    message: preset ? `将删除“${preset.name}”。此操作不可撤销。` : "",
+    confirmText: "删除",
+    tone: "danger",
+  });
+  if (!confirmed) return;
+  try {
+    const response = await fetch(
+      `/api/art-position-presets/${encodeURIComponent(presetId)}`,
+      { method: "DELETE" },
+    );
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.detail || "删除坐标预设失败。");
+    }
+    await loadPositionPresets();
+    renderPositionPresetMessage("坐标预设已删除。", "success");
+  } catch (error) {
+    renderPositionPresetMessage(error.message, "warning");
+  }
 }
 
 let lastOverlayTap = null;
@@ -1902,6 +2241,25 @@ function beginOverlayDrag(event, overlayId) {
   renderOverlayList();
   renderPreview();
 
+  // Re-resolve the element after renderPreview() rebuilt the overlay layer, and
+  // capture the grab offset — the pointer's distance from the art-text center —
+  // plus the layer bounds and element size once. Dragging then keeps the grabbed
+  // point under the pointer (1:1) instead of snapping the center onto it, and
+  // never re-reads layout per move.
+  const overlay = overlays.find((item) => item.id === overlayId);
+  if (!overlay) return;
+  const element = overlayLayer.querySelector(`[data-overlay-id="${overlayId}"]`);
+  if (!element) return;
+  const bounds = overlayLayer.getBoundingClientRect();
+  const elementRect = element.getBoundingClientRect();
+  const grabOffsetX = event.clientX - (elementRect.left + elementRect.width / 2);
+  const grabOffsetY = event.clientY - (elementRect.top + elementRect.height / 2);
+  const cachedSize = {
+    width: Math.max(1, element.offsetWidth),
+    height: Math.max(1, element.offsetHeight),
+  };
+  let framePending = false;
+
   const move = (moveEvent) => {
     // Moving the pointer means this was a drag, not a double-click.
     if (
@@ -1910,17 +2268,32 @@ function beginOverlayDrag(event, overlayId) {
     ) {
       lastOverlayTap = null;
     }
-    const overlay = overlays.find((item) => item.id === overlayId);
-    if (!overlay) return;
-    const bounds = videoStage.getBoundingClientRect();
-    const x = clamp((moveEvent.clientX - bounds.left) / bounds.width, 0.05, 0.95);
-    const y = clamp((moveEvent.clientY - bounds.top) / bounds.height, 0.05, 0.95);
-    const targets = isTranscriptTrackOverlay(overlay)
-      ? transcriptTrackOverlays(overlay.trackId)
-      : [overlay];
-    for (const target of targets) Object.assign(target, { x, y });
-    const element = overlayLayer.querySelector(`[data-overlay-id="${overlayId}"]`);
-    if (element) positionPreviewOverlay(element, overlay);
+    if (framePending) return;
+    framePending = true;
+    // Coalesce to one write per animation frame so the drag stays smooth.
+    window.requestAnimationFrame(() => {
+      framePending = false;
+      const targets = isTranscriptTrackOverlay(overlay)
+        ? transcriptTrackOverlays(overlay.trackId)
+        : [overlay];
+      if (!targets.length) return;
+      const x = clamp(
+        (moveEvent.clientX - grabOffsetX - bounds.left) / bounds.width,
+        0.05,
+        0.95,
+      );
+      const y = clamp(
+        (moveEvent.clientY - grabOffsetY - bounds.top) / bounds.height,
+        0.05,
+        0.95,
+      );
+      for (const target of targets) Object.assign(target, { x, y });
+      const currentElement = overlayLayer.querySelector(
+        `[data-overlay-id="${overlayId}"]`,
+      );
+      if (currentElement) positionPreviewOverlay(currentElement, overlay, cachedSize);
+      syncOverlayCoordinateReadout();
+    });
   };
 
   const finish = () => {
@@ -2108,6 +2481,7 @@ function renderPreview(options = {}) {
     positionPreviewOverlay(element, overlay);
   }
   notifyEditorHost();
+  syncOverlayCoordinateReadout();
 }
 
 function notifyEditorHost(options = {}) {
@@ -2116,6 +2490,13 @@ function notifyEditorHost(options = {}) {
     overlayWidth: overlayLayer.clientWidth,
     overlayHeight: overlayLayer.clientHeight,
     timelineHtml: frameTimelineSegments?.innerHTML || "",
+    timelineTrackCount: Math.max(
+      1,
+      ...Array.from(
+        frameTimelineSegments?.querySelectorAll("[data-timeline-track-index]") || [],
+        (segment) => Number(segment.dataset.timelineTrackIndex) + 1,
+      ),
+    ),
     generationDisabled: generateArtVideo.disabled,
     generationLabel: generateArtVideo.textContent.trim(),
     generationBusy: !artProgress.hidden,
@@ -2181,6 +2562,8 @@ async function refreshArtAfterTranscriptUpdate() {
       });
     }
     const art = payload.art || {};
+    // Always load the server's track overlays (edited text with stable times),
+    // then retime them to the edited timeline when a cut draft is active.
     if (Array.isArray(art.overlays) && art.overlays.length) {
       cutSuppressedOverlays = [];
       overlays = art.overlays.map((item) => ({
@@ -2188,6 +2571,9 @@ async function refreshArtAfterTranscriptUpdate() {
         id: nextOverlayId++,
       }));
       selectedOverlayId = overlays[0]?.id || null;
+      if (cutDraftActive && pendingCutDraft) {
+        retimeDraftAnchoredOverlays(pendingCutDraft);
+      }
     }
     renderEditor();
     renderPreview({ force: true });
@@ -2372,6 +2758,15 @@ function retimeDraftAnchoredOverlays(data) {
   return { matchedCount, removedCount };
 }
 
+function cutDraftTimingSignature(state) {
+  return JSON.stringify([
+    Boolean(state?.active),
+    (state?.ranges || []).map((range) => `${range.start}-${range.end}`),
+    Number(state?.sourceDuration) || 0,
+    Number(state?.duration) || 0,
+  ]);
+}
+
 function applyEditorCutDraft(data) {
   pendingCutDraft = data;
   transcriptTrackDraftVersion += 1;
@@ -2383,14 +2778,25 @@ function applyEditorCutDraft(data) {
     start: clamp(Number(segment.start) || 0, 0, duration),
     end: clamp(Number(segment.end) || 0, 0, duration),
   }));
+  // When only the transcript text changed (same cut ranges/durations), the
+  // server already kept the subtitle times stable, so re-segmenting here would
+  // re-flow every cue and shift the timeline. Keep the existing track in that
+  // case; the server's updated text is loaded separately.
+  const timingUnchanged =
+    cutDraftTimingSignature(appliedCutDraftState) ===
+    cutDraftTimingSignature(data);
+  const textChanged =
+    appliedCutDraftState?.transcript?.text !== data.transcript?.text;
+  const isTextOnlyChange = timingUnchanged && textChanged;
   const trackSeed = currentTranscriptTrack()[0];
-  const locallyRebuiltTrack = trackSeed
-    ? replaceTranscriptTrackFromCutDraft(
-        trackSeed,
-        transcriptTrackSharedStyle(trackSeed),
-        data,
-      )
-    : [];
+  const locallyRebuiltTrack =
+    trackSeed && !isTextOnlyChange
+      ? replaceTranscriptTrackFromCutDraft(
+          trackSeed,
+          transcriptTrackSharedStyle(trackSeed),
+          data,
+        )
+      : [];
   const { matchedCount, removedCount } = retimeDraftAnchoredOverlays(data);
   appliedCutDraftState = data;
   renderRetainedTranscript({
@@ -2453,6 +2859,45 @@ function handleEditorHostMessage(event) {
     void refreshArtAfterTranscriptUpdate();
     return;
   }
+  if (data.type === "editor-suite:select-art-timeline") {
+    const overlay = overlays.find(
+      (item) => String(item.id) === String(data.id),
+    );
+    if (!overlay) return;
+    selectedOverlayId = overlay.id;
+    editorHostCurrentTime = clamp(
+      Number(data.currentTime) || overlay.start,
+      0,
+      duration,
+    );
+    renderEditor();
+    return;
+  }
+  if (data.type === "editor-suite:adjust-art-timeline") {
+    const overlay = overlays.find(
+      (item) => String(item.id) === String(data.id),
+    );
+    if (
+      !updateManualOverlayTimelineRange(overlay, data.start, data.end)
+    ) {
+      return;
+    }
+    editorHostCurrentTime = clamp(
+      Number(data.currentTime) || overlay.start,
+      0,
+      duration,
+    );
+    renderControls();
+    renderPreview();
+    return;
+  }
+  if (data.type === "editor-suite:move-finish" && data.kind === "art") {
+    // The host drove a drag directly on its mirrored element; the data model
+    // was already updated by the move-effect messages, so just refresh the
+    // controls, list, and preview here instead of on every pointermove.
+    renderEditor();
+    return;
+  }
   if (data.type !== "editor-suite:move-effect" || data.kind !== "art") return;
   const overlay = overlays.find((item) => String(item.id) === String(data.id));
   if (!overlay) return;
@@ -2464,7 +2909,6 @@ function handleEditorHostMessage(event) {
     target.y = clamp(Number(data.y) || 0.5, 0.05, 0.95);
   }
   selectedOverlayId = overlay.id;
-  renderEditor();
 }
 
 window.addEventListener("message", handleEditorHostMessage);
@@ -2490,6 +2934,7 @@ artGenerationObserver.observe(artFormError, {
 function renderControls() {
   const overlay = selectedOverlay();
   const hasSelection = Boolean(overlay);
+  syncOverlayCoordinateReadout();
   const trackItems = selectedTrackOverlays();
   const isTrack = trackItems.length > 0;
   overlayControls.disabled = !hasSelection;
@@ -4219,6 +4664,7 @@ function renderArtJob(art) {
         onClose: () => {
           generationModalActive = false;
         },
+        onCancel: () => void cancelArtGeneration(),
       });
     } else {
       window.appGeneration?.setProgress(art.progress, art.stage);
@@ -4242,6 +4688,7 @@ function renderArtJob(art) {
         videoUrl: art.outputUrl,
         downloadUrl: `${art.outputUrl}?download=true`,
         duration: formatTime(art.outputDuration),
+        redirectOnClose: embeddedEditor ? null : "/",
       });
     }
   } else if (art.status === "failed") {
@@ -4253,6 +4700,10 @@ function renderArtJob(art) {
         art.error || "艺术字视频生成失败，请重新尝试。",
       );
     }
+  } else if (art.status === "cancelled") {
+    artProgress.hidden = true;
+    generateArtVideo.disabled = overlays.length === 0;
+    showFormError("已取消生成。");
   }
 }
 
@@ -4277,6 +4728,23 @@ async function pollArtJob() {
     artProgress.hidden = true;
     generateArtVideo.disabled = overlays.length === 0;
     showFormError(error.message);
+  }
+}
+
+async function cancelArtGeneration() {
+  if (!jobId) return;
+  if (pollTimer) window.clearTimeout(pollTimer);
+  try {
+    const response = await fetch(
+      `/api/transcriptions/${encodeURIComponent(jobId)}/cancel`,
+      { method: "POST" },
+    );
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || "无法取消生成。");
+    renderArtJob(payload.art);
+    window.appGeneration?.fail("已取消生成。");
+  } catch (error) {
+    window.appGeneration?.fail(error.message || "取消失败，请重试。");
   }
 }
 
@@ -4434,6 +4902,7 @@ async function initialize() {
     artWorkspace.hidden = false;
     artEditorReady = true;
     if (pendingCutDraft?.transcript) applyEditorCutDraft(pendingCutDraft);
+    loadPositionPresets();
     window.requestAnimationFrame(() => {
       syncVideoStageLayout();
       refreshFrameTimeline({ force: true });
@@ -4554,6 +5023,16 @@ endTime.addEventListener("change", () => {
   updateSelectedOverlay({ end });
 });
 fitArtToTranscript.addEventListener("click", fitSelectedArtTimeToTranscript);
+savePositionPreset.addEventListener("click", saveCurrentPositionPreset);
+positionPresetName.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    saveCurrentPositionPreset();
+  }
+});
+positionPresetName.addEventListener("input", () => {
+  renderPositionPresetMessage("");
+});
 
 const ART_STYLE_PALETTES = {
   impact: { color: "#FFD84D", strokeColor: "#15110A" },
@@ -4730,6 +5209,10 @@ frameTimelineJumpInput.addEventListener("input", () => {
     updateFrameTimelineStatus("");
   }
 });
+frameTimelineSegments?.addEventListener(
+  "pointerdown",
+  beginFrameTimelineSegmentAdjustment,
+);
 frameTimelineTrack?.addEventListener("pointerdown", beginFrameTimelineScrub);
 generateArtVideo.addEventListener("click", generateVideo);
 generateAiSuggestions.addEventListener("click", requestAiSuggestions);

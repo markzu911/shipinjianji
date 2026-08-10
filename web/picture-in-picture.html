@@ -8,11 +8,11 @@
       content="选择视频文案片段，使用 AI 生成并插入与口播时间同步的画中画。"
     />
     <title>插入画中画 · 视频文字剪辑</title>
-    <link rel="stylesheet" href="/styles.css?v=20260805-02" />
+    <link rel="stylesheet" href="/styles.css?v=20260810-09" />
     <script src="https://code.iconify.design/iconify-icon/3.0.0/iconify-icon.min.js" defer></script>
-    <script src="/ui-feedback.js?v=20260806-01" defer></script>
-    <script src="/editor-suite.js?v=20260805-05" defer></script>
-    <script src="/picture-in-picture.js?v=20260805-02" defer></script>
+    <script src="/ui-feedback.js?v=20260807-03" defer></script>
+    <script src="/editor-suite.js?v=20260810-05" defer></script>
+    <script src="/picture-in-picture.js?v=20260810-10" defer></script>
   </head>
   <body class="pip-editor-body">
     <a class="skip-link" href="#main">跳到主要内容</a>
@@ -45,7 +45,6 @@
         <div>
           <p class="eyebrow">AI 画中画</p>
           <h1 id="pip-page-title">让画面跟随重点文案出现</h1>
-          <p>选择一段口播文字，生成对应画面；图片会在该段文字的时长内自动显示。</p>
         </div>
         <div class="pip-heading-chips">
           <span id="pipSourceLabel" class="pip-time-chip">艺术字视频</span>
@@ -71,7 +70,7 @@
           <div class="art-section-heading">
             <div>
               <p class="step-label">01 · 实时预览</p>
-              <h2 id="pip-preview-title">播放到对应时间，拖动画中画调整位置</h2>
+              <h2 id="pip-preview-title">拖动画中画调整位置，拖动边框缩放</h2>
             </div>
             <span id="videoTime" class="result-chip">00:00 / 00:00</span>
           </div>
@@ -79,6 +78,17 @@
           <div id="pipVideoPlayer" class="media-player-shell pip-media-player">
             <div id="pipVideoStage" class="video-stage pip-video-stage">
               <video id="pipVideo" preload="metadata" playsinline></video>
+              <div class="preview-grid" aria-hidden="true"></div>
+              <button
+                type="button"
+                class="preview-grid-toggle"
+                data-preview-grid-toggle
+                aria-label="九宫格构图辅助线"
+                aria-pressed="true"
+                title="九宫格构图辅助线"
+              >
+                <iconify-icon icon="ph:grid-four-bold" aria-hidden="true"></iconify-icon>
+              </button>
               <div id="pipOverlayLayer" class="pip-overlay-layer" aria-label="画中画实时预览"></div>
             </div>
             <div
@@ -109,7 +119,6 @@
             <div class="frame-timeline-heading editor-layer-timeline-heading pip-timeline-heading">
               <div>
                 <strong>画中画时间轴</strong>
-                <span>叠加层与剪辑页使用相同刻度，点击片段可快速定位</span>
               </div>
               <output id="timelineTime">00:00 / 00:00</output>
             </div>
@@ -122,11 +131,7 @@
                 <input id="pipTimelineSeek" class="frame-timeline-seek pip-timeline-seek" type="range" min="0" max="0" step="0.033" value="0" aria-label="逐帧定位画中画预览时间" />
               </div>
             </div>
-            <div class="cut-frame-timeline-footer editor-layer-timeline-footer">
-              <p class="frame-timeline-status">时间轴仅显示当前视频和已启用的画中画片段</p>
-            </div>
           </div>
-          <p id="previewHint" class="section-helper">画中画出现后可直接按住拖动摆放；下拉位置可用于快速定位。</p>
         </section>
 
         <aside class="panel pip-control-panel" aria-labelledby="pip-controls-title">

@@ -273,6 +273,7 @@ JOB_FILES: dict[str, Path] = {}
 JOBS_LOCK = threading.Lock()
 FONT_LIBRARY_LOCK = threading.Lock()
 ART_TEMPLATE_LIBRARY_LOCK = threading.Lock()
+ART_POSITION_PRESETS_LOCK = threading.Lock()
 HISTORY_LIBRARY_LOCK = threading.Lock()
 _T2S_CONVERTER: Any | None = None
 
@@ -420,6 +421,8 @@ class PictureInPictureImageRequest(BaseModel):
     prompt: str = Field(default="", max_length=800)
     source: Literal["original", "edited", "art"] = "art"
     aspectRatio: Literal["1:1", "3:4", "4:3", "16:9", "9:16"] = "16:9"
+    sourceStart: float | None = Field(default=None, ge=0, le=86400)
+    sourceEnd: float | None = Field(default=None, gt=0, le=86400)
 
 
 class PictureInPictureVideoRequest(BaseModel):
@@ -430,6 +433,8 @@ class PictureInPictureVideoRequest(BaseModel):
     prompt: str = Field(default="", max_length=800)
     source: Literal["original", "edited", "art"] = "art"
     aspectRatio: Literal["1:1", "3:4", "4:3", "16:9", "9:16"] = "16:9"
+    sourceStart: float | None = Field(default=None, ge=0, le=86400)
+    sourceEnd: float | None = Field(default=None, gt=0, le=86400)
 
 
 class PictureInPicturePromptRequest(BaseModel):
@@ -439,6 +444,8 @@ class PictureInPicturePromptRequest(BaseModel):
     assetType: Literal["image", "video"] = "image"
     source: Literal["original", "edited", "art"] = "art"
     aspectRatio: Literal["1:1", "3:4", "4:3", "16:9", "9:16"] = "16:9"
+    sourceStart: float | None = Field(default=None, ge=0, le=86400)
+    sourceEnd: float | None = Field(default=None, gt=0, le=86400)
 
 
 class PictureInPictureOverlay(BaseModel):
@@ -479,6 +486,18 @@ class FontUpdate(BaseModel):
 
 class ArtTemplateUpdate(BaseModel):
     name: str
+
+
+class ArtPositionPresetCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+    x: float
+    y: float
+
+
+class ArtPositionPresetUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=40)
+    x: float | None = None
+    y: float | None = None
 
 
 class HistoryVersionUpdate(BaseModel):
@@ -972,6 +991,35 @@ def save_uploaded_art_templates_unlocked(
     temporary_path.replace(manifest_path)
 
 
+def art_template_hidden_path() -> Path:
+    return art_template_library_directory() / "hidden.json"
+
+
+def load_hidden_art_templates_unlocked() -> set[str]:
+    path = art_template_hidden_path()
+    if not path.is_file():
+        return set()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("艺术字模板隐藏列表读取失败。") from exc
+    if not isinstance(payload, list):
+        raise RuntimeError("艺术字模板隐藏列表格式无效。")
+    return {str(item) for item in payload if str(item) in ART_TEXT_STYLES}
+
+
+def save_hidden_art_templates_unlocked(hidden: set[str]) -> None:
+    library_dir = art_template_library_directory()
+    library_dir.mkdir(parents=True, exist_ok=True)
+    path = art_template_hidden_path()
+    temporary_path = path.with_suffix(".tmp")
+    temporary_path.write_text(
+        json.dumps(sorted(hidden), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temporary_path.replace(path)
+
+
 def public_builtin_art_template(template: dict[str, Any]) -> dict[str, Any]:
     return {
         **copy.deepcopy(template),
@@ -1000,16 +1048,28 @@ def public_uploaded_art_template(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def list_art_text_templates() -> list[dict[str, Any]]:
-    builtins = [
-        public_builtin_art_template(template)
-        for template in ART_TEXT_TEMPLATE_CATALOG
-    ]
     with ART_TEMPLATE_LIBRARY_LOCK:
+        hidden = load_hidden_art_templates_unlocked()
+        builtins = [
+            public_builtin_art_template(template)
+            for template in ART_TEXT_TEMPLATE_CATALOG
+            if template["id"] not in hidden
+        ]
         uploaded = [
             public_uploaded_art_template(record)
             for record in load_uploaded_art_templates_unlocked()
         ]
     return builtins + uploaded
+
+
+def list_hidden_art_text_templates() -> list[dict[str, Any]]:
+    with ART_TEMPLATE_LIBRARY_LOCK:
+        hidden = load_hidden_art_templates_unlocked()
+    return [
+        public_builtin_art_template(template)
+        for template in ART_TEXT_TEMPLATE_CATALOG
+        if template["id"] in hidden
+    ]
 
 
 def find_uploaded_art_template(template_id: str) -> dict[str, Any] | None:
@@ -1022,6 +1082,68 @@ def find_uploaded_art_template(template_id: str) -> dict[str, Any] | None:
             ),
             None,
         )
+
+
+ART_POSITION_PRESET_MAX_COUNT = 50
+ART_POSITION_MIN = 0.05
+ART_POSITION_MAX = 0.95
+
+
+def art_position_presets_directory() -> Path:
+    return DATA_DIR / "art-position-presets"
+
+
+def art_position_presets_manifest_path() -> Path:
+    return art_position_presets_directory() / "manifest.json"
+
+
+def load_art_position_presets_unlocked() -> list[dict[str, Any]]:
+    manifest_path = art_position_presets_manifest_path()
+    if not manifest_path.is_file():
+        return []
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("艺术字坐标预设库索引读取失败。") from exc
+    if not isinstance(payload, list):
+        raise RuntimeError("艺术字坐标预设库索引格式无效。")
+    return [
+        item
+        for item in payload
+        if isinstance(item, dict) and str(item.get("id", "")).startswith("pos-")
+    ]
+
+
+def save_art_position_presets_unlocked(
+    presets: list[dict[str, Any]],
+) -> None:
+    library_dir = art_position_presets_directory()
+    library_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = art_position_presets_manifest_path()
+    temporary_path = manifest_path.with_suffix(".tmp")
+    temporary_path.write_text(
+        json.dumps(presets, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temporary_path.replace(manifest_path)
+
+
+def public_art_position_preset(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(record["id"]),
+        "name": str(record["name"]),
+        "x": round(float(record["x"]), 4),
+        "y": round(float(record["y"]), 4),
+        "createdAt": record.get("createdAt"),
+        "updatedAt": record.get("updatedAt"),
+    }
+
+
+def clamp_art_position(value: float) -> float:
+    return round(
+        max(ART_POSITION_MIN, min(ART_POSITION_MAX, float(value))),
+        4,
+    )
 
 
 def resolve_art_text_style(template_id: str) -> str | None:
@@ -1204,6 +1326,112 @@ def validate_font_file(font_path: Path) -> tuple[str, str]:
 
 def public_job(job: dict[str, Any]) -> dict[str, Any]:
     return copy.deepcopy(job)
+
+
+class GenerationCancelledError(Exception):
+    """Raised inside render jobs when the user cancels generation."""
+
+
+# Per-job registry of in-flight FFmpeg processes so cancellation can terminate
+# them mid-run. Populated by run_ffmpeg (the current worker thread's job id is
+# used) and drained by mark_job_cancelled.
+RUNNING_PROCESSES: dict[str, list[subprocess.Popen]] = {}
+PROCESSES_LOCK = threading.Lock()
+_job_thread_local = threading.local()
+
+
+def _thread_job_id() -> str:
+    return str(getattr(_job_thread_local, "job_id", "") or "")
+
+
+def _set_thread_job(job_id: str) -> None:
+    _job_thread_local.job_id = job_id
+
+
+def is_cancelled(job_id: str) -> bool:
+    if not job_id:
+        return False
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        return bool(job and job.get("cancelRequested"))
+
+
+def check_cancelled(job_id: str) -> None:
+    if is_cancelled(job_id):
+        raise GenerationCancelledError()
+
+
+def run_ffmpeg(
+    command: list[str],
+    *,
+    timeout: float,
+    cwd: str | None = None,
+    job_id: str | None = None,
+) -> subprocess.CompletedProcess:
+    """Run an FFmpeg command as a killable subprocess.
+
+    The launched process is registered under the current job (from the worker
+    thread) so a cancellation can terminate it mid-run. On a non-zero exit that
+    follows a cancellation request, raises GenerationCancelledError instead of
+    letting the caller report a generic FFmpeg failure.
+    """
+    resolved_job = job_id or _thread_job_id()
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if resolved_job:
+        with PROCESSES_LOCK:
+            RUNNING_PROCESSES.setdefault(resolved_job, []).append(process)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+        raise
+    finally:
+        if resolved_job:
+            with PROCESSES_LOCK:
+                registered = RUNNING_PROCESSES.get(resolved_job)
+                if registered:
+                    try:
+                        registered.remove(process)
+                    except ValueError:
+                        pass
+    completed = subprocess.CompletedProcess(
+        command,
+        process.returncode,
+        stdout,
+        stderr,
+    )
+    if completed.returncode != 0 and is_cancelled(resolved_job):
+        raise GenerationCancelledError()
+    return completed
+
+
+def mark_job_cancelled(job_id: str) -> None:
+    """Flag the job as cancelled, mark in-flight sub-jobs, and kill FFmpeg."""
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            return
+        job["cancelRequested"] = True
+        for key in ("edit", "art", "pictureInPicture", "composition"):
+            sub = job.get(key)
+            if isinstance(sub, dict) and sub.get("status") in {"queued", "processing"}:
+                sub["status"] = "cancelled"
+                sub["stage"] = "已取消"
+                sub["error"] = "用户取消了生成。"
+    with PROCESSES_LOCK:
+        processes = list(RUNNING_PROCESSES.pop(job_id, ()))
+    for process in processes:
+        try:
+            process.terminate()
+        except Exception:
+            pass
 
 
 def update_job(job_id: str, **changes: Any) -> None:
@@ -2301,13 +2529,7 @@ def render_cut_video(
         "+faststart",
         str(temporary_path),
     ]
-    completed = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        timeout=60 * 60,
-        check=False,
-    )
+    completed = run_ffmpeg(command, timeout=60 * 60)
     if completed.returncode != 0:
         temporary_path.unlink(missing_ok=True)
         details = completed.stderr.strip().splitlines()
@@ -4699,13 +4921,10 @@ def render_art_text_video(
         temporary_path.name,
     ])
     try:
-        completed = subprocess.run(
+        completed = run_ffmpeg(
             command,
             cwd=working_directory,
-            capture_output=True,
-            text=True,
             timeout=60 * 60,
-            check=False,
         )
     except OSError as exc:
         temporary_path.unlink(missing_ok=True)
@@ -5307,6 +5526,59 @@ def resolve_picture_in_picture_source(
     return input_path, float(art.get("outputDuration") or 0), transcript
 
 
+def resolve_picture_in_picture_reference(
+    job: dict[str, Any],
+    video_path: Path | None,
+    request: Any,
+) -> tuple[Path, float, Path, float]:
+    """Resolve PiP AI generation inputs.
+
+    Returns (source_path, duration, reference_path, reference_time) where
+    source_path/duration drive validation and output placement, and
+    reference_path/reference_time are where the style reference frame is read.
+
+    When sourceStart/sourceEnd (original source anchors) are provided, the
+    reference frame is read from the ORIGINAL video at the anchor midpoint so
+    PiP material can be generated before the edited/art video is rendered
+    ("finish everything, then compose" workflow). Otherwise the resolved source
+    video is used at the midpoint of start/end.
+    """
+    has_anchor = (
+        request.sourceStart is not None and request.sourceEnd is not None
+    )
+    try:
+        source_path, duration, _ = resolve_picture_in_picture_source(
+            job,
+            video_path,
+            request.source,
+        )
+    except ValueError as exc:
+        if not has_anchor:
+            raise ValueError(str(exc)) from exc
+        # The edited/art video isn't ready, but PiP material can still be
+        # generated: style-match against the original video via the anchors.
+        if video_path is None or not video_path.is_file():
+            raise ValueError("原视频文件不存在。") from exc
+        source_path = video_path
+        duration = float(job.get("duration") or 0)
+    if has_anchor:
+        reference_path = video_path if video_path is not None else source_path
+        reference_time = min(
+            max(
+                0.0,
+                (float(request.sourceStart) + float(request.sourceEnd)) / 2,
+            ),
+            max(0.0, duration - 0.01),
+        )
+    else:
+        reference_path = source_path
+        reference_time = min(
+            max(0.0, (float(request.start) + float(request.end)) / 2),
+            max(0.0, duration - 0.01),
+        )
+    return source_path, duration, reference_path, reference_time
+
+
 def render_picture_in_picture_video(
     input_path: Path,
     output_path: Path,
@@ -5380,13 +5652,7 @@ def render_picture_in_picture_video(
             str(temporary_path),
         ]
     )
-    completed = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        timeout=60 * 60,
-        check=False,
-    )
+    completed = run_ffmpeg(command, timeout=60 * 60)
     if completed.returncode != 0:
         temporary_path.unlink(missing_ok=True)
         details = completed.stderr.strip().splitlines()
@@ -5874,8 +6140,48 @@ def sync_source_segments_from_editable(
                 float(source.get("start") or 0),
                 float(source.get("end") or 0),
             )
+        # Capture the original source-anchor range before overwriting the words
+        # so a re-segmented subtitle track keeps its cut-draft time mapping.
+        # Without these anchors the retimed art-text cues drift forward.
+        original_words = source.get("words") or []
+        anchor_starts = [
+            word.get("sourceStart")
+            for word in original_words
+            if word.get("sourceStart") is not None
+        ]
+        anchor_ends = [
+            word.get("sourceEnd")
+            for word in original_words
+            if word.get("sourceEnd") is not None
+        ]
         source["text"] = combined_text
         source["words"] = combined_words
+        if anchor_starts and anchor_ends:
+            segment_start = float(source.get("start") or 0)
+            segment_end = max(
+                segment_start, float(source.get("end") or segment_start)
+            )
+            segment_duration = max(segment_end - segment_start, 0.001)
+            anchor_start = float(min(anchor_starts))
+            anchor_end = float(max(anchor_ends))
+            anchor_duration = anchor_end - anchor_start
+            for word in source["words"]:
+                word_start = float(word.get("start") or 0)
+                word_end = max(word_start, float(word.get("end") or word_start))
+                word["sourceStart"] = round(
+                    anchor_start
+                    + (word_start - segment_start)
+                    / segment_duration
+                    * anchor_duration,
+                    3,
+                )
+                word["sourceEnd"] = round(
+                    anchor_start
+                    + (word_end - segment_start)
+                    / segment_duration
+                    * anchor_duration,
+                    3,
+                )
     return synced
 
 
@@ -5897,17 +6203,20 @@ ART_TEXT_TRACK_SHARED_KEYS = (
 )
 
 
-def resegment_transcript_art_text_track(
-    job: dict[str, Any],
-    transcript: dict[str, Any],
+def update_transcript_track_text_for_segment(
+    art: dict[str, Any],
+    segment_start: float,
+    segment_end: float,
+    new_text: str,
 ) -> None:
-    """Rebuild the full-transcript art-text track from updated transcript text.
+    """Update only the subtitle-track cues that overlap an edited segment.
 
-    Only the auto subtitle track is touched; manual art text stays as the user
-    authored it. A failed re-segmentation must never break the text edit itself.
+    The cue TIMES stay exactly as they were; only the text changes, distributed
+    proportionally across the overlapping cues by their source duration. This
+    keeps the existing subtitle timeline stable when the 文案 is edited, instead
+    of re-flowing every cue from a fresh segmentation.
     """
     try:
-        art = job.get("art") or {}
         overlays = art.get("overlays") or []
         track_items = [
             item
@@ -5916,51 +6225,53 @@ def resegment_transcript_art_text_track(
         ]
         if not track_items:
             return
-        video_path = JOB_FILES.get(str(job.get("id") or ""))
-        if video_path is None or not video_path.is_file():
-            return
-        video_width, _ = probe_video_dimensions(video_path)
-        track = track_items[0]
-        duration = float(job.get("duration") or 0)
-        new_track = build_transcript_art_text_track(
-            transcript,
-            duration,
-            video_width,
-            font_id=str(track.get("font") or "bold"),
-            font_size=int(track.get("fontSize") or 54),
-            letter_spacing=int(track.get("letterSpacing") or 0),
-            stroke_width=int(track.get("strokeWidth") or 0),
-            semantic_breaks=None,
-            segmentation_method="local",
-        )
-        track_id = str(track.get("trackId") or new_track.get("trackId") or "transcript-full")
-        shared = {key: track.get(key) for key in ART_TEXT_TRACK_SHARED_KEYS}
-        new_overlays: list[dict[str, Any]] = []
-        for cue in new_track.get("cues") or []:
-            new_overlays.append(
-                {
-                    **shared,
-                    "text": str(cue.get("text") or ""),
-                    "start": float(cue.get("start") or 0),
-                    "end": float(cue.get("end") or 0),
-                    "trackId": track_id,
-                    "trackType": TRANSCRIPT_ART_TEXT_TRACK_TYPE,
-                    "sourceStart": cue.get("sourceStart"),
-                    "sourceEnd": cue.get("sourceEnd"),
-                }
-            )
-        art["overlays"] = [
+        overlapping = [
             item
-            for item in overlays
-            if item.get("trackType") != TRANSCRIPT_ART_TEXT_TRACK_TYPE
-        ] + new_overlays
+            for item in track_items
+            if float(item.get("sourceEnd") or item.get("end") or 0) > segment_start
+            and float(item.get("sourceStart") or item.get("start") or 0) < segment_end
+        ]
+        if not overlapping:
+            return
+        overlapping.sort(
+            key=lambda item: (
+                float(item.get("sourceStart") or item.get("start") or 0),
+                float(item.get("sourceEnd") or item.get("end") or 0),
+            )
+        )
+        chars = list(content_characters(new_text))
+        if not chars:
+            return
+        durations = [
+            max(
+                0.001,
+                float(item.get("sourceEnd") or item.get("end") or 0)
+                - float(item.get("sourceStart") or item.get("start") or 0),
+            )
+            for item in overlapping
+        ]
+        total = sum(durations)
+        cursor = 0
+        for index, item in enumerate(overlapping):
+            remaining_chars = len(chars) - cursor
+            remaining_cues = len(overlapping) - index
+            if index == len(overlapping) - 1:
+                count = remaining_chars
+            else:
+                count = round(remaining_chars * durations[index] / total)
+                # Leave at least one character for each cue still to come, and
+                # never strand a cue with no text when the input shrank.
+                count = min(count, remaining_chars - (remaining_cues - 1))
+                count = max(1, count)
+            item["text"] = "".join(chars[cursor : cursor + count])
+            cursor += count
         # The previously rendered art video used the old subtitles, so it is
         # now stale and must be regenerated.
         art["status"] = None
         art["outputUrl"] = None
         art["updatedAt"] = utc_now()
     except Exception:
-        # The subtitle re-flow is a best-effort enhancement.
+        # The subtitle text update is a best-effort enhancement.
         return
 
 
@@ -6813,6 +7124,7 @@ def process_cut_job(
     delete_ranges: list[dict[str, float]],
     transcript_delete_ranges: list[dict[str, float]] | None = None,
 ) -> None:
+    _set_thread_job(job_id)
     video_path = JOB_FILES[job_id]
     output_path = video_path.parent / "edited.mp4"
 
@@ -6836,6 +7148,7 @@ def process_cut_job(
             progress=35,
             ranges=media_ranges,
         )
+        check_cancelled(job_id)
         render_cut_video(video_path, output_path, media_ranges, duration)
         deleted_duration = sum(
             item["end"] - item["start"] for item in media_ranges
@@ -6874,6 +7187,13 @@ def process_cut_job(
             historyName=history_version["name"],
             error=None,
         )
+    except GenerationCancelledError:
+        update_edit_job(
+            job_id,
+            status="cancelled",
+            stage="已取消",
+            error="用户取消了生成。",
+        )
     except Exception as exc:
         update_edit_job(
             job_id,
@@ -6888,8 +7208,10 @@ def process_art_text_job(
     input_path: Path,
     overlays: list[dict[str, Any]],
 ) -> None:
+    _set_thread_job(job_id)
     output_path = input_path.parent / "art-text.mp4"
     try:
+        check_cancelled(job_id)
         update_art_job(
             job_id,
             status="processing",
@@ -6928,6 +7250,13 @@ def process_art_text_job(
             historyName=history_version["name"],
             error=None,
         )
+    except GenerationCancelledError:
+        update_art_job(
+            job_id,
+            status="cancelled",
+            stage="已取消",
+            error="用户取消了生成。",
+        )
     except Exception as exc:
         update_art_job(
             job_id,
@@ -6942,8 +7271,10 @@ def process_picture_in_picture_job(
     input_path: Path,
     overlays: list[dict[str, Any]],
 ) -> None:
+    _set_thread_job(job_id)
     output_path = input_path.parent / "picture-in-picture.mp4"
     try:
+        check_cancelled(job_id)
         update_picture_in_picture_job(
             job_id,
             status="processing",
@@ -6958,6 +7289,13 @@ def process_picture_in_picture_job(
             progress=100,
             outputUrl=f"/api/transcriptions/{job_id}/picture-in-picture-video",
             error=None,
+        )
+    except GenerationCancelledError:
+        update_picture_in_picture_job(
+            job_id,
+            status="cancelled",
+            stage="已取消",
+            error="用户取消了生成。",
         )
     except Exception as exc:
         update_picture_in_picture_job(
@@ -6976,6 +7314,7 @@ def process_preview_composition_job(
     composition_request: dict[str, Any],
 ) -> None:
     """Turn the shared live preview into one rendered video in a single job."""
+    _set_thread_job(job_id)
     video_path = JOB_FILES[job_id]
     edited_path = video_path.parent / "edited.mp4"
     art_path = video_path.parent / "art-text.mp4"
@@ -7028,6 +7367,7 @@ def process_preview_composition_job(
             ranges=media_ranges,
         )
         render_cut_video(video_path, edited_path, media_ranges, duration)
+        check_cancelled(job_id)
         output_duration = round(
             duration
             - sum(item["end"] - item["start"] for item in media_ranges),
@@ -7082,6 +7422,7 @@ def process_preview_composition_job(
                     progress=55,
                 )
             render_art_text_video(edited_path, art_path, final_art_overlays)
+            check_cancelled(job_id)
             update_art_job(
                 job_id,
                 status="completed",
@@ -7117,6 +7458,7 @@ def process_preview_composition_job(
                 },
             )
             render_picture_in_picture_video(current_input, pip_path, final_pip_overlays)
+            check_cancelled(job_id)
             update_picture_in_picture_job(
                 job_id,
                 status="completed",
@@ -7131,6 +7473,7 @@ def process_preview_composition_job(
         # Keep one canonical output for the shared editor button. The staged
         # files above are still retained for backwards-compatible result views,
         # while this file is always the exact final preview composition.
+        check_cancelled(job_id)
         composition_path = video_path.parent / "composition.mp4"
         shutil.copy2(current_input, composition_path)
         with JOBS_LOCK:
@@ -7156,6 +7499,45 @@ def process_preview_composition_job(
                 "historyId": history_version["id"],
                 "historyName": history_version["name"],
                 "error": None,
+                "updatedAt": utc_now(),
+            },
+        )
+    except GenerationCancelledError:
+        with JOBS_LOCK:
+            job = JOBS.get(job_id) or {}
+            edit_status = (job.get("edit") or {}).get("status")
+            art_status = (job.get("art") or {}).get("status")
+            pip_status = (job.get("pictureInPicture") or {}).get("status")
+        if edit_status in {"queued", "processing"}:
+            update_edit_job(
+                job_id,
+                status="cancelled",
+                stage="已取消",
+                error="用户取消了生成。",
+            )
+        if art_status in {"queued", "processing"}:
+            update_art_job(
+                job_id,
+                status="cancelled",
+                stage="已取消",
+                error="用户取消了生成。",
+            )
+        if pip_status in {"queued", "processing"}:
+            update_picture_in_picture_job(
+                job_id,
+                status="cancelled",
+                stage="已取消",
+                error="用户取消了生成。",
+            )
+        update_job(
+            job_id,
+            composition={
+                "status": "cancelled",
+                "stage": "已取消",
+                "progress": 100,
+                "outputUrl": None,
+                "outputDuration": None,
+                "error": "用户取消了生成。",
                 "updatedAt": utc_now(),
             },
         )
@@ -7329,6 +7711,7 @@ def process_art_suggestion_job(
 @app.get("/api/art-templates")
 def get_art_text_templates() -> dict[str, Any]:
     templates = list_art_text_templates()
+    hidden_builtins = list_hidden_art_text_templates()
     return {
         "templates": templates,
         "count": len(templates),
@@ -7338,6 +7721,8 @@ def get_art_text_templates() -> dict[str, Any]:
         "uploadedCount": sum(
             template["source"] == "uploaded" for template in templates
         ),
+        "hiddenCount": len(hidden_builtins),
+        "hiddenBuiltins": hidden_builtins,
     }
 
 
@@ -7415,7 +7800,13 @@ def update_art_text_template(
 @app.delete("/api/art-templates/{template_id}")
 def delete_art_text_template(template_id: str) -> dict[str, str]:
     if template_id in ART_TEXT_STYLES:
-        raise HTTPException(status_code=400, detail="内置艺术字模板不能删除。")
+        # Built-in templates are soft-deleted: hidden from the library so they
+        # can be restored later instead of being lost permanently.
+        with ART_TEMPLATE_LIBRARY_LOCK:
+            hidden = load_hidden_art_templates_unlocked()
+            hidden.add(template_id)
+            save_hidden_art_templates_unlocked(hidden)
+        return {"status": "hidden"}
     with JOBS_LOCK:
         is_used = any(
             overlay.get("artStyle") == template_id
@@ -7436,6 +7827,98 @@ def delete_art_text_template(template_id: str) -> dict[str, str]:
             item for item in templates if item.get("id") != template_id
         ]
         save_uploaded_art_templates_unlocked(templates)
+    return {"status": "deleted"}
+
+
+@app.post("/api/art-templates/{template_id}/restore")
+def restore_art_text_template(template_id: str) -> dict[str, str]:
+    if template_id not in ART_TEXT_STYLES:
+        raise HTTPException(status_code=404, detail="内置艺术字模板不存在。")
+    with ART_TEMPLATE_LIBRARY_LOCK:
+        hidden = load_hidden_art_templates_unlocked()
+        hidden.discard(template_id)
+        save_hidden_art_templates_unlocked(hidden)
+    return {"status": "restored"}
+
+
+@app.get("/api/art-position-presets")
+def get_art_position_presets() -> dict[str, Any]:
+    with ART_POSITION_PRESETS_LOCK:
+        presets = [
+            public_art_position_preset(record)
+            for record in load_art_position_presets_unlocked()
+        ]
+    return {"presets": presets, "count": len(presets)}
+
+
+@app.post("/api/art-position-presets", status_code=201)
+def create_art_position_preset(
+    request: ArtPositionPresetCreate,
+) -> dict[str, Any]:
+    name = request.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="坐标预设名称不能为空。")
+    with ART_POSITION_PRESETS_LOCK:
+        presets = load_art_position_presets_unlocked()
+        if len(presets) >= ART_POSITION_PRESET_MAX_COUNT:
+            raise HTTPException(
+                status_code=400,
+                detail=f"坐标预设最多保存 {ART_POSITION_PRESET_MAX_COUNT} 条。",
+            )
+        now = utc_now()
+        record = {
+            "id": f"pos-{uuid.uuid4().hex}",
+            "name": name,
+            "x": clamp_art_position(request.x),
+            "y": clamp_art_position(request.y),
+            "createdAt": now,
+            "updatedAt": now,
+        }
+        presets.append(record)
+        save_art_position_presets_unlocked(presets)
+    return public_art_position_preset(record)
+
+
+@app.patch("/api/art-position-presets/{preset_id}")
+def update_art_position_preset(
+    preset_id: str,
+    request: ArtPositionPresetUpdate,
+) -> dict[str, Any]:
+    if request.name is not None:
+        name = request.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="坐标预设名称不能为空。")
+    else:
+        name = None
+    with ART_POSITION_PRESETS_LOCK:
+        presets = load_art_position_presets_unlocked()
+        record = next(
+            (item for item in presets if item.get("id") == preset_id),
+            None,
+        )
+        if record is None:
+            raise HTTPException(status_code=404, detail="坐标预设不存在。")
+        if name is not None:
+            record["name"] = name
+        if request.x is not None:
+            record["x"] = clamp_art_position(request.x)
+        if request.y is not None:
+            record["y"] = clamp_art_position(request.y)
+        record["updatedAt"] = utc_now()
+        save_art_position_presets_unlocked(presets)
+        return public_art_position_preset(record)
+
+
+@app.delete("/api/art-position-presets/{preset_id}")
+def delete_art_position_preset(preset_id: str) -> dict[str, str]:
+    with ART_POSITION_PRESETS_LOCK:
+        presets = load_art_position_presets_unlocked()
+        if not any(item.get("id") == preset_id for item in presets):
+            raise HTTPException(status_code=404, detail="坐标预设不存在。")
+        presets = [
+            item for item in presets if item.get("id") != preset_id
+        ]
+        save_art_position_presets_unlocked(presets)
     return {"status": "deleted"}
 
 
@@ -7876,6 +8359,22 @@ def get_transcription(job_id: str) -> dict[str, Any]:
         return public_job(job)
 
 
+@app.post("/api/transcriptions/{job_id}/cancel")
+def cancel_transcription_job(job_id: str) -> dict[str, Any]:
+    """Cancel an in-progress video generation (edit / art / PiP / compose).
+
+    Flags the job, marks any in-flight sub-job as "cancelled", and terminates the
+    running FFmpeg process so the render stops promptly. Safe to call when
+    nothing is generating — the job is returned unchanged.
+    """
+    with JOBS_LOCK:
+        if job_id not in JOBS:
+            raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+    mark_job_cancelled(job_id)
+    with JOBS_LOCK:
+        return public_job(JOBS[job_id])
+
+
 @app.get("/api/transcriptions/{job_id}/cut-draft")
 def get_cut_draft(job_id: str) -> dict[str, Any]:
     with JOBS_LOCK:
@@ -8146,8 +8645,8 @@ def update_editable_transcript_segments(
         result["editableSegments"] = updated_segments
         if request.action == "text":
             # A text edit changes the actual transcript, so re-sync the ASR
-            # segments and rebuild the full-transcript art-text track so the
-            # subtitle text follows the edited 文案.
+            # segments and update the overlapping subtitle cues' text while
+            # keeping their times stable.
             result["segments"] = sync_source_segments_from_editable(
                 result.get("segments") or [],
                 updated_segments,
@@ -8156,7 +8655,20 @@ def update_editable_transcript_segments(
                 str(segment.get("text") or "")
                 for segment in result["segments"]
             )
-            resegment_transcript_art_text_track(job, result)
+            existing_art = job.get("art")
+            edited_editable = updated_segments[request.segmentIndex]
+            source_index = int(
+                edited_editable.get("sourceSegmentIndex", 0) or 0
+            )
+            source_segments = result.get("segments") or []
+            if existing_art is not None and 0 <= source_index < len(source_segments):
+                source_segment = source_segments[source_index]
+                update_transcript_track_text_for_segment(
+                    existing_art,
+                    float(source_segment.get("start") or 0),
+                    float(source_segment.get("end") or 0),
+                    source_segment.get("text") or "",
+                )
         job["updatedAt"] = utc_now()
         return {"editableSegments": copy.deepcopy(updated_segments)}
 
@@ -8202,6 +8714,7 @@ def create_cut(
         job["artSuggestion"] = None
         job["pictureInPicture"] = None
         job["composition"] = None
+        job["cancelRequested"] = False
         job["updatedAt"] = now
 
     background_tasks.add_task(
@@ -8551,6 +9064,7 @@ def create_art_text(
         JOBS[job_id]["art"] = art
         JOBS[job_id]["pictureInPicture"] = None
         JOBS[job_id]["composition"] = None
+        JOBS[job_id]["cancelRequested"] = False
         JOBS[job_id]["updatedAt"] = now
 
     background_tasks.add_task(process_art_text_job, job_id, input_path, overlays)
@@ -8598,10 +9112,8 @@ def create_picture_in_picture_prompt(
             raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
         video_path = JOB_FILES.get(job_id)
         try:
-            source_path, duration, _ = resolve_picture_in_picture_source(
-                job,
-                video_path,
-                request.source,
+            source_path, duration, reference_path, reference_time = (
+                resolve_picture_in_picture_reference(job, video_path, request)
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -8616,13 +9128,9 @@ def create_picture_in_picture_prompt(
     if request.end - request.start < 0.05:
         raise HTTPException(status_code=400, detail="文字片段时长过短。")
 
-    reference_time = min(
-        max(0.0, (float(request.start) + float(request.end)) / 2),
-        max(0.0, duration - 0.01),
-    )
     try:
         reference_image = extract_picture_in_picture_reference_frame(
-            source_path,
+            reference_path,
             reference_time,
         )
         prompt = generate_picture_in_picture_prompt_draft(
@@ -8663,10 +9171,8 @@ def create_picture_in_picture_image(
             raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
         video_path = JOB_FILES.get(job_id)
         try:
-            source_path, duration, _ = resolve_picture_in_picture_source(
-                job,
-                video_path,
-                request.source,
+            source_path, duration, reference_path, reference_time = (
+                resolve_picture_in_picture_reference(job, video_path, request)
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -8701,15 +9207,11 @@ def create_picture_in_picture_image(
         request.mode,
         request.aspectRatio,
     )
-    reference_time = min(
-        max(0.0, (float(request.start) + float(request.end)) / 2),
-        max(0.0, duration - 0.01),
-    )
     image_id = str(uuid.uuid4())
     image_path = source_path.parent / f"picture-in-picture-{image_id}.png"
     try:
         reference_image = extract_picture_in_picture_reference_frame(
-            source_path,
+            reference_path,
             reference_time,
         )
         generate_picture_in_picture_image(
@@ -8799,10 +9301,8 @@ def create_picture_in_picture_video_asset(
             raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
         video_path = JOB_FILES.get(job_id)
         try:
-            source_path, duration, _ = resolve_picture_in_picture_source(
-                job,
-                video_path,
-                request.source,
+            source_path, duration, reference_path, reference_time = (
+                resolve_picture_in_picture_reference(job, video_path, request)
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -8830,13 +9330,9 @@ def create_picture_in_picture_video_asset(
     if request.end - request.start < 0.05:
         raise HTTPException(status_code=400, detail="文字片段时长过短。")
 
-    reference_time = min(
-        max(0.0, (float(request.start) + float(request.end)) / 2),
-        max(0.0, duration - 0.01),
-    )
     try:
         reference_image = extract_picture_in_picture_reference_frame(
-            source_path,
+            reference_path,
             reference_time,
         )
     except RuntimeError as exc:
@@ -9074,6 +9570,7 @@ def create_preview_composition(
         latest_job["artSuggestion"] = None
         latest_job["pictureInPicture"] = picture_in_picture
         latest_job["composition"] = composition
+        latest_job["cancelRequested"] = False
         latest_job["updatedAt"] = now
 
     background_tasks.add_task(
@@ -9142,6 +9639,7 @@ def create_picture_in_picture_video(
     with JOBS_LOCK:
         JOBS[job_id]["pictureInPicture"] = picture_in_picture
         JOBS[job_id]["composition"] = None
+        JOBS[job_id]["cancelRequested"] = False
         JOBS[job_id]["updatedAt"] = now
 
     background_tasks.add_task(

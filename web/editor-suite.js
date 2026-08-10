@@ -87,6 +87,14 @@
   const timelineTrack = document.querySelector("#cutFrameTimelineTrack");
   const previewVideo = document.querySelector("#cutPreviewVideo");
   const previewStage = document.querySelector("#cutVideoStage");
+  const previewGrid = previewStage?.querySelector(".preview-grid");
+  const previewGridToggle = document.querySelector(
+    "[data-preview-grid-toggle]",
+  );
+  const douyinPreviewToggle = document.querySelector(
+    "[data-douyin-preview-toggle]",
+  );
+  const douyinChrome = document.querySelector("#editorSuiteDouyinChrome");
   const generateButton = root.querySelector("[data-editor-suite-generate]");
   const downloadButton = root.querySelector("[data-editor-suite-download]");
   const frameEntries = new Map();
@@ -100,6 +108,9 @@
   let frameSyncRequest = 0;
   let currentJob = null;
   let previousJobId = null;
+  let douyinPreviewEnabled = false;
+  let douyinBaseVideo = null;
+  let previewGridStateBeforeDouyin = null;
   let cutDraftActive = false;
   let cutDraftState = {
     active: false,
@@ -151,6 +162,154 @@
     const tool = tools.get(name);
     if (stateLabel) stateLabel.textContent = label;
     if (tool) tool.classList.toggle("is-complete", complete);
+  }
+
+  function setDouyinPreviewAvailable(enabled) {
+    if (douyinPreviewToggle) {
+      douyinPreviewToggle.disabled = !enabled;
+      douyinPreviewToggle.setAttribute("aria-disabled", String(!enabled));
+      douyinPreviewToggle.tabIndex = enabled ? 0 : -1;
+    }
+    if (!enabled) setDouyinPreviewEnabled(false);
+  }
+
+  function setDouyinPreviewEnabled(enabled) {
+    const nextEnabled = Boolean(enabled && currentJob?.id);
+    if (nextEnabled && !douyinPreviewEnabled) {
+      previewGridStateBeforeDouyin = previewGrid
+        ? !previewGrid.hidden
+        : null;
+      if (previewGrid) previewGrid.hidden = true;
+      if (previewGridToggle) {
+        previewGridToggle.disabled = true;
+        previewGridToggle.setAttribute("aria-pressed", "false");
+        previewGridToggle.title = "抖音发布预览中不显示构图辅助线";
+      }
+    } else if (!nextEnabled && douyinPreviewEnabled) {
+      if (previewGrid && previewGridStateBeforeDouyin !== null) {
+        previewGrid.hidden = !previewGridStateBeforeDouyin;
+      }
+      if (previewGridToggle) {
+        previewGridToggle.disabled = false;
+        previewGridToggle.setAttribute(
+          "aria-pressed",
+          String(Boolean(previewGridStateBeforeDouyin)),
+        );
+        previewGridToggle.title = "九宫格构图辅助线";
+      }
+      previewGridStateBeforeDouyin = null;
+    }
+    douyinPreviewEnabled = nextEnabled;
+    previewStage?.classList.toggle(
+      "is-douyin-preview",
+      douyinPreviewEnabled,
+    );
+    if (douyinChrome) {
+      douyinChrome.hidden = !douyinPreviewEnabled;
+      douyinChrome.setAttribute(
+        "aria-hidden",
+        String(!douyinPreviewEnabled),
+      );
+    }
+    if (douyinPreviewToggle) {
+      douyinPreviewToggle.setAttribute(
+        "aria-pressed",
+        String(douyinPreviewEnabled),
+      );
+      douyinPreviewToggle.title = douyinPreviewEnabled
+        ? "关闭抖音发布预览"
+        : "抖音发布预览";
+    }
+    if (douyinPreviewEnabled) {
+      previewStage?.setAttribute("data-preview-mode", "douyin");
+    } else {
+      previewStage?.removeAttribute("data-preview-mode");
+    }
+    updateDouyinBaseVideo();
+    window.dispatchEvent(new Event("resize"));
+    renderMirroredPreview();
+    syncMirroredPlayback();
+  }
+
+  function editedDouyinVideoUrl() {
+    if (
+      !douyinPreviewEnabled ||
+      currentJob?.edit?.status !== "completed" ||
+      !currentJob.edit.outputUrl
+    ) {
+      return "";
+    }
+    return String(currentJob.edit.outputUrl);
+  }
+
+  function ensureDouyinBaseVideo() {
+    if (douyinBaseVideo || !previewVideo) return douyinBaseVideo;
+    douyinBaseVideo = document.createElement("video");
+    douyinBaseVideo.className = "editor-suite-douyin-base-video";
+    douyinBaseVideo.muted = true;
+    douyinBaseVideo.playsInline = true;
+    douyinBaseVideo.preload = "metadata";
+    douyinBaseVideo.setAttribute("aria-hidden", "true");
+    douyinBaseVideo.tabIndex = -1;
+    douyinBaseVideo.addEventListener("loadedmetadata", () => {
+      syncDouyinBasePlayback(true);
+    });
+    previewVideo.insertAdjacentElement("afterend", douyinBaseVideo);
+    return douyinBaseVideo;
+  }
+
+  function updateDouyinBaseVideo() {
+    if (!previewStage) return;
+    const editedUrl = editedDouyinVideoUrl();
+    const useEditedBase = Boolean(editedUrl);
+    previewStage.classList.toggle("has-douyin-edited-base", useEditedBase);
+    previewStage.dataset.douyinVideoSource = useEditedBase
+      ? "edited"
+      : cutDraftActive
+        ? "cut-draft"
+        : "original";
+    if (!useEditedBase) {
+      douyinBaseVideo?.pause();
+      return;
+    }
+    const video = ensureDouyinBaseVideo();
+    if (!video) return;
+    if (video.dataset.sourceUrl !== editedUrl) {
+      video.dataset.sourceUrl = editedUrl;
+      const version = encodeURIComponent(
+        currentJob?.edit?.updatedAt || currentJob?.updatedAt || "",
+      );
+      video.src = `${editedUrl}${editedUrl.includes("?") ? "&" : "?"}v=${version}`;
+      video.load();
+      return;
+    }
+    syncDouyinBasePlayback();
+  }
+
+  function syncDouyinBasePlayback(force = false) {
+    if (
+      !douyinPreviewEnabled ||
+      !previewStage?.classList.contains("has-douyin-edited-base") ||
+      !douyinBaseVideo ||
+      !previewVideo
+    ) {
+      return;
+    }
+    const editedTime = workspaceCurrentTime();
+    if (
+      douyinBaseVideo.readyState >= 1 &&
+      (force || Math.abs((Number(douyinBaseVideo.currentTime) || 0) - editedTime) > 0.24)
+    ) {
+      douyinBaseVideo.currentTime = Math.min(
+        editedTime,
+        Math.max(0, (Number(douyinBaseVideo.duration) || editedTime) - 0.01),
+      );
+    }
+    if (!previewVideo.paused && !previewVideo.ended) {
+      douyinBaseVideo.play().catch(() => {});
+    } else {
+      douyinBaseVideo.pause();
+    }
   }
 
   function previewCompositionState() {
@@ -309,6 +468,7 @@
         title: "合成成片",
         progress: Number(payload.progress) || 5,
         status: payload.stage || "正在生成当前预览…",
+        onCancel: () => void cancelComposition(),
       });
       pollComposition(jobId);
     } catch (error) {
@@ -322,6 +482,25 @@
       ) {
         window.handleExpiredTask();
       }
+    }
+  }
+
+  async function cancelComposition() {
+    const jobId = currentJobId();
+    if (!jobId) return;
+    if (compositionPollTimer) window.clearTimeout(compositionPollTimer);
+    try {
+      const response = await fetch(
+        `/api/transcriptions/${encodeURIComponent(jobId)}/cancel`,
+        { method: "POST" },
+      );
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "无法取消生成。");
+      renderJobState(payload);
+      syncGenerationButton();
+      window.appGeneration?.fail("已取消生成。");
+    } catch (error) {
+      window.appGeneration?.fail(error.message || "取消失败，请重试。");
     }
   }
 
@@ -355,7 +534,12 @@
           videoUrl: outputUrl,
           downloadUrl: outputUrl ? `${outputUrl}?download=true` : null,
           duration: formatGenerationDuration(composition.outputDuration),
+          redirectOnClose: embeddedEditor ? null : "/",
         });
+        return;
+      }
+      if (composition?.status === "cancelled") {
+        syncGenerationButton();
         return;
       }
       if (composition?.status === "failed") {
@@ -525,6 +709,7 @@
   }
 
   function syncMirroredPlayback() {
+    syncDouyinBasePlayback();
     const canvas = previewOverlay?.querySelector(".editor-suite-preview-canvas");
     if (!canvas || !previewVideo) return;
     const current = Number(previewVideo.currentTime) || 0;
@@ -569,7 +754,9 @@
       return;
     }
 
-    const nextState = { signature: JSON.stringify(layers) };
+    const nextState = {
+      signature: JSON.stringify({ layers, douyinPreviewEnabled }),
+    };
     if (renderedPreviewState?.signature === nextState.signature) {
       previewOverlay.hidden = false;
       syncMirroredPlayback();
@@ -612,22 +799,39 @@
 
   function renderMirroredTimeline() {
     if (!timelineLayer) return;
-    const timelineStates = [toolStates.get("art"), toolStates.get("pip")]
-      .filter(Boolean);
-    const timelineHtml = timelineStates
-      .map((state) => state.timelineHtml)
-      .filter(Boolean)
-      .join("");
+    const timelineStates = [
+      ["art", toolStates.get("art")],
+      ["pip", toolStates.get("pip")],
+    ].filter(([, state]) => state?.timelineHtml);
+    let timelineTrackOffset = 0;
+    const timelineHtml = timelineStates.map(([kind, state]) => {
+      const container = document.createElement("div");
+      container.innerHTML = state.timelineHtml;
+      for (const segment of container.children) {
+        segment.dataset.effectKind = kind;
+        const localTrackIndex = Number(segment.dataset.timelineTrackIndex) || 0;
+        segment.dataset.timelineTrackIndex = String(
+          timelineTrackOffset + localTrackIndex,
+        );
+        segment.style.top = `${(
+          timelineTrackOffset + localTrackIndex
+        ) * 30 + 2}px`;
+      }
+      timelineTrackOffset += Math.max(1, Number(state.timelineTrackCount) || 1);
+      return container.innerHTML;
+    }).join("");
     const showEffectTrack = Boolean(timelineHtml);
     const nextState = {
       kind: "shared",
       html: showEffectTrack ? timelineHtml : "",
       visible: showEffectTrack,
+      trackCount: showEffectTrack ? timelineTrackOffset : 0,
     };
     if (
       renderedTimelineState?.kind === nextState.kind &&
       renderedTimelineState.html === nextState.html &&
-      renderedTimelineState.visible === nextState.visible
+      renderedTimelineState.visible === nextState.visible &&
+      renderedTimelineState.trackCount === nextState.trackCount
     ) {
       return;
     }
@@ -637,6 +841,24 @@
     }
     timelineLayer.hidden = !nextState.visible;
     timelineTrack?.classList.toggle("has-effect-track", nextState.visible);
+    if (timelineTrack) {
+      if (nextState.visible) {
+        const trackAreaHeight = nextState.trackCount * 30;
+        timelineTrack.style.setProperty(
+          "--editor-layer-timeline-height",
+          `${trackAreaHeight}px`,
+        );
+        timelineTrack.style.setProperty(
+          "--editor-timeline-track-height",
+          `${74 + trackAreaHeight}px`,
+        );
+        timelineLayer.style.height = `${trackAreaHeight}px`;
+      } else {
+        timelineTrack.style.removeProperty("--editor-layer-timeline-height");
+        timelineTrack.style.removeProperty("--editor-timeline-track-height");
+        timelineLayer.style.removeProperty("height");
+      }
+    }
     renderedTimelineState = nextState;
   }
 
@@ -699,6 +921,7 @@
     setToolLink("cut", "/", true);
     setToolLink("art", "#", false);
     setToolLink("pip", "#", false);
+    setDouyinPreviewAvailable(false);
     setToolState("cut", "上传或选择视频");
     setToolState("art", "等待视频准备完成");
     setToolState("pip", "等待视频准备完成");
@@ -733,6 +956,7 @@
     }
 
     currentJob = job;
+    updateDouyinBaseVideo();
     if (!job.composition) {
       job.composition = null;
     }
@@ -765,6 +989,7 @@
       `/picture-in-picture?job=${encodedJobId}&source=${pipSource}`,
       downstreamReady,
     );
+    setDouyinPreviewAvailable(ready);
 
     setToolState(
       "cut",
@@ -899,10 +1124,15 @@
       transcript: payload.transcript || null,
     };
     cutDraftActive = cutDraftState.active;
+    updateDouyinBaseVideo();
     for (const name of ["art", "pip"]) syncFrameCutDraft(name);
     if (currentJob) renderJobState(currentJob);
     else syncGenerationButton();
   }
+
+  douyinPreviewToggle?.addEventListener("click", () => {
+    setDouyinPreviewEnabled(!douyinPreviewEnabled);
+  });
 
   for (const [name, tool] of tools) {
     tool.addEventListener("click", (event) => {
@@ -988,6 +1218,7 @@
       overlayWidth: Number(data.overlayWidth) || 1,
       overlayHeight: Number(data.overlayHeight) || 1,
       timelineHtml: String(data.timelineHtml || ""),
+      timelineTrackCount: Math.max(1, Number(data.timelineTrackCount) || 1),
       generationDisabled: data.generationDisabled !== false,
       generationLabel: String(data.generationLabel || ""),
       generationBusy: Boolean(data.generationBusy),
@@ -1024,36 +1255,363 @@
     previewVideo?.addEventListener(eventName, scheduleFrameSync);
   }
 
+  function beginMirroredPipResize(event, target, canvas, id, direction) {
+    const canvasRect = canvas?.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    if (!canvasRect || canvasRect.width <= 0 || canvasRect.height <= 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const startClientX = event.clientX;
+    const startClientY = event.clientY;
+    const startWidth =
+      Number.parseFloat(target.style.width) / 100 ||
+      targetRect.width / canvasRect.width;
+    const centerX = Number.parseFloat(target.style.left) / 100 || 0.5;
+    const centerY = Number.parseFloat(target.style.top) / 100 || 0.5;
+    const media = target.querySelector("img, video");
+    const imageAspectRatio = Math.max(
+      0.1,
+      media?.naturalWidth && media?.naturalHeight
+        ? media.naturalWidth / media.naturalHeight
+        : media?.videoWidth && media?.videoHeight
+          ? media.videoWidth / media.videoHeight
+          : targetRect.width / targetRect.height,
+    );
+    const maximumWidth = Math.max(
+      0.05,
+      Math.min(
+        0.55,
+        2 * Math.min(centerX, 1 - centerX),
+        (2 * Math.min(centerY, 1 - centerY) * imageAspectRatio * canvasRect.height) /
+          canvasRect.width,
+      ),
+    );
+    let moved = false;
+    let framePending = false;
+    let latestWidth = startWidth;
+    let finished = false;
+
+    const move = (moveEvent) => {
+      const deltaX = moveEvent.clientX - startClientX;
+      const deltaY = moveEvent.clientY - startClientY;
+      if (!moved && Math.hypot(deltaX, deltaY) < 3) return;
+      moved = true;
+      if (framePending) return;
+      framePending = true;
+      const horizontalDirection = direction.includes("e")
+        ? 1
+        : direction.includes("w")
+          ? -1
+          : 0;
+      const verticalDirection = direction.includes("s")
+        ? 1
+        : direction.includes("n")
+          ? -1
+          : 0;
+      const horizontalChange =
+        (horizontalDirection * deltaX * 2) / canvasRect.width;
+      const verticalChange =
+        (verticalDirection * deltaY * 2 * imageAspectRatio) /
+        canvasRect.width;
+      const widthChange =
+        horizontalDirection && verticalDirection
+          ? Math.abs(horizontalChange) >= Math.abs(verticalChange)
+            ? horizontalChange
+            : verticalChange
+          : horizontalChange || verticalChange;
+      const width = Math.min(
+        maximumWidth,
+        Math.max(Math.min(0.2, maximumWidth), startWidth + widthChange),
+      );
+      latestWidth = width;
+      window.requestAnimationFrame(() => {
+        framePending = false;
+        if (finished) return;
+        if (!previewOverlay?.contains(target)) return;
+        target.classList.add("is-selected", "is-resizing");
+        target.style.width = `${width * 100}%`;
+        frameEntries.get("pip")?.frame.contentWindow?.postMessage(
+          { type: "editor-suite:resize-effect", kind: "pip", id, width },
+          window.location.origin,
+        );
+      });
+    };
+
+    const finish = () => {
+      finished = true;
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      target.classList.remove("is-resizing");
+      frameEntries.get("pip")?.frame.contentWindow?.postMessage(
+        {
+          type: "editor-suite:resize-effect",
+          kind: "pip",
+          id,
+          width: latestWidth,
+        },
+        window.location.origin,
+      );
+      frameEntries.get("pip")?.frame.contentWindow?.postMessage(
+        { type: "editor-suite:move-finish", kind: "pip", id },
+        window.location.origin,
+      );
+    };
+
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish, { once: true });
+    window.addEventListener("pointercancel", finish, { once: true });
+  }
+
   previewOverlay?.addEventListener("pointerdown", (event) => {
-    if (activeTool === "cut") return;
+    if (activeTool === "cut" || event.button !== 0) return;
     const target = event.target.closest("[data-overlay-id], [data-picture-id]");
     if (!target) return;
     const effectKind = target.closest("[data-effect-kind]")?.dataset.effectKind;
     if (effectKind !== activeTool) return;
     event.preventDefault();
-    const bounds = previewStage.getBoundingClientRect();
+    const canvas = target.closest(".editor-suite-preview-canvas");
     const id = target.dataset.overlayId || target.dataset.pictureId;
-    const move = (moveEvent) => {
-      const x = Math.min(0.95, Math.max(0.05, (moveEvent.clientX - bounds.left) / bounds.width));
-      const y = Math.min(0.95, Math.max(0.05, (moveEvent.clientY - bounds.top) / bounds.height));
-      frameEntries.get(effectKind)?.frame.contentWindow?.postMessage(
-        { type: "editor-suite:move-effect", kind: effectKind, id, x, y },
-        window.location.origin,
+    const resizeHandle = event.target.closest("[data-pip-resize]");
+    if (effectKind === "pip" && resizeHandle) {
+      beginMirroredPipResize(
+        event,
+        target,
+        canvas,
+        id,
+        resizeHandle.dataset.pipResize,
       );
+      return;
+    }
+    const startClientX = event.clientX;
+    const startClientY = event.clientY;
+    let moved = false;
+    let framePending = false;
+    let currentTarget = target;
+
+    // Capture the grab offset — the pointer's distance from the element's
+    // visual center — plus the canvas bounds once at drag start, so the grabbed
+    // point stays under the pointer (1:1) instead of the element center snapping
+    // onto it. The canvas may be rebuilt while dragging, so its rect is frozen
+    // here rather than re-read from a possibly-detached node.
+    const canvasRect = canvas?.getBoundingClientRect();
+    const grabRect = target.getBoundingClientRect();
+    const grabOffsetX = event.clientX - (grabRect.left + grabRect.width / 2);
+    const grabOffsetY = event.clientY - (grabRect.top + grabRect.height / 2);
+
+    // The mirror canvas may be rebuilt by a snapshot while dragging, so
+    // re-resolve the element by id instead of keeping a stale reference.
+    const resolveTarget = () => {
+      if (previewOverlay?.contains(currentTarget)) return currentTarget;
+      const found = canvas?.querySelector(
+        `[data-picture-id="${id}"], [data-overlay-id="${id}"]`,
+      );
+      if (found) currentTarget = found;
+      return currentTarget;
     };
+
+    const move = (moveEvent) => {
+      const deltaX = moveEvent.clientX - startClientX;
+      const deltaY = moveEvent.clientY - startClientY;
+      if (!moved && Math.hypot(deltaX, deltaY) < 3) return;
+      moved = true;
+      if (framePending) return;
+      framePending = true;
+      const clientX = moveEvent.clientX;
+      const clientY = moveEvent.clientY;
+      // Coalesce to one write per frame and move the mirrored element directly
+      // (no snapshot round-trip), so dragging stays smooth on the compositor.
+      window.requestAnimationFrame(() => {
+        framePending = false;
+        const element = resolveTarget();
+        if (!previewOverlay?.contains(element)) return;
+        element.classList.add("is-dragging");
+        if (!canvasRect || canvasRect.width <= 0 || canvasRect.height <= 0) return;
+        const x = Math.min(
+          0.95,
+          Math.max(
+            0.05,
+            (clientX - grabOffsetX - canvasRect.left) / canvasRect.width,
+          ),
+        );
+        const y = Math.min(
+          0.95,
+          Math.max(
+            0.05,
+            (clientY - grabOffsetY - canvasRect.top) / canvasRect.height,
+          ),
+        );
+        element.style.left = `${x * 100}%`;
+        element.style.top = `${y * 100}%`;
+        frameEntries.get(effectKind)?.frame.contentWindow?.postMessage(
+          { type: "editor-suite:move-effect", kind: effectKind, id, x, y },
+          window.location.origin,
+        );
+      });
+    };
+
     const finish = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      resolveTarget()?.classList.remove("is-dragging");
+      frameEntries.get(effectKind)?.frame.contentWindow?.postMessage(
+        { type: "editor-suite:move-finish", kind: effectKind, id },
+        window.location.origin,
+      );
     };
-    move(event);
+
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", finish, { once: true });
+    window.addEventListener("pointercancel", finish, { once: true });
   });
+
+  timelineLayer?.addEventListener(
+    "pointerdown",
+    (event) => {
+      const pipSegment = event.target.closest(
+        '.pip-timeline-segment[data-effect-kind="pip"][data-picture-id]',
+      );
+      if (pipSegment && event.button === 0) {
+        event.preventDefault();
+        event.stopPropagation();
+        const id = pipSegment.dataset.pictureId;
+        const start = Math.max(0, Number(pipSegment.dataset.effectStart) || 0);
+        const pipFrame = frameEntries.get("pip")?.frame;
+        if (!pipFrame?.contentWindow) return;
+        openTool("pip", desiredToolUrls.get("pip"));
+        previewVideo.currentTime = workspaceSourceTime(start);
+        pipFrame.contentWindow.postMessage(
+          {
+            type: "editor-suite:select-pip-timeline",
+            kind: "pip",
+            id,
+            currentTime: start,
+          },
+          window.location.origin,
+        );
+        return;
+      }
+      const segment = event.target.closest(
+        '.frame-timeline-segment[data-effect-kind="art"][data-overlay-id]',
+      );
+      if (!segment || event.button !== 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const id = segment.dataset.overlayId;
+      const artFrame = frameEntries.get("art")?.frame;
+      if (!artFrame?.contentWindow) return;
+      openTool("art", desiredToolUrls.get("art"));
+      artFrame.contentWindow.postMessage(
+        {
+          type: "editor-suite:select-art-timeline",
+          kind: "art",
+          id,
+          currentTime: workspaceCurrentTime(),
+        },
+        window.location.origin,
+      );
+      if (segment.dataset.timelineEditable !== "true") return;
+
+      const mode =
+        event.target.closest("[data-art-time-drag]")?.dataset.artTimeDrag ||
+        "move";
+      const original = {
+        start: Number(segment.dataset.effectStart) || 0,
+        end: Number(segment.dataset.effectEnd) || 0,
+      };
+      const startClientX = event.clientX;
+      const total =
+        Number(previewVideo.duration) ||
+        Number(document.querySelector("#cutFrameTimelineSeek")?.max) ||
+        0;
+      let moved = false;
+      let currentSegment = segment;
+
+      const resolveSegment = () => {
+        if (timelineLayer.contains(currentSegment)) return currentSegment;
+        const found = timelineLayer.querySelector(
+          `.frame-timeline-segment[data-effect-kind="art"][data-overlay-id="${id}"]`,
+        );
+        if (found) currentSegment = found;
+        return currentSegment;
+      };
+
+      const move = (moveEvent) => {
+        if (!moved && Math.abs(moveEvent.clientX - startClientX) < 3) return;
+        moved = true;
+        if (total <= 0) return;
+        const delta =
+          ((moveEvent.clientX - startClientX) /
+            timelineTrack.getBoundingClientRect().width) * total;
+        let start = original.start;
+        let end = original.end;
+        if (mode === "start") {
+          start = Math.min(
+            original.end - 0.1,
+            Math.max(0, original.start + delta),
+          );
+        } else if (mode === "end") {
+          end = Math.min(
+            total,
+            Math.max(original.start + 0.1, original.end + delta),
+          );
+        } else {
+          const length = original.end - original.start;
+          start = Math.min(total - length, Math.max(0, original.start + delta));
+          end = start + length;
+        }
+        const liveSegment = resolveSegment();
+        liveSegment.classList.add("is-selected", "is-dragging");
+        liveSegment.style.left = `${(start / total) * 100}%`;
+        liveSegment.style.width = `${Math.max(
+          0.8,
+          ((end - start) / total) * 100,
+        )}%`;
+        const currentTime = mode === "end" ? end : start;
+        previewVideo.currentTime = workspaceSourceTime(currentTime);
+        artFrame.contentWindow.postMessage(
+          {
+            type: "editor-suite:adjust-art-timeline",
+            kind: "art",
+            id,
+            start,
+            end,
+            currentTime,
+          },
+          window.location.origin,
+        );
+      };
+
+      const finish = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", finish);
+        window.removeEventListener("pointercancel", finish);
+        resolveSegment()?.classList.remove("is-dragging");
+        artFrame.contentWindow.postMessage(
+          { type: "editor-suite:move-finish", kind: "art", id },
+          window.location.origin,
+        );
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", finish, { once: true });
+      window.addEventListener("pointercancel", finish, { once: true });
+    },
+    true,
+  );
 
   timelineTrack?.addEventListener(
     "pointerdown",
     (event) => {
       if (activeTool === "cut") return;
+      if (
+        event.target.closest(
+          '.frame-timeline-segment[data-effect-kind="art"], ' +
+            '.pip-timeline-segment[data-effect-kind="pip"]',
+        )
+      ) {
+        return;
+      }
       event.preventDefault();
       event.stopImmediatePropagation();
       const seek = (moveEvent) => {
@@ -1090,6 +1648,7 @@
     update: renderJobState,
     openTool,
     activeTool: () => activeTool,
+    isDouyinPreview: () => douyinPreviewEnabled,
     setCutDraft,
     generateCurrentPreview,
   };
