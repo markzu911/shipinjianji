@@ -25,7 +25,7 @@
 - 画中画支持图片和动态视频两种素材：图片使用 Seedream 5.0 Lite，视频使用 Seedance；两者都支持自定义提示词或根据所选文案智能生成，生成后可实时预览并分别调整位置与大小，用户确认后才合成最终视频。
 - Chrome/Edge 桌面与窄屏响应式界面。
 
-当前任务状态保存在内存中，服务重启后任务记录会清空；源视频、音频和已生成的剪辑视频仍保存在 `data/jobs/`。这是 MVP 阶段的有意取舍。
+当前任务状态保存在内存中，服务重启后任务记录会清空。最终成片成功保存或任务进入终态失败后，`data/jobs/` 中的工作目录会立即删除；未完成任务由启动清理和定时清理按保留策略回收。
 
 ## 本地启动
 
@@ -41,6 +41,8 @@ Copy-Item .env.example .env
 
 打开 <http://127.0.0.1:8001>。
 
+启动后也可以打开 <http://127.0.0.1:8001/settings> 修改各功能使用的模型名称、服务商请求地址和 API Key。配置保存后即时生效，通过局域网访问应用的设备也可以修改。
+
 如果系统中的 `python` 不可用，可使用 Codex 工作区 Python 创建虚拟环境：
 
 ```powershell
@@ -52,10 +54,12 @@ Copy-Item .env.example .env
 应用启动时会自动读取项目根目录的 `.env`。常用配置：
 
 - `DASHSCOPE_API_KEY`：阿里云百炼 API Key；程序也兼容原有的 `ASR_API_KEY` 变量名。
+- `DASHSCOPE_HTTP_API_URL=https://dashscope.aliyuncs.com/api/v1`：百炼文本与多模态模型的 HTTP 请求地址。
 - `ASR_MODEL=paraformer-realtime-v2`：直接识别本地音频，启用时间戳校准并返回句子和词级毫秒时间戳。
 - `PUNCTUATION_MODEL=qwen-plus`：对连续口播执行二次标点和断句校对。
 - `SUGGESTION_MODEL=qwen3.7-max`：分析疑似口误并返回带词级索引的结构化删减建议。
 - `ART_SUGGESTION_MODEL=qwen3.6-flash`：结合关键帧和时间轴生成待确认的艺术字草稿。
+- `ART_TEXT_SEGMENTATION_MODEL=qwen-plus`：按语义将全文切分为艺术字单行片段。
 - `PIP_PROMPT_MODEL=qwen-plus`：为画中画素材编写提示词，与口误分析模型独立配置。
 - `ARK_API_KEY`：火山方舟 API Key，供 Seedream 生图和 Seedance 视频生成共同使用。
 - `SEEDREAM_MODEL=doubao-seedream-5-0-lite-260128`：Seedream 图片生成模型，可替换为当前账号已开通的兼容模型 ID。
@@ -65,20 +69,22 @@ Copy-Item .env.example .env
 - `MAX_UPLOAD_MB=1024`：上传大小限制。
 - `JOB_RETENTION_DAYS=7`：临时任务目录保留天数；只影响 `data/jobs/`，不会删除剪辑历史。
 - `JOB_MAX_STORED=80`：最多保留多少个非活跃临时任务目录；设为 `0` 时关闭数量上限清理。
+- `JOB_CLEANUP_INTERVAL_SECONDS=21600`：服务运行期间自动清理临时任务的间隔，默认每 6 小时执行一次；设为 `0` 时关闭定时清理。
+- `HISTORY_MAX_STORED=20`：剪辑历史最多保留最新 20 条，超出后自动删除最旧记录及其文件；设为 `0` 时关闭历史数量上限。
 - `DATA_DIR=./data`：视频和提取音频的保存目录。
 
 API Key 只配置在服务端 `.env`，不要写入 `web/` 下的浏览器代码，也不要提交到 Git。
 
 ## 临时任务清理
 
-`data/jobs/` 保存上传源视频、提取音频和生成中的临时文件。服务重启后内存任务状态会清空，但这些文件仍会留在磁盘。可先预览再执行清理：
+`data/jobs/` 保存上传源视频、提取音频和生成中的临时文件。服务会在启动时立即清理一次，并在运行期间按 `JOB_CLEANUP_INTERVAL_SECONDS` 定时清理。也可以先预览再手动执行：
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8001/api/maintenance/jobs
 Invoke-RestMethod http://127.0.0.1:8001/api/maintenance/jobs/cleanup -Method Post -ContentType 'application/json' -Body '{"dryRun":false}'
 ```
 
-清理只会处理 UUID 形式的 `data/jobs/` 任务目录，并跳过当前服务内存中仍活跃的任务；`data/history/` 不受影响。
+临时任务清理只会处理 UUID 形式的 `data/jobs/` 任务目录，并跳过正在解析或生成的任务。`data/history/` 由独立的 `HISTORY_MAX_STORED` 上限管理，默认只保留最新 20 条。
 
 ## 艺术字效果模板文件
 

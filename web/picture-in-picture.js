@@ -120,6 +120,10 @@ let previewVisibilitySignature = "";
 let cutDraftActive = false;
 let pendingCutDraft = null;
 let pipEditorReady = false;
+const pipTimelineStore = window.EditorTimeline.createStore(
+  { duration: 0, tracks: [] },
+  { onCommit: () => persistEmbeddedPipDraft() },
+);
 
 function clamp(value, minimum, maximum) {
   return Math.min(maximum, Math.max(minimum, value));
@@ -375,6 +379,13 @@ function finishPictureDrag(event) {
   drag.element.removeEventListener("pointerup", finishPictureDrag);
   drag.element.removeEventListener("pointercancel", finishPictureDrag);
   activePictureDrag = null;
+  syncPipTimelineModel();
+  pipTimelineStore.patchClipPayload(
+    pipTimelineClipId(drag.item.id),
+    { x: drag.item.x, y: drag.item.y, width: drag.item.width },
+    { silent: true },
+  );
+  pipTimelineStore.commit("preview-move");
   renderGeneratedList();
   renderTimelineSegments();
   renderPreview();
@@ -438,6 +449,13 @@ function finishPictureResize(event) {
   window.removeEventListener("pointerup", finishPictureResize);
   window.removeEventListener("pointercancel", finishPictureResize);
   activePictureResize = null;
+  syncPipTimelineModel();
+  pipTimelineStore.patchClipPayload(
+    pipTimelineClipId(resize.item.id),
+    { x: resize.item.x, y: resize.item.y, width: resize.item.width },
+    { silent: true },
+  );
+  pipTimelineStore.commit("preview-resize");
   renderGeneratedList();
   renderTimelineSegments();
   renderPreview();
@@ -772,7 +790,131 @@ function schedulePipTimelineRebuild() {
   }, 180);
 }
 
+function pipTimelineClipId(pictureId) {
+  return `pip:${pictureId}`;
+}
+
+function buildPipTimelineTracks() {
+  return pictureItems
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) => item.enabled)
+    .map(({ item, index }, trackIndex) => ({
+      id: `pip:track:${item.id}`,
+      kind: "pip",
+      name: `画中画${index + 1}`,
+      order: trackIndex,
+      clips: [
+        {
+          id: pipTimelineClipId(item.id),
+          sourceId: item.id,
+          name: `画中画${index + 1}`,
+          start: item.start,
+          end: item.end,
+          minDuration: 0.1,
+          editable: true,
+          payload: {
+            x: Number(item.x),
+            y: Number(item.y),
+            width: Number(item.width),
+            enabled: Boolean(item.enabled),
+          },
+        },
+      ],
+    }));
+}
+
+function syncPipTimelineModel() {
+  pipTimelineStore.setDuration(duration, { silent: true });
+  return pipTimelineStore.replaceKind("pip", buildPipTimelineTracks(), {
+    selection: selectedPictureItemId
+      ? pipTimelineClipId(selectedPictureItemId)
+      : null,
+    silent: true,
+  });
+}
+
+function updatePictureTimelineRange(item, start, end) {
+  if (!item || !item.enabled) return false;
+  syncPipTimelineModel();
+  const clip = pipTimelineStore.setClipRange(
+    pipTimelineClipId(item.id),
+    start,
+    end,
+    { silent: true },
+  );
+  if (!clip) return false;
+  item.start = clip.start;
+  item.end = clip.end;
+  selectedPictureItemId = item.id;
+  pipTimelineStore.selectClip(clip.id, { silent: true });
+  return true;
+}
+
+function beginPipTimelineSegmentAdjustment(event) {
+  const segment = event.target.closest(
+    ".pip-timeline-segment[data-picture-id]",
+  );
+  if (!segment || event.button !== 0) return;
+  const item = pictureItems.find(
+    (candidate) => String(candidate.id) === segment.dataset.pictureId,
+  );
+  if (!item) return;
+  event.preventDefault();
+  event.stopPropagation();
+  selectedPictureItemId = item.id;
+  seekEditorPreview(item.start);
+  syncPipTimelineModel();
+  pipTimelineStore.selectClip(pipTimelineClipId(item.id), { silent: true });
+  const mode =
+    event.target.closest("[data-timeline-resize]")?.dataset.timelineResize ||
+    "move";
+  const pointerSession = window.EditorTimeline.createPointerSession(
+    pipTimelineStore,
+    {
+      clipId: pipTimelineClipId(item.id),
+      mode,
+      startClientX: event.clientX,
+      trackWidth: pipTimelineTrack.getBoundingClientRect().width,
+      duration,
+      onUpdate: (clip) => {
+        item.start = clip.start;
+        item.end = clip.end;
+      },
+    },
+  );
+  if (!pointerSession) return;
+  let moved = false;
+
+  const move = (moveEvent) => {
+    if (!moved && Math.abs(moveEvent.clientX - event.clientX) < 3) return;
+    moved = true;
+    const clip = pointerSession.update(moveEvent.clientX);
+    segment.classList.add("is-selected", "is-dragging");
+    segment.style.left = `${(clip.start / duration) * 100}%`;
+    segment.style.width = `${Math.max(
+      0.8,
+      ((clip.end - clip.start) / duration) * 100,
+    )}%`;
+    seekEditorPreview(mode === "end" ? clip.end : clip.start);
+    renderPreview();
+  };
+
+  const finish = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", finish);
+    window.removeEventListener("pointercancel", finish);
+    pointerSession.finish();
+    renderGeneratedList();
+    renderTimelineSegments();
+    renderPreview();
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", finish, { once: true });
+  window.addEventListener("pointercancel", finish, { once: true });
+}
+
 function renderTimelineSegments() {
+  syncPipTimelineModel();
   updatePipTimelineScale();
   pipTimelineSegments.replaceChildren();
   const enabledItems = pictureItems
@@ -799,6 +941,11 @@ function renderTimelineSegments() {
     segment.type = "button";
     segment.className = "pip-timeline-segment";
     segment.dataset.pictureId = String(item.id);
+    segment.dataset.timelineClipId = pipTimelineClipId(item.id);
+    const timelineClip = pipTimelineStore.findClip(pipTimelineClipId(item.id));
+    if (timelineClip) segment.dataset.timelineTrackId = timelineClip.trackId;
+    segment.dataset.timelineEditable = "true";
+    segment.dataset.timelineClipEditable = "true";
     segment.dataset.effectStart = String(item.start);
     segment.dataset.effectEnd = String(item.end);
     segment.dataset.timelineTrackIndex = String(trackIndex);
@@ -817,9 +964,17 @@ function renderTimelineSegments() {
     label.className = "editor-layer-timeline-segment-label";
     label.textContent = trackLabel;
     segment.append(label);
+    for (const mode of ["start", "end"]) {
+      const handle = document.createElement("span");
+      handle.className = `art-timeline-handle timeline-clip-handle is-${mode}`;
+      handle.dataset.timelineResize = mode;
+      handle.setAttribute("aria-hidden", "true");
+      segment.append(handle);
+    }
     segment.addEventListener("click", (event) => {
       event.stopPropagation();
       selectedPictureItemId = item.id;
+      pipTimelineStore.selectClip(pipTimelineClipId(item.id), { commit: true });
       seekToPictureItem(item);
       generatedList.children[index]?.scrollIntoView({ block: "nearest" });
       renderGeneratedList();
@@ -992,6 +1147,7 @@ function renderPreview(options = {}) {
 }
 
 function notifyEditorHost(options = {}) {
+  const timeline = syncPipTimelineModel();
   const state = {
     overlayHtml: pipOverlayLayer.innerHTML,
     overlayWidth: pipOverlayLayer.clientWidth,
@@ -1004,6 +1160,7 @@ function notifyEditorHost(options = {}) {
         (segment) => Number(segment.dataset.timelineTrackIndex) + 1,
       ),
     ),
+    timeline,
     generationDisabled: generatePipVideo.disabled,
     generationLabel: generatePipVideo.textContent.trim(),
     generationBusy: !outputProgress.hidden,
@@ -1060,70 +1217,72 @@ function embeddedPipDraftKey() {
 }
 
 function persistEmbeddedPipDraft() {
-  if (!embeddedEditor || !jobId || !pipEditorReady) return;
+  if (!jobId || !pipEditorReady) return;
   const segment = selectedSegment();
-  try {
-    window.sessionStorage.setItem(
-      embeddedPipDraftKey(),
-      JSON.stringify({
-        text: segment?.text || "",
-        sourceStart: segment?.sourceStart ?? null,
-        sourceEnd: segment?.sourceEnd ?? null,
-        prompt: pipPrompt.value,
-        assetType: currentAssetType(),
-        mode: currentGenerationMode(),
-        aspectRatio: currentImageAspectRatio(),
-        items: pictureItems.map((item) => ({
-          id: item.id,
-          start: item.start,
-          end: item.end,
-          sourceStart: item.sourceStart ?? null,
-          sourceEnd: item.sourceEnd ?? null,
-          x: item.x,
-          y: item.y,
-          width: item.width,
-          enabled: item.enabled,
-        })),
-      }),
-    );
-  } catch {
-    // The editor remains usable when private browsing blocks session storage.
-  }
+  const timeline = syncPipTimelineModel();
+  window.EditorTimeline.saveDraft(
+    window.sessionStorage,
+    embeddedPipDraftKey(),
+    timeline,
+    {
+      text: segment?.text || "",
+      sourceStart: segment?.sourceStart ?? null,
+      sourceEnd: segment?.sourceEnd ?? null,
+      prompt: pipPrompt.value,
+      assetType: currentAssetType(),
+      mode: currentGenerationMode(),
+      aspectRatio: currentImageAspectRatio(),
+      selectedPictureItemId,
+      items: pictureItems.map((item) => ({
+        id: item.id,
+        start: item.start,
+        end: item.end,
+        sourceStart: item.sourceStart ?? null,
+        sourceEnd: item.sourceEnd ?? null,
+        x: item.x,
+        y: item.y,
+        width: item.width,
+        enabled: item.enabled,
+      })),
+    },
+  );
 }
 
 function restoreEmbeddedPipDraft() {
-  if (!embeddedEditor || !jobId) return false;
-  try {
-    const saved = JSON.parse(
-      window.sessionStorage.getItem(embeddedPipDraftKey()) || "null",
-    );
-    if (!saved) return false;
-    pipPrompt.value = String(saved.prompt || "");
-    for (const input of assetTypeInputs) input.checked = input.value === saved.assetType;
-    for (const input of generationModeInputs) input.checked = input.value === saved.mode;
-    for (const input of aspectRatioInputs) input.checked = input.value === saved.aspectRatio;
-    updateAssetType();
-    updateGenerationMode();
-    updateAspectRatioSelection();
-    const savedItems = new Map(
-      (saved.items || []).map((item) => [String(item.id), item]),
-    );
-    for (const item of pictureItems) {
-      const savedItem = savedItems.get(String(item.id));
-      if (savedItem) Object.assign(item, savedItem);
-    }
-    renderGeneratedList();
-    const index = transcriptSegments.findIndex((segment) =>
-      saved.sourceStart !== null && saved.sourceEnd !== null
-        ? Math.abs(Number(segment.sourceStart) - Number(saved.sourceStart)) < 0.01 &&
-          Math.abs(Number(segment.sourceEnd) - Number(saved.sourceEnd)) < 0.01
-        : segment.text === saved.text,
-    );
-    if (index >= 0) selectTranscriptSegment(index, { preservePreviewTime: true });
-    return true;
-  } catch {
-    return false;
+  if (!jobId) return false;
+  const envelope = window.EditorTimeline.loadDraft(
+    window.sessionStorage,
+    embeddedPipDraftKey(),
+  );
+  const saved = envelope?.metadata;
+  if (!saved) return false;
+  pipPrompt.value = String(saved.prompt || "");
+  for (const input of assetTypeInputs) input.checked = input.value === saved.assetType;
+  for (const input of generationModeInputs) input.checked = input.value === saved.mode;
+  for (const input of aspectRatioInputs) input.checked = input.value === saved.aspectRatio;
+  updateAssetType();
+  updateGenerationMode();
+  updateAspectRatioSelection();
+  const savedItems = new Map(
+    (saved.items || []).map((item) => [String(item.id), item]),
+  );
+  for (const item of pictureItems) {
+    const savedItem = savedItems.get(String(item.id));
+    if (savedItem) Object.assign(item, savedItem);
   }
+  if (saved.selectedPictureItemId) {
+    selectedPictureItemId = String(saved.selectedPictureItemId);
+  }
+  syncPipTimelineModel();
+  renderGeneratedList();
+  const index = transcriptSegments.findIndex((segment) =>
+    saved.sourceStart !== null && saved.sourceEnd !== null
+      ? Math.abs(Number(segment.sourceStart) - Number(saved.sourceStart)) < 0.01 &&
+        Math.abs(Number(segment.sourceEnd) - Number(saved.sourceEnd)) < 0.01
+      : segment.text === saved.text,
+  );
+  if (index >= 0) selectTranscriptSegment(index, { preservePreviewTime: true });
+  return true;
 }
 
 function matchingDraftSegment(item, segments) {
@@ -1225,6 +1384,34 @@ function handleEditorHostMessage(event) {
     renderPreview({ timeOnly: true });
     return;
   }
+  if (data.type === "editor-suite:timeline-action" && data.kind === "pip") {
+    const item = pictureItems.find(
+      (candidate) => String(candidate.id) === String(data.sourceId),
+    );
+    if (!item) return;
+    selectedPictureItemId = item.id;
+    syncPipTimelineModel();
+    pipTimelineStore.selectClip(pipTimelineClipId(item.id), { silent: true });
+    if (data.action === "set-range") {
+      if (!updatePictureTimelineRange(item, data.start, data.end)) return;
+      seekEditorPreview(Number(data.currentTime) || item.start);
+      renderTimelineSegments();
+      renderPreview();
+      return;
+    }
+    if (data.action === "commit") {
+      pipTimelineStore.commit("host-timeline");
+      renderGeneratedList();
+      renderTimelineSegments();
+      renderPreview();
+      return;
+    }
+    seekEditorPreview(Number(data.currentTime) || item.start);
+    renderGeneratedList();
+    renderTimelineSegments();
+    renderPreview();
+    return;
+  }
   if (data.type === "editor-suite:select-pip-timeline" && data.kind === "pip") {
     const item = pictureItems.find(
       (candidate) => String(candidate.id) === String(data.id),
@@ -1240,6 +1427,7 @@ function handleEditorHostMessage(event) {
   if (data.type === "editor-suite:move-finish" && data.kind === "pip") {
     // The host drove a drag directly on its mirrored element; sync the list
     // readout and preview once here instead of on every pointermove.
+    pipTimelineStore.commit("host-preview");
     renderGeneratedList();
     renderPreview();
     return;
@@ -1251,6 +1439,12 @@ function handleEditorHostMessage(event) {
     if (!item) return;
     item.width = clamp(Number(data.width) || item.width, PIP_MIN_WIDTH, PIP_MAX_WIDTH);
     selectedPictureItemId = item.id;
+    syncPipTimelineModel();
+    pipTimelineStore.patchClipPayload(
+      pipTimelineClipId(item.id),
+      { width: item.width },
+      { silent: true },
+    );
     return;
   }
   if (data.type !== "editor-suite:move-effect" || data.kind !== "pip") return;
@@ -1259,6 +1453,12 @@ function handleEditorHostMessage(event) {
   item.x = clamp(Number(data.x) || 0.5, 0.05, 0.95);
   item.y = clamp(Number(data.y) || 0.5, 0.05, 0.95);
   selectedPictureItemId = item.id;
+  syncPipTimelineModel();
+  pipTimelineStore.patchClipPayload(
+    pipTimelineClipId(item.id),
+    { x: item.x, y: item.y, width: item.width },
+    { silent: true },
+  );
 }
 
 window.addEventListener("message", handleEditorHostMessage);
@@ -1884,7 +2084,6 @@ async function generateVideo(composition = null) {
     (job?.art?.composition
       ? {
           source: job.art.source || "original",
-          historyName: job.art.historyName || null,
           overlays: job.art.overlays || [],
         }
       : null);
@@ -1899,7 +2098,7 @@ async function generateVideo(composition = null) {
         artSource: artPayload?.source || "original",
         pictureInPictureOverlays: overlays,
         pictureInPictureSource: requestedSource,
-        historyName: artPayload?.historyName || null,
+        historyName: null,
       }
     : {
         source: requestedSource,
@@ -2168,6 +2367,10 @@ pipVideo.addEventListener("pause", renderPreview);
 pipTimelineSeek.addEventListener("input", () => {
   seekEditorPreview(pipTimelineSeek.value);
 });
+pipTimelineSegments.addEventListener(
+  "pointerdown",
+  beginPipTimelineSegmentAdjustment,
+);
 pipTimelineTrack.addEventListener("pointerdown", (event) => {
   if (event.target.closest(".pip-timeline-segment")) return;
   const bounds = pipTimelineTrack.getBoundingClientRect();

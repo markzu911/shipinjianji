@@ -1,0 +1,4 @@
+{"file":".trellis/spec/frontend/index.md","reason":"实现前确认前端规范入口与质量要求。"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"约束时间轴点击、拖动、键盘和无障碍交互。"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"保持待确认选区状态与现有前端状态管理一致。"}
+{"file":".trellis/spec/testing/index.md","reason":"为交互状态变化补充符合项目惯例的回归测试。"}

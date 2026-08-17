@@ -32,29 +32,9 @@ const stepTranscribe = document.querySelector("#stepTranscribe");
 const jobError = document.querySelector("#jobError");
 const jobErrorText = document.querySelector("#jobErrorText");
 const retryButton = document.querySelector("#retryButton");
-const suggestionState = document.querySelector("#suggestionState");
-const suggestionList = document.querySelector("#suggestionList");
-const selectAllSuggestionsButton = document.querySelector(
-  "#selectAllSuggestionsButton",
-);
-const noSpeechState = document.querySelector("#noSpeechState");
-const noSpeechList = document.querySelector("#noSpeechList");
-const selectAllNoSpeechButton = document.querySelector(
-  "#selectAllNoSpeechButton",
-);
-const noSpeechCutSummary = document.querySelector("#noSpeechCutSummary");
-const noSpeechCutSelectionDetail = document.querySelector(
-  "#noSpeechCutSelectionDetail",
-);
 const segmentList = document.querySelector("#segmentList");
 const segmentStructureStatus = document.querySelector("#segmentStructureStatus");
 const cutDraftSaveStatus = document.querySelector("#cutDraftSaveStatus");
-const cutUndoButton = document.querySelector("#cutUndoButton");
-const cutRedoButton = document.querySelector("#cutRedoButton");
-const cutHistoryStatus = document.querySelector("#cutHistoryStatus");
-const cutHistoryCount = document.querySelector("#cutHistoryCount");
-const cutHistoryEmpty = document.querySelector("#cutHistoryEmpty");
-const cutHistoryList = document.querySelector("#cutHistoryList");
 const segmentEditDialog = document.querySelector("#segmentEditDialog");
 const segmentEditEyebrow = document.querySelector("#segmentEditEyebrow");
 const segmentEditTime = document.querySelector("#segmentEditTime");
@@ -71,7 +51,6 @@ const mergeSegmentDownButton = document.querySelector(
 );
 const clearSelectionButton = document.querySelector("#clearSelectionButton");
 const generateCutButton = document.querySelector("#generateCutButton");
-const cutHistoryName = document.querySelector("#cutHistoryName");
 const outputCutSummary = document.querySelector("#outputCutSummary");
 const outputCutSelectionDetail = document.querySelector(
   "#outputCutSelectionDetail",
@@ -156,11 +135,6 @@ const cutFrameTimelineStatus = document.querySelector(
 const textEditorPreviewPane = document.querySelector("#textEditorPreviewPane");
 const cutPreviewPanel = document.querySelector(".cut-preview-panel");
 const textEditorOutputPanel = document.querySelector("#textOutputPanel");
-const textEditorPanelStack = document.querySelector(".text-editor-panel-stack");
-const textEditorTabs = [...document.querySelectorAll("[data-text-editor-tab]")];
-const textEditorPanels = [
-  ...document.querySelectorAll("[data-text-editor-panel]"),
-];
 
 if (textEditorPreviewPane && cutPreviewPanel) {
   textEditorPreviewPane.append(cutPreviewPanel);
@@ -173,6 +147,7 @@ const CUT_TIMELINE_STEP = 1 / 30;
 const CUT_TIMELINE_MIN_RANGE = 0.1;
 const CUT_TIMELINE_DRAG_THRESHOLD = 5;
 const CUT_SPEECH_BOUNDARY_EPSILON = 0.002;
+const CUT_SAFE_NO_SPEECH_MIN_DURATION = 0.45;
 const CUT_TIMELINE_TEXT_GAP_COVERAGE_MAX = 1.5;
 const CUT_TIMELINE_THUMB_MIN = 8;
 const CUT_TIMELINE_THUMB_MAX = 180;
@@ -195,6 +170,7 @@ let activeSegmentEditIndex = null;
 let segmentOperationInFlight = false;
 let currentSuggestions = [];
 let currentNoSpeechSuggestions = [];
+let currentAudioQuietRanges = [];
 let cutControlsLocked = false;
 let currentVideoDuration = 0;
 let timelineDeleteRanges = [];
@@ -210,28 +186,32 @@ let cutTimelineRulerSignature = "";
 let cutTimelineResizeTimer = null;
 let noSpeechPreviewEnd = null;
 let cutSelectionPreviewEnd = null;
+let transcriptPreviewRange = null;
 let activeTranscriptSegmentIndex = -1;
+let activeTranscriptSegmentKey = "";
 let transcriptFollowScrollFrame = 0;
 let cutDraftReady = false;
 let cutDraftRevision = 0;
 let cutDraftLastSignature = "";
 let cutDraftSaveQueue = Promise.resolve();
 let cutDraftNeedsServerSync = false;
+let automaticNoSpeechInitialized = false;
 let originalSourceActionsAllowed = true;
 let historyVersions = [];
 let editingHistoryId = null;
 let historyBusyId = null;
 const selectedRanges = new Map();
 const selectedNoSpeechRanges = new Map();
-const ignoredSuggestions = new Set();
-const ignoredNoSpeechSuggestions = new Set();
 let cutHistoryBaseline = null;
 let cutHistoryEntries = [];
 let cutHistoryIndex = 0;
+const cutTimelineStore = window.EditorTimeline.createStore(
+  { duration: 0, tracks: [] },
+  { onCommit: () => scheduleCutDraftSave() },
+);
 let cutHistoryLastState = null;
 let cutHistoryPendingMeta = null;
 let cutHistoryReplaying = false;
-let cutHistoryFeedback = "";
 
 function updateOriginalSourceActionsVisibility() {
   const visible = originalSourceActionsAllowed && !hasCutSelection();
@@ -253,43 +233,6 @@ function formatBytes(bytes) {
   const units = ["B", "KB", "MB", "GB"];
   const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
   return `${(bytes / 1024 ** index).toFixed(index > 1 ? 1 : 0)} ${units[index]}`;
-}
-
-function activateTextEditorPanel(panelName, { focus = false } = {}) {
-  const activeTab = textEditorTabs.find(
-    (tab) => tab.dataset.textEditorTab === panelName,
-  );
-  if (!activeTab) return;
-
-  for (const tab of textEditorTabs) {
-    const isActive = tab === activeTab;
-    tab.setAttribute("aria-selected", String(isActive));
-    tab.tabIndex = isActive ? 0 : -1;
-  }
-  for (const panel of textEditorPanels) {
-    panel.hidden = panel.dataset.textEditorPanel !== panelName;
-  }
-  if (textEditorPanelStack) textEditorPanelStack.scrollTop = 0;
-  if (focus) activeTab.focus();
-}
-
-function handleTextEditorTabKeydown(event) {
-  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-  const currentIndex = textEditorTabs.indexOf(event.currentTarget);
-  if (currentIndex < 0) return;
-  event.preventDefault();
-  let nextIndex = currentIndex;
-  if (event.key === "Home") nextIndex = 0;
-  if (event.key === "End") nextIndex = textEditorTabs.length - 1;
-  if (event.key === "ArrowLeft") {
-    nextIndex = (currentIndex - 1 + textEditorTabs.length) % textEditorTabs.length;
-  }
-  if (event.key === "ArrowRight") {
-    nextIndex = (currentIndex + 1) % textEditorTabs.length;
-  }
-  activateTextEditorPanel(textEditorTabs[nextIndex].dataset.textEditorTab, {
-    focus: true,
-  });
 }
 
 function formatTime(seconds) {
@@ -516,102 +459,360 @@ function resolveEditableSegments(segments, editableSegments) {
     : buildFallbackEditableSegments(segments);
 }
 
+function selectedTextRangeKeysAtTime(sourceTime) {
+  return [...selectedRanges.entries()].flatMap(([key, range]) => {
+    const start = Number(range.originalStart ?? range.start);
+    const end = Number(range.originalEnd ?? range.end);
+    return Number.isFinite(start) &&
+      Number.isFinite(end) &&
+      sourceTime >= start &&
+      sourceTime < end
+      ? [key]
+      : [];
+  });
+}
+
+function suggestionTextRangeKeysAtTime(sourceTime) {
+  return currentSuggestions.flatMap((suggestion) =>
+    getSuggestionRanges(suggestion).flatMap((range) => {
+      const start = Number(range.start);
+      const end = Number(range.end);
+      return sourceTime >= start && sourceTime < end
+        ? [rangeKey(start, end)]
+        : [];
+    }),
+  );
+}
+
+function buildSegmentTextRuns(segment, deletedRanges) {
+  const words = Array.isArray(segment.words) && segment.words.length
+    ? segment.words
+    : [
+        {
+          text: String(segment.text || "暂无识别文字"),
+          start: Number(segment.start),
+          end: Number(segment.end),
+        },
+      ];
+  const runs = [];
+  for (const word of words) {
+    const start = Number(word.start);
+    const end = Number(word.end);
+    const midpoint = start + (end - start) / 2;
+    const rangeKeys = Number.isFinite(midpoint)
+      ? selectedTextRangeKeysAtTime(midpoint)
+      : [];
+    const suggestionRangeKeys = Number.isFinite(midpoint)
+      ? suggestionTextRangeKeysAtTime(midpoint)
+      : [];
+    const deletedRange = Number.isFinite(midpoint) && deletedRanges.find(
+      (range) =>
+        midpoint >= Number(range.start) && midpoint < Number(range.end),
+    );
+    const kind = rangeKeys.length > 0
+      ? "restore"
+      : deletedRange
+        ? "deleted"
+        : "edit";
+    const presentationKey = rangeKeys.length > 0
+      ? `selected:${rangeKeys.join("|")}`
+      : deletedRange
+        ? `deleted:${rangeKey(deletedRange.start, deletedRange.end)}`
+        : suggestionRangeKeys.length > 0
+          ? `suggestion:${suggestionRangeKeys.join("|")}`
+          : "retained";
+    const previous = runs.at(-1);
+    const canMerge = Boolean(
+      previous &&
+        previous.kind === kind &&
+        previous.presentationKey === presentationKey,
+    );
+    if (canMerge) {
+      previous.text += String(word.text || "");
+      previous.end = Number.isFinite(end) ? end : previous.end;
+      previous.rangeKeys = [...new Set([...previous.rangeKeys, ...rangeKeys])];
+      previous.suggestionRangeKeys = [
+        ...new Set([
+          ...previous.suggestionRangeKeys,
+          ...suggestionRangeKeys,
+        ]),
+      ];
+    } else {
+      runs.push({
+        kind,
+        text: String(word.text || ""),
+        start,
+        end,
+        rangeKeys,
+        suggestionRangeKeys,
+        presentationKey,
+      });
+    }
+  }
+  return runs.filter((run) => String(run.text || "").trim());
+}
+
+function renderSegmentTextRun(container, run, segmentIndex) {
+  if (run.kind === "restore") {
+    const restoreButton = document.createElement("button");
+    restoreButton.type = "button";
+    restoreButton.className = "segment-text-run segment-restore-button";
+    restoreButton.dataset.rangeKeys = JSON.stringify(run.rangeKeys);
+    restoreButton.dataset.start = String(run.start);
+    restoreButton.disabled = cutControlsLocked;
+    restoreButton.title = "恢复这处文字";
+    restoreButton.setAttribute("aria-label", `恢复已删除文字：${run.text}`);
+    const icon = document.createElement("iconify-icon");
+    icon.setAttribute("icon", "ph:arrow-counter-clockwise-bold");
+    icon.setAttribute("aria-hidden", "true");
+    const label = document.createElement("span");
+    label.className = "segment-text-run-label";
+    label.textContent = run.text;
+    restoreButton.append(icon, label);
+    container.append(restoreButton);
+    return;
+  }
+  if (run.kind === "deleted") {
+    const deletedText = document.createElement("span");
+    deletedText.className = "segment-text-run segment-deleted-text";
+    deletedText.textContent = run.text;
+    deletedText.setAttribute("aria-label", `已由时间轴删除：${run.text}`);
+    container.append(deletedText);
+    return;
+  }
+  const editButton = document.createElement("button");
+  editButton.type = "button";
+  editButton.className = "segment-text-run segment-edit-button";
+  editButton.dataset.segmentIndex = String(segmentIndex);
+  editButton.disabled = cutControlsLocked;
+  editButton.textContent = run.text;
+  editButton.setAttribute("aria-label", `编辑文字段：${run.text}`);
+  container.append(editButton);
+}
+
+function renderTextSegmentItem(run, segmentIndex, displayIndex) {
+  const segmentStart = Number(run.start);
+  const segmentEnd = Number(run.end);
+  const hasValidRange =
+    Number.isFinite(segmentStart) &&
+    Number.isFinite(segmentEnd) &&
+    segmentEnd > segmentStart;
+  const allSelected =
+    run.rangeKeys.length > 0 &&
+    run.rangeKeys.every((key) => selectedRanges.has(key));
+  const item = document.createElement("li");
+  item.className = "segment-item is-editable";
+  item.classList.toggle("has-selection", allSelected);
+  item.classList.toggle("is-delete-fragment", run.kind === "restore");
+  item.classList.toggle(
+    "is-restored-fragment",
+    run.kind === "edit" && run.suggestionRangeKeys.length > 0,
+  );
+  item.dataset.segmentIndex = String(segmentIndex);
+  item.dataset.displayIndex = String(displayIndex);
+  item.dataset.displayKind = run.kind;
+  item.dataset.displayStart = String(segmentStart);
+  item.dataset.displayEnd = String(segmentEnd);
+  item.dataset.displayText = run.text;
+  item.dataset.rangeKeys = JSON.stringify(run.rangeKeys);
+  item.dataset.displayKey =
+    `${segmentIndex}:${run.presentationKey}:${rangeKey(segmentStart, segmentEnd)}`;
+
+  const selectSegmentButton = document.createElement("button");
+  selectSegmentButton.type = "button";
+  selectSegmentButton.className = "segment-toggle";
+  selectSegmentButton.dataset.segmentIndex = String(segmentIndex);
+  selectSegmentButton.classList.toggle("is-selected", allSelected);
+  selectSegmentButton.setAttribute("aria-pressed", String(allSelected));
+  selectSegmentButton.setAttribute(
+    "aria-label",
+    `${allSelected ? "恢复删除文字" : "删除文字"}：${run.text}`,
+  );
+  selectSegmentButton.dataset.selectionDisabled = String(
+    !hasValidRange || run.kind === "deleted",
+  );
+  selectSegmentButton.disabled =
+    cutControlsLocked || !hasValidRange || run.kind === "deleted";
+
+  const time = document.createElement("time");
+  time.className = "segment-time";
+  time.textContent = formatTime(segmentStart);
+  time.setAttribute(
+    "aria-label",
+    `原片从 ${formatPreciseTime(segmentStart)} 到 ${formatPreciseTime(segmentEnd)}`,
+  );
+
+  const timeColumn = document.createElement("span");
+  timeColumn.className = "segment-time-column";
+  const currentBadge = document.createElement("span");
+  currentBadge.className = "segment-current-badge";
+  currentBadge.textContent = "播放中";
+  currentBadge.setAttribute("aria-hidden", "true");
+  currentBadge.hidden = true;
+  timeColumn.append(time, currentBadge);
+
+  const segmentText = document.createElement("div");
+  segmentText.className = "segment-text";
+  renderSegmentTextRun(segmentText, run, segmentIndex);
+
+  const playButton = document.createElement("button");
+  playButton.type = "button";
+  playButton.className = "segment-play-button";
+  playButton.dataset.segmentPreview = "true";
+  playButton.disabled = cutControlsLocked || !hasValidRange;
+  playButton.title = "从这段文案开始播放";
+  playButton.setAttribute("aria-label", `播放文案：${run.text}`);
+  const playIcon = document.createElement("iconify-icon");
+  playIcon.setAttribute("icon", "ph:play-fill");
+  playIcon.setAttribute("aria-hidden", "true");
+  playButton.append(playIcon);
+
+  item.append(selectSegmentButton, timeColumn, segmentText, playButton);
+  return item;
+}
+
+function renderNoSpeechSegmentItem(suggestion, displayIndex) {
+  const range = getNoSpeechRange(suggestion);
+  if (!range) return null;
+  const selected = selectedNoSpeechRanges.has(range.id);
+  const deletable = suggestion.deletable !== false;
+  const duration = Math.max(0, range.end - range.start);
+  const label = `空白 ${duration.toFixed(1)} 秒`;
+  const item = document.createElement("li");
+  item.className = "segment-item is-no-speech-fragment";
+  item.classList.toggle("has-selection", selected);
+  item.classList.toggle("is-delete-fragment", selected);
+  item.classList.toggle("is-restored-no-speech", !selected && deletable);
+  item.classList.toggle("is-protected-no-speech", !deletable);
+  item.dataset.noSpeechId = range.id;
+  item.dataset.displayIndex = String(displayIndex);
+  item.dataset.displayKind = selected
+    ? "no-speech-restore"
+    : "no-speech";
+  item.dataset.displayStart = String(range.start);
+  item.dataset.displayEnd = String(range.end);
+  item.dataset.displayText = label;
+  item.dataset.displayKey =
+    `no-speech:${range.id}:${rangeKey(range.start, range.end)}`;
+
+  const toggleButton = document.createElement("button");
+  toggleButton.type = "button";
+  toggleButton.className = "segment-toggle";
+  toggleButton.dataset.noSpeechId = range.id;
+  toggleButton.classList.toggle("is-selected", selected);
+  toggleButton.setAttribute("aria-pressed", String(selected));
+  toggleButton.setAttribute(
+    "aria-label",
+    !deletable
+      ? `不能删除整段空白：${label}`
+      : `${selected ? "恢复删除空白" : "删除空白"}：${label}`,
+  );
+  toggleButton.dataset.selectionDisabled = String(!deletable);
+  toggleButton.disabled = cutControlsLocked || !deletable;
+
+  const time = document.createElement("time");
+  time.className = "segment-time";
+  time.textContent = formatTime(range.start);
+  time.setAttribute(
+    "aria-label",
+    `原片从 ${formatPreciseTime(range.start)} 到 ${formatPreciseTime(range.end)}`,
+  );
+  const timeColumn = document.createElement("span");
+  timeColumn.className = "segment-time-column";
+  const currentBadge = document.createElement("span");
+  currentBadge.className = "segment-current-badge";
+  currentBadge.textContent = "播放中";
+  currentBadge.setAttribute("aria-hidden", "true");
+  currentBadge.hidden = true;
+  timeColumn.append(time, currentBadge);
+
+  const segmentText = document.createElement("div");
+  segmentText.className = "segment-text segment-no-speech-content";
+  const actionButton = document.createElement("button");
+  actionButton.type = "button";
+  actionButton.className =
+    `segment-text-run segment-no-speech-button${selected ? " segment-restore-button" : ""}`;
+  actionButton.dataset.noSpeechId = range.id;
+  actionButton.disabled = cutControlsLocked;
+  actionButton.setAttribute(
+    "aria-label",
+    selected ? `恢复已删除空白：${label}` : `试听空白：${label}`,
+  );
+  const icon = document.createElement("iconify-icon");
+  icon.setAttribute(
+    "icon",
+    selected ? "ph:arrow-counter-clockwise-bold" : "ph:play-circle-bold",
+  );
+  icon.setAttribute("aria-hidden", "true");
+  const copy = document.createElement("span");
+  copy.className = "segment-no-speech-copy";
+  const mainLabel = document.createElement("strong");
+  mainLabel.className = selected ? "segment-text-run-label" : "";
+  mainLabel.textContent = label;
+  const meta = document.createElement("span");
+  meta.className = "segment-no-speech-meta";
+  meta.textContent = [
+    noSpeechKindLabel(suggestion),
+    noSpeechAudioLabel(suggestion),
+    !deletable ? "保留整段视频" : selected ? "已自动删除" : "已恢复",
+  ].join(" · ");
+  copy.append(mainLabel, meta);
+  actionButton.append(icon, copy);
+  segmentText.append(actionButton);
+
+  item.append(toggleButton, timeColumn, segmentText);
+  return item;
+}
+
 function renderCutSegments() {
   activeTranscriptSegmentIndex = -1;
-  segmentList.replaceChildren();
+  activeTranscriptSegmentKey = "";
+  const deletedRanges = getMergedSelection();
+  const displayItems = [];
   currentEditableSegments.forEach((segment, segmentIndex) => {
-    const segmentStart = Number(segment.start);
-    const segmentEnd = Number(segment.end);
-    const hasValidRange =
-      Number.isFinite(segmentStart) &&
-      Number.isFinite(segmentEnd) &&
-      segmentEnd > segmentStart;
-    const item = document.createElement("li");
-    item.className = "segment-item is-editable";
-    item.dataset.segmentIndex = String(segmentIndex);
-
-    const selectSegmentButton = document.createElement("button");
-    selectSegmentButton.type = "button";
-    selectSegmentButton.className = "segment-toggle";
-    selectSegmentButton.dataset.segmentIndex = String(segmentIndex);
-    selectSegmentButton.setAttribute("aria-pressed", "false");
-    selectSegmentButton.setAttribute(
-      "aria-label",
-      `删除第 ${segmentIndex + 1} 段`,
-    );
-    selectSegmentButton.disabled = !hasValidRange;
-
-    const time = document.createElement("time");
-    time.className = "segment-time";
-    time.textContent = formatTime(segment.start);
-    time.setAttribute(
-      "aria-label",
-      `从 ${formatPreciseTime(segment.start)} 到 ${formatPreciseTime(segment.end)}`,
-    );
-
-    const timeColumn = document.createElement("span");
-    timeColumn.className = "segment-time-column";
-    const currentBadge = document.createElement("span");
-    currentBadge.className = "segment-current-badge";
-    currentBadge.textContent = "播放中";
-    currentBadge.setAttribute("aria-hidden", "true");
-    currentBadge.hidden = true;
-    timeColumn.append(time, currentBadge);
-
-    const segmentText = document.createElement("button");
-    segmentText.type = "button";
-    segmentText.className = "segment-text";
-    const segmentWords = Array.isArray(segment.words) ? segment.words : [];
-    if (segmentWords.length) {
-      const textContent = document.createElement("span");
-      textContent.className = "segment-text-content";
-      for (const word of segmentWords) {
-        const span = document.createElement("span");
-        span.className = "segment-word";
-        span.textContent = String(word.text || "");
-        textContent.append(span);
-      }
-      segmentText.append(textContent);
-    } else {
-      segmentText.textContent = String(segment.text || "暂无识别文字");
+    for (const run of buildSegmentTextRuns(segment, deletedRanges)) {
+      displayItems.push({
+        type: "text",
+        start: Number(run.start),
+        end: Number(run.end),
+        segmentIndex,
+        run,
+      });
     }
-    segmentText.setAttribute(
-      "aria-label",
-      `编辑第 ${segmentIndex + 1} 段分段：${String(segment.text || "暂无识别文字")}`,
-    );
-
-    item.append(selectSegmentButton, timeColumn, segmentText);
-    segmentList.append(item);
   });
-  updateCutSegmentText();
+  for (const suggestion of currentNoSpeechSuggestions) {
+    const range = getNoSpeechRange(suggestion);
+    if (!range) continue;
+    displayItems.push({
+      type: "no-speech",
+      start: range.start,
+      end: range.end,
+      suggestion,
+    });
+  }
+  displayItems.sort((left, right) =>
+    left.start - right.start ||
+    left.end - right.end ||
+    left.type.localeCompare(right.type),
+  );
+
+  const fragment = document.createDocumentFragment();
+  displayItems.forEach((displayItem, displayIndex) => {
+    const item = displayItem.type === "no-speech"
+      ? renderNoSpeechSegmentItem(displayItem.suggestion, displayIndex)
+      : renderTextSegmentItem(
+          displayItem.run,
+          displayItem.segmentIndex,
+          displayIndex,
+        );
+    if (item) fragment.append(item);
+  });
+  segmentList.replaceChildren(fragment);
   updateCutSegmentTimestamps();
 }
 
 function updateCutSegmentText() {
-  const deletedRanges = getMergedSelection();
-  segmentList
-    .querySelectorAll(".segment-item[data-segment-index]")
-    .forEach((item) => {
-      const segmentIndex = Number(item.dataset.segmentIndex);
-      const segment = currentEditableSegments[segmentIndex];
-      const spans = item.querySelectorAll(".segment-word");
-      if (!segment || !spans.length) return;
-      const words = Array.isArray(segment.words) ? segment.words : [];
-      spans.forEach((span, index) => {
-        const word = words[index];
-        let deleted = false;
-        if (word) {
-          const start = Number(word.start);
-          const end = Number(word.end);
-          const midpoint = start + (end - start) / 2;
-          deleted = deletedRanges.some(
-            (range) =>
-              midpoint >= Number(range.start) && midpoint < Number(range.end),
-          );
-        }
-        span.classList.toggle("is-deleted", deleted);
-      });
-    });
+  renderCutSegments();
 }
 
 function getLiveEditedSegmentTiming(
@@ -638,52 +839,29 @@ function getLiveEditedSegmentTiming(
   };
 }
 
-function updateCutInspectorTimestamps() {
-  const spans = getEditedTimelineSpans();
-  for (const card of suggestionList.querySelectorAll(".suggestion-card")) {
-    const suggestion = currentSuggestions.find(
-      (item) => item.id === card.dataset.suggestionId,
-    );
-    const time = card.querySelector(".suggestion-time");
-    if (!suggestion || !time) continue;
-    if (isSuggestionSelected(suggestion)) {
-      time.textContent = "已删除";
-      continue;
-    }
-    time.textContent =
-      `${formatPreciseTime(sourceTimeToEditedTime(suggestion.start, spans))} — ` +
-      `${formatPreciseTime(sourceTimeToEditedTime(suggestion.end, spans))}`;
-  }
-  for (const card of noSpeechList?.querySelectorAll(".no-speech-card") || []) {
-    const suggestion = currentNoSpeechSuggestions.find(
-      (item) => item.id === card.dataset.noSpeechId,
-    );
-    const time = card.querySelector(".no-speech-time");
-    if (!suggestion || !time) continue;
-    if (isNoSpeechSelected(suggestion)) {
-      time.textContent = "已删除";
-      continue;
-    }
-    time.textContent =
-      `${formatPreciseTime(sourceTimeToEditedTime(suggestion.start, spans))} — ` +
-      `${formatPreciseTime(sourceTimeToEditedTime(suggestion.end, spans))}`;
-  }
-}
-
 function updateCutSegmentTimestamps() {
   const spans = getEditedTimelineSpans();
   segmentList
-    .querySelectorAll(".segment-item[data-segment-index]")
+    .querySelectorAll(
+      ".segment-item[data-display-start][data-display-end]",
+    )
     .forEach((item) => {
-      const segmentIndex = Number(item.dataset.segmentIndex);
-      const segment = currentEditableSegments[segmentIndex];
+      const segment = {
+        start: Number(item.dataset.displayStart),
+        end: Number(item.dataset.displayEnd),
+      };
       const time = item.querySelector(".segment-time");
-      if (!segment || !time) return;
+      if (!time || !Number.isFinite(segment.start) || !Number.isFinite(segment.end)) {
+        return;
+      }
       const timing = getLiveEditedSegmentTiming(segment, spans);
       item.classList.toggle("is-removed-from-timeline", !timing);
       if (!timing) {
-        time.textContent = "已删除";
-        time.setAttribute("aria-label", "此段已从剪辑时间轴删除");
+        time.textContent = formatTime(segment.start);
+        time.setAttribute(
+          "aria-label",
+          `原片从 ${formatPreciseTime(segment.start)} 到 ${formatPreciseTime(segment.end)}，已删除`,
+        );
         return;
       }
       time.textContent = formatTime(timing.start);
@@ -886,79 +1064,8 @@ function getSuggestionRanges(suggestion) {
     : [];
 }
 
-function isSuggestionSelected(suggestion) {
-  const ranges = getSuggestionRanges(suggestion);
-  return (
-    ranges.length > 0 &&
-    ranges.every((range) =>
-      selectedRanges.has(rangeKey(range.start, range.end)),
-    )
-  );
-}
-
-function updateSuggestionStates() {
-  let deletedCount = 0;
-  for (const card of suggestionList.querySelectorAll(".suggestion-card")) {
-    const suggestion = currentSuggestions.find(
-      (item) => item.id === card.dataset.suggestionId,
-    );
-    if (!suggestion) continue;
-
-    const ignored = ignoredSuggestions.has(suggestion.id);
-    const marked = isSuggestionSelected(suggestion);
-    if (marked) deletedCount += 1;
-    card.classList.toggle("is-marked", marked);
-    card.classList.toggle("is-ignored", ignored);
-
-    const applyButton = card.querySelector('[data-action="apply"]');
-    const ignoreButton = card.querySelector('[data-action="ignore"]');
-    const status = card.querySelector(".suggestion-card-status");
-    applyButton.disabled = cutControlsLocked || ignored || marked;
-    applyButton.classList.toggle("is-active", marked);
-    applyButton.setAttribute("aria-pressed", String(marked));
-    applyButton.textContent = marked ? "已删除" : "删除";
-    ignoreButton.disabled = cutControlsLocked || marked;
-    ignoreButton.setAttribute("aria-pressed", String(ignored));
-    ignoreButton.textContent = ignored ? "恢复建议" : "忽略";
-    status.textContent = ignored
-      ? "已忽略"
-      : marked
-        ? "已从剪辑时间轴删除"
-        : "等待确认";
-  }
-
-  if (currentSuggestions.length > 0) {
-    suggestionState.textContent =
-      deletedCount > 0
-        ? `共 ${currentSuggestions.length} 条建议，已删除 ${deletedCount} 条。`
-        : `发现 ${currentSuggestions.length} 条疑似问题，请逐条确认。`;
-  }
-
-  const remainingSuggestions = currentSuggestions.filter(
-    (suggestion) =>
-      !isSuggestionSelected(suggestion) &&
-      !ignoredSuggestions.has(suggestion.id),
-  );
-  selectAllSuggestionsButton.hidden = currentSuggestions.length === 0;
-  selectAllSuggestionsButton.disabled =
-    cutControlsLocked || remainingSuggestions.length === 0;
-  selectAllSuggestionsButton.classList.toggle(
-    "is-active",
-    remainingSuggestions.length === 0,
-  );
-  selectAllSuggestionsButton.setAttribute("aria-pressed", "false");
-  selectAllSuggestionsButton.querySelector("span").textContent =
-    remainingSuggestions.length > 0
-      ? "一键删除"
-      : deletedCount === currentSuggestions.length
-        ? "已全部删除"
-        : "无待删建议";
-}
-
-function renderSuggestions(suggestions, status) {
-  suggestionList.replaceChildren();
-  ignoredSuggestions.clear();
-  currentSuggestions = Array.isArray(suggestions)
+function setCurrentSuggestions(suggestions, status) {
+  currentSuggestions = status === "completed" && Array.isArray(suggestions)
     ? suggestions.filter(
         (suggestion) =>
           suggestion &&
@@ -966,75 +1073,37 @@ function renderSuggestions(suggestions, status) {
           getSuggestionRanges(suggestion).length > 0,
       )
     : [];
+}
 
-  suggestionState.classList.remove("is-empty", "is-warning");
-  selectAllSuggestionsButton.hidden =
-    status !== "completed" || currentSuggestions.length === 0;
-  if (status !== "completed") {
-    suggestionState.classList.add("is-warning");
-    suggestionState.textContent =
-      "本次 AI 初筛暂不可用，不影响下方手动选择和剪辑。";
-    return;
-  }
-  if (currentSuggestions.length === 0) {
-    suggestionState.classList.add("is-empty");
-    suggestionState.textContent =
-      "没有发现明显口误，建议仍由你快速复核全文。";
-    return;
-  }
-
+function seedAutomaticSuggestionRanges() {
+  let seededCount = 0;
   for (const suggestion of currentSuggestions) {
-    const item = document.createElement("li");
-    item.className = "suggestion-card";
-    item.dataset.suggestionId = suggestion.id;
-
-    const heading = document.createElement("div");
-    heading.className = "suggestion-card-heading";
-    const labels = document.createElement("div");
-    labels.className = "suggestion-labels";
-    const type = document.createElement("span");
-    type.className = "suggestion-type";
-    type.textContent = suggestion.type;
-    const confidence = document.createElement("span");
-    confidence.className = "suggestion-confidence";
-    confidence.textContent =
-      `置信度 ${Math.round(Number(suggestion.confidence) * 100)}%`;
-    labels.append(type, confidence);
-    const time = document.createElement("span");
-    time.className = "suggestion-time";
-    time.textContent =
-      `${formatPreciseTime(suggestion.start)} — ${formatPreciseTime(suggestion.end)}`;
-    heading.append(labels, time);
-
-    const quote = document.createElement("p");
-    quote.className = "suggestion-quote";
-    quote.textContent = `“${suggestion.text}”`;
-    const reason = document.createElement("p");
-    reason.className = "suggestion-reason";
-    reason.textContent = suggestion.reason;
-
-    const footer = document.createElement("div");
-    footer.className = "suggestion-card-footer";
-    const cardStatus = document.createElement("span");
-    cardStatus.className = "suggestion-card-status";
-    cardStatus.setAttribute("aria-live", "polite");
-    const actions = document.createElement("div");
-    actions.className = "suggestion-actions";
-    const applyButton = document.createElement("button");
-    applyButton.type = "button";
-    applyButton.className = "suggestion-action suggestion-mark-button";
-    applyButton.dataset.action = "apply";
-    const ignoreButton = document.createElement("button");
-    ignoreButton.type = "button";
-    ignoreButton.className = "suggestion-action suggestion-ignore-button";
-    ignoreButton.dataset.action = "ignore";
-    actions.append(applyButton, ignoreButton);
-    footer.append(cardStatus, actions);
-
-    item.append(heading, quote, reason, footer);
-    suggestionList.append(item);
+    for (const range of getSuggestionRanges(suggestion)) {
+      const key = rangeKey(range.start, range.end);
+      if (selectedRanges.has(key)) continue;
+      selectedRanges.set(
+        key,
+        expandRangeToAdjacentSilence({
+          ...range,
+          text: String(suggestion.text || ""),
+        }),
+      );
+      seededCount += 1;
+    }
   }
-  updateSuggestionStates();
+  return seededCount;
+}
+
+function seedAutomaticNoSpeechRanges() {
+  let seededCount = 0;
+  for (const suggestion of currentNoSpeechSuggestions) {
+    if (suggestion.deletable === false) continue;
+    const range = getNoSpeechRange(suggestion);
+    if (!range || selectedNoSpeechRanges.has(range.id)) continue;
+    selectedNoSpeechRanges.set(range.id, range);
+    seededCount += 1;
+  }
+  return seededCount;
 }
 
 function getNoSpeechRange(suggestion) {
@@ -1052,104 +1121,10 @@ function getNoSpeechRange(suggestion) {
   };
 }
 
-function isNoSpeechSelected(suggestion) {
-  const range = getNoSpeechRange(suggestion);
-  return Boolean(range && selectedNoSpeechRanges.has(range.id));
-}
-
-function setActionLabel(button, label) {
-  const labelElement = button?.querySelector(".button-label");
-  if (labelElement) labelElement.textContent = label;
-}
-
-function updateNoSpeechStates() {
-  if (!noSpeechList || !selectAllNoSpeechButton || !noSpeechState) return;
-  let deletedCount = 0;
-  for (const card of noSpeechList.querySelectorAll(".no-speech-card")) {
-    const suggestion = currentNoSpeechSuggestions.find(
-      (item) => item.id === card.dataset.noSpeechId,
-    );
-    if (!suggestion) continue;
-
-    const marked = isNoSpeechSelected(suggestion);
-    const ignored = ignoredNoSpeechSuggestions.has(suggestion.id);
-    const protectedRange = Boolean(suggestion.protected);
-    if (marked) deletedCount += 1;
-    card.classList.toggle("is-marked", marked);
-    card.classList.toggle("is-ignored", ignored);
-    card.classList.toggle("is-protected", protectedRange);
-
-    const applyButton = card.querySelector('[data-action="apply"]');
-    const ignoreButton = card.querySelector('[data-action="ignore"]');
-    const previewButton = card.querySelector('[data-action="preview"]');
-    const status = card.querySelector(".no-speech-card-status");
-    const canDelete = suggestion.deletable !== false;
-    applyButton.disabled = cutControlsLocked || ignored || marked || !canDelete;
-    applyButton.classList.toggle("is-active", marked);
-    applyButton.setAttribute("aria-pressed", String(marked));
-    setActionLabel(
-      applyButton,
-      marked ? "已删除" : protectedRange ? "确认删除" : "删除",
-    );
-    ignoreButton.disabled = cutControlsLocked || marked;
-    ignoreButton.setAttribute("aria-pressed", String(ignored));
-    setActionLabel(ignoreButton, ignored ? "恢复建议" : "忽略");
-    previewButton.disabled = cutControlsLocked || marked;
-    status.textContent = !canDelete
-      ? "整段无文字，不能删除全部视频"
-      : ignored
-        ? "已忽略"
-        : marked
-          ? "已从剪辑时间轴删除"
-          : protectedRange
-            ? "已保护，需要手动确认"
-            : "等待试听确认";
-  }
-
-  const protectedCount = currentNoSpeechSuggestions.filter(
-    (suggestion) => suggestion.protected,
-  ).length;
-  noSpeechState.classList.toggle("is-marked", deletedCount > 0);
-  noSpeechState.textContent =
-    deletedCount > 0
-      ? `发现 ${currentNoSpeechSuggestions.length} 处长时间无文字片段，已删除 ${deletedCount} 处。`
-      : `发现 ${currentNoSpeechSuggestions.length} 处长时间无文字片段${protectedCount ? `，其中 ${protectedCount} 处片头或片尾已默认保护` : ""}。`;
-
-  const bulkEligible = currentNoSpeechSuggestions.filter(
-    (suggestion) =>
-      !suggestion.protected &&
-      suggestion.deletable !== false,
-  );
-  const bulkCandidates = bulkEligible.filter(
-    (suggestion) =>
-      !ignoredNoSpeechSuggestions.has(suggestion.id) &&
-      !isNoSpeechSelected(suggestion),
-  );
-  const bulkDeletedCount = bulkEligible.filter((suggestion) =>
-    isNoSpeechSelected(suggestion),
-  ).length;
-  selectAllNoSpeechButton.hidden = bulkEligible.length === 0;
-  selectAllNoSpeechButton.disabled =
-    cutControlsLocked || bulkCandidates.length === 0;
-  selectAllNoSpeechButton.classList.toggle(
-    "is-active",
-    bulkCandidates.length === 0,
-  );
-  selectAllNoSpeechButton.setAttribute("aria-pressed", "false");
-  setActionLabel(
-    selectAllNoSpeechButton,
-    bulkCandidates.length > 0
-      ? "一键删除可删片段"
-      : bulkDeletedCount === bulkEligible.length
-        ? "可删片段已删除"
-        : "无待删片段",
-  );
-}
-
 function noSpeechKindLabel(suggestion) {
-  if (suggestion.kind === "leading") return "片头保护";
-  if (suggestion.kind === "trailing") return "片尾保护";
-  if (suggestion.kind === "full") return "整段保护";
+  if (suggestion.kind === "leading") return "片头空白";
+  if (suggestion.kind === "trailing") return "片尾空白";
+  if (suggestion.kind === "full") return "整段空白";
   return "中段空白";
 }
 
@@ -1159,27 +1134,8 @@ function noSpeechAudioLabel(suggestion) {
   return "音频待复核";
 }
 
-function createNoSpeechAction(action, icon, label, className = "") {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = `no-speech-action ${className}`.trim();
-  button.dataset.action = action;
-  const iconElement = document.createElement("iconify-icon");
-  iconElement.setAttribute("icon", icon);
-  iconElement.setAttribute("aria-hidden", "true");
-  const labelElement = document.createElement("span");
-  labelElement.className = "button-label";
-  labelElement.textContent = label;
-  button.append(iconElement, labelElement);
-  return button;
-}
-
-function renderNoSpeechSuggestions(suggestions, status) {
-  if (!noSpeechList || !selectAllNoSpeechButton || !noSpeechState) return;
-  noSpeechList.replaceChildren();
-  selectedNoSpeechRanges.clear();
-  ignoredNoSpeechSuggestions.clear();
-  currentNoSpeechSuggestions = Array.isArray(suggestions)
+function setCurrentNoSpeechSuggestions(suggestions, status) {
+  currentNoSpeechSuggestions = status === "completed" && Array.isArray(suggestions)
     ? suggestions
         .filter((suggestion) => getNoSpeechRange(suggestion))
         .map((suggestion) => ({
@@ -1187,85 +1143,6 @@ function renderNoSpeechSuggestions(suggestions, status) {
           id: getNoSpeechRange(suggestion).id,
         }))
     : [];
-
-  noSpeechState.classList.remove("is-empty", "is-warning", "is-marked");
-  selectAllNoSpeechButton.hidden = true;
-  if (status !== "completed") {
-    noSpeechState.classList.add("is-warning");
-    noSpeechState.textContent =
-      "本次无文字片段检测暂不可用，你仍可在时间轴上手动选择删除区间。";
-    return;
-  }
-  if (currentNoSpeechSuggestions.length === 0) {
-    noSpeechState.classList.add("is-empty");
-    noSpeechState.textContent =
-      "没有发现超过 1.5 秒的无文字片段，短暂停顿已自动保留。";
-    return;
-  }
-
-  for (const suggestion of currentNoSpeechSuggestions) {
-    const item = document.createElement("li");
-    item.className = "no-speech-card";
-    item.dataset.noSpeechId = suggestion.id;
-
-    const heading = document.createElement("div");
-    heading.className = "no-speech-card-heading";
-    const labels = document.createElement("div");
-    labels.className = "no-speech-labels";
-    const kind = document.createElement("span");
-    kind.className = "no-speech-kind";
-    kind.textContent = noSpeechKindLabel(suggestion);
-    const audio = document.createElement("span");
-    audio.className = `no-speech-audio is-${suggestion.audioState || "unknown"}`;
-    audio.textContent = noSpeechAudioLabel(suggestion);
-    labels.append(kind, audio);
-    const time = document.createElement("span");
-    time.className = "no-speech-time";
-    time.textContent =
-      `${formatPreciseTime(suggestion.start)} — ${formatPreciseTime(suggestion.end)}`;
-    heading.append(labels, time);
-
-    const description = document.createElement("p");
-    description.className = "no-speech-description";
-    const seconds = Math.max(
-      0,
-      Number(suggestion.end) - Number(suggestion.start),
-    );
-    description.textContent =
-      `${seconds.toFixed(1)} 秒无识别文字。${suggestion.reason || "请先试听，再决定是否删除。"}`;
-
-    const footer = document.createElement("div");
-    footer.className = "no-speech-card-footer";
-    const cardStatus = document.createElement("span");
-    cardStatus.className = "no-speech-card-status";
-    cardStatus.setAttribute("aria-live", "polite");
-    const actions = document.createElement("div");
-    actions.className = "no-speech-actions";
-    actions.append(
-      createNoSpeechAction(
-        "preview",
-        "ph:play-circle-bold",
-        "试听",
-        "no-speech-preview-button",
-      ),
-      createNoSpeechAction(
-        "apply",
-        "ph:scissors-bold",
-        "删除",
-        "no-speech-mark-button",
-      ),
-      createNoSpeechAction(
-        "ignore",
-        "ph:eye-slash-bold",
-        "忽略",
-        "no-speech-ignore-button",
-      ),
-    );
-    footer.append(cardStatus, actions);
-    item.append(heading, description, footer);
-    noSpeechList.append(item);
-  }
-  updateNoSpeechStates();
 }
 
 function mergeCutRanges(ranges) {
@@ -1454,10 +1331,6 @@ function alignManualRangeToTranscript(range) {
   };
 }
 
-function getMergedTextSelection() {
-  return mergeCutRanges([...selectedRanges.values()]);
-}
-
 function getCommittedTimelineDeleteRanges() {
   return timelineDeleteRanges.filter(
     ({ id }) =>
@@ -1465,10 +1338,129 @@ function getCommittedTimelineDeleteRanges() {
   );
 }
 
+function protectRecognizedSpeechFromQuietRanges(quietRanges) {
+  const speechRanges = getRecognizedSpeechRanges();
+  const safeRanges = [];
+  for (const quietRange of quietRanges) {
+    let fragments = [
+      {
+        start: Number(quietRange.start),
+        end: Number(quietRange.end),
+      },
+    ];
+    for (const speechRange of speechRanges) {
+      if (!fragments.length || speechRange.start >= fragments.at(-1).end) break;
+      const nextFragments = [];
+      for (const fragment of fragments) {
+        if (
+          speechRange.end <= fragment.start ||
+          speechRange.start >= fragment.end
+        ) {
+          nextFragments.push(fragment);
+          continue;
+        }
+        if (speechRange.start > fragment.start) {
+          nextFragments.push({
+            start: fragment.start,
+            end: speechRange.start,
+          });
+        }
+        if (speechRange.end < fragment.end) {
+          nextFragments.push({
+            start: speechRange.end,
+            end: fragment.end,
+          });
+        }
+      }
+      fragments = nextFragments;
+    }
+    safeRanges.push(
+      ...fragments.filter(
+        ({ start, end }) => end - start >= CUT_SAFE_NO_SPEECH_MIN_DURATION,
+      ),
+    );
+  }
+  return safeRanges;
+}
+
+function protectRestoredNoSpeechFromTextRanges(textRanges) {
+  const restoredNoSpeechRanges = currentNoSpeechSuggestions.flatMap(
+    (suggestion) => {
+      const range = getNoSpeechRange(suggestion);
+      return range && !selectedNoSpeechRanges.has(range.id) ? [range] : [];
+    },
+  );
+  if (restoredNoSpeechRanges.length === 0) return textRanges;
+
+  const safeRanges = [];
+  for (const textRange of textRanges) {
+    const start = Number(textRange.start);
+    const end = Number(textRange.end);
+    const originalStart = clamp(
+      Number(textRange.originalStart ?? start),
+      start,
+      end,
+    );
+    const originalEnd = clamp(
+      Number(textRange.originalEnd ?? end),
+      originalStart,
+      end,
+    );
+    let fragments = [
+      { start, end: originalStart },
+      { start: originalEnd, end },
+    ].filter((range) => range.end - range.start > CUT_SPEECH_BOUNDARY_EPSILON);
+    for (const protectedRange of restoredNoSpeechRanges) {
+      const nextFragments = [];
+      for (const fragment of fragments) {
+        if (
+          protectedRange.end <= fragment.start ||
+          protectedRange.start >= fragment.end
+        ) {
+          nextFragments.push(fragment);
+          continue;
+        }
+        if (protectedRange.start > fragment.start) {
+          nextFragments.push({
+            start: fragment.start,
+            end: protectedRange.start,
+          });
+        }
+        if (protectedRange.end < fragment.end) {
+          nextFragments.push({
+            start: protectedRange.end,
+            end: fragment.end,
+          });
+        }
+      }
+      fragments = nextFragments;
+    }
+    safeRanges.push(
+      ...fragments.filter(
+        (range) => range.end - range.start > CUT_SPEECH_BOUNDARY_EPSILON,
+      ),
+    );
+    if (originalEnd - originalStart > CUT_SPEECH_BOUNDARY_EPSILON) {
+      safeRanges.push({ start: originalStart, end: originalEnd });
+    }
+  }
+  return safeRanges;
+}
+
+function resolveOverlappingRepeatAndQuietRanges(textRanges, quietRanges) {
+  return [
+    ...protectRestoredNoSpeechFromTextRanges(textRanges),
+    ...protectRecognizedSpeechFromQuietRanges(quietRanges),
+  ];
+}
+
 function getMergedSelection() {
+  const resolvedAutomaticRanges = resolveOverlappingRepeatAndQuietRanges(
+    [...selectedRanges.values()],
+    [...selectedNoSpeechRanges.values()],
+  );
   return mergeCutRanges([
-    ...getMergedTextSelection(),
-    ...selectedNoSpeechRanges.values(),
+    ...resolvedAutomaticRanges,
     ...getCommittedTimelineDeleteRanges(),
   ]);
 }
@@ -1534,6 +1526,29 @@ function editedTimeToSourceTime(seconds, spans = getEditedTimelineSpans()) {
     }
   }
   return spans.at(-1)?.sourceEnd || 0;
+}
+
+function getEditedAudioQuietRanges(spans = getEditedTimelineSpans()) {
+  const mapped = [];
+  for (const quietRange of currentAudioQuietRanges) {
+    const quietStart = Number(quietRange?.start);
+    const quietEnd = Number(quietRange?.end);
+    if (!Number.isFinite(quietStart) || !Number.isFinite(quietEnd)) continue;
+    for (const span of spans) {
+      const sourceStart = Math.max(quietStart, span.sourceStart);
+      const sourceEnd = Math.min(quietEnd, span.sourceEnd);
+      if (sourceEnd <= sourceStart) continue;
+      const start = span.editedStart + sourceStart - span.sourceStart;
+      const end = span.editedStart + sourceEnd - span.sourceStart;
+      const previous = mapped.at(-1);
+      if (previous && start <= previous.end + 0.001) {
+        previous.end = Math.max(previous.end, end);
+      } else {
+        mapped.push({ start, end });
+      }
+    }
+  }
+  return mapped;
 }
 
 function getEditableSegmentCoverageEnd(segmentIndex) {
@@ -1656,13 +1671,68 @@ function updateActiveTranscriptSegment(
   currentTime = cutPreviewVideo.currentTime || 0,
   { follow = false } = {},
 ) {
-  const nextIndex = getActiveTranscriptSegmentIndex(currentTime);
+  const sourceTime = Number(currentTime);
+  const allItems = [
+    ...segmentList.querySelectorAll(
+      ".segment-item[data-display-start][data-display-end]",
+    ),
+  ];
+  const transcriptPreviewItem = transcriptPreviewRange
+    ? allItems.find((item) => {
+        const start = Number(item.dataset.displayStart);
+        const end = Number(item.dataset.displayEnd);
+        return (
+          item.dataset.displayKey === transcriptPreviewRange.displayKey &&
+          Number.isFinite(start) &&
+          Number.isFinite(end) &&
+          sourceTime >= start &&
+          sourceTime < end
+        );
+      }) || null
+    : null;
+  const nextNoSpeechItem = allItems.find((item) => {
+    const start = Number(item.dataset.displayStart);
+    const end = Number(item.dataset.displayEnd);
+    return (
+      item.dataset.noSpeechId &&
+      !item.classList.contains("is-removed-from-timeline") &&
+      Number.isFinite(start) &&
+      Number.isFinite(end) &&
+      sourceTime >= start &&
+      sourceTime < end
+    );
+  }) || null;
+  const textSegmentIndex = getActiveTranscriptSegmentIndex(currentTime);
+  const matchingItems = textSegmentIndex < 0
+    ? []
+    : [
+        ...segmentList.querySelectorAll(
+          `.segment-item[data-segment-index="${textSegmentIndex}"]`,
+        ),
+      ];
+  const nextTextItem = matchingItems.find((item) => {
+    const start = Number(item.dataset.displayStart);
+    const end = Number(item.dataset.displayEnd);
+    return (
+      !item.classList.contains("is-removed-from-timeline") &&
+      Number.isFinite(start) &&
+      Number.isFinite(end) &&
+      sourceTime >= start &&
+      sourceTime < end
+    );
+  }) || null;
+  const nextItem = transcriptPreviewItem || nextNoSpeechItem || nextTextItem;
+  const nextIndex = nextItem?.dataset.segmentIndex === undefined
+    ? -1
+    : Number(nextItem.dataset.segmentIndex);
+  const nextKey = nextItem?.dataset.displayKey || "";
   const currentItem = segmentList.querySelector(
-    ".segment-item.is-playback-active[data-segment-index]",
+    ".segment-item.is-playback-active",
   );
   if (
     nextIndex === activeTranscriptSegmentIndex &&
-    Number(currentItem?.dataset.segmentIndex) === nextIndex
+    nextKey === activeTranscriptSegmentKey &&
+    currentItem === nextItem
   ) {
     return;
   }
@@ -1675,11 +1745,8 @@ function updateActiveTranscriptSegment(
   }
 
   activeTranscriptSegmentIndex = nextIndex;
-  if (nextIndex < 0) return;
-  const nextItem = segmentList.querySelector(
-    `.segment-item[data-segment-index="${nextIndex}"]`,
-  );
-  if (!nextItem || nextItem.classList.contains("is-removed-from-timeline")) return;
+  activeTranscriptSegmentKey = nextKey;
+  if (!nextItem) return;
   nextItem.classList.add("is-playback-active");
   nextItem.setAttribute("aria-current", "true");
   const badge = nextItem.querySelector(".segment-current-badge");
@@ -1732,6 +1799,7 @@ function buildLiveCutDraftState() {
     transcript: {
       text: segments.map((segment) => segment.text).join("\n"),
       segments,
+      audioQuietRanges: getEditedAudioQuietRanges(spans),
     },
   };
 }
@@ -1772,35 +1840,28 @@ function updateTimelineRangeConfirmation() {
     timelineDeleteRanges.some(({ id }) => id === selectedTimelineRangeId),
   );
   generateCutButton.disabled =
-    cutControlsLocked || hasPendingRange || !hasCutSelection();
+    cutControlsLocked || hasPendingRange || getMergedSelection().length === 0;
 }
 
 function setCutControlsDisabled(disabled) {
   cutControlsLocked = disabled;
-  segmentList.querySelectorAll(".segment-toggle").forEach((button) => {
-    button.disabled = disabled;
-  });
-  suggestionList.querySelectorAll(".suggestion-action").forEach((button) => {
-    button.disabled = disabled;
-  });
-  selectAllSuggestionsButton.disabled =
-    disabled || currentSuggestions.length === 0;
-  noSpeechList
-    ?.querySelectorAll(".no-speech-action")
+  segmentList
+    .querySelectorAll(".segment-toggle")
     .forEach((button) => {
-      button.disabled = disabled;
+      if (button instanceof HTMLButtonElement) {
+        button.disabled =
+          disabled || button.dataset.selectionDisabled === "true";
+      }
     });
-  if (selectAllNoSpeechButton) {
-    selectAllNoSpeechButton.disabled =
-      disabled || currentNoSpeechSuggestions.length === 0;
-  }
+  segmentList
+    .querySelectorAll(".segment-text-run")
+    .forEach((button) => {
+      if (button instanceof HTMLButtonElement) button.disabled = disabled;
+    });
   cutFrameTimeline?.classList.toggle("is-locked", disabled);
   clearSelectionButton.disabled = disabled || !hasCutSelection();
-  generateCutButton.disabled = disabled || !hasCutSelection();
+  generateCutButton.disabled = disabled || getMergedSelection().length === 0;
   updateTimelineRangeConfirmation();
-  updateSuggestionStates();
-  updateNoSpeechStates();
-  renderCutHistory();
 }
 
 function setCutDraftSaveStatus(message, tone = "neutral") {
@@ -1898,6 +1959,7 @@ function buildPersistedCutDraftPayload() {
   });
   return {
     revision: cutDraftRevision,
+    automaticNoSpeechInitialized,
     textRanges,
     noSpeechRanges,
     timelineRanges,
@@ -1906,6 +1968,8 @@ function buildPersistedCutDraftPayload() {
 
 function cutDraftSelectionSignature(payload) {
   return JSON.stringify({
+    automaticNoSpeechInitialized:
+      payload.automaticNoSpeechInitialized === true,
     textRanges: payload.textRanges,
     noSpeechRanges: payload.noSpeechRanges,
     timelineRanges: payload.timelineRanges,
@@ -1914,6 +1978,8 @@ function cutDraftSelectionSignature(payload) {
 
 function restorePersistedCutDraft(draft) {
   cutDraftRevision = Math.max(0, Number(draft?.revision) || 0);
+  automaticNoSpeechInitialized =
+    draft?.automaticNoSpeechInitialized === true;
   for (const item of Array.isArray(draft?.textRanges) ? draft.textRanges : []) {
     const normalized = serializableCutDraftRange(item);
     const key = String(item?.key || "");
@@ -1966,6 +2032,85 @@ function restorePersistedCutDraft(draft) {
   );
 }
 
+function reconcileCurrentCutHistorySnapshot() {
+  const aligned = cloneCutHistorySnapshot();
+  cutHistoryLastState = aligned;
+  if (!cutHistoryBaseline || cutHistoryIndex === 0) {
+    cutHistoryBaseline = aligned;
+  } else if (cutHistoryEntries[cutHistoryIndex - 1]) {
+    cutHistoryEntries[cutHistoryIndex - 1].after = aligned;
+  }
+  if (cutHistoryEntries[cutHistoryIndex]) {
+    cutHistoryEntries[cutHistoryIndex].before = aligned;
+  }
+  saveLocalCutHistory();
+}
+
+function applyPersistedCutDraftAlignment(draft, expectedSignature) {
+  if (
+    !draft ||
+    cutDraftSelectionSignature(buildPersistedCutDraftPayload()) !==
+      expectedSignature
+  ) {
+    return false;
+  }
+
+  const serverRanges = new Map(
+    (Array.isArray(draft.textRanges) ? draft.textRanges : []).flatMap((item) => {
+      const key = String(item?.key || "");
+      const normalized = serializableCutDraftRange(item);
+      return key && normalized ? [[key, { item, normalized }]] : [];
+    }),
+  );
+  if (
+    serverRanges.size !== selectedRanges.size ||
+    [...selectedRanges.keys()].some((key) => !serverRanges.has(key))
+  ) {
+    return false;
+  }
+
+  let changed = false;
+  for (const [key, currentRange] of selectedRanges.entries()) {
+    const { item, normalized } = serverRanges.get(key);
+    const aligned = {
+      ...currentRange,
+      ...normalized,
+      text: String(item.text ?? currentRange.text ?? ""),
+      originalStart: Number.isFinite(Number(item.originalStart))
+        ? Number(item.originalStart)
+        : Number(currentRange.originalStart ?? normalized.start),
+      originalEnd: Number.isFinite(Number(item.originalEnd))
+        ? Number(item.originalEnd)
+        : Number(currentRange.originalEnd ?? normalized.end),
+      adjacentSilenceBefore: Math.max(
+        0,
+        Number(item.adjacentSilenceBefore) || 0,
+      ),
+      adjacentSilenceAfter: Math.max(
+        0,
+        Number(item.adjacentSilenceAfter) || 0,
+      ),
+    };
+    changed ||= cutDraftSelectionSignature({ textRanges: [currentRange] }) !==
+      cutDraftSelectionSignature({ textRanges: [aligned] });
+    selectedRanges.set(key, aligned);
+  }
+
+  cutDraftLastSignature = cutDraftSelectionSignature(
+    buildPersistedCutDraftPayload(),
+  );
+  if (changed) {
+    cutHistoryReplaying = true;
+    try {
+      updateSelectionSummary();
+    } finally {
+      cutHistoryReplaying = false;
+    }
+    reconcileCurrentCutHistorySnapshot();
+  }
+  return true;
+}
+
 async function persistCutDraft() {
   if (!cutDraftReady || !currentJobId) return;
   const jobId = currentJobId;
@@ -1997,7 +2142,25 @@ async function persistCutDraft() {
       cutDraftRevision,
       Number(result.cutDraft?.revision) || 0,
     );
-    cutDraftLastSignature = signature;
+    const alignmentApplied = applyPersistedCutDraftAlignment(
+      result.cutDraft,
+      signature,
+    );
+    if (!alignmentApplied) {
+      cutDraftLastSignature = cutDraftSelectionSignature(
+        result.cutDraft || payload,
+      );
+      cutDraftNeedsServerSync = true;
+      saveLocalCutDraft(
+        {
+          schemaVersion: 1,
+          ...buildPersistedCutDraftPayload(),
+          updatedAt: new Date().toISOString(),
+        },
+        jobId,
+      );
+      return;
+    }
     cutDraftNeedsServerSync = false;
     saveLocalCutDraft(result.cutDraft, jobId);
     setCutDraftSaveStatus("剪辑草稿已保存", "success");
@@ -2154,17 +2317,6 @@ function loadLocalCutHistory(jobId = currentJobId) {
   }
 }
 
-function formatCutHistoryTime(value) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "刚刚";
-  return new Intl.DateTimeFormat("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).format(date);
-}
-
 function canUndoCutHistory() {
   return Boolean(
     currentJobId &&
@@ -2185,69 +2337,6 @@ function canRedoCutHistory() {
   );
 }
 
-function renderCutHistory() {
-  if (!cutUndoButton || !cutRedoButton || !cutHistoryStatus) return;
-  cutUndoButton.disabled = !canUndoCutHistory();
-  cutRedoButton.disabled = !canRedoCutHistory();
-  const undoEntry = cutHistoryEntries[cutHistoryIndex - 1];
-  const redoEntry = cutHistoryEntries[cutHistoryIndex];
-  cutUndoButton.setAttribute(
-    "aria-label",
-    undoEntry ? `撤销：${undoEntry.label}` : "没有可撤销的剪辑操作",
-  );
-  cutRedoButton.setAttribute(
-    "aria-label",
-    redoEntry ? `重做：${redoEntry.label}` : "没有可重做的剪辑操作",
-  );
-
-  if (cutHistoryFeedback) {
-    cutHistoryStatus.textContent = cutHistoryFeedback;
-  } else if (cutHistoryEntries.length === 0) {
-    cutHistoryStatus.textContent = "暂无操作记录";
-  } else if (cutHistoryIndex === 0) {
-    cutHistoryStatus.textContent = `0/${cutHistoryEntries.length} · 已回到初始状态`;
-  } else {
-    cutHistoryStatus.textContent =
-      `${cutHistoryIndex}/${cutHistoryEntries.length} · ${undoEntry.label}`;
-  }
-
-  if (cutHistoryCount) {
-    cutHistoryCount.textContent = String(cutHistoryEntries.length);
-    cutHistoryCount.hidden = cutHistoryEntries.length === 0;
-  }
-  if (cutHistoryEmpty) cutHistoryEmpty.hidden = cutHistoryEntries.length > 0;
-  if (!cutHistoryList) return;
-  const fragment = document.createDocumentFragment();
-  [...cutHistoryEntries]
-    .map((entry, index) => ({ entry, index }))
-    .reverse()
-    .forEach(({ entry, index }) => {
-      const item = document.createElement("li");
-      const applied = index < cutHistoryIndex;
-      item.className = "cut-history-entry";
-      item.classList.toggle("is-undone", !applied);
-      item.classList.toggle("is-current", applied && index === cutHistoryIndex - 1);
-
-      const label = document.createElement("strong");
-      label.className = "cut-history-entry-label";
-      label.textContent = entry.label;
-      const time = document.createElement("time");
-      time.className = "cut-history-entry-time";
-      time.dateTime = entry.at;
-      time.textContent = formatCutHistoryTime(entry.at);
-      const state = document.createElement("span");
-      state.className = "cut-history-entry-state";
-      state.textContent = applied
-        ? index === cutHistoryIndex - 1
-          ? "当前状态"
-          : "已应用"
-        : "已撤销 · 可重做";
-      item.append(label, time, state);
-      fragment.append(item);
-    });
-  cutHistoryList.replaceChildren(fragment);
-}
-
 function resetCutHistoryRuntime() {
   cutHistoryBaseline = null;
   cutHistoryEntries = [];
@@ -2255,8 +2344,6 @@ function resetCutHistoryRuntime() {
   cutHistoryLastState = null;
   cutHistoryPendingMeta = null;
   cutHistoryReplaying = false;
-  cutHistoryFeedback = "";
-  renderCutHistory();
 }
 
 function restoreLocalCutHistory() {
@@ -2276,18 +2363,14 @@ function restoreLocalCutHistory() {
     cutHistoryBaseline = stored.baseline;
     cutHistoryEntries = stored.entries;
     cutHistoryIndex = stored.index;
-    cutHistoryFeedback =
-      stored.entries.length > 0 ? "已恢复本机操作记录" : "";
   } else {
     cutHistoryBaseline = current;
     cutHistoryEntries = [];
     cutHistoryIndex = 0;
-    cutHistoryFeedback = "";
     saveLocalCutHistory();
   }
   cutHistoryLastState = current;
   cutHistoryPendingMeta = null;
-  renderCutHistory();
 }
 
 function stageCutHistoryOperation(label, { coalesceKey = "" } = {}) {
@@ -2310,7 +2393,6 @@ function recordCutHistoryIfChanged() {
     cutHistorySnapshotSignature(previous) === cutHistorySnapshotSignature(current)
   ) {
     cutHistoryLastState = current;
-    renderCutHistory();
     return;
   }
 
@@ -2344,9 +2426,7 @@ function recordCutHistoryIfChanged() {
   }
   cutHistoryIndex = cutHistoryEntries.length;
   cutHistoryLastState = current;
-  cutHistoryFeedback = `已记录：${meta?.label || "更新剪辑方案"}`;
   saveLocalCutHistory();
-  renderCutHistory();
 }
 
 function applyCutHistorySnapshot(snapshot) {
@@ -2395,20 +2475,16 @@ function undoCutHistory() {
   if (!canUndoCutHistory()) return;
   const entry = cutHistoryEntries[cutHistoryIndex - 1];
   cutHistoryIndex -= 1;
-  cutHistoryFeedback = `已撤销：${entry.label}`;
   applyCutHistorySnapshot(entry.before);
   saveLocalCutHistory();
-  renderCutHistory();
 }
 
 function redoCutHistory() {
   if (!canRedoCutHistory()) return;
   const entry = cutHistoryEntries[cutHistoryIndex];
   cutHistoryIndex += 1;
-  cutHistoryFeedback = `已重做：${entry.label}`;
   applyCutHistorySnapshot(entry.after);
   saveLocalCutHistory();
-  renderCutHistory();
 }
 
 function isNativeUndoTarget(target) {
@@ -2445,13 +2521,6 @@ function updateSelectionSummary() {
     (total, range) => total + range.end - range.start,
     0,
   );
-  const mergedNoSpeechRanges = mergeCutRanges([
-    ...selectedNoSpeechRanges.values(),
-  ]);
-  const noSpeechDeletedDuration = mergedNoSpeechRanges.reduce(
-    (total, range) => total + range.end - range.start,
-    0,
-  );
   const selectionParts = [];
   const selectedSegmentCount = currentEditableSegments.filter((segment) =>
     selectedRanges.has(rangeKey(segment.start, segment.end)),
@@ -2480,7 +2549,7 @@ function updateSelectionSummary() {
       "点击文字删除会一并收紧前后无声区；时间轴拖动按自定义区间处理";
     outputCutSummary.textContent = "尚未删除任何内容";
     outputCutSelectionDetail.textContent =
-      "请先在文字剪辑、空白剪辑或时间轴中删除内容";
+      "请先在文字剪辑或时间轴中删除内容";
   } else {
     const editedDuration = Math.max(0, cutTimelineDuration() - deletedDuration);
     cutSummary.textContent = `已删除 ${selectionParts.join("、")}`;
@@ -2494,53 +2563,16 @@ function updateSelectionSummary() {
   clearSelectionButton.disabled =
     cutControlsLocked || !hasCutSelection();
   generateCutButton.disabled =
-    cutControlsLocked || !hasCutSelection();
-  if (noSpeechCutSummary && noSpeechCutSelectionDetail) {
-    if (selectedNoSpeechRanges.size === 0) {
-      noSpeechCutSummary.textContent = "尚未删除空白片段";
-      noSpeechCutSelectionDetail.textContent =
-        "请先试听，再直接删除不需要的区间";
-    } else {
-      noSpeechCutSummary.textContent =
-        `已删除 ${selectedNoSpeechRanges.size} 个空白片段`;
-      const hasOtherSelections =
-        selectedRanges.size > 0 || committedTimelineRanges.length > 0;
-      noSpeechCutSelectionDetail.textContent =
-        `已删除空白 ${formatDuration(noSpeechDeletedDuration)}` +
-        (hasOtherSelections ? " · 已与其他删除区间合并" : " · 原视频保留");
-    }
-  }
+    cutControlsLocked || merged.length === 0;
   updateTimelineRangeConfirmation();
   updateOriginalSourceActionsVisibility();
-
-  segmentList.querySelectorAll(".segment-toggle").forEach((button) => {
-    const segment = currentEditableSegments[Number(button.dataset.segmentIndex)];
-    const allSelected = Boolean(
-      segment && selectedRanges.has(rangeKey(segment.start, segment.end)),
-    );
-    button.closest(".segment-item")?.classList.toggle(
-      "has-selection",
-      allSelected,
-    );
-    button.classList.toggle("is-selected", allSelected);
-    button.setAttribute("aria-pressed", String(allSelected));
-    button.disabled = cutControlsLocked;
-    button.setAttribute(
-      "aria-label",
-      `${allSelected ? "撤销删除" : "删除"}第 ${Number(button.dataset.segmentIndex) + 1} 段`,
-    );
-  });
   document.body.classList.toggle(
     "has-cut-selection",
     hasCutSelection(),
   );
   updateCutSegmentText();
-  updateCutSegmentTimestamps();
-  updateCutInspectorTimestamps();
   syncEditorSuiteCutDraftState();
   refreshCutTimeline();
-  updateSuggestionStates();
-  updateNoSpeechStates();
   scheduleCutDraftSave();
 }
 
@@ -2662,6 +2694,7 @@ function seekCutPreview(seconds) {
   const total = cutTimelineDuration();
   noSpeechPreviewEnd = null;
   cutSelectionPreviewEnd = null;
+  transcriptPreviewRange = null;
   cutPreviewVideo.currentTime = clamp(Number(seconds) || 0, 0, total);
   updateCutTimelinePlayhead({ followTranscript: true });
 }
@@ -2700,6 +2733,27 @@ function previewNoSpeechSuggestion(suggestion) {
     `正在试听无文字区间 ${formatCutRange(range.start, range.end)}。`,
     "neutral",
     "no-speech",
+  );
+  cutPreviewVideo.play().catch(() => {});
+}
+
+function previewTextSegment(item) {
+  const total = cutTimelineDuration();
+  const start = clamp(Number(item?.dataset.displayStart) || 0, 0, total);
+  const end = clamp(Number(item?.dataset.displayEnd) || start, start, total);
+  if (total <= 0 || end <= start) return;
+  cutPreviewVideo.pause();
+  seekCutPreview(start);
+  transcriptPreviewRange = {
+    start,
+    end,
+    displayKey: String(item.dataset.displayKey || ""),
+  };
+  updateActiveTranscriptSegment(start, { follow: true });
+  updateCutTimelineStatus(
+    `正在播放文案 ${formatCutRange(start, end)}。`,
+    "neutral",
+    "transcript",
   );
   cutPreviewVideo.play().catch(() => {});
 }
@@ -2755,6 +2809,51 @@ function renderCutTimelineRuler() {
   }
 }
 
+function cutTimelineClipId(rangeId) {
+  return `cut:${rangeId}`;
+}
+
+function syncCutTimelineModel() {
+  const total = Math.max(currentVideoDuration, cutTimelineDuration());
+  cutTimelineStore.setDuration(total, { silent: true });
+  const timeline = cutTimelineStore.replaceKind(
+    "cut",
+    [
+      {
+        id: "cut:deletions",
+        kind: "cut",
+        name: "删除区间",
+        order: 0,
+        clips: timelineDeleteRanges.map((range) => ({
+          id: cutTimelineClipId(range.id),
+          sourceId: range.id,
+          name: "删除区间",
+          start: range.start,
+          end: range.end,
+          minDuration: CUT_TIMELINE_MIN_RANGE,
+          editable: true,
+          payload: {
+            pending:
+              timelineRangeInProgress && range.id === selectedTimelineRangeId,
+          },
+        })),
+      },
+    ],
+    {
+      selection:
+        selectedTimelineRangeId === null
+          ? null
+          : cutTimelineClipId(selectedTimelineRangeId),
+      silent: true,
+    },
+  );
+  window.EditorSuite?.setTimelineTracks("cut", timeline.tracks, {
+    duration: timeline.duration,
+    selection: timeline.selection?.clipId || null,
+  });
+  return timeline;
+}
+
 function renderCutTimelineRanges() {
   cutFrameTimelineRanges.replaceChildren();
   const spans = getEditedTimelineSpans();
@@ -2766,6 +2865,7 @@ function renderCutTimelineRanges() {
   ) {
     selectedTimelineRangeId = null;
   }
+  syncCutTimelineModel();
 
   for (const range of timelineDeleteRanges.filter(
     ({ id }) => id === selectedTimelineRangeId,
@@ -2801,10 +2901,10 @@ function renderCutTimelineRanges() {
     body.className = "cut-timeline-range-body";
     body.dataset.dragMode = "move";
     body.textContent = formatCutRange(range.start, range.end);
-    body.title = "拖动调整区间，确认后才会删除";
+    body.title = "拖动调整区间，再次点击确认删除";
     body.setAttribute(
       "aria-label",
-      `待确认删除区间 ${formatCutRange(range.start, range.end)}，可拖动调整`,
+      `待确认删除区间 ${formatCutRange(range.start, range.end)}，可拖动调整，再次点击或按 Enter 确认删除`,
     );
 
     const endHandle = document.createElement("button");
@@ -2816,7 +2916,23 @@ function renderCutTimelineRanges() {
       "aria-label",
       `调整删除区间结束时间，当前 ${formatTime(range.end)}`,
     );
-    rangeElement.append(startHandle, body, endHandle);
+
+    const cancelButton = document.createElement("button");
+    cancelButton.type = "button";
+    cancelButton.className = "cut-timeline-range-cancel";
+    cancelButton.dataset.timelineRangeAction = "cancel";
+    cancelButton.title = "取消选区";
+    cancelButton.setAttribute(
+      "aria-label",
+      `取消待确认删除区间 ${formatCutRange(range.start, range.end)}`,
+    );
+
+    const cancelIcon = document.createElement("iconify-icon");
+    cancelIcon.setAttribute("icon", "ph:x-bold");
+    cancelIcon.setAttribute("aria-hidden", "true");
+    cancelButton.append(cancelIcon);
+
+    rangeElement.append(startHandle, body, endHandle, cancelButton);
     cutFrameTimelineRanges.append(rangeElement);
   }
   updateTimelineRangeConfirmation();
@@ -3099,11 +3215,10 @@ function beginCutTimelineSelection(event) {
     renderCutTimelineRanges();
     updateTimelineRangeConfirmation();
     updateCutTimelineStatus(
-      `已选择 ${formatCutRange(draftRange.start, draftRange.end)}，确认后才会删除。`,
+      `已选择 ${formatCutRange(draftRange.start, draftRange.end)}，可拖动微调，再次点击选区确认删除。`,
       "neutral",
       "selection",
     );
-    void requestTimelineRangeConfirmation(draftRange);
   };
   window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", finish, { once: true });
@@ -3124,34 +3239,38 @@ function beginTimelineRangeAdjustment(event) {
   cutPreviewVideo.pause();
   selectedTimelineRangeId = rangeId;
   const mode = control.dataset.dragMode;
-  const original = { start: range.start, end: range.end };
   const startClientX = event.clientX;
+  let hasDragged = false;
   const total = cutTimelineDuration();
+  syncCutTimelineModel();
+  cutTimelineStore.selectClip(cutTimelineClipId(range.id), { silent: true });
+  const pointerSession = window.EditorTimeline.createPointerSession(
+    cutTimelineStore,
+    {
+      clipId: cutTimelineClipId(range.id),
+      mode,
+      startClientX,
+      trackWidth: cutFrameTimelineTrack.getBoundingClientRect().width,
+      duration: total,
+      onUpdate: (clip) => {
+        range.start = clip.start;
+        range.end = clip.end;
+      },
+    },
+  );
+  if (!pointerSession) return;
   renderCutTimelineRanges();
 
   const move = (moveEvent) => {
-    const rect = cutFrameTimelineTrack.getBoundingClientRect();
-    const delta = ((moveEvent.clientX - startClientX) / rect.width) * total;
-    if (mode === "start") {
-      range.start = clamp(
-        original.start + delta,
-        0,
-        original.end - CUT_TIMELINE_MIN_RANGE,
-      );
-      seekCutPreview(range.start);
-    } else if (mode === "end") {
-      range.end = clamp(
-        original.end + delta,
-        original.start + CUT_TIMELINE_MIN_RANGE,
-        total,
-      );
-      seekCutPreview(range.end);
-    } else {
-      const length = original.end - original.start;
-      range.start = clamp(original.start + delta, 0, total - length);
-      range.end = range.start + length;
-      seekCutPreview(range.start);
+    if (
+      !hasDragged &&
+      Math.abs(moveEvent.clientX - startClientX) < CUT_TIMELINE_DRAG_THRESHOLD
+    ) {
+      return;
     }
+    hasDragged = true;
+    const clip = pointerSession.update(moveEvent.clientX);
+    seekCutPreview(mode === "end" ? clip.end : clip.start);
     renderCutTimelineRanges();
     updateCutTimelineStatus(
       `正在调整删除区间 ${formatCutRange(range.start, range.end)}`,
@@ -3160,15 +3279,29 @@ function beginTimelineRangeAdjustment(event) {
     );
   };
 
-  const finish = () => {
+  const finish = (finishEvent) => {
     window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", finish);
     window.removeEventListener("pointercancel", finish);
+    if (!hasDragged) {
+      pointerSession.finish({ commit: false });
+      if (
+        finishEvent.type === "pointerup" &&
+        mode === "move" &&
+        timelineRangeInProgress
+      ) {
+        void requestTimelineRangeConfirmation(range);
+      }
+      return;
+    }
     const safeRange = alignManualRangeToTranscript(range);
     if (safeRange) Object.assign(range, safeRange);
+    pointerSession.finish({ commit: false });
+    syncCutTimelineModel();
+    cutTimelineStore.commit("cut-range");
     stageCutHistoryOperation("调整时间轴删除区间");
     updateCutTimelineStatus(
-      `已调整待确认区间 ${formatCutRange(range.start, range.end)}，确认后才会删除。`,
+      `已调整待确认区间 ${formatCutRange(range.start, range.end)}，再次点击选区确认删除。`,
       "neutral",
       "selection",
     );
@@ -3179,15 +3312,15 @@ function beginTimelineRangeAdjustment(event) {
   window.addEventListener("pointercancel", finish, { once: true });
 }
 
-function cancelPendingTimelineRange() {
+function cancelPendingTimelineRange(message = "") {
   if (selectedTimelineRangeId === null || cutControlsLocked) return;
   timelineDeleteRanges = timelineDeleteRanges.filter(
     ({ id }) => id !== selectedTimelineRangeId,
   );
   selectedTimelineRangeId = null;
   timelineRangeInProgress = false;
-  updateCutTimelineStatus("");
   updateSelectionSummary();
+  updateCutTimelineStatus(message);
 }
 
 function confirmPendingTimelineRange() {
@@ -3239,7 +3372,11 @@ async function requestTimelineRangeConfirmation(range) {
   if (confirmed) {
     confirmPendingTimelineRange();
   } else {
-    cancelPendingTimelineRange();
+    updateCutTimelineStatus(
+      `已保留待确认区间 ${formatCutRange(range.start, range.end)}，可继续调整或再次点击确认。`,
+      "neutral",
+      "selection",
+    );
   }
 }
 
@@ -3303,7 +3440,7 @@ function adjustTimelineRangeWithKeyboard(event) {
       ?.focus({ preventScroll: true });
   });
   updateCutTimelineStatus(
-    `已调整待确认区间 ${formatCutRange(range.start, range.end)}，确认后才会删除。`,
+    `已调整待确认区间 ${formatCutRange(range.start, range.end)}，再次点击选区确认删除。`,
     "neutral",
     "selection",
   );
@@ -3316,6 +3453,13 @@ function setupCutPreviewControls() {
   const skipSelectedRangeDuringPlayback = () => {
     if (cutPreviewVideo.paused) return null;
     const current = cutPreviewVideo.currentTime || 0;
+    if (
+      transcriptPreviewRange &&
+      current >= transcriptPreviewRange.start - CUT_SPEECH_BOUNDARY_EPSILON &&
+      current < transcriptPreviewRange.end - CUT_SPEECH_BOUNDARY_EPSILON
+    ) {
+      return null;
+    }
     const range = getMergedSelection().find(
       ({ start, end }) => current >= start && current < end - 0.001,
     );
@@ -3337,6 +3481,12 @@ function setupCutPreviewControls() {
       0,
       sourceTotal || 0,
     );
+    if (
+      transcriptPreviewRange &&
+      current >= transcriptPreviewRange.end
+    ) {
+      transcriptPreviewRange = null;
+    }
     if (
       noSpeechPreviewEnd !== null &&
       current >= noSpeechPreviewEnd - CUT_TIMELINE_STEP
@@ -3695,8 +3845,8 @@ async function loadHistoryVersions() {
     renderHistoryVersions();
     setHistoryStatus(
       historyVersions.length
-        ? `共 ${historyVersions.length} 个版本，剪辑版与艺术字版分别保存。`
-        : "完成剪辑或生成艺术字后，系统会自动保存一个版本。",
+        ? `共 ${historyVersions.length} 个已保存版本，最终成片会自动保留。`
+        : "最终成片会自动保留；剪辑版和艺术字版可用顶部书签按钮保存。",
       historyVersions.length ? "success" : "",
     );
   } catch (error) {
@@ -3805,6 +3955,7 @@ function resetToUpload() {
   cutDraftLastSignature = "";
   cutDraftSaveQueue = Promise.resolve();
   cutDraftNeedsServerSync = false;
+  automaticNoSpeechInitialized = false;
   setCutDraftSaveStatus("剪辑草稿自动保存");
   setCutOperationLock(false);
   if (pollTimer) window.clearTimeout(pollTimer);
@@ -3815,6 +3966,7 @@ function resetToUpload() {
   forgetJob();
   currentSegments = [];
   currentEditableSegments = [];
+  currentAudioQuietRanges = [];
   currentSuggestions = [];
   currentNoSpeechSuggestions = [];
   cutControlsLocked = false;
@@ -3831,20 +3983,10 @@ function resetToUpload() {
   cutTimelineRulerSignature = "";
   selectedRanges.clear();
   selectedNoSpeechRanges.clear();
-  ignoredSuggestions.clear();
-  ignoredNoSpeechSuggestions.clear();
   resetCutHistoryRuntime();
   noSpeechPreviewEnd = null;
   cutSelectionPreviewEnd = null;
-  suggestionList.replaceChildren();
-  suggestionState.classList.remove("is-empty", "is-warning");
-  suggestionState.textContent = "正在读取 AI 分析结果…";
-  noSpeechList?.replaceChildren();
-  noSpeechState?.classList.remove("is-empty", "is-warning", "is-marked");
-  if (noSpeechState) {
-    noSpeechState.textContent = "正在读取无文字片段检测结果…";
-  }
-  if (selectAllNoSpeechButton) selectAllNoSpeechButton.hidden = true;
+  transcriptPreviewRange = null;
   document.body.classList.remove("has-result", "has-cut-selection");
   clearSelectedFile();
   startButton.querySelector("span").textContent = "开始提取文字";
@@ -3978,7 +4120,11 @@ function renderJob(job) {
 
 function renderResult(job) {
   cutDraftReady = false;
+  cutDraftRevision = 0;
+  cutDraftLastSignature = "";
   cutDraftSaveQueue = Promise.resolve();
+  cutDraftNeedsServerSync = false;
+  automaticNoSpeechInitialized = false;
   resetCutHistoryRuntime();
   const result = job.result || {};
   const segments = result.segments || [];
@@ -3988,6 +4134,13 @@ function renderResult(job) {
     segments,
     result.editableSegments,
   );
+  currentAudioQuietRanges = (result.audioQuietRanges || []).flatMap((range) => {
+    const start = Number(range?.start);
+    const end = Number(range?.end);
+    return Number.isFinite(start) && Number.isFinite(end) && end > start
+      ? [{ start, end }]
+      : [];
+  });
   cutControlsLocked = false;
   setCutOperationLock(false);
   currentVideoDuration = Math.max(
@@ -4008,21 +4161,31 @@ function renderResult(job) {
   cutTimelineRulerSignature = "";
   selectedRanges.clear();
   selectedNoSpeechRanges.clear();
-  ignoredNoSpeechSuggestions.clear();
   noSpeechPreviewEnd = null;
   cutSelectionPreviewEnd = null;
+  transcriptPreviewRange = null;
   document.body.classList.add("has-result");
-  renderSuggestions(
+  setCurrentSuggestions(
     result.suggestions || [],
     result.suggestionStatus || "unavailable",
   );
-  renderNoSpeechSuggestions(
-    result.noSpeechSuggestions || [],
-    result.noSpeechStatus || "unavailable",
+  const noSpeechStatus = result.noSpeechStatus || "unavailable";
+  setCurrentNoSpeechSuggestions(result.noSpeechSuggestions || [], noSpeechStatus);
+  const persistedDraft = resolvePersistedCutDraft(
+    job.cutDraft ?? null,
+    currentJobId,
   );
-  restorePersistedCutDraft(
-    resolvePersistedCutDraft(job.cutDraft || null, currentJobId),
-  );
+  let shouldPersistAutomaticDefaults = false;
+  if (persistedDraft === null) {
+    shouldPersistAutomaticDefaults = seedAutomaticSuggestionRanges() > 0;
+  } else {
+    restorePersistedCutDraft(persistedDraft);
+  }
+  if (noSpeechStatus === "completed" && !automaticNoSpeechInitialized) {
+    seedAutomaticNoSpeechRanges();
+    automaticNoSpeechInitialized = true;
+    shouldPersistAutomaticDefaults = true;
+  }
   restoreLocalCutHistory();
   cutError.hidden = true;
   cutProgress.hidden = true;
@@ -4040,7 +4203,7 @@ function renderResult(job) {
   renderCutSegments();
   updateSelectionSummary();
   cutDraftReady = true;
-  if (cutDraftNeedsServerSync) {
+  if (shouldPersistAutomaticDefaults || cutDraftNeedsServerSync) {
     cutDraftLastSignature = "";
     scheduleCutDraftSave();
   }
@@ -4048,7 +4211,6 @@ function renderResult(job) {
   progressCard.hidden = true;
   resultCard.hidden = false;
   if (job.edit) renderEdit(job.edit);
-  activateTextEditorPanel("cuts");
   resultCard.scrollIntoView({ behavior: "smooth", block: "start" });
   resultCard.focus({ preventScroll: true });
 }
@@ -4257,7 +4419,6 @@ async function generateCut() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ranges,
-          historyName: cutHistoryName.value.trim() || null,
         }),
       },
     );
@@ -4423,37 +4584,123 @@ dropZone.addEventListener("drop", (event) => {
 
 segmentList.addEventListener("click", (event) => {
   if (!(event.target instanceof Element)) return;
+  const playButton = event.target.closest(".segment-play-button");
+  if (playButton instanceof HTMLButtonElement) {
+    if (playButton.disabled || cutControlsLocked) return;
+    const segmentItem = playButton.closest(
+      ".segment-item[data-display-start][data-display-end]",
+    );
+    if (segmentItem) previewTextSegment(segmentItem);
+    return;
+  }
+  const noSpeechButton = event.target.closest(".segment-no-speech-button");
+  if (noSpeechButton instanceof HTMLButtonElement) {
+    if (noSpeechButton.disabled || cutControlsLocked) return;
+    const suggestion = currentNoSpeechSuggestions.find(
+      (item) => item.id === noSpeechButton.dataset.noSpeechId,
+    );
+    const range = getNoSpeechRange(suggestion);
+    if (!suggestion || !range) return;
+    if (selectedNoSpeechRanges.has(range.id)) {
+      stageCutHistoryOperation("恢复空白片段");
+      selectedNoSpeechRanges.delete(range.id);
+      updateSelectionSummary();
+    }
+    previewNoSpeechSuggestion(suggestion);
+    return;
+  }
+  const restoreButton = event.target.closest(".segment-restore-button");
+  if (restoreButton instanceof HTMLButtonElement) {
+    if (restoreButton.disabled || cutControlsLocked) return;
+    let rangeKeys = [];
+    try {
+      rangeKeys = JSON.parse(restoreButton.dataset.rangeKeys || "[]");
+    } catch {
+      return;
+    }
+    const restoredRanges = rangeKeys
+      .map((key) => selectedRanges.get(String(key)))
+      .filter(Boolean);
+    if (restoredRanges.length === 0) return;
+    stageCutHistoryOperation("恢复已删除文字");
+    for (const key of rangeKeys) selectedRanges.delete(String(key));
+    updateSelectionSummary();
+    const previewStart = Math.min(
+      ...restoredRanges.map((range) =>
+        Number(range.originalStart ?? range.start),
+      ),
+    );
+    if (Number.isFinite(previewStart)) seekCutPreview(previewStart);
+    return;
+  }
+  const editButton = event.target.closest(".segment-edit-button");
+  if (editButton instanceof HTMLButtonElement) {
+    if (!editButton.disabled) {
+      openSegmentEditDialog(Number(editButton.dataset.segmentIndex));
+    }
+    return;
+  }
   const segmentButton = event.target.closest(".segment-toggle");
   if (!segmentButton) {
     const segmentItem = event.target.closest(".segment-item[data-segment-index]");
-    if (segmentItem) {
+    if (
+      segmentItem &&
+      !["restore", "deleted"].includes(segmentItem.dataset.displayKind)
+    ) {
       openSegmentEditDialog(Number(segmentItem.dataset.segmentIndex));
     }
     return;
   }
-  const segment = currentEditableSegments[Number(segmentButton.dataset.segmentIndex)];
-  if (!segment) return;
+  const segmentItem = segmentButton.closest(".segment-item");
+  if (!segmentItem) return;
+
+  if (segmentItem.dataset.noSpeechId) {
+    const suggestion = currentNoSpeechSuggestions.find(
+      (item) => item.id === segmentItem.dataset.noSpeechId,
+    );
+    const noSpeechRange = getNoSpeechRange(suggestion);
+    if (!suggestion || !noSpeechRange || suggestion.deletable === false) return;
+    if (selectedNoSpeechRanges.has(noSpeechRange.id)) {
+      stageCutHistoryOperation("恢复空白片段");
+      selectedNoSpeechRanges.delete(noSpeechRange.id);
+      updateSelectionSummary();
+      previewNoSpeechSuggestion(suggestion);
+    } else {
+      stageCutHistoryOperation("删除空白片段");
+      selectedNoSpeechRanges.set(noSpeechRange.id, noSpeechRange);
+      updateSelectionSummary();
+      previewSelectedCutRange(noSpeechRange);
+    }
+    return;
+  }
 
   const range = {
-    start: Number(segment.start),
-    end: Number(segment.end),
-    text: String(segment.text || ""),
+    start: Number(segmentItem.dataset.displayStart),
+    end: Number(segmentItem.dataset.displayEnd),
+    text: String(segmentItem.dataset.displayText || ""),
   };
   if (!Number.isFinite(range.start) || !Number.isFinite(range.end)) return;
   if (range.end <= range.start) return;
+  let itemRangeKeys = [];
+  try {
+    itemRangeKeys = JSON.parse(segmentItem.dataset.rangeKeys || "[]")
+      .map(String)
+      .filter((key) => selectedRanges.has(key));
+  } catch {
+    itemRangeKeys = [];
+  }
   const key = rangeKey(range.start, range.end);
-  if (selectedRanges.has(key)) {
-    stageCutHistoryOperation(
-      `恢复第 ${Number(segmentButton.dataset.segmentIndex) + 1} 段文字`,
-    );
+  if (itemRangeKeys.length > 0 || selectedRanges.has(key)) {
+    stageCutHistoryOperation("恢复这段文字");
+    for (const selectedKey of itemRangeKeys) {
+      selectedRanges.delete(selectedKey);
+    }
     selectedRanges.delete(key);
     updateSelectionSummary();
     seekCutPreview(range.start);
     return;
   }
-  stageCutHistoryOperation(
-    `删除第 ${Number(segmentButton.dataset.segmentIndex) + 1} 段文字`,
-  );
+  stageCutHistoryOperation("删除这段文字");
   seekCutPreview(range.start);
   for (const [selectedKey, selectedRange] of selectedRanges.entries()) {
     const selectedStart = Number(
@@ -4497,148 +4744,6 @@ mergeSegmentDownButton.addEventListener("click", () => {
   applyEditableSegmentOperation("merge_down");
 });
 
-suggestionList.addEventListener("click", (event) => {
-  if (!(event.target instanceof Element)) return;
-  const button = event.target.closest(".suggestion-action");
-  const card = event.target.closest(".suggestion-card");
-  if (!button || !card || button.disabled) return;
-  const suggestion = currentSuggestions.find(
-    (item) => item.id === card.dataset.suggestionId,
-  );
-  if (!suggestion) return;
-  seekCutPreview(suggestion.start);
-
-  const ranges = getSuggestionRanges(suggestion);
-  let previewRange = null;
-  if (button.dataset.action === "apply") {
-    if (isSuggestionSelected(suggestion)) return;
-    stageCutHistoryOperation("删除 AI 建议片段");
-    ignoredSuggestions.delete(suggestion.id);
-    const expandedRanges = [];
-    for (const range of ranges) {
-      const key = rangeKey(range.start, range.end);
-      const expandedRange = expandRangeToAdjacentSilence(range);
-      selectedRanges.set(key, expandedRange);
-      expandedRanges.push(expandedRange);
-    }
-    if (expandedRanges.length > 0) {
-      previewRange = {
-        start: Math.min(...expandedRanges.map(({ start }) => start)),
-        end: Math.max(...expandedRanges.map(({ end }) => end)),
-        adjacentSilenceBefore: expandedRanges.reduce(
-          (total, range) => total + range.adjacentSilenceBefore,
-          0,
-        ),
-        adjacentSilenceAfter: expandedRanges.reduce(
-          (total, range) => total + range.adjacentSilenceAfter,
-          0,
-        ),
-      };
-    }
-  } else if (button.dataset.action === "ignore") {
-    if (ignoredSuggestions.has(suggestion.id)) {
-      ignoredSuggestions.delete(suggestion.id);
-    } else {
-      ignoredSuggestions.add(suggestion.id);
-    }
-  }
-  updateSelectionSummary();
-  if (previewRange) previewSelectedCutRange(previewRange);
-});
-
-selectAllSuggestionsButton.addEventListener("click", () => {
-  if (cutControlsLocked || currentSuggestions.length === 0) return;
-  const candidates = currentSuggestions.filter(
-    (suggestion) =>
-      !isSuggestionSelected(suggestion) &&
-      !ignoredSuggestions.has(suggestion.id),
-  );
-  if (candidates.length === 0) return;
-  stageCutHistoryOperation(`批量删除 ${candidates.length} 条 AI 建议`);
-  for (const suggestion of candidates) {
-    for (const range of getSuggestionRanges(suggestion)) {
-      const key = rangeKey(range.start, range.end);
-      selectedRanges.set(key, expandRangeToAdjacentSilence(range));
-    }
-  }
-  updateSelectionSummary();
-  const firstRanges = getSuggestionRanges(candidates[0]);
-  if (firstRanges.length > 0) {
-    const firstExpandedRanges = firstRanges.map((range) =>
-      expandRangeToAdjacentSilence(range),
-    );
-    previewSelectedCutRange({
-      start: Math.min(...firstExpandedRanges.map(({ start }) => start)),
-      end: Math.max(...firstExpandedRanges.map(({ end }) => end)),
-      adjacentSilenceBefore: firstExpandedRanges.reduce(
-        (total, range) => total + range.adjacentSilenceBefore,
-        0,
-      ),
-      adjacentSilenceAfter: firstExpandedRanges.reduce(
-        (total, range) => total + range.adjacentSilenceAfter,
-        0,
-      ),
-    });
-  }
-});
-
-noSpeechList?.addEventListener("click", (event) => {
-  if (!(event.target instanceof Element)) return;
-  const button = event.target.closest(".no-speech-action");
-  const card = event.target.closest(".no-speech-card");
-  if (!button || !card || button.disabled) return;
-  const suggestion = currentNoSpeechSuggestions.find(
-    (item) => item.id === card.dataset.noSpeechId,
-  );
-  const range = getNoSpeechRange(suggestion);
-  if (!suggestion || !range) return;
-
-  if (button.dataset.action === "preview") {
-    previewNoSpeechSuggestion(suggestion);
-    return;
-  }
-  seekCutPreview(range.start);
-  let markedForPreview = false;
-  if (button.dataset.action === "apply") {
-    if (selectedNoSpeechRanges.has(range.id)) return;
-    stageCutHistoryOperation("删除空白片段");
-    ignoredNoSpeechSuggestions.delete(suggestion.id);
-    if (suggestion.deletable !== false) {
-      selectedNoSpeechRanges.set(range.id, range);
-      markedForPreview = true;
-    }
-  } else if (button.dataset.action === "ignore") {
-    if (ignoredNoSpeechSuggestions.has(suggestion.id)) {
-      ignoredNoSpeechSuggestions.delete(suggestion.id);
-    } else {
-      ignoredNoSpeechSuggestions.add(suggestion.id);
-    }
-  }
-  updateSelectionSummary();
-  if (markedForPreview) previewSelectedCutRange(range);
-});
-
-selectAllNoSpeechButton?.addEventListener("click", () => {
-  if (cutControlsLocked) return;
-  const candidates = currentNoSpeechSuggestions.filter(
-    (suggestion) =>
-      !suggestion.protected &&
-      suggestion.deletable !== false &&
-      !ignoredNoSpeechSuggestions.has(suggestion.id) &&
-      !isNoSpeechSelected(suggestion),
-  );
-  if (candidates.length === 0) return;
-  stageCutHistoryOperation(`批量删除 ${candidates.length} 个空白片段`);
-  for (const suggestion of candidates) {
-    const range = getNoSpeechRange(suggestion);
-    if (!range) continue;
-    selectedNoSpeechRanges.set(range.id, range);
-  }
-  updateSelectionSummary();
-  const firstRange = getNoSpeechRange(candidates[0]);
-  if (firstRange) previewSelectedCutRange(firstRange);
-});
-
 cutFrameTimelineTrack.addEventListener("pointerdown", beginCutTimelineSelection);
 cutFrameTimelineRanges.addEventListener(
   "pointerdown",
@@ -4648,7 +4753,18 @@ cutFrameTimelineRanges.addEventListener("keydown", adjustTimelineRangeWithKeyboa
 cutFrameTimelineRanges.addEventListener("click", (event) => {
   const rangeElement = event.target.closest(".cut-timeline-delete-range");
   if (!rangeElement) return;
-  selectedTimelineRangeId = Number(rangeElement.dataset.rangeId);
+  const rangeId = Number(rangeElement.dataset.rangeId);
+  const action = event.target.closest("[data-timeline-range-action]")?.dataset
+    .timelineRangeAction;
+  if (action === "cancel") {
+    event.preventDefault();
+    event.stopPropagation();
+    if (timelineRangeInProgress && selectedTimelineRangeId === rangeId) {
+      cancelPendingTimelineRange("已取消时间轴选区。");
+    }
+    return;
+  }
+  selectedTimelineRangeId = rangeId;
   renderCutTimelineRanges();
 });
 generateCutButton.addEventListener("click", generateCut);
@@ -4690,17 +4806,8 @@ uploadForm.addEventListener("submit", (event) => {
 
 retryButton.addEventListener("click", resetToUpload);
 restartProjectButton.addEventListener("click", confirmAndResetProject);
-cutUndoButton?.addEventListener("click", undoCutHistory);
-cutRedoButton?.addEventListener("click", redoCutHistory);
 document.addEventListener("keydown", handleGlobalCutHistoryShortcut);
 window.addEventListener("editor-suite:job-state", acceptEditorSuiteJobState);
-
-for (const tab of textEditorTabs) {
-  tab.addEventListener("click", () => {
-    activateTextEditorPanel(tab.dataset.textEditorTab);
-  });
-  tab.addEventListener("keydown", handleTextEditorTabKeydown);
-}
 setupCutPreviewControls();
 window.addEventListener("resize", scheduleCutTimelineResize);
 loadHistoryVersions();

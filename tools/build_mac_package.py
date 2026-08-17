@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PACKAGE_NAME = "video-text-editor-mac-8003-with-data"
+PACKAGE_NAME = "video-text-editor-mac-8003"
 FONT_PACKAGE_NAME = "video-text-editor-fonts-builtin"
 BUILD_DIR = ROOT / "build" / PACKAGE_NAME
 DIST_DIR = ROOT / "dist"
@@ -28,7 +28,6 @@ PROJECT_FILES = [
     "server",
     "web",
     "tests",
-    "data",
     "requirements.txt",
     ".env.example",
     "README.md",
@@ -114,7 +113,7 @@ if [ ! -f ".env" ]; then
   echo "已创建 .env。需要在线识别/生成能力时，请在 .env 里填写 DASHSCOPE_API_KEY 和 ARK_API_KEY。"
 fi
 
-mkdir -p data/jobs data/history data/fonts data/art-templates data/models
+mkdir -p data/jobs data/history data/fonts/builtin data/art-templates data/art-position-presets data/models
 
 echo ""
 echo "正在启动服务..."
@@ -138,14 +137,14 @@ MAC_README = """# Mac 一键运行说明
 
 http://127.0.0.1:8003/
 
-这个 `with-data` 包已经包含当前项目的 `data/` 快照，包括历史版本、任务文件、字体和模板。
+安装包只包含程序代码、内置字体和空白数据目录，不包含打包电脑上的任务视频、历史记录、模型缓存或自定义模板。
 
 首次运行会自动完成：
 
 - 创建 `.venv` 虚拟环境
 - 安装 `requirements.txt` 里的 Python 依赖
 - 从 `.env.example` 生成本机 `.env`
-- 保留压缩包内的 `data/` 数据，并补齐缺少的工作目录
+- 初始化本机的任务、历史、字体和模板目录
 - 打开浏览器并启动 FastAPI 服务
 
 需要的本机环境：
@@ -176,6 +175,14 @@ def ensure_inside(child: Path, parent: Path) -> None:
         raise RuntimeError(f"Refusing to touch path outside workspace: {child_resolved}")
 
 
+def clean_previous_outputs() -> None:
+    for path in (ROOT / "build", DIST_DIR):
+        if not path.exists():
+            continue
+        ensure_inside(path, ROOT)
+        shutil.rmtree(path)
+
+
 def copy_project_files() -> None:
     if BUILD_DIR.exists():
         ensure_inside(BUILD_DIR, ROOT / "build")
@@ -196,6 +203,20 @@ def copy_project_files() -> None:
             shutil.copy2(source, target)
         else:
             raise FileNotFoundError(source)
+
+    clean_data_files = {
+        "jobs/.gitkeep": "\n",
+        "history/.gitkeep": "\n",
+        "models/.gitkeep": "\n",
+        "fonts/manifest.json": "[]\n",
+        "art-templates/manifest.json": "[]\n",
+        "art-templates/hidden.json": "[]\n",
+        "art-position-presets/manifest.json": "[]\n",
+    }
+    for relative, content in clean_data_files.items():
+        path = BUILD_DIR / "data" / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8", newline="\n")
 
     (BUILD_DIR / "run_mac.command").write_text(RUN_MAC_COMMAND, encoding="utf-8", newline="\n")
     (BUILD_DIR / "run_mac.sh").write_text(RUN_MAC_SH, encoding="utf-8", newline="\n")
@@ -265,6 +286,7 @@ def build_font_zip() -> None:
 
 
 def main() -> None:
+    clean_previous_outputs()
     copy_project_files()
     build_zip()
     build_font_zip()

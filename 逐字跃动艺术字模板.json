@@ -1,0 +1,16 @@
+{
+  "name": "逐字跃动",
+  "sample": "别再乱买衣服啦!",
+  "description": "黄白分字的醒目漫画粗体，搭配黑色粗描边，视频念到对应文字时逐字跃动。",
+  "baseStyle": "comic",
+  "color": "#FFF36A",
+  "strokeColor": "#0A0A0A",
+  "textColorMode": "center-highlight",
+  "secondaryColor": "#FFFFFF",
+  "animation": {
+    "type": "character-bounce",
+    "duration": 0.56,
+    "stagger": 0.07,
+    "amplitude": 0.18
+  }
+}

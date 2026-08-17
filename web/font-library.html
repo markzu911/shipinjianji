@@ -8,10 +8,10 @@
       content="浏览、调整并使用视频艺术字内置效果模板。"
     />
     <title>艺术字效果模板库 · 视频文字剪辑</title>
-    <link rel="stylesheet" href="/styles.css?v=20260810-09" />
+    <link rel="stylesheet" href="/styles.css?v=20260812-02" />
     <script src="https://code.iconify.design/iconify-icon/3.0.0/iconify-icon.min.js" defer></script>
     <script src="/ui-feedback.js?v=20260807-03" defer></script>
-    <script src="/art-template-library.js?v=20260810-01" defer></script>
+    <script src="/art-template-library.js?v=20260812-02" defer></script>
   </head>
   <body class="template-library-body">
     <a class="skip-link" href="#main">跳到主要内容</a>
@@ -25,6 +25,14 @@
         </a>
         <div class="header-actions">
           <span class="mvp-badge">艺术字效果管理</span>
+          <a
+            class="header-restart-button header-link-button header-settings-link"
+            href="/settings"
+            aria-label="模型设置"
+            title="模型设置"
+          >
+            <iconify-icon icon="ph:gear-six-bold" aria-hidden="true"></iconify-icon>
+          </a>
           <a class="header-restart-button header-link-button" href="/font-manager">
             字体管理
           </a>
@@ -91,7 +99,7 @@
           />
         </label>
         <label class="field color-field" for="templatePreviewColor">
-          <span>主颜色</span>
+          <span>当前模板主色</span>
           <input id="templatePreviewColor" type="color" value="#ffd84d" />
         </label>
         <label class="field" for="templateSearch">

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import base64
 import difflib
@@ -19,10 +20,12 @@ import unicodedata
 import uuid
 from array import array
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any, Callable, Literal
+from urllib.parse import urlparse
 
 import dashscope
 import httpx
@@ -33,14 +36,15 @@ from dashscope.utils.oss_utils import OssUtils
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from dotenv import load_dotenv
+from dotenv import load_dotenv, set_key, unset_key
 from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont, ImageStat
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-load_dotenv(BASE_DIR / ".env")
+ENV_FILE = BASE_DIR / ".env"
+load_dotenv(ENV_FILE)
 
 WEB_DIR = BASE_DIR / "web"
 DATA_DIR = Path(os.getenv("DATA_DIR", BASE_DIR / "data")).resolve()
@@ -48,6 +52,10 @@ MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "1024"))
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 JOB_RETENTION_DAYS = int(os.getenv("JOB_RETENTION_DAYS", "7"))
 JOB_MAX_STORED = int(os.getenv("JOB_MAX_STORED", "80"))
+JOB_CLEANUP_INTERVAL_SECONDS = int(
+    os.getenv("JOB_CLEANUP_INTERVAL_SECONDS", "21600")
+)
+HISTORY_MAX_STORED = int(os.getenv("HISTORY_MAX_STORED", "20"))
 ALLOWED_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm"}
 MAX_FONT_MB = 20
 MAX_FONT_BYTES = MAX_FONT_MB * 1024 * 1024
@@ -183,6 +191,9 @@ ART_TEXT_TEMPLATE_CATALOG = [
     },
 ]
 ART_TEXT_STYLES = {template["id"] for template in ART_TEXT_TEMPLATE_CATALOG}
+ART_TEXT_COLOR_MODES = {"solid", "center-highlight"}
+ART_TEXT_ANIMATION_TYPES = {"none", "character-bounce"}
+ART_TEXT_CHARACTER_LAYOUT_TYPES = {"none", "staggered"}
 ART_TEXT_SAFE_AREA_RATIO = 0.92
 MAX_MANUAL_ART_TEXT_OVERLAYS = 20
 MAX_TRANSCRIPT_ART_TEXT_CUES = 240
@@ -238,10 +249,16 @@ ARK_API_BASE_URL = os.getenv(
         "https://ark.cn-beijing.volces.com/api/v3",
     ),
 ).rstrip("/")
+DASHSCOPE_HTTP_API_URL = os.getenv(
+    "DASHSCOPE_HTTP_API_URL",
+    "https://dashscope.aliyuncs.com/api/v1",
+).rstrip("/")
 DASHSCOPE_WEBSOCKET_URL = os.getenv(
     "DASHSCOPE_WEBSOCKET_URL",
     "wss://dashscope.aliyuncs.com/api-ws/v1/inference",
 )
+dashscope.base_http_api_url = DASHSCOPE_HTTP_API_URL
+dashscope.base_websocket_api_url = DASHSCOPE_WEBSOCKET_URL
 
 # ASR timestamps identify selected text, but are not reliable physical splice
 # points: one timestamp can cover multiple Chinese characters. Snap media cuts
@@ -259,14 +276,16 @@ CUT_START_HEAD_GUARD_SECONDS = CUT_START_EXTENDED_SEARCH_BEFORE_SECONDS
 CUT_END_TAIL_GUARD_SECONDS = CUT_END_EXTENDED_SEARCH_AFTER_SECONDS
 CUT_LOW_ENERGY_RMS_THRESHOLD = 500.0
 CUT_EXTENDED_VALLEY_IMPROVEMENT = 0.65
-CUT_TAIL_VALLEY_IMPROVEMENT = 0.35
+CUT_TAIL_VALLEY_IMPROVEMENT = 0.65
 CUT_VALLEY_TOLERANCE = 1.10
 CUT_AUDIO_FADE_SECONDS = 0.008
+CUT_AUDIO_LOUDNESS_FILTER = "loudnorm=I=-16:LRA=7:TP=-1.5"
 NO_SPEECH_MIN_GAP_SECONDS = 1.5
 NO_SPEECH_BOUNDARY_PADDING_SECONDS = 0.2
 NO_SPEECH_AUDIO_FRAME_SECONDS = 0.04
 NO_SPEECH_AUDIO_SAMPLE_STRIDE = 8
 NO_SPEECH_QUIET_RMS_THRESHOLD = 650.0
+AUDIO_TIMING_QUIET_MIN_SECONDS = 0.45
 
 JOBS: dict[str, dict[str, Any]] = {}
 JOB_FILES: dict[str, Path] = {}
@@ -275,9 +294,49 @@ FONT_LIBRARY_LOCK = threading.Lock()
 ART_TEMPLATE_LIBRARY_LOCK = threading.Lock()
 ART_POSITION_PRESETS_LOCK = threading.Lock()
 HISTORY_LIBRARY_LOCK = threading.Lock()
+MODEL_SETTINGS_LOCK = threading.Lock()
 _T2S_CONVERTER: Any | None = None
 
-app = FastAPI(title="视频转文字 MVP", version="0.1.0")
+
+async def periodic_storage_cleanup(
+    stop_event: asyncio.Event,
+    interval_seconds: float | None = None,
+) -> None:
+    interval = (
+        JOB_CLEANUP_INTERVAL_SECONDS
+        if interval_seconds is None
+        else interval_seconds
+    )
+    if interval <= 0:
+        return
+    while True:
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval)
+            return
+        except TimeoutError:
+            try:
+                await asyncio.to_thread(run_storage_maintenance)
+            except Exception:
+                continue
+
+
+@asynccontextmanager
+async def app_lifespan(_: FastAPI):
+    await asyncio.to_thread(run_storage_maintenance)
+    stop_event = asyncio.Event()
+    cleanup_task = asyncio.create_task(periodic_storage_cleanup(stop_event))
+    try:
+        yield
+    finally:
+        stop_event.set()
+        await cleanup_task
+
+
+app = FastAPI(
+    title="视频转文字 MVP",
+    version="0.1.0",
+    lifespan=app_lifespan,
+)
 
 
 @app.middleware("http")
@@ -287,6 +346,7 @@ async def disable_frontend_cache(request, call_next):
         "/",
         "/index.html",
         "/app.js",
+        "/timeline-model.js",
         "/editor-suite.js",
         "/ui-feedback.js",
         "/styles.css",
@@ -304,7 +364,12 @@ async def disable_frontend_cache(request, call_next):
         "/font-manager",
         "/font-manager.html",
         "/font-manager.js",
-    } or request.url.path.startswith(("/api/fonts", "/api/art-templates")):
+        "/settings",
+        "/settings.html",
+        "/settings.js",
+    } or request.url.path.startswith(
+        ("/api/fonts", "/api/art-templates", "/api/settings")
+    ):
         response.headers["Cache-Control"] = "no-store, max-age=0"
         response.headers["Pragma"] = "no-cache"
     return response
@@ -335,6 +400,7 @@ class CutDraftNoSpeechRange(DeleteRange):
 
 class CutDraftRequest(BaseModel):
     revision: int = Field(default=0, ge=0)
+    automaticNoSpeechInitialized: bool = False
     textRanges: list[CutDraftTextRange] = Field(default_factory=list, max_length=500)
     noSpeechRanges: list[CutDraftNoSpeechRange] = Field(
         default_factory=list,
@@ -347,6 +413,12 @@ class JobCleanupRequest(BaseModel):
     maxAgeDays: int | None = Field(default=None, ge=0, le=3650)
     maxDirectories: int | None = Field(default=None, ge=0, le=10000)
     dryRun: bool = False
+
+
+class ModelProviderUpdate(BaseModel):
+    apiKey: str | None = Field(default=None, max_length=4096)
+    models: dict[str, str] = Field(default_factory=dict)
+    requestUrls: dict[str, str] = Field(default_factory=dict)
 
 
 class TranscriptWordUpdate(BaseModel):
@@ -367,6 +439,24 @@ class TranscriptSegmentOperation(BaseModel):
     text: str | None = Field(default=None, max_length=500)
 
 
+class ArtTextAnimation(BaseModel):
+    type: Literal["none", "character-bounce"] = "none"
+    duration: float = Field(default=0.56, ge=0.2, le=2.0)
+    stagger: float = Field(default=0.07, ge=0.0, le=0.3)
+    amplitude: float = Field(default=0.18, ge=0.05, le=0.5)
+
+
+class ArtTextCharacterTiming(BaseModel):
+    start: float = Field(ge=0, le=86400)
+    end: float = Field(gt=0, le=86400)
+
+
+class ArtTextCharacterLayout(BaseModel):
+    type: Literal["none", "staggered"] = "none"
+    rotationPattern: list[float] = Field(default_factory=list, max_length=12)
+    verticalOffsetPattern: list[float] = Field(default_factory=list, max_length=12)
+
+
 class TextOverlay(BaseModel):
     text: str
     font: str
@@ -385,6 +475,16 @@ class TextOverlay(BaseModel):
     letterSpacing: int = 0
     lineSpacing: int = 8
     artStyle: str = "impact"
+    textColorMode: Literal["solid", "center-highlight"] = "solid"
+    secondaryColor: str = "#FFFFFF"
+    animation: ArtTextAnimation = Field(default_factory=ArtTextAnimation)
+    characterLayout: ArtTextCharacterLayout = Field(
+        default_factory=ArtTextCharacterLayout
+    )
+    characterTimings: list[ArtTextCharacterTiming] = Field(
+        default_factory=list,
+        max_length=500,
+    )
     trackId: str | None = Field(default=None, max_length=80)
     trackType: Literal["transcript"] | None = None
     sourceStart: float | None = Field(default=None, ge=0, le=86400)
@@ -504,6 +604,11 @@ class HistoryVersionUpdate(BaseModel):
     name: str = Field(min_length=1, max_length=80)
 
 
+class HistoryVersionCreate(BaseModel):
+    kind: Literal["edited", "art"]
+    name: str | None = Field(default=None, max_length=80)
+
+
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -573,6 +678,20 @@ def is_job_directory_name(value: str) -> bool:
     )
 
 
+def remove_job_working_directory(job_id: str, video_path: Path) -> bool:
+    if not is_job_directory_name(job_id):
+        return False
+    expected_dir = (jobs_directory() / job_id).resolve()
+    if video_path.resolve().parent != expected_dir:
+        return False
+    shutil.rmtree(expected_dir, ignore_errors=True)
+    if expected_dir.exists():
+        return False
+    with JOBS_LOCK:
+        JOB_FILES.pop(job_id, None)
+    return True
+
+
 def directory_size_bytes(path: Path) -> int:
     total = 0
     for item in path.rglob("*"):
@@ -582,6 +701,33 @@ def directory_size_bytes(path: Path) -> int:
             except OSError:
                 continue
     return total
+
+
+def job_has_running_work(job: dict[str, Any]) -> bool:
+    if str(job.get("status") or "") in {
+        "queued",
+        "extracting",
+        "transcribing",
+        "processing",
+    }:
+        return True
+    for key in (
+        "edit",
+        "art",
+        "artSuggestion",
+        "pictureInPicture",
+        "composition",
+    ):
+        if str((job.get(key) or {}).get("status") or "") in {
+            "queued",
+            "processing",
+        }:
+            return True
+    return any(
+        str(item.get("status") or "") in {"queued", "processing"}
+        for item in job.get("pictureInPictureVideos") or []
+        if isinstance(item, dict)
+    )
 
 
 def cleanup_job_directories(
@@ -597,12 +743,9 @@ def cleanup_job_directories(
     max_directories = max(0, int(max_directories))
 
     with JOBS_LOCK:
-        active_job_ids = set(JOBS)
-        active_job_ids.update(
-            path.parent.name
-            for path in JOB_FILES.values()
-            if isinstance(path, Path)
-        )
+        active_job_ids = {
+            job_id for job_id, job in JOBS.items() if job_has_running_work(job)
+        }
 
     if not jobs_dir.is_dir():
         return {
@@ -702,6 +845,9 @@ def cleanup_job_directories(
                 continue
             freed_bytes += size
             deleted_count += 1
+            with JOBS_LOCK:
+                JOBS.pop(str(item["id"]), None)
+                JOB_FILES.pop(str(item["id"]), None)
         items.append(record)
 
     return {
@@ -779,6 +925,52 @@ def save_history_versions_unlocked(records: list[dict[str, Any]]) -> None:
         encoding="utf-8",
     )
     temporary_path.replace(manifest_path)
+
+
+def enforce_history_limit_unlocked(
+    records: list[dict[str, Any]],
+    max_stored: int | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    limit = HISTORY_MAX_STORED if max_stored is None else max_stored
+    limit = max(0, int(limit))
+    if limit == 0 or len(records) <= limit:
+        return records, []
+    newest_ids = {
+        str(record["id"])
+        for record in sorted(
+            records,
+            key=lambda item: str(item.get("createdAt") or ""),
+            reverse=True,
+        )[:limit]
+    }
+    retained = [record for record in records if str(record["id"]) in newest_ids]
+    removed = [record for record in records if str(record["id"]) not in newest_ids]
+    return retained, removed
+
+
+def trim_history_versions(max_stored: int | None = None) -> dict[str, Any]:
+    with HISTORY_LIBRARY_LOCK:
+        records = load_history_versions_unlocked()
+        retained, removed = enforce_history_limit_unlocked(records, max_stored)
+        if removed:
+            save_history_versions_unlocked(retained)
+    for record in removed:
+        shutil.rmtree(
+            history_version_directory(str(record["id"])),
+            ignore_errors=True,
+        )
+    return {
+        "retained": len(retained),
+        "deleted": len(removed),
+        "deletedIds": [str(record["id"]) for record in removed],
+    }
+
+
+def run_storage_maintenance() -> dict[str, Any]:
+    return {
+        "jobs": cleanup_job_directories(),
+        "history": trim_history_versions(),
+    }
 
 
 def history_version_directory(history_id: str) -> Path:
@@ -936,10 +1128,17 @@ def save_history_version(
             "createdAt": now,
             "updatedAt": now,
         }
+        removed_records: list[dict[str, Any]] = []
         with HISTORY_LIBRARY_LOCK:
             records = load_history_versions_unlocked()
             records.append(record)
+            records, removed_records = enforce_history_limit_unlocked(records)
             save_history_versions_unlocked(records)
+        for removed_record in removed_records:
+            shutil.rmtree(
+                history_version_directory(str(removed_record["id"])),
+                ignore_errors=True,
+            )
     except Exception:
         shutil.rmtree(version_dir, ignore_errors=True)
         raise
@@ -1025,6 +1224,20 @@ def public_builtin_art_template(template: dict[str, Any]) -> dict[str, Any]:
         **copy.deepcopy(template),
         "source": "builtin",
         "baseStyle": str(template["id"]),
+        "letterSpacing": 0,
+        "textColorMode": "solid",
+        "secondaryColor": str(template["color"]),
+        "animation": {
+            "type": "none",
+            "duration": 0.56,
+            "stagger": 0.07,
+            "amplitude": 0.18,
+        },
+        "characterLayout": {
+            "type": "none",
+            "rotationPattern": [],
+            "verticalOffsetPattern": [],
+        },
         "createdAt": None,
     }
 
@@ -1039,6 +1252,28 @@ def public_uploaded_art_template(record: dict[str, Any]) -> dict[str, Any]:
         "color": str(record["color"]),
         "strokeColor": str(record["strokeColor"]),
         "baseStyle": str(record["baseStyle"]),
+        "letterSpacing": int(record.get("letterSpacing") or 0),
+        "textColorMode": str(record.get("textColorMode") or "solid"),
+        "secondaryColor": str(
+            record.get("secondaryColor") or record["color"]
+        ),
+        "animation": copy.deepcopy(
+            record.get("animation")
+            or {
+                "type": "none",
+                "duration": 0.56,
+                "stagger": 0.07,
+                "amplitude": 0.18,
+            }
+        ),
+        "characterLayout": copy.deepcopy(
+            record.get("characterLayout")
+            or {
+                "type": "none",
+                "rotationPattern": [],
+                "verticalOffsetPattern": [],
+            }
+        ),
         "source": "uploaded",
         "originalFilename": str(record.get("originalFilename") or ""),
         "fileSize": int(record.get("fileSize") or 0),
@@ -1185,6 +1420,78 @@ def parse_art_template_file(
         raise ValueError("艺术字主颜色必须使用 #RRGGBB 格式。")
     if not color_pattern.fullmatch(stroke_color):
         raise ValueError("艺术字描边颜色必须使用 #RRGGBB 格式。")
+    try:
+        letter_spacing = int(payload.get("letterSpacing") or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("艺术字默认字间距必须是整数。") from exc
+    if not -20 <= letter_spacing <= 40:
+        raise ValueError("艺术字默认字间距应在 -20–40 之间。")
+
+    text_color_mode = str(payload.get("textColorMode") or "solid").strip()
+    if text_color_mode not in ART_TEXT_COLOR_MODES:
+        raise ValueError(
+            "艺术字分色模式无效，可选值为 solid 或 center-highlight。"
+        )
+    secondary_color = str(payload.get("secondaryColor") or color).strip()
+    if not color_pattern.fullmatch(secondary_color):
+        raise ValueError("艺术字辅助颜色必须使用 #RRGGBB 格式。")
+
+    animation_payload = payload.get("animation") or {"type": "none"}
+    if isinstance(animation_payload, str):
+        animation_payload = {"type": animation_payload}
+    if not isinstance(animation_payload, dict):
+        raise ValueError("艺术字动画设置必须是对象。")
+    animation_type = str(animation_payload.get("type") or "none").strip()
+    if animation_type not in ART_TEXT_ANIMATION_TYPES:
+        raise ValueError(
+            "艺术字动画类型无效，可选值为 none 或 character-bounce。"
+        )
+    try:
+        animation_duration = float(animation_payload.get("duration", 0.56))
+        animation_stagger = float(animation_payload.get("stagger", 0.07))
+        animation_amplitude = float(animation_payload.get("amplitude", 0.18))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("艺术字动画参数必须是数值。") from exc
+    if not 0.2 <= animation_duration <= 2.0:
+        raise ValueError("艺术字动画时长应在 0.2–2.0 秒之间。")
+    if not 0 <= animation_stagger <= 0.3:
+        raise ValueError("艺术字逐字延迟应在 0–0.3 秒之间。")
+    if not 0.05 <= animation_amplitude <= 0.5:
+        raise ValueError("艺术字跃动幅度应在 0.05–0.5 之间。")
+
+    layout_payload = payload.get("characterLayout") or {"type": "none"}
+    if isinstance(layout_payload, str):
+        layout_payload = {"type": layout_payload}
+    if not isinstance(layout_payload, dict):
+        raise ValueError("艺术字错落排版设置必须是对象。")
+    layout_type = str(layout_payload.get("type") or "none").strip()
+    if layout_type not in ART_TEXT_CHARACTER_LAYOUT_TYPES:
+        raise ValueError(
+            "艺术字排版类型无效，可选值为 none 或 staggered。"
+        )
+    rotation_pattern = layout_payload.get("rotationPattern") or []
+    vertical_offset_pattern = layout_payload.get("verticalOffsetPattern") or []
+    if not isinstance(rotation_pattern, list) or not isinstance(
+        vertical_offset_pattern, list
+    ):
+        raise ValueError("艺术字错落排版参数必须是数值数组。")
+    if len(rotation_pattern) > 12 or len(vertical_offset_pattern) > 12:
+        raise ValueError("艺术字错落排版参数最多包含 12 个循环值。")
+    try:
+        rotations = [float(value) for value in rotation_pattern]
+        vertical_offsets = [float(value) for value in vertical_offset_pattern]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("艺术字错落排版参数必须是数值。") from exc
+    if any(not -12 <= value <= 12 for value in rotations):
+        raise ValueError("艺术字单字旋转角度应在 -12°–12° 之间。")
+    if any(not -0.25 <= value <= 0.25 for value in vertical_offsets):
+        raise ValueError("艺术字单字上下偏移应在 -0.25–0.25em 之间。")
+    if layout_type == "staggered":
+        rotations = rotations or [-7.0, 5.0, -4.0, 3.0, -6.0, 4.0]
+        vertical_offsets = vertical_offsets or [0.06, -0.04, 0.03, -0.05]
+    else:
+        rotations = []
+        vertical_offsets = []
 
     sample = str(payload.get("sample") or name).strip()
     if not sample:
@@ -1206,6 +1513,22 @@ def parse_art_template_file(
         "color": color.upper(),
         "strokeColor": stroke_color.upper(),
         "baseStyle": base_style,
+        "letterSpacing": letter_spacing,
+        "textColorMode": text_color_mode,
+        "secondaryColor": secondary_color.upper(),
+        "animation": {
+            "type": animation_type,
+            "duration": round(animation_duration, 3),
+            "stagger": round(animation_stagger, 3),
+            "amplitude": round(animation_amplitude, 3),
+        },
+        "characterLayout": {
+            "type": layout_type,
+            "rotationPattern": [round(value, 3) for value in rotations],
+            "verticalOffsetPattern": [
+                round(value, 3) for value in vertical_offsets
+            ],
+        },
         "originalFilename": original_filename,
         "fileSize": len(content),
     }
@@ -1656,6 +1979,135 @@ def normalize_delete_ranges(
     ]
 
 
+def delete_ranges_match(
+    first: list[dict[str, float]],
+    second: list[dict[str, float]],
+    tolerance: float = 0.015,
+) -> bool:
+    return len(first) == len(second) and all(
+        abs(float(left["start"]) - float(right["start"])) <= tolerance
+        and abs(float(left["end"]) - float(right["end"])) <= tolerance
+        for left, right in zip(first, second)
+    )
+
+
+def normalize_cut_draft_delete_ranges(
+    draft: dict[str, Any] | None,
+    duration: float,
+) -> list[dict[str, float]]:
+    if not draft:
+        return []
+    values = [
+        {"start": float(item["start"]), "end": float(item["end"])}
+        for key in ("textRanges", "noSpeechRanges", "timelineRanges")
+        for item in draft.get(key) or []
+    ]
+    if not values:
+        return []
+    return normalize_delete_ranges(
+        [DeleteRange(**value) for value in values],
+        duration,
+    )
+
+
+def protect_recognized_speech_from_quiet_ranges(
+    quiet_ranges: list[dict[str, Any]],
+    segments: list[dict[str, Any]],
+) -> list[dict[str, float]]:
+    """Keep automatic quiet cuts strictly outside recognized speech."""
+    speech_ranges = [
+        {
+            "start": float(word["start"]),
+            "end": float(word["end"]),
+        }
+        for segment in segments
+        for word in segment.get("words") or []
+        if str(word.get("text") or "").strip()
+        and float(word.get("end") or 0) > float(word.get("start") or 0)
+    ]
+    speech_ranges.sort(key=lambda item: (item["start"], item["end"]))
+
+    safe_ranges: list[dict[str, float]] = []
+    for quiet_range in quiet_ranges:
+        fragments = [
+            (
+                float(quiet_range["start"]),
+                float(quiet_range["end"]),
+            )
+        ]
+        for speech_range in speech_ranges:
+            if not fragments or speech_range["start"] >= fragments[-1][1]:
+                break
+            next_fragments: list[tuple[float, float]] = []
+            for start, end in fragments:
+                if speech_range["end"] <= start or speech_range["start"] >= end:
+                    next_fragments.append((start, end))
+                    continue
+                if speech_range["start"] > start:
+                    next_fragments.append((start, speech_range["start"]))
+                if speech_range["end"] < end:
+                    next_fragments.append((speech_range["end"], end))
+            fragments = next_fragments
+        safe_ranges.extend(
+            {
+                "start": round(start, 3),
+                "end": round(end, 3),
+            }
+            for start, end in fragments
+            if end - start >= AUDIO_TIMING_QUIET_MIN_SECONDS
+        )
+    return safe_ranges
+
+
+def resolve_cut_draft_delete_ranges(
+    draft: dict[str, Any] | None,
+    suggestions: list[dict[str, Any]],
+    segments: list[dict[str, Any]],
+    duration: float,
+    *,
+    use_text_semantic_boundaries: bool = False,
+) -> list[dict[str, float]]:
+    """Combine draft cuts without allowing automatic quiet cuts to remove text."""
+    if not draft:
+        return []
+    text_ranges = list(draft.get("textRanges") or [])
+    quiet_ranges = protect_recognized_speech_from_quiet_ranges(
+        list(draft.get("noSpeechRanges") or []),
+        segments,
+    )
+    timeline_ranges = list(draft.get("timelineRanges") or [])
+
+    values = [
+        {
+            "start": float(
+                item.get("originalStart", item["start"])
+                if use_text_semantic_boundaries
+                else item["start"]
+            ),
+            "end": float(
+                item.get("originalEnd", item["end"])
+                if use_text_semantic_boundaries
+                else item["end"]
+            ),
+        }
+        for item in text_ranges
+    ]
+    values.extend(
+        {"start": float(item["start"]), "end": float(item["end"])}
+        for item in quiet_ranges
+    )
+    values.extend(
+        {"start": float(item["start"]), "end": float(item["end"])}
+        for item in timeline_ranges
+    )
+    if not values:
+        return []
+    return normalize_delete_ranges(
+        [DeleteRange(**value) for value in values],
+        duration,
+    )
+
+
 def decode_cut_audio_samples(media_path: Path) -> array:
     command = [
         get_ffmpeg_binary("ffmpeg"),
@@ -1749,6 +2201,44 @@ def no_speech_quiet_ratio(
     return round(quiet_frames / frame_count, 3)
 
 
+def detect_audio_quiet_ranges(
+    samples: array | None,
+    duration: float,
+    sample_rate: int = CUT_BOUNDARY_SAMPLE_RATE,
+    minimum_gap: float = AUDIO_TIMING_QUIET_MIN_SECONDS,
+) -> list[dict[str, float]]:
+    """Find clear quiet spans that character animations must not consume."""
+    if not samples or sample_rate <= 0 or duration <= 0:
+        return []
+    frame_size = max(1, round(NO_SPEECH_AUDIO_FRAME_SECONDS * sample_rate))
+    sample_limit = min(len(samples), round(float(duration) * sample_rate))
+    quiet_frames: list[tuple[float, float]] = []
+    for frame_start in range(0, sample_limit - frame_size + 1, frame_size):
+        frame = samples[frame_start : frame_start + frame_size]
+        energy = sum(
+            int(frame[index]) * int(frame[index])
+            for index in range(0, len(frame), NO_SPEECH_AUDIO_SAMPLE_STRIDE)
+        )
+        sample_count = math.ceil(len(frame) / NO_SPEECH_AUDIO_SAMPLE_STRIDE)
+        rms = math.sqrt(energy / max(1, sample_count))
+        if rms <= NO_SPEECH_QUIET_RMS_THRESHOLD:
+            quiet_frames.append(
+                (frame_start / sample_rate, (frame_start + frame_size) / sample_rate)
+            )
+
+    merged: list[list[float]] = []
+    for start, end in quiet_frames:
+        if merged and start <= merged[-1][1] + NO_SPEECH_AUDIO_FRAME_SECONDS * 0.1:
+            merged[-1][1] = end
+        else:
+            merged.append([start, end])
+    return [
+        {"start": round(start, 3), "end": round(min(end, duration), 3)}
+        for start, end in merged
+        if min(end, duration) - start >= minimum_gap
+    ]
+
+
 def detect_no_speech_ranges(
     segments: list[dict[str, Any]],
     duration: float,
@@ -1774,6 +2264,31 @@ def detect_no_speech_ranges(
                 raw_gaps.append((previous[1], following[0], "middle"))
         if duration - speech_intervals[-1][1] >= minimum_gap:
             raw_gaps.append((speech_intervals[-1][1], duration, "trailing"))
+
+    # ASR can stretch a word block across a real pause after a deleted retry.
+    # Surface those waveform-confirmed pauses even when the transcript has no gap.
+    for quiet_range in detect_audio_quiet_ranges(
+        samples,
+        duration,
+        sample_rate,
+        minimum_gap=minimum_gap + boundary_padding * 2,
+    ):
+        quiet_start = float(quiet_range["start"])
+        quiet_end = float(quiet_range["end"])
+        if any(
+            quiet_start < raw_end - 0.05 and quiet_end > raw_start + 0.05
+            for raw_start, raw_end, _ in raw_gaps
+        ):
+            continue
+        kind = (
+            "leading"
+            if quiet_start <= 0.001
+            else "trailing"
+            if quiet_end >= duration - 0.001
+            else "middle"
+        )
+        raw_gaps.append((quiet_start, quiet_end, kind))
+    raw_gaps.sort(key=lambda item: (item[0], item[1]))
 
     suggestions: list[dict[str, Any]] = []
     for raw_start, raw_end, kind in raw_gaps:
@@ -1958,18 +2473,16 @@ def snap_delete_ranges_to_samples(
             # A waveform valley may expand a deletion into a real pause, but it
             # must never shrink the selected semantic range.  Shrinking here
             # leaves syllable tails from AI-selected words in the final video.
-            # Only extend a high-energy word ending when the nearby valley is
-            # substantially quieter; otherwise preserve the exact ASR edge.
+            # Extend a word ending only when the nearby valley is meaningfully
+            # quieter relative to that recording; fixed RMS thresholds miss
+            # tails in softly recorded speech.
             limits = boundary_limits[range_index]
             start = max(float(limits["start"]), min(start, original_start))
             if (
-                original_end_rms <= CUT_LOW_ENERGY_RMS_THRESHOLD
-                or end <= original_end
-                or (
-                    end_rms > CUT_LOW_ENERGY_RMS_THRESHOLD
-                    and end_rms
-                    > original_end_rms * CUT_TAIL_VALLEY_IMPROVEMENT
-                )
+                end <= original_end
+                or original_end_rms <= end_rms * CUT_VALLEY_TOLERANCE
+                or end_rms
+                > original_end_rms * CUT_TAIL_VALLEY_IMPROVEMENT
             ):
                 end = original_end
             end = min(float(limits["end"]), max(end, original_end))
@@ -2216,11 +2729,87 @@ def build_transcript_delete_boundary_limits(
     return limits
 
 
+def align_cut_draft_text_ranges_to_audio(
+    media_path: Path | None,
+    text_ranges: list[dict[str, Any]],
+    segments: list[dict[str, Any]],
+    duration: float,
+) -> list[dict[str, Any]]:
+    """Align draft media cuts while preserving their exact text semantics."""
+    if not text_ranges or media_path is None or not media_path.is_file():
+        return copy.deepcopy(text_ranges)
+
+    semantic_ranges: list[dict[str, float]] = []
+    for item in text_ranges:
+        physical_start = float(item["start"])
+        physical_end = float(item["end"])
+        semantic_start = max(
+            0.0,
+            min(float(item.get("originalStart", physical_start)), duration),
+        )
+        semantic_end = max(
+            semantic_start,
+            min(float(item.get("originalEnd", physical_end)), duration),
+        )
+        if semantic_end <= semantic_start:
+            semantic_start, semantic_end = physical_start, physical_end
+        semantic_ranges.append(
+            {
+                "start": round(semantic_start, 3),
+                "end": round(semantic_end, 3),
+            }
+        )
+
+    boundary_limits = build_transcript_delete_boundary_limits(
+        segments,
+        semantic_ranges,
+        duration,
+        start_head_guard_seconds=CUT_START_HEAD_GUARD_SECONDS,
+        end_tail_guard_seconds=CUT_END_TAIL_GUARD_SECONDS,
+    )
+    try:
+        samples = decode_cut_audio_samples(media_path)
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return copy.deepcopy(text_ranges)
+
+    aligned_ranges: list[dict[str, Any]] = []
+    for item, semantic_range, limits in zip(
+        text_ranges,
+        semantic_ranges,
+        boundary_limits,
+    ):
+        snapped = snap_delete_ranges_to_samples(
+            [{"start": float(item["start"]), "end": float(item["end"])}],
+            duration,
+            samples,
+            boundary_limits=[limits],
+        )[0]
+        aligned_ranges.append(
+            {
+                **copy.deepcopy(item),
+                "start": snapped["start"],
+                "end": snapped["end"],
+                "originalStart": semantic_range["start"],
+                "originalEnd": semantic_range["end"],
+                "adjacentSilenceBefore": round(
+                    max(0.0, semantic_range["start"] - snapped["start"]),
+                    3,
+                ),
+                "adjacentSilenceAfter": round(
+                    max(0.0, snapped["end"] - semantic_range["end"]),
+                    3,
+                ),
+            }
+        )
+    return aligned_ranges
+
+
 def build_retained_transcript(
     segments: list[dict[str, Any]],
     delete_ranges: list[dict[str, float]],
     output_duration: float,
     timeline_delete_ranges: list[dict[str, float]] | None = None,
+    audio_quiet_ranges: list[dict[str, float]] | None = None,
 ) -> dict[str, Any]:
     retained_segments: list[dict[str, Any]] = []
     timeline_ranges = timeline_delete_ranges or delete_ranges
@@ -2346,12 +2935,40 @@ def build_retained_transcript(
             }
         )
 
+    mapped_quiet_ranges: list[list[float]] = []
+    source_duration = output_duration + sum(
+        float(item["end"]) - float(item["start"]) for item in timeline_ranges
+    )
+    for quiet_range in audio_quiet_ranges or []:
+        quiet_start = max(0.0, float(quiet_range.get("start", 0)))
+        quiet_end = min(source_duration, float(quiet_range.get("end", quiet_start)))
+        if quiet_end <= quiet_start:
+            continue
+        for keep_start, keep_end in build_keep_ranges(timeline_ranges, source_duration):
+            retained_start = max(quiet_start, keep_start)
+            retained_end = min(quiet_end, keep_end)
+            if retained_end <= retained_start:
+                continue
+            mapped_start = timeline_after_deletions(retained_start, timeline_ranges)
+            mapped_end = timeline_after_deletions(retained_end, timeline_ranges)
+            if mapped_end <= mapped_start:
+                continue
+            if mapped_quiet_ranges and mapped_start <= mapped_quiet_ranges[-1][1] + 0.001:
+                mapped_quiet_ranges[-1][1] = max(mapped_quiet_ranges[-1][1], mapped_end)
+            else:
+                mapped_quiet_ranges.append([mapped_start, mapped_end])
+
     return {
         "text": "".join(
             segment["text"] for segment in retained_segments if segment["text"]
         ),
         "segments": retained_segments,
         "duration": round(output_duration, 3),
+        "audioQuietRanges": [
+            {"start": round(start, 3), "end": round(end, 3)}
+            for start, end in mapped_quiet_ranges
+            if end - start >= AUDIO_TIMING_QUIET_MIN_SECONDS
+        ],
     }
 
 
@@ -2493,7 +3110,10 @@ def render_cut_video(
         concat_inputs.append(f"[v{index}][a{index}]")
     filter_parts.append(
         "".join(concat_inputs)
-        + f"concat=n={len(keep_ranges)}:v=1:a=1[outv][outa]"
+        + f"concat=n={len(keep_ranges)}:v=1:a=1[outv][joined_audio]"
+    )
+    filter_parts.append(
+        f"[joined_audio]{CUT_AUDIO_LOUDNESS_FILTER}[outa]"
     )
 
     temporary_path = output_path.with_name("edited.tmp.mp4")
@@ -2616,6 +3236,23 @@ def normalize_text_overlays(
             raise ValueError(f"第 {index} 条艺术字颜色格式无效。")
         if not color_pattern.fullmatch(overlay.strokeColor):
             raise ValueError(f"第 {index} 条艺术字描边颜色格式无效。")
+        if not color_pattern.fullmatch(overlay.secondaryColor):
+            raise ValueError(f"第 {index} 条艺术字辅助颜色格式无效。")
+        rotations = [float(value) for value in overlay.characterLayout.rotationPattern]
+        vertical_offsets = [
+            float(value)
+            for value in overlay.characterLayout.verticalOffsetPattern
+        ]
+        if any(not -12 <= value <= 12 for value in rotations):
+            raise ValueError(f"第 {index} 条艺术字单字旋转角度无效。")
+        if any(not -0.25 <= value <= 0.25 for value in vertical_offsets):
+            raise ValueError(f"第 {index} 条艺术字单字上下偏移无效。")
+        if overlay.characterLayout.type == "staggered":
+            rotations = rotations or [-7.0, 5.0, -4.0, 3.0, -6.0, 4.0]
+            vertical_offsets = vertical_offsets or [0.06, -0.04, 0.03, -0.05]
+        else:
+            rotations = []
+            vertical_offsets = []
         if not 0 <= overlay.strokeWidth <= 12:
             raise ValueError(f"第 {index} 条艺术字描边应在 0–12 之间。")
         if overlay.direction not in {"horizontal", "vertical"}:
@@ -2659,6 +3296,29 @@ def normalize_text_overlays(
             and overlay.sourceEnd <= overlay.sourceStart
         ):
             raise ValueError(f"第 {index} 条艺术字的原视频时间锚点无效。")
+        character_timings = []
+        for timing in overlay.characterTimings:
+            timing_start = float(timing.start)
+            timing_end = float(timing.end)
+            if (
+                not math.isfinite(timing_start)
+                or not math.isfinite(timing_end)
+                or timing_end <= timing_start
+                or timing_start < overlay.start - 0.01
+                or timing_end > overlay.end + 0.01
+            ):
+                raise ValueError(f"第 {index} 条艺术字的逐字时间无效。")
+            character_timings.append(
+                {
+                    "start": round(timing_start, 4),
+                    "end": round(timing_end, 4),
+                }
+            )
+        visible_character_count = sum(
+            1 for character in text if not character.isspace()
+        )
+        if character_timings and len(character_timings) != visible_character_count:
+            raise ValueError(f"第 {index} 条艺术字的逐字时间与文字数量不一致。")
         if overlay.trackType == TRANSCRIPT_ART_TEXT_TRACK_TYPE:
             if len(content_characters(text)) > TRANSCRIPT_ART_TEXT_MAX_CHARS_PER_CUE:
                 raise ValueError(
@@ -2669,6 +3329,11 @@ def normalize_text_overlays(
                 raise ValueError("全文艺术字轨道的每个片段只能显示一行。")
             if overlay.direction != "horizontal" or overlay.charsPerLine != 0:
                 raise ValueError("全文艺术字轨道必须使用横向单行排版。")
+            if (
+                overlay.animation.type == "character-bounce"
+                and not character_timings
+            ):
+                raise ValueError("逐字跃动的全文艺术字缺少词级时间。")
 
         normalized_overlay = {
             "text": text,
@@ -2688,6 +3353,15 @@ def normalize_text_overlays(
             "letterSpacing": int(overlay.letterSpacing),
             "lineSpacing": int(overlay.lineSpacing),
             "artStyle": overlay.artStyle,
+            "textColorMode": overlay.textColorMode,
+            "secondaryColor": overlay.secondaryColor.upper(),
+            "animation": overlay.animation.model_dump(),
+            "characterLayout": {
+                "type": overlay.characterLayout.type,
+                "rotationPattern": rotations,
+                "verticalOffsetPattern": vertical_offsets,
+            },
+            "characterTimings": character_timings,
             "trackId": (
                 str(overlay.trackId).strip()
                 if overlay.trackType == TRANSCRIPT_ART_TEXT_TRACK_TYPE
@@ -2728,6 +3402,10 @@ def normalize_text_overlays(
             "letterSpacing",
             "lineSpacing",
             "artStyle",
+            "textColorMode",
+            "secondaryColor",
+            "animation",
+            "characterLayout",
         )
         shared_signature = tuple(
             transcript_items[0][key] for key in shared_keys
@@ -2833,6 +3511,20 @@ def collect_transcript_art_text_words(
                 )
             normalized_segment_words[-1]["text"] += pending_zero_duration_text
 
+        segment_character_timings = transcript_art_text_character_timings(
+            normalized_segment_words,
+            float(normalized_segment_words[0]["start"]),
+            float(normalized_segment_words[-1]["end"]),
+            transcript.get("audioQuietRanges") or [],
+        )
+        timing_offset = 0
+        for word in normalized_segment_words:
+            character_count = len(content_characters(str(word.get("text") or "")))
+            word["characterTimings"] = segment_character_timings[
+                timing_offset : timing_offset + character_count
+            ]
+            timing_offset += character_count
+
         joined_text = "".join(word["text"] for word in normalized_segment_words)
         if content_characters(joined_text) != content_characters(segment_text):
             raise ValueError(
@@ -2877,6 +3569,226 @@ def transcript_art_text_display_text(items: list[dict[str, Any]]) -> str:
         if not unicodedata.category(character).startswith("P")
     )
     return re.sub(r"\s+", " ", without_punctuation).strip()
+
+
+def align_character_timings_to_audio_activity(
+    timings: list[dict[str, float]],
+    cue_start: float,
+    cue_end: float,
+    audio_quiet_ranges: list[dict[str, float]] | None,
+) -> list[dict[str, float]]:
+    """Reproject ordered character times onto audible spans inside one cue."""
+    if not timings or cue_end <= cue_start or not audio_quiet_ranges:
+        return timings
+    clipped: list[list[float]] = []
+    for quiet_range in audio_quiet_ranges:
+        start = max(cue_start, float(quiet_range.get("start", cue_start)))
+        end = min(cue_end, float(quiet_range.get("end", cue_end)))
+        if end <= start:
+            continue
+        if clipped and start <= clipped[-1][1] + 0.001:
+            clipped[-1][1] = max(clipped[-1][1], end)
+        else:
+            clipped.append([start, end])
+    if not clipped or not any(
+        float(timing["start"]) < quiet_end
+        and float(timing["end"]) > quiet_start
+        for timing in timings
+        for quiet_start, quiet_end in clipped
+    ):
+        return timings
+
+    active_spans: list[tuple[float, float]] = []
+    cursor = cue_start
+    for quiet_start, quiet_end in clipped:
+        if quiet_start > cursor + 0.001:
+            active_spans.append((cursor, quiet_start))
+        cursor = max(cursor, quiet_end)
+    if cursor < cue_end - 0.001:
+        active_spans.append((cursor, cue_end))
+    active_duration = sum(end - start for start, end in active_spans)
+    if not active_spans or active_duration <= 0.001:
+        return timings
+
+    weights = [
+        max(0.001, float(timing["end"]) - float(timing["start"]))
+        for timing in timings
+    ]
+    total_weight = sum(weights)
+
+    def timeline_time(active_offset: float, *, end_edge: bool) -> float:
+        remaining = max(0.0, min(active_duration, active_offset))
+        for index, (start, end) in enumerate(active_spans):
+            span_duration = end - start
+            if remaining < span_duration - 0.000001:
+                return start + remaining
+            if abs(remaining - span_duration) <= 0.000001:
+                if end_edge or index == len(active_spans) - 1:
+                    return end
+                return active_spans[index + 1][0]
+            remaining -= span_duration
+        return active_spans[-1][1]
+
+    aligned: list[dict[str, float]] = []
+    consumed_weight = 0.0
+    for weight in weights:
+        start_offset = active_duration * consumed_weight / total_weight
+        consumed_weight += weight
+        end_offset = active_duration * consumed_weight / total_weight
+        start = timeline_time(start_offset, end_edge=False)
+        end = timeline_time(end_offset, end_edge=True)
+        aligned.append(
+            {
+                "start": round(start, 4),
+                "end": round(max(start + 0.001, end), 4),
+            }
+        )
+    return aligned
+
+
+def align_text_overlays_to_audio_activity(
+    overlays: list[dict[str, Any]],
+    audio_quiet_ranges: list[dict[str, float]] | None,
+    transcript_segments: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    aligned_overlays = copy.deepcopy(overlays)
+    if not audio_quiet_ranges:
+        return aligned_overlays
+    handled_indices: set[int] = set()
+    for segment in transcript_segments or []:
+        segment_start = float(segment.get("start") or 0)
+        segment_end = float(segment.get("end") or segment_start)
+        segment_indices = [
+            index
+            for index, overlay in enumerate(aligned_overlays)
+            if overlay.get("trackType") == TRANSCRIPT_ART_TEXT_TRACK_TYPE
+            and (overlay.get("characterTimings") or [])
+            and float(overlay.get("start") or 0) < segment_end + 0.001
+            and float(overlay.get("end") or 0) > segment_start - 0.001
+        ]
+        if not segment_indices:
+            continue
+        segment_indices.sort(
+            key=lambda index: float(aligned_overlays[index].get("start") or 0)
+        )
+        timings = [
+            timing
+            for index in segment_indices
+            for timing in aligned_overlays[index].get("characterTimings") or []
+        ]
+        aligned_timings = align_character_timings_to_audio_activity(
+            timings,
+            segment_start,
+            segment_end,
+            audio_quiet_ranges,
+        )
+        offset = 0
+        for index in segment_indices:
+            overlay = aligned_overlays[index]
+            timing_count = len(overlay.get("characterTimings") or [])
+            overlay["characterTimings"] = aligned_timings[
+                offset : offset + timing_count
+            ]
+            offset += timing_count
+            if overlay["characterTimings"]:
+                overlay["start"] = overlay["characterTimings"][0]["start"]
+                overlay["end"] = overlay["characterTimings"][-1]["end"]
+            handled_indices.add(index)
+
+    for index, overlay in enumerate(aligned_overlays):
+        if index in handled_indices:
+            continue
+        animation = overlay.get("animation") or {}
+        timings = overlay.get("characterTimings") or []
+        is_transcript_overlay = (
+            overlay.get("trackType") == TRANSCRIPT_ART_TEXT_TRACK_TYPE
+        )
+        if (
+            not is_transcript_overlay
+            and str(animation.get("type") or "none") != "character-bounce"
+        ) or not timings:
+            continue
+        overlay["characterTimings"] = align_character_timings_to_audio_activity(
+            timings,
+            float(overlay.get("start") or 0),
+            float(overlay.get("end") or 0),
+            audio_quiet_ranges,
+        )
+        if overlay["characterTimings"]:
+            overlay["start"] = overlay["characterTimings"][0]["start"]
+            overlay["end"] = overlay["characterTimings"][-1]["end"]
+    return aligned_overlays
+
+
+def transcript_art_text_character_timings(
+    items: list[dict[str, Any]],
+    cue_start: float,
+    cue_end: float,
+    audio_quiet_ranges: list[dict[str, float]] | None = None,
+) -> list[dict[str, float]]:
+    visible_items: list[tuple[float, float]] = []
+    supplied_all = True
+    for item in items:
+        characters = [
+            character
+            for character in str(item.get("text") or "")
+            if not character.isspace()
+            and not unicodedata.category(character).startswith("P")
+        ]
+        if not characters:
+            continue
+        supplied = item.get("characterTimings") or []
+        if len(supplied) == len(characters):
+            visible_items.extend(
+                (float(timing["start"]), float(timing["end"]))
+                for timing in supplied
+            )
+            continue
+        supplied_all = False
+        start = float(item["start"])
+        end = float(item["end"])
+        duration = max(0.0001, end - start)
+        for index in range(len(characters)):
+            visible_items.append(
+                (
+                    start + duration * index / len(characters),
+                    start + duration * (index + 1) / len(characters),
+                )
+            )
+
+    if not visible_items or cue_end <= cue_start:
+        return []
+    if supplied_all:
+        return [
+            {
+                "start": round(start, 4),
+                "end": round(max(start + 0.001, end), 4),
+            }
+            for start, end in visible_items
+        ]
+    minimum_duration = min(
+        0.001,
+        (cue_end - cue_start) / max(2, len(visible_items) * 2),
+    )
+    timings: list[dict[str, float]] = []
+    for raw_start, raw_end in visible_items:
+        start = min(
+            max(raw_start, cue_start),
+            max(cue_start, cue_end - minimum_duration),
+        )
+        end = min(cue_end, max(raw_end, start + minimum_duration))
+        timings.append(
+            {
+                "start": round(start, 4),
+                "end": round(max(end, start + minimum_duration), 4),
+            }
+        )
+    return align_character_timings_to_audio_activity(
+        timings,
+        cue_start,
+        cue_end,
+        audio_quiet_ranges,
+    )
 
 
 def transcript_art_text_segmentation_key(
@@ -3740,6 +4652,7 @@ def build_transcript_art_text_track(
     )
 
     cues = []
+    cue_groups: list[list[dict[str, Any]]] = []
     for group in fitted_groups:
         cue = {
             "text": transcript_art_text_display_text(group),
@@ -3754,6 +4667,7 @@ def build_transcript_art_text_track(
                 }
             )
         cues.append(cue)
+        cue_groups.append(group)
 
     for previous, current in zip(cues, cues[1:]):
         if float(current["start"]) >= float(previous["end"]) - 0.001:
@@ -3762,6 +4676,17 @@ def build_transcript_art_text_track(
         if boundary - float(previous["start"]) < 0.019:
             raise ValueError("剪后词级时间戳过密，无法生成完整的全文艺术字。")
         previous["end"] = boundary
+
+    for cue, group in zip(cues, cue_groups):
+        cue["characterTimings"] = transcript_art_text_character_timings(
+            group,
+            float(cue["start"]),
+            float(cue["end"]),
+            transcript.get("audioQuietRanges") or [],
+        )
+        if cue["characterTimings"]:
+            cue["start"] = cue["characterTimings"][0]["start"]
+            cue["end"] = cue["characterTimings"][-1]["end"]
 
     if len(cues) > MAX_TRANSCRIPT_ART_TEXT_CUES:
         raise ValueError(
@@ -4313,6 +5238,76 @@ def crop_art_text_canvas_to_effects(
     return canvas.crop(crop_box)
 
 
+def apply_staggered_character_layout(
+    canvas: Image.Image,
+    positioned_lines: list[tuple[str, float, float]],
+    font: ImageFont.FreeTypeFont,
+    font_size: int,
+    stroke_width: int,
+    layout: dict[str, Any] | None,
+) -> Image.Image:
+    if str((layout or {}).get("type") or "none") != "staggered":
+        return canvas
+    rotations = list((layout or {}).get("rotationPattern") or [])
+    vertical_offsets = list((layout or {}).get("verticalOffsetPattern") or [])
+    if not rotations or not vertical_offsets:
+        return canvas
+
+    measure = ImageDraw.Draw(Image.new("L", (1, 1)))
+    transformed = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    visible_index = 0
+    piece_padding = max(5, stroke_width + 3)
+    for line, line_x, line_y in positioned_lines:
+        for character_index, character in enumerate(line):
+            if character.isspace():
+                continue
+            prefix = line[:character_index]
+            character_x = line_x + measure.textlength(prefix, font=font)
+            character_end = line_x + measure.textlength(
+                line[: character_index + 1],
+                font=font,
+            )
+            glyph_box = measure.textbbox(
+                (character_x, line_y),
+                character,
+                font=font,
+                stroke_width=stroke_width,
+            )
+            crop_box = (
+                max(0, math.floor(min(character_x, glyph_box[0]) - piece_padding)),
+                max(0, math.floor(glyph_box[1] - piece_padding)),
+                min(
+                    canvas.width,
+                    math.ceil(max(character_end, glyph_box[2]) + piece_padding),
+                ),
+                min(canvas.height, math.ceil(glyph_box[3] + piece_padding)),
+            )
+            if crop_box[2] <= crop_box[0] or crop_box[3] <= crop_box[1]:
+                continue
+            piece = canvas.crop(crop_box)
+            angle = float(rotations[visible_index % len(rotations)])
+            offset_y = round(
+                float(vertical_offsets[visible_index % len(vertical_offsets)])
+                * font_size
+            )
+            rotated = piece.rotate(
+                angle,
+                resample=Image.Resampling.BICUBIC,
+                expand=True,
+            )
+            center_x = (crop_box[0] + crop_box[2]) / 2
+            center_y = (crop_box[1] + crop_box[3]) / 2 + offset_y
+            transformed.alpha_composite(
+                rotated,
+                (
+                    round(center_x - rotated.width / 2),
+                    round(center_y - rotated.height / 2),
+                ),
+            )
+            visible_index += 1
+    return transformed if visible_index else canvas
+
+
 def render_art_text_layer(
     output_path: Path,
     overlay: dict[str, Any],
@@ -4827,6 +5822,48 @@ def render_art_text_layer(
             stroke_fill=stroke_color,
         )
 
+    if overlay.get("textColorMode") == "center-highlight":
+        secondary_color_value = str(
+            overlay.get("secondaryColor") or "#FFFFFF"
+        )
+        secondary_fill = (*ImageColor.getrgb(secondary_color_value), 255)
+        character_count = sum(
+            1
+            for line, _, _ in positioned_lines
+            for character in line
+            if not character.isspace()
+        )
+        highlight_start = math.floor(character_count * 0.25)
+        highlight_end = math.ceil(character_count * 0.75)
+        character_index = 0
+        color_draw = ImageDraw.Draw(canvas)
+        for line, line_x, line_y in positioned_lines:
+            for offset, character in enumerate(line):
+                if character.isspace():
+                    continue
+                if not highlight_start <= character_index < highlight_end:
+                    character_x = line_x + measure.textlength(
+                        line[:offset],
+                        font=font,
+                    )
+                    color_draw.text(
+                        (character_x, line_y),
+                        character,
+                        font=font,
+                        fill=secondary_fill,
+                    )
+                character_index += 1
+
+    if overlay.get("direction") == "horizontal":
+        canvas = apply_staggered_character_layout(
+            canvas,
+            positioned_lines,
+            font,
+            int(overlay["fontSize"]),
+            measure_stroke,
+            overlay.get("characterLayout"),
+        )
+
     canvas = crop_art_text_canvas_to_effects(canvas, text_fill_bounds)
 
     if max_size is not None:
@@ -4847,6 +5884,132 @@ def render_art_text_layer(
             )
 
     canvas.save(output_path, "PNG", optimize=True)
+
+
+def render_art_text_asset(
+    output_path: Path,
+    overlay: dict[str, Any],
+    max_size: tuple[int, int] | None = None,
+) -> bool:
+    """Render one overlay asset and return whether it contains APNG animation."""
+    render_art_text_layer(output_path, overlay, max_size=max_size)
+    animation = overlay.get("animation") or {}
+    if str(animation.get("type") or "none") != "character-bounce":
+        return False
+
+    with Image.open(output_path) as rendered:
+        source = rendered.convert("RGBA")
+    visible_bounds = source.getbbox()
+    text = format_overlay_text(overlay)
+    characters = [character for character in text if not character.isspace()]
+    character_timings = overlay.get("characterTimings") or []
+    if (
+        visible_bounds is None
+        or not characters
+        or len(character_timings) != len(characters)
+    ):
+        return False
+
+    try:
+        animation_duration = float(animation.get("duration", 0.56))
+        animation_amplitude = float(animation.get("amplitude", 0.18))
+        overlay_start = float(overlay.get("start") or 0)
+        local_starts = [
+            max(0.0, float(timing["start"]) - overlay_start)
+            for timing in character_timings
+        ]
+        character_durations = [
+            min(
+                animation_duration,
+                max(
+                    0.2,
+                    float(timing["end"]) - float(timing["start"]) + 0.18,
+                ),
+            )
+            for timing in character_timings
+        ]
+    except (KeyError, TypeError, ValueError):
+        return False
+
+    centers: list[float] = []
+    if "\n" not in text:
+        font_path = resolve_art_text_font_path(str(overlay["font"]))
+        if font_path is not None:
+            font = ImageFont.truetype(str(font_path), int(overlay["fontSize"]))
+            measure = ImageDraw.Draw(Image.new("L", (1, 1)))
+            line_width = max(1.0, measure.textlength(text, font=font))
+            visible_width = max(1, visible_bounds[2] - visible_bounds[0])
+            for offset, character in enumerate(text):
+                if character.isspace():
+                    continue
+                prefix_width = measure.textlength(text[:offset], font=font)
+                character_width = measure.textlength(character, font=font)
+                centers.append(
+                    visible_bounds[0]
+                    + ((prefix_width + character_width / 2) / line_width)
+                    * visible_width
+                )
+    if len(centers) != len(characters):
+        centers = [
+            source.width * (index + 0.5) / len(characters)
+            for index in range(len(characters))
+        ]
+
+    boundaries = [0]
+    boundaries.extend(
+        round((left + right) / 2)
+        for left, right in zip(centers, centers[1:])
+    )
+    boundaries.append(source.width)
+    for index in range(1, len(boundaries)):
+        boundaries[index] = max(boundaries[index], boundaries[index - 1] + 1)
+    boundaries[-1] = source.width
+
+    frames_per_second = 24
+    cycle_duration = max(
+        local_start + character_duration
+        for local_start, character_duration in zip(
+            local_starts,
+            character_durations,
+        )
+    )
+    cycle_duration += 0.18
+    frame_count = max(2, math.ceil(cycle_duration * frames_per_second))
+    lift = max(
+        1,
+        round(min(source.height * 0.24, source.height * animation_amplitude)),
+    )
+    frames: list[Image.Image] = []
+    for frame_index in range(frame_count):
+        frame_time = frame_index / frames_per_second
+        frame = Image.new("RGBA", source.size, (0, 0, 0, 0))
+        for character_index in range(len(characters)):
+            left = min(source.width, boundaries[character_index])
+            right = min(source.width, boundaries[character_index + 1])
+            if right <= left:
+                continue
+            local_time = frame_time - local_starts[character_index]
+            progress = local_time / character_durations[character_index]
+            offset_y = 0
+            if 0 <= progress <= 1:
+                offset_y = -round(lift * math.sin(math.pi * progress))
+            character_slice = source.crop((left, 0, right, source.height))
+            frame.alpha_composite(character_slice, (left, offset_y))
+        frames.append(frame)
+
+    frame_duration_ms = max(1, round(1000 / frames_per_second))
+    frames[0].save(
+        output_path,
+        "PNG",
+        save_all=True,
+        append_images=frames[1:],
+        duration=frame_duration_ms,
+        loop=1,
+        disposal=1,
+        blend=0,
+        optimize=False,
+    )
+    return True
 
 
 def render_art_text_video(
@@ -4876,12 +6039,27 @@ def render_art_text_video(
         text_path = input_path.parent / f"art-text-{index}.txt"
         text_path.write_text(format_overlay_text(overlay), encoding="utf-8")
         image_path = input_path.parent / f"art-text-{index}.png"
-        render_art_text_layer(image_path, overlay, max_size=safe_layer_size)
-        command.extend(["-loop", "1", "-i", image_path.name])
+        animated = render_art_text_asset(
+            image_path,
+            overlay,
+            max_size=safe_layer_size,
+        )
+        if animated:
+            command.extend(["-i", image_path.name])
+        else:
+            command.extend(["-loop", "1", "-i", image_path.name])
         source = "[0:v]" if index == 0 else f"[v{index}]"
         target = f"[v{index + 1}]"
+        overlay_input = f"[{index + 1}:v]"
+        if animated:
+            animated_input = f"[art{index}]"
+            filter_parts.append(
+                f"{overlay_input}setpts=PTS-STARTPTS+{overlay['start']:.3f}/TB"
+                f"{animated_input}"
+            )
+            overlay_input = animated_input
         filter_parts.append(
-            f"{source}[{index + 1}:v]overlay="
+            f"{source}{overlay_input}overlay="
             f"x='max(main_w*{safe_margin_ratio:.4f},"
             f"min(main_w-overlay_w-main_w*{safe_margin_ratio:.4f},"
             f"main_w*{overlay['x']:.4f}-overlay_w/2))':"
@@ -5662,7 +6840,256 @@ def render_picture_in_picture_video(
 
 
 def get_asr_api_key() -> str:
-    return os.getenv("DASHSCOPE_API_KEY") or os.getenv("ASR_API_KEY") or ""
+    return (
+        os.getenv("DASHSCOPE_API_KEY")
+        or os.getenv("ASR_API_KEY")
+        or ""
+    ).strip()
+
+
+def model_credential_providers() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "dashscope",
+            "name": "阿里云百炼",
+            "environmentVariable": "DASHSCOPE_API_KEY",
+            "configured": bool(get_asr_api_key()),
+            "maskedValue": "••••••••" if get_asr_api_key() else "",
+            "models": [
+                {"id": "asr", "role": "语音转文字", "model": ASR_MODEL},
+                {
+                    "id": "punctuation",
+                    "role": "标点与断句",
+                    "model": PUNCTUATION_MODEL,
+                },
+                {
+                    "id": "suggestion",
+                    "role": "AI 删减建议",
+                    "model": SUGGESTION_MODEL,
+                },
+                {
+                    "id": "artTextSegmentation",
+                    "role": "艺术字语义分句",
+                    "model": ART_TEXT_SEGMENTATION_MODEL,
+                },
+                {
+                    "id": "artSuggestion",
+                    "role": "AI 艺术字推荐",
+                    "model": ART_SUGGESTION_MODEL,
+                },
+                {
+                    "id": "pipPrompt",
+                    "role": "画中画提示词",
+                    "model": PIP_PROMPT_MODEL,
+                },
+            ],
+            "requestUrls": [
+                {
+                    "id": "http",
+                    "label": "HTTP 请求地址",
+                    "value": DASHSCOPE_HTTP_API_URL,
+                    "placeholder": "https://dashscope.aliyuncs.com/api/v1",
+                },
+                {
+                    "id": "websocket",
+                    "label": "语音识别 WebSocket 地址",
+                    "value": DASHSCOPE_WEBSOCKET_URL,
+                    "placeholder": (
+                        "wss://dashscope.aliyuncs.com/api-ws/v1/inference"
+                    ),
+                },
+            ],
+        },
+        {
+            "id": "volcengine",
+            "name": "火山方舟",
+            "environmentVariable": "ARK_API_KEY",
+            "configured": bool(get_ark_api_key()),
+            "maskedValue": "••••••••" if get_ark_api_key() else "",
+            "models": [
+                {
+                    "id": "image",
+                    "role": "画中画图片生成",
+                    "model": PIP_IMAGE_MODEL,
+                },
+                {
+                    "id": "video",
+                    "role": "画中画视频生成",
+                    "model": PIP_VIDEO_MODEL,
+                },
+            ],
+            "requestUrls": [
+                {
+                    "id": "api",
+                    "label": "API 请求地址",
+                    "value": ARK_API_BASE_URL,
+                    "placeholder": "https://ark.cn-beijing.volces.com/api/v3",
+                },
+            ],
+        },
+    ]
+
+
+def model_provider_environment_variables(
+    provider_id: str,
+) -> dict[str, dict[str, str] | tuple[str, ...]]:
+    if provider_id == "dashscope":
+        return {
+            "keys": ("DASHSCOPE_API_KEY", "ASR_API_KEY"),
+            "models": {
+                "asr": "ASR_MODEL",
+                "punctuation": "PUNCTUATION_MODEL",
+                "suggestion": "SUGGESTION_MODEL",
+                "artTextSegmentation": "ART_TEXT_SEGMENTATION_MODEL",
+                "artSuggestion": "ART_SUGGESTION_MODEL",
+                "pipPrompt": "PIP_PROMPT_MODEL",
+            },
+            "requestUrls": {
+                "http": "DASHSCOPE_HTTP_API_URL",
+                "websocket": "DASHSCOPE_WEBSOCKET_URL",
+            },
+        }
+    if provider_id == "volcengine":
+        return {
+            "keys": ("ARK_API_KEY",),
+            "models": {
+                "image": "SEEDREAM_MODEL",
+                "video": "SEEDANCE_MODEL",
+            },
+            "requestUrls": {"api": "ARK_API_BASE_URL"},
+        }
+    raise HTTPException(status_code=404, detail="模型服务商不存在。")
+
+
+def validate_model_provider_update(
+    provider_id: str,
+    update: ModelProviderUpdate,
+) -> tuple[str | None, dict[str, str], dict[str, str]]:
+    variables = model_provider_environment_variables(provider_id)
+    model_variables = variables["models"]
+    request_url_variables = variables["requestUrls"]
+    api_key = update.apiKey.strip() if update.apiKey is not None else None
+    if api_key == "":
+        api_key = None
+    if api_key and any(character.isspace() for character in api_key):
+        raise HTTPException(status_code=422, detail="API Key 不能包含空格或换行。")
+    unknown_models = set(update.models) - set(model_variables)
+    unknown_urls = set(update.requestUrls) - set(request_url_variables)
+    if unknown_models or unknown_urls:
+        raise HTTPException(status_code=422, detail="提交了不支持的模型配置项。")
+
+    models = {key: value.strip() for key, value in update.models.items()}
+    if any(not value for value in models.values()):
+        raise HTTPException(status_code=422, detail="模型名称不能为空。")
+    if any(len(value) > 200 for value in models.values()):
+        raise HTTPException(status_code=422, detail="模型名称不能超过 200 个字符。")
+
+    request_urls = {
+        key: value.strip().rstrip("/")
+        for key, value in update.requestUrls.items()
+    }
+    if any(not value for value in request_urls.values()):
+        raise HTTPException(status_code=422, detail="请求地址不能为空。")
+    for key, value in request_urls.items():
+        parsed = urlparse(value)
+        allowed_schemes = {"wss", "ws"} if key == "websocket" else {"https", "http"}
+        if parsed.scheme not in allowed_schemes or not parsed.netloc:
+            scheme_hint = "ws:// 或 wss://" if key == "websocket" else "http:// 或 https://"
+            raise HTTPException(
+                status_code=422,
+                detail=f"请求地址格式无效，应使用 {scheme_hint} 开头的完整地址。",
+            )
+    return api_key, models, request_urls
+
+
+def refresh_model_runtime_settings() -> None:
+    global ASR_MODEL
+    global PUNCTUATION_MODEL
+    global SUGGESTION_MODEL
+    global ART_SUGGESTION_MODEL
+    global ART_TEXT_SEGMENTATION_MODEL
+    global PIP_PROMPT_MODEL
+    global PIP_IMAGE_MODEL
+    global PIP_VIDEO_MODEL
+    global ARK_API_BASE_URL
+    global DASHSCOPE_HTTP_API_URL
+    global DASHSCOPE_WEBSOCKET_URL
+
+    ASR_MODEL = os.getenv("ASR_MODEL", "paraformer-realtime-v2").strip()
+    PUNCTUATION_MODEL = os.getenv("PUNCTUATION_MODEL", "qwen-plus").strip()
+    SUGGESTION_MODEL = os.getenv("SUGGESTION_MODEL", "qwen3.7-max").strip()
+    ART_SUGGESTION_MODEL = os.getenv(
+        "ART_SUGGESTION_MODEL", "qwen3.6-flash"
+    ).strip()
+    ART_TEXT_SEGMENTATION_MODEL = os.getenv(
+        "ART_TEXT_SEGMENTATION_MODEL", PUNCTUATION_MODEL
+    ).strip()
+    PIP_PROMPT_MODEL = os.getenv("PIP_PROMPT_MODEL", "qwen-plus").strip()
+    PIP_IMAGE_MODEL = os.getenv(
+        "SEEDREAM_MODEL", "doubao-seedream-5-0-lite-260128"
+    ).strip()
+    PIP_VIDEO_MODEL = os.getenv(
+        "SEEDANCE_MODEL", "doubao-seedance-2-0-260128"
+    ).strip()
+    ARK_API_BASE_URL = os.getenv(
+        "ARK_API_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3"
+    ).strip().rstrip("/")
+    DASHSCOPE_HTTP_API_URL = os.getenv(
+        "DASHSCOPE_HTTP_API_URL", "https://dashscope.aliyuncs.com/api/v1"
+    ).strip().rstrip("/")
+    DASHSCOPE_WEBSOCKET_URL = os.getenv(
+        "DASHSCOPE_WEBSOCKET_URL",
+        "wss://dashscope.aliyuncs.com/api-ws/v1/inference",
+    ).strip()
+    dashscope.base_http_api_url = DASHSCOPE_HTTP_API_URL
+    dashscope.base_websocket_api_url = DASHSCOPE_WEBSOCKET_URL
+
+
+def persist_model_provider_settings(
+    provider_id: str,
+    update: ModelProviderUpdate,
+) -> None:
+    variables = model_provider_environment_variables(provider_id)
+    api_key, models, request_urls = validate_model_provider_update(
+        provider_id,
+        update,
+    )
+    with MODEL_SETTINGS_LOCK:
+        try:
+            ENV_FILE.touch(exist_ok=True)
+            if api_key is not None:
+                primary_variable = variables["keys"][0]
+                set_key(str(ENV_FILE), primary_variable, api_key, quote_mode="always")
+                os.environ[primary_variable] = api_key
+            for field_id, value in models.items():
+                variable = variables["models"][field_id]
+                set_key(str(ENV_FILE), variable, value, quote_mode="always")
+                os.environ[variable] = value
+            for field_id, value in request_urls.items():
+                variable = variables["requestUrls"][field_id]
+                set_key(str(ENV_FILE), variable, value, quote_mode="always")
+                os.environ[variable] = value
+            refresh_model_runtime_settings()
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail="模型配置保存失败，请检查项目 .env 文件是否可写。",
+            ) from exc
+
+
+def remove_model_credential(provider_id: str) -> None:
+    variables = model_provider_environment_variables(provider_id)["keys"]
+    with MODEL_SETTINGS_LOCK:
+        try:
+            for variable in variables:
+                if ENV_FILE.is_file():
+                    unset_key(str(ENV_FILE), variable)
+                os.environ.pop(variable, None)
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail="API Key 清除失败，请检查项目 .env 文件是否可写。",
+            ) from exc
 
 
 def to_simplified(text: str) -> str:
@@ -7077,6 +8504,10 @@ def process_job(job_id: str) -> None:
         except (OSError, RuntimeError, subprocess.SubprocessError):
             audio_samples = None
         result["mediaDuration"] = media_duration
+        result["audioQuietRanges"] = detect_audio_quiet_ranges(
+            audio_samples,
+            media_duration,
+        )
         result["noSpeechSuggestions"] = detect_no_speech_ranges(
             result["segments"],
             media_duration,
@@ -7117,6 +8548,7 @@ def process_job(job_id: str) -> None:
             stage="处理失败",
             error=str(exc),
         )
+        remove_job_working_directory(job_id, video_path)
 
 
 def process_cut_job(
@@ -7131,17 +8563,20 @@ def process_cut_job(
     try:
         with JOBS_LOCK:
             duration = float(JOBS[job_id]["duration"])
-            source_segments = copy.deepcopy(
-                (JOBS[job_id].get("result") or {}).get("segments") or []
-            )
+            source_result = copy.deepcopy(JOBS[job_id].get("result") or {})
+            source_segments = source_result.get("segments") or []
         update_edit_job(
             job_id,
             status="processing",
             stage="正在按当前预览剪辑视频",
             progress=20,
         )
-        requested_ranges = transcript_delete_ranges or delete_ranges
-        media_ranges = copy.deepcopy(requested_ranges)
+        requested_ranges = (
+            transcript_delete_ranges
+            if transcript_delete_ranges is not None
+            else delete_ranges
+        )
+        media_ranges = copy.deepcopy(delete_ranges)
         update_edit_job(
             job_id,
             stage="正在生成当前预览视频",
@@ -7159,21 +8594,16 @@ def process_cut_job(
             requested_ranges,
             output_duration,
             timeline_delete_ranges=media_ranges,
+            audio_quiet_ranges=source_result.get("audioQuietRanges") or [],
         )
-        with JOBS_LOCK:
-            original_filename = str(JOBS[job_id].get("filename") or "视频.mp4")
-            custom_history_name = (JOBS[job_id].get("edit") or {}).get(
-                "historyName"
-            )
-        history_version = save_history_version(
-            job_id=job_id,
-            kind="edited",
-            source_video=output_path,
-            duration=output_duration,
-            transcript=transcript,
-            original_filename=original_filename,
-            custom_name=custom_history_name,
-        )
+        try:
+            edited_samples = decode_cut_audio_samples(output_path)
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            edited_samples = None
+        transcript["audioQuietRanges"] = detect_audio_quiet_ranges(
+            edited_samples,
+            output_duration,
+        ) or transcript.get("audioQuietRanges", [])
         update_edit_job(
             job_id,
             status="completed",
@@ -7183,8 +8613,6 @@ def process_cut_job(
             outputDuration=output_duration,
             transcript=transcript,
             ranges=media_ranges,
-            historyId=history_version["id"],
-            historyName=history_version["name"],
             error=None,
         )
     except GenerationCancelledError:
@@ -7212,42 +8640,38 @@ def process_art_text_job(
     output_path = input_path.parent / "art-text.mp4"
     try:
         check_cancelled(job_id)
-        update_art_job(
-            job_id,
-            status="processing",
-            stage="正在把艺术字合成到视频",
-            progress=25,
-        )
-        render_art_text_video(input_path, output_path, overlays)
         with JOBS_LOCK:
             job = JOBS[job_id]
             art = job.get("art") or {}
             art_source = str(art.get("source") or "edited")
-            duration = float(art.get("outputDuration") or 0)
             transcript = copy.deepcopy(
                 job.get("result") or {}
                 if art_source == "original"
                 else (job.get("edit") or {}).get("transcript") or {}
             )
-            original_filename = str(job.get("filename") or "视频.mp4")
-            custom_history_name = art.get("historyName")
-        history_version = save_history_version(
-            job_id=job_id,
-            kind="art",
-            source_video=output_path,
-            duration=duration,
-            transcript=transcript,
-            original_filename=original_filename,
-            custom_name=custom_history_name,
+        overlays = align_text_overlays_to_audio_activity(
+            overlays,
+            transcript.get("audioQuietRanges") or [],
+            transcript.get("segments") or [],
         )
+        update_art_job(
+            job_id,
+            status="processing",
+            stage="正在把艺术字合成到视频",
+            progress=25,
+            overlays=overlays,
+        )
+        render_art_text_video(input_path, output_path, overlays)
+        with JOBS_LOCK:
+            job = JOBS[job_id]
+            art = job.get("art") or {}
+            duration = float(art.get("outputDuration") or 0)
         update_art_job(
             job_id,
             status="completed",
             stage="艺术字视频已生成",
             progress=100,
             outputUrl=f"/api/transcriptions/{job_id}/art-text-video",
-            historyId=history_version["id"],
-            historyName=history_version["name"],
             error=None,
         )
     except GenerationCancelledError:
@@ -7309,6 +8733,7 @@ def process_picture_in_picture_job(
 def process_preview_composition_job(
     job_id: str,
     requested_ranges: list[dict[str, float]],
+    transcript_delete_ranges: list[dict[str, float]],
     art_overlays: list[dict[str, Any]],
     picture_in_picture_overlays: list[dict[str, Any]],
     composition_request: dict[str, Any],
@@ -7324,9 +8749,8 @@ def process_preview_composition_job(
         with JOBS_LOCK:
             job = JOBS[job_id]
             duration = float(job["duration"])
-            source_segments = copy.deepcopy(
-                (job.get("result") or {}).get("segments") or []
-            )
+            source_result = copy.deepcopy(job.get("result") or {})
+            source_segments = source_result.get("segments") or []
 
         update_edit_job(
             job_id,
@@ -7375,10 +8799,19 @@ def process_preview_composition_job(
         )
         transcript = build_retained_transcript(
             source_segments,
-            requested_ranges,
+            transcript_delete_ranges,
             output_duration,
             timeline_delete_ranges=media_ranges,
+            audio_quiet_ranges=source_result.get("audioQuietRanges") or [],
         )
+        try:
+            edited_samples = decode_cut_audio_samples(edited_path)
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            edited_samples = None
+        transcript["audioQuietRanges"] = detect_audio_quiet_ranges(
+            edited_samples,
+            output_duration,
+        ) or transcript.get("audioQuietRanges", [])
         update_edit_job(
             job_id,
             status="completed",
@@ -7393,7 +8826,11 @@ def process_preview_composition_job(
 
         current_input = edited_path
         if art_overlays:
-            final_art_overlays = copy.deepcopy(art_overlays)
+            final_art_overlays = align_text_overlays_to_audio_activity(
+                art_overlays,
+                transcript.get("audioQuietRanges") or [],
+                transcript.get("segments") or [],
+            )
             if not final_art_overlays:
                 raise RuntimeError("剪辑后没有可显示的艺术字，请检查当前预览。")
             update_art_job(
@@ -7502,6 +8939,7 @@ def process_preview_composition_job(
                 "updatedAt": utc_now(),
             },
         )
+        remove_job_working_directory(job_id, video_path)
     except GenerationCancelledError:
         with JOBS_LOCK:
             job = JOBS.get(job_id) or {}
@@ -7581,6 +9019,7 @@ def process_preview_composition_job(
                 "updatedAt": utc_now(),
             },
         )
+        remove_job_working_directory(job_id, video_path)
 
 
 def process_picture_in_picture_video_asset(
@@ -8197,6 +9636,10 @@ def use_history_version(history_id: str) -> JSONResponse:
     result = copy.deepcopy(transcript)
     result["duration"] = round(duration, 3)
     result["mediaDuration"] = round(duration, 3)
+    result["text"] = "\n".join(
+        str(segment.get("text") or "")
+        for segment in result.get("segments") or []
+    )
     result.setdefault("language", "zh")
     result.setdefault("languageProbability", None)
     result["editableSegments"] = build_editable_transcript_segments(
@@ -8252,6 +9695,38 @@ def health() -> dict[str, Any]:
         "configured": bool(get_asr_api_key()),
         "seedreamConfigured": bool(get_ark_api_key()),
         "seedanceConfigured": bool(get_ark_api_key()),
+    }
+
+
+@app.get("/api/settings/models")
+def get_model_settings() -> dict[str, Any]:
+    return {"providers": model_credential_providers()}
+
+
+@app.put("/api/settings/models/{provider_id}")
+def update_model_provider_settings(
+    provider_id: str,
+    update: ModelProviderUpdate,
+) -> dict[str, Any]:
+    persist_model_provider_settings(provider_id, update)
+    return {
+        "provider": next(
+            provider
+            for provider in model_credential_providers()
+            if provider["id"] == provider_id
+        )
+    }
+
+
+@app.delete("/api/settings/models/{provider_id}")
+def delete_model_credential(provider_id: str) -> dict[str, Any]:
+    remove_model_credential(provider_id)
+    return {
+        "provider": next(
+            provider
+            for provider in model_credential_providers()
+            if provider["id"] == provider_id
+        )
     }
 
 
@@ -8359,6 +9834,68 @@ def get_transcription(job_id: str) -> dict[str, Any]:
         return public_job(job)
 
 
+@app.post("/api/transcriptions/{job_id}/history", status_code=201)
+def save_transcription_history_version(
+    job_id: str,
+    request: HistoryVersionCreate,
+) -> dict[str, Any]:
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        video_path = JOB_FILES.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+        result_key = "edit" if request.kind == "edited" else "art"
+        result = copy.deepcopy(job.get(result_key) or {})
+        if result.get("status") != "completed":
+            label = history_kind_label(request.kind)
+            raise HTTPException(status_code=409, detail=f"{label}尚未生成，无法保存版本。")
+        if video_path is None:
+            raise HTTPException(status_code=404, detail="任务视频文件不存在。")
+
+        existing_history_id = str(result.get("historyId") or "")
+        if request.kind == "edited":
+            source_video = video_path.parent / "edited.mp4"
+            transcript = copy.deepcopy(result.get("transcript") or {})
+        else:
+            source_video = video_path.parent / "art-text.mp4"
+            art_source = str(result.get("source") or "edited")
+            transcript = copy.deepcopy(
+                job.get("result") or {}
+                if art_source == "original"
+                else (job.get("edit") or {}).get("transcript") or {}
+            )
+        duration = float(result.get("outputDuration") or 0)
+        original_filename = str(job.get("filename") or "视频.mp4")
+        result_updated_at = result.get("updatedAt")
+
+    if existing_history_id:
+        existing = find_history_version(existing_history_id)
+        if existing is not None:
+            return public_history_version(existing)
+
+    if duration <= 0:
+        raise HTTPException(status_code=409, detail="生成视频的时长无效，无法保存版本。")
+    try:
+        saved = save_history_version(
+            job_id=job_id,
+            kind=request.kind,
+            source_video=source_video,
+            duration=duration,
+            transcript=transcript,
+            original_filename=original_filename,
+            custom_name=request.name,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    with JOBS_LOCK:
+        current_job = JOBS.get(job_id) or {}
+        current_result = current_job.get(result_key) or {}
+        if current_result.get("updatedAt") == result_updated_at:
+            current_result["historyId"] = saved["id"]
+            current_result["historyName"] = saved["name"]
+    return saved
+
+
 @app.post("/api/transcriptions/{job_id}/cancel")
 def cancel_transcription_job(job_id: str) -> dict[str, Any]:
     """Cancel an in-progress video generation (edit / art / PiP / compose).
@@ -8413,38 +9950,66 @@ def update_cut_draft(
                 detail="剪辑草稿已在其他页面更新，请刷新后继续。",
             )
 
-        try:
-            text_ranges = []
-            for item in request.textRanges:
-                normalized = normalize_cut_draft_range(item, duration)
-                text_ranges.append(
-                    {
-                        **item.model_dump(
-                            exclude={"start", "end"},
-                            exclude_none=True,
-                        ),
-                        **normalized,
-                    }
-                )
-            no_speech_ranges = []
-            for item in request.noSpeechRanges:
-                normalized = normalize_cut_draft_range(item, duration)
-                no_speech_ranges.append(
-                    {
-                        "key": item.key,
-                        **normalized,
-                    }
-                )
-            timeline_ranges = [
-                normalize_cut_draft_range(item, duration)
-                for item in request.timelineRanges
-            ]
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        video_path = JOB_FILES.get(job_id)
+        source_segments = copy.deepcopy(
+            (job.get("result") or {}).get("segments") or []
+        )
 
+    try:
+        text_ranges = []
+        for item in request.textRanges:
+            normalized = normalize_cut_draft_range(item, duration)
+            text_ranges.append(
+                {
+                    **item.model_dump(
+                        exclude={"start", "end"},
+                        exclude_none=True,
+                    ),
+                    **normalized,
+                }
+            )
+        text_ranges = align_cut_draft_text_ranges_to_audio(
+            video_path,
+            text_ranges,
+            source_segments,
+            duration,
+        )
+        no_speech_ranges = []
+        for item in request.noSpeechRanges:
+            normalized = normalize_cut_draft_range(item, duration)
+            no_speech_ranges.append(
+                {
+                    "key": item.key,
+                    **normalized,
+                }
+            )
+        timeline_ranges = [
+            normalize_cut_draft_range(item, duration)
+            for item in request.timelineRanges
+        ]
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            raise HTTPException(
+                status_code=404,
+                detail="转写任务不存在或服务已重启。",
+            )
+        current_draft = job.get("cutDraft")
+        if current_draft is None:
+            current_draft = load_cut_draft(job_id)
+        current_revision = int((current_draft or {}).get("revision") or 0)
+        if request.revision != current_revision:
+            raise HTTPException(
+                status_code=409,
+                detail="剪辑草稿已在其他页面更新，请刷新后继续。",
+            )
         draft = {
             "schemaVersion": 1,
             "revision": current_revision + 1,
+            "automaticNoSpeechInitialized": request.automaticNoSpeechInitialized,
             "textRanges": text_ranges,
             "noSpeechRanges": no_speech_ranges,
             "timelineRanges": timeline_ranges,
@@ -8528,9 +10093,13 @@ def update_transcript_word(
         if edit.get("status") == "completed":
             edit_transcript = build_retained_transcript(
                 segments,
-                edit.get("requestedRanges") or edit.get("ranges") or [],
+                edit.get("transcriptRanges")
+                or edit.get("requestedRanges")
+                or edit.get("ranges")
+                or [],
                 float(edit.get("outputDuration") or 0),
                 timeline_delete_ranges=edit.get("ranges") or [],
+                audio_quiet_ranges=result.get("audioQuietRanges") or [],
             )
             edit["transcript"] = edit_transcript
             edit["updatedAt"] = utc_now()
@@ -8588,8 +10157,13 @@ def update_transcript_text(
         if edit.get("status") == "completed":
             edit_transcript = build_retained_transcript(
                 segments,
-                edit.get("ranges") or [],
+                edit.get("transcriptRanges")
+                or edit.get("requestedRanges")
+                or edit.get("ranges")
+                or [],
                 float(edit.get("outputDuration") or 0),
+                timeline_delete_ranges=edit.get("ranges") or [],
+                audio_quiet_ranges=result.get("audioQuietRanges") or [],
             )
             edit["transcript"] = edit_transcript
             edit["updatedAt"] = utc_now()
@@ -8691,6 +10265,29 @@ def create_cut(
         duration = float(job["duration"])
         try:
             requested_ranges = normalize_delete_ranges(request.ranges, duration)
+            transcript_delete_ranges = copy.deepcopy(requested_ranges)
+            draft_ranges = normalize_cut_draft_delete_ranges(
+                job.get("cutDraft"),
+                duration,
+            )
+            resolved_draft_ranges = resolve_cut_draft_delete_ranges(
+                job.get("cutDraft"),
+                (job.get("result") or {}).get("suggestions") or [],
+                (job.get("result") or {}).get("segments") or [],
+                duration,
+            )
+            if resolved_draft_ranges and (
+                delete_ranges_match(requested_ranges, draft_ranges)
+                or delete_ranges_match(requested_ranges, resolved_draft_ranges)
+            ):
+                requested_ranges = resolved_draft_ranges
+                transcript_delete_ranges = resolve_cut_draft_delete_ranges(
+                    job.get("cutDraft"),
+                    (job.get("result") or {}).get("suggestions") or [],
+                    (job.get("result") or {}).get("segments") or [],
+                    duration,
+                    use_text_semantic_boundaries=True,
+                )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -8699,9 +10296,9 @@ def create_cut(
             "status": "queued",
             "stage": "剪辑任务已创建",
             "progress": 10,
-            "historyName": request.historyName,
             "ranges": copy.deepcopy(requested_ranges),
-            "requestedRanges": requested_ranges,
+            "requestedRanges": copy.deepcopy(requested_ranges),
+            "transcriptRanges": copy.deepcopy(transcript_delete_ranges),
             "outputUrl": None,
             "outputDuration": None,
             "transcript": None,
@@ -8721,7 +10318,7 @@ def create_cut(
         process_cut_job,
         job_id,
         requested_ranges,
-        requested_ranges,
+        transcript_delete_ranges,
     )
     return JSONResponse(copy.deepcopy(edit), status_code=202)
 
@@ -8756,10 +10353,20 @@ def get_composition_video(job_id: str, download: bool = False) -> FileResponse:
         composition = job.get("composition") if job else None
         if job is None:
             raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
-        if not composition or composition.get("status") != "completed" or video_path is None:
+        if not composition or composition.get("status") != "completed":
             raise HTTPException(status_code=409, detail="当前预览视频尚未生成。")
+        history_id = str(composition.get("historyId") or "")
 
-    output_path = video_path.parent / "composition.mp4"
+    history_record = find_history_version(history_id) if history_id else None
+    if history_record is not None:
+        output_path = history_version_directory(history_id) / str(
+            history_record["videoFilename"]
+        )
+    elif video_path is not None:
+        output_path = video_path.parent / "composition.mp4"
+    else:
+        raise HTTPException(status_code=404, detail="当前预览视频文件不存在。")
+
     if not output_path.is_file():
         raise HTTPException(status_code=404, detail="当前预览视频文件不存在。")
     filename = f"{Path(job['filename']).stem}-当前预览版.mp4" if download else None
@@ -9051,7 +10658,6 @@ def create_art_text(
         "status": "queued",
         "stage": "艺术字合成任务已创建",
         "progress": 10,
-        "historyName": request.historyName,
         "source": request.source,
         "overlays": overlays,
         "outputUrl": None,
@@ -9457,6 +11063,8 @@ def create_preview_composition(
                     detail="当前预览已有生成任务正在处理，请稍候。",
                 )
         duration = float(job.get("duration") or 0)
+        draft = copy.deepcopy(job.get("cutDraft"))
+        source_result = copy.deepcopy(job.get("result") or {})
         asset_records = copy.deepcopy(
             [
                 *(job.get("pictureInPictureImages") or []),
@@ -9470,6 +11078,27 @@ def create_preview_composition(
             if request.ranges
             else []
         )
+        transcript_delete_ranges = copy.deepcopy(requested_ranges)
+        if requested_ranges:
+            draft_ranges = normalize_cut_draft_delete_ranges(draft, duration)
+            resolved_draft_ranges = resolve_cut_draft_delete_ranges(
+                draft,
+                source_result.get("suggestions") or [],
+                source_result.get("segments") or [],
+                duration,
+            )
+            if resolved_draft_ranges and (
+                delete_ranges_match(requested_ranges, draft_ranges)
+                or delete_ranges_match(requested_ranges, resolved_draft_ranges)
+            ):
+                requested_ranges = resolved_draft_ranges
+                transcript_delete_ranges = resolve_cut_draft_delete_ranges(
+                    draft,
+                    source_result.get("suggestions") or [],
+                    source_result.get("segments") or [],
+                    duration,
+                    use_text_semantic_boundaries=True,
+                )
         preview_duration = round(
             duration
             - sum(item["end"] - item["start"] for item in requested_ranges),
@@ -9515,7 +11144,8 @@ def create_preview_composition(
         "progress": 5,
         "historyName": request.historyName,
         "ranges": copy.deepcopy(requested_ranges),
-        "requestedRanges": requested_ranges,
+        "requestedRanges": copy.deepcopy(requested_ranges),
+        "transcriptRanges": copy.deepcopy(transcript_delete_ranges),
         "outputUrl": None,
         "outputDuration": None,
         "transcript": None,
@@ -9577,6 +11207,7 @@ def create_preview_composition(
         process_preview_composition_job,
         job_id,
         requested_ranges,
+        transcript_delete_ranges,
         art_overlays,
         picture_in_picture_overlays,
         request.model_dump(mode="json"),
@@ -9696,6 +11327,11 @@ def get_art_template_library_page() -> FileResponse:
 @app.get("/font-manager")
 def get_font_manager_page() -> FileResponse:
     return FileResponse(WEB_DIR / "font-manager.html")
+
+
+@app.get("/settings")
+def get_settings_page() -> FileResponse:
+    return FileResponse(WEB_DIR / "settings.html")
 
 
 app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")

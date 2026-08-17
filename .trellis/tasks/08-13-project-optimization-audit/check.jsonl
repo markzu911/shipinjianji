@@ -1,0 +1,9 @@
+{"file":".trellis/spec/guides/project-overview.md","reason":"检查实现是否符合当前产品和技术栈，而不是未经实施的目标架构。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"检查浏览器、API、状态、持久化、时间轴和渲染边界是否闭环。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"检查媒体临时输出、锁、路径安全、API 兼容与完整测试。"}
+{"file":".trellis/spec/frontend/index.md","reason":"检查前端状态所有权、消息安全、响应式、可访问性和轮询行为。"}
+{"file":".trellis/spec/testing/index.md","reason":"检查测试是否覆盖真实行为、失败清理、时间映射以及预览/导出一致性。"}
+{"file":".trellis/spec/operations/index.md","reason":"检查配置秘密、数据目录、启动和打包隔离。"}
+{"file":".trellis/tasks/08-13-project-optimization-audit/prd.md","reason":"检查优化是否覆盖可靠性、体验、性能、可维护性与测试，并遵守不整体重写约束。"}
+{"file":".trellis/tasks/08-13-project-optimization-audit/design.md","reason":"检查状态所有权、持久化、迁移、兼容和回滚是否闭环。"}
+{"file":".trellis/tasks/08-13-project-optimization-audit/implement.md","reason":"检查每个阶段是否独立可验收并包含行为与端到端测试。"}

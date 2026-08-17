@@ -52,6 +52,16 @@
           <iconify-icon icon="ph:download-simple-bold" aria-hidden="true"></iconify-icon>
         </a>
         <button
+          class="editor-suite-download-button editor-suite-save-button"
+          type="button"
+          data-editor-suite-save
+          aria-label="保存当前版本"
+          title="保存当前版本"
+          hidden
+        >
+          <iconify-icon icon="ph:bookmark-simple-bold" aria-hidden="true"></iconify-icon>
+        </button>
+        <button
           class="editor-suite-generate-button"
           type="button"
           data-editor-suite-generate
@@ -79,7 +89,6 @@
   );
   const status = root.querySelector("[data-editor-suite-status]");
   const inspector = document.querySelector(".text-editor-inspector");
-  const cutTabbar = inspector?.querySelector(".text-editor-tabbar");
   const cutPanelStack = inspector?.querySelector(".text-editor-panel-stack");
   const inspectorHost = document.querySelector("#editorSuiteInspectorHost");
   const previewOverlay = document.querySelector("#editorSuitePreviewOverlay");
@@ -97,6 +106,7 @@
   const douyinChrome = document.querySelector("#editorSuiteDouyinChrome");
   const generateButton = root.querySelector("[data-editor-suite-generate]");
   const downloadButton = root.querySelector("[data-editor-suite-download]");
+  const saveButton = root.querySelector("[data-editor-suite-save]");
   const frameEntries = new Map();
   const toolStates = new Map();
   const desiredToolUrls = new Map();
@@ -119,12 +129,35 @@
     duration: 0,
     transcript: null,
   };
+  const timelineStore = window.EditorTimeline.createStore({
+    duration: 0,
+    tracks: [],
+  });
+
+  function syncToolTimeline(kind, timeline, options = {}) {
+    if (!timeline || !Array.isArray(timeline.tracks)) return;
+    const duration = Math.max(
+      timelineStore.snapshot().duration,
+      Number(timeline.duration) || 0,
+    );
+    timelineStore.setDuration(duration, { silent: true });
+    const selection =
+      options.selection !== undefined
+        ? options.selection
+        : kind === activeTool
+          ? timeline.selection?.clipId || null
+          : undefined;
+    timelineStore.replaceKind(
+      kind,
+      timeline.tracks.filter((track) => track.kind === kind),
+      { selection, silent: true },
+    );
+  }
 
   function supportsInlineWorkspace() {
     return Boolean(
       stage === "cut" &&
         inspector &&
-        cutTabbar &&
         cutPanelStack &&
         inspectorHost &&
         previewOverlay &&
@@ -322,7 +355,6 @@
       currentJob?.art?.overlays
         ? {
             source: currentJob.art.source || "original",
-            historyName: currentJob.art.historyName || null,
             overlays: currentJob.art.overlays,
           }
         : { overlays: [] }
@@ -353,7 +385,7 @@
         composition.pictureInPicture?.overlays || [],
       pictureInPictureSource:
         composition.pictureInPicture?.source || "original",
-      historyName: compositionHistoryName(),
+      historyName: null,
     };
   }
 
@@ -391,6 +423,38 @@
     return currentJob?.status === "completed" && !compositionBusy();
   }
 
+  function currentManualHistoryKind() {
+    if (compositionBusy() || currentJob?.composition?.status === "completed") return "";
+    if (
+      activeTool === "cut" &&
+      !cutDraftActive &&
+      currentJob?.edit?.status === "completed" &&
+      !currentJob.edit.historyId
+    ) {
+      return "edited";
+    }
+    if (
+      activeTool === "art" &&
+      currentJob?.art?.status === "completed" &&
+      !currentJob.art.composition &&
+      !currentJob.art.historyId
+    ) {
+      return "art";
+    }
+    return "";
+  }
+
+  function syncSaveButton() {
+    if (!saveButton) return;
+    const kind = currentManualHistoryKind();
+    saveButton.hidden = !kind;
+    saveButton.disabled = !kind || saveButton.getAttribute("aria-busy") === "true";
+    saveButton.dataset.historyKind = kind;
+    const label = kind === "art" ? "保存艺术字版本" : "保存剪辑版本";
+    saveButton.title = label;
+    saveButton.setAttribute("aria-label", label);
+  }
+
   function syncGenerationButton() {
     if (!generateButton) return;
     const state = {
@@ -421,6 +485,7 @@
       downloadButton.hidden = !outputUrl || !outputMatchesPreview;
       downloadButton.href = outputUrl ? `${outputUrl}?download=true` : "#";
     }
+    syncSaveButton();
     if (state.error) {
       status.textContent = state.error;
       root.dataset.state = "error";
@@ -433,15 +498,42 @@
     }
   }
 
-  let compositionPollTimer = null;
-
-  function compositionHistoryName() {
-    for (const selector of ["#cutHistoryName", "#artHistoryName"]) {
-      const value = document.querySelector(selector)?.value?.trim();
-      if (value) return value;
+  async function saveCurrentVersion() {
+    const kind = currentManualHistoryKind();
+    const jobId = currentJobId();
+    if (!kind || !jobId || !saveButton) return;
+    saveButton.disabled = true;
+    saveButton.setAttribute("aria-busy", "true");
+    status.textContent = "正在保存当前版本…";
+    try {
+      const response = await fetch(
+        `/api/transcriptions/${encodeURIComponent(jobId)}/history`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ kind, name: null }),
+        },
+      );
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "无法保存当前版本。");
+      const resultKey = kind === "edited" ? "edit" : "art";
+      currentJob[resultKey] = {
+        ...currentJob[resultKey],
+        historyId: payload.id,
+        historyName: payload.name,
+      };
+      status.textContent = `已保存“${payload.name}”`;
+      root.dataset.state = "complete";
+    } catch (error) {
+      status.textContent = error.message;
+      root.dataset.state = "error";
+    } finally {
+      saveButton.setAttribute("aria-busy", "false");
+      syncSaveButton();
     }
-    return null;
   }
+
+  let compositionPollTimer = null;
 
   async function generateCurrentPreview() {
     if (!compositionReady()) return;
@@ -780,7 +872,8 @@
 
     const resize = () => {
       for (const { canvas, layer } of canvases) {
-        const scale = Math.min(
+        const fitScale = douyinPreviewEnabled ? Math.max : Math.min;
+        const scale = fitScale(
           previewOverlay.clientWidth / layer.width,
           previewOverlay.clientHeight / layer.height,
         );
@@ -878,7 +971,6 @@
       return;
     }
     const isCut = activeTool === "cut";
-    cutTabbar.hidden = !isCut;
     cutPanelStack.hidden = !isCut;
     inspectorHost.hidden = false;
     inspectorHost.classList.toggle("is-background", isCut);
@@ -895,6 +987,7 @@
     renderMirroredTimeline();
     updateActiveTool();
     syncGenerationButton();
+    syncSaveButton();
     if (!isCut) window.requestAnimationFrame(() => syncFrameTime(activeTool));
   }
 
@@ -939,6 +1032,12 @@
 
     const jobChanged = job.id !== previousJobId;
     previousJobId = job.id;
+    if (jobChanged) {
+      timelineStore.replace(
+        { duration: Number(job.duration) || 0, tracks: [] },
+        { silent: true },
+      );
+    }
     if (jobChanged && stage === "cut") {
       // A fresh video task lands on the cut tool. Clear a stale ?tool=art
       // parameter left by a previous task so the workspace does not jump to
@@ -1130,6 +1229,21 @@
     else syncGenerationButton();
   }
 
+  function setTimelineTracks(kind, tracks, options = {}) {
+    syncToolTimeline(
+      kind,
+      {
+        duration: Math.max(0, Number(options.duration) || 0),
+        tracks: Array.isArray(tracks) ? tracks : [],
+        selection: options.selection
+          ? { clipId: String(options.selection) }
+          : null,
+      },
+      { selection: options.selection || null },
+    );
+    return timelineStore.snapshot();
+  }
+
   douyinPreviewToggle?.addEventListener("click", () => {
     setDouyinPreviewEnabled(!douyinPreviewEnabled);
   });
@@ -1219,6 +1333,7 @@
       overlayHeight: Number(data.overlayHeight) || 1,
       timelineHtml: String(data.timelineHtml || ""),
       timelineTrackCount: Math.max(1, Number(data.timelineTrackCount) || 1),
+      timeline: data.timeline || null,
       generationDisabled: data.generationDisabled !== false,
       generationLabel: String(data.generationLabel || ""),
       generationBusy: Boolean(data.generationBusy),
@@ -1228,6 +1343,7 @@
           ? data.generationPayload
           : null,
     });
+    syncToolTimeline(data.kind, data.timeline);
     syncGenerationButton();
     renderMirroredPreview();
     renderMirroredTimeline();
@@ -1246,6 +1362,7 @@
     const data = event.detail || {};
     if (!['art', 'pip'].includes(data.kind)) return;
     toolStates.set(data.kind, data);
+    syncToolTimeline(data.kind, data.timeline);
     syncGenerationButton();
     renderMirroredPreview();
     renderMirroredTimeline();
@@ -1469,6 +1586,127 @@
   timelineLayer?.addEventListener(
     "pointerdown",
     (event) => {
+      const unifiedSegment = event.target.closest(
+        "[data-timeline-clip-id][data-effect-kind]",
+      );
+      if (unifiedSegment && event.button === 0) {
+        event.preventDefault();
+        event.stopPropagation();
+        const kind = unifiedSegment.dataset.effectKind;
+        const clipId = unifiedSegment.dataset.timelineClipId;
+        const clip = timelineStore.findClip(clipId);
+        const frame = frameEntries.get(kind)?.frame;
+        if (!clip || !frame?.contentWindow) return;
+        openTool(kind, desiredToolUrls.get(kind));
+        timelineStore.selectClip(clipId, { silent: true });
+        for (const candidate of timelineLayer.querySelectorAll(
+          "[data-timeline-clip-id]",
+        )) {
+          const selected = candidate.dataset.timelineClipId === clipId;
+          candidate.classList.toggle("is-selected", selected);
+          candidate.setAttribute("aria-pressed", String(selected));
+        }
+        previewVideo.currentTime = workspaceSourceTime(clip.start);
+        frame.contentWindow.postMessage(
+          {
+            type: "editor-suite:timeline-action",
+            action: "select",
+            kind,
+            clipId,
+            sourceId: clip.sourceId,
+            currentTime: clip.start,
+          },
+          window.location.origin,
+        );
+        if (!clip.editable) return;
+
+        const mode =
+          event.target.closest("[data-timeline-resize]")?.dataset
+            .timelineResize ||
+          event.target.closest("[data-art-time-drag]")?.dataset.artTimeDrag ||
+          "move";
+        const total = Math.max(
+          timelineStore.snapshot().duration,
+          Number(previewVideo.duration) || 0,
+          Number(document.querySelector("#cutFrameTimelineSeek")?.max) || 0,
+        );
+        const pointerSession = window.EditorTimeline.createPointerSession(
+          timelineStore,
+          {
+            clipId,
+            mode,
+            startClientX: event.clientX,
+            trackWidth: timelineTrack.getBoundingClientRect().width,
+            duration: total,
+          },
+        );
+        if (!pointerSession) return;
+        let moved = false;
+        let currentSegment = unifiedSegment;
+
+        const resolveSegment = () => {
+          if (timelineLayer.contains(currentSegment)) return currentSegment;
+          const found = timelineLayer.querySelector(
+            `[data-timeline-clip-id="${clipId}"]`,
+          );
+          if (found) currentSegment = found;
+          return currentSegment;
+        };
+
+        const move = (moveEvent) => {
+          if (!moved && Math.abs(moveEvent.clientX - event.clientX) < 3) return;
+          moved = true;
+          const nextClip = pointerSession.update(moveEvent.clientX);
+          const liveSegment = resolveSegment();
+          liveSegment.classList.add("is-selected", "is-dragging");
+          liveSegment.dataset.effectStart = String(nextClip.start);
+          liveSegment.dataset.effectEnd = String(nextClip.end);
+          liveSegment.style.left = `${(nextClip.start / total) * 100}%`;
+          liveSegment.style.width = `${Math.max(
+            0.8,
+            ((nextClip.end - nextClip.start) / total) * 100,
+          )}%`;
+          const currentTime = mode === "end" ? nextClip.end : nextClip.start;
+          previewVideo.currentTime = workspaceSourceTime(currentTime);
+          frame.contentWindow.postMessage(
+            {
+              type: "editor-suite:timeline-action",
+              action: "set-range",
+              kind,
+              clipId,
+              sourceId: clip.sourceId,
+              start: nextClip.start,
+              end: nextClip.end,
+              currentTime,
+            },
+            window.location.origin,
+          );
+        };
+
+        const finish = () => {
+          window.removeEventListener("pointermove", move);
+          window.removeEventListener("pointerup", finish);
+          window.removeEventListener("pointercancel", finish);
+          resolveSegment()?.classList.remove("is-dragging");
+          const finalClip = pointerSession.finish({ commit: false });
+          frame.contentWindow.postMessage(
+            {
+              type: "editor-suite:timeline-action",
+              action: "commit",
+              kind,
+              clipId,
+              sourceId: clip.sourceId,
+              start: finalClip.start,
+              end: finalClip.end,
+            },
+            window.location.origin,
+          );
+        };
+        window.addEventListener("pointermove", move);
+        window.addEventListener("pointerup", finish, { once: true });
+        window.addEventListener("pointercancel", finish, { once: true });
+        return;
+      }
       const pipSegment = event.target.closest(
         '.pip-timeline-segment[data-effect-kind="pip"][data-picture-id]',
       );
@@ -1632,6 +1870,7 @@
   );
 
   generateButton?.addEventListener("click", generateCurrentPreview);
+  saveButton?.addEventListener("click", saveCurrentVersion);
 
   window.addEventListener("popstate", () => {
     if (!supportsInlineWorkspace()) return;
@@ -1650,6 +1889,8 @@
     activeTool: () => activeTool,
     isDouyinPreview: () => douyinPreviewEnabled,
     setCutDraft,
+    setTimelineTracks,
+    timelineSnapshot: () => timelineStore.snapshot(),
     generateCurrentPreview,
   };
   document.addEventListener("editor-suite:refresh", () => refresh());
