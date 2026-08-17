@@ -1,0 +1,29 @@
+{
+  "id": "project-optimization-audit",
+  "name": "project-optimization-audit",
+  "title": "项目优化评估与路线规划",
+  "description": "审计视频剪辑项目的状态一致性、生成可靠性、编辑体验、性能、可维护性与测试覆盖，并制定分阶段优化路线。",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P1",
+  "creator": "541",
+  "assignee": "541",
+  "createdAt": "2026-08-13",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "08-13-timeline-selection-second-confirm",
+    "08-13-ai-auto-delete"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

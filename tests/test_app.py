@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
@@ -18,6 +19,24 @@ import server.app as app_module
 
 @pytest.fixture(autouse=True)
 def isolated_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    runtime_setting_names = (
+        "ASR_MODEL",
+        "PUNCTUATION_MODEL",
+        "SUGGESTION_MODEL",
+        "ART_SUGGESTION_MODEL",
+        "ART_TEXT_SEGMENTATION_MODEL",
+        "PIP_PROMPT_MODEL",
+        "PIP_IMAGE_MODEL",
+        "PIP_VIDEO_MODEL",
+        "ARK_API_BASE_URL",
+        "DASHSCOPE_HTTP_API_URL",
+        "DASHSCOPE_WEBSOCKET_URL",
+    )
+    runtime_settings = {
+        name: getattr(app_module, name) for name in runtime_setting_names
+    }
+    dashscope_http_url = app_module.dashscope.base_http_api_url
+    dashscope_websocket_url = app_module.dashscope.base_websocket_api_url
     monkeypatch.setattr(app_module, "DATA_DIR", tmp_path)
     monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
     monkeypatch.delenv("ASR_API_KEY", raising=False)
@@ -26,6 +45,10 @@ def isolated_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         app_module.JOBS.clear()
         app_module.JOB_FILES.clear()
     yield
+    for name, value in runtime_settings.items():
+        setattr(app_module, name, value)
+    app_module.dashscope.base_http_api_url = dashscope_http_url
+    app_module.dashscope.base_websocket_api_url = dashscope_websocket_url
 
 
 @pytest.fixture
@@ -82,6 +105,206 @@ def test_health_reports_media_tools():
     assert response.json()["configured"] is False
 
 
+def test_model_settings_mask_credentials_and_list_current_models(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-secret-value")
+    monkeypatch.setenv("ARK_API_KEY", "ark-secret-value")
+
+    with TestClient(app_module.app) as client:
+        response = client.get("/api/settings/models")
+
+    assert response.status_code == 200
+    response_text = response.text
+    assert "dashscope-secret-value" not in response_text
+    assert "ark-secret-value" not in response_text
+    providers = {item["id"]: item for item in response.json()["providers"]}
+    assert providers["dashscope"]["configured"] is True
+    assert providers["dashscope"]["maskedValue"] == "••••••••"
+    assert {item["model"] for item in providers["dashscope"]["models"]} >= {
+        app_module.ASR_MODEL,
+        app_module.PUNCTUATION_MODEL,
+        app_module.SUGGESTION_MODEL,
+    }
+    assert providers["volcengine"]["configured"] is True
+    assert {item["model"] for item in providers["volcengine"]["models"]} == {
+        app_module.PIP_IMAGE_MODEL,
+        app_module.PIP_VIDEO_MODEL,
+    }
+
+
+def test_model_settings_update_persists_and_applies_without_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    env_file = tmp_path / ".env"
+    env_file.write_text("DATA_DIR=./data\n", encoding="utf-8")
+    monkeypatch.setattr(app_module, "ENV_FILE", env_file)
+
+    with TestClient(app_module.app) as client:
+        response = client.put(
+            "/api/settings/models/dashscope",
+            json={
+                "apiKey": "new-dashscope-key",
+                "models": {
+                    "asr": "custom-asr-model",
+                    "punctuation": "custom-punctuation-model",
+                    "suggestion": "custom-suggestion-model",
+                    "artTextSegmentation": "custom-segmentation-model",
+                    "artSuggestion": "custom-art-model",
+                    "pipPrompt": "custom-prompt-model",
+                },
+                "requestUrls": {
+                    "http": "https://bailian.example.com/api/v1/",
+                    "websocket": "wss://bailian.example.com/api-ws/v1/inference",
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["provider"]["configured"] is True
+    assert response.json()["provider"]["maskedValue"] == "••••••••"
+    assert "new-dashscope-key" not in response.text
+    assert app_module.get_asr_api_key() == "new-dashscope-key"
+    assert app_module.ASR_MODEL == "custom-asr-model"
+    assert app_module.PUNCTUATION_MODEL == "custom-punctuation-model"
+    assert app_module.SUGGESTION_MODEL == "custom-suggestion-model"
+    assert app_module.ART_TEXT_SEGMENTATION_MODEL == "custom-segmentation-model"
+    assert app_module.ART_SUGGESTION_MODEL == "custom-art-model"
+    assert app_module.PIP_PROMPT_MODEL == "custom-prompt-model"
+    assert app_module.DASHSCOPE_HTTP_API_URL == "https://bailian.example.com/api/v1"
+    assert app_module.DASHSCOPE_WEBSOCKET_URL == (
+        "wss://bailian.example.com/api-ws/v1/inference"
+    )
+    assert app_module.dashscope.base_http_api_url == (
+        "https://bailian.example.com/api/v1"
+    )
+    env_text = env_file.read_text(encoding="utf-8")
+    assert "DASHSCOPE_API_KEY='new-dashscope-key'" in env_text
+    assert "ASR_MODEL='custom-asr-model'" in env_text
+    assert "DASHSCOPE_HTTP_API_URL='https://bailian.example.com/api/v1'" in env_text
+
+
+def test_model_settings_update_volcengine_without_replacing_existing_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    env_file = tmp_path / ".env"
+    env_file.write_text("ARK_API_KEY='existing-ark-key'\n", encoding="utf-8")
+    monkeypatch.setattr(app_module, "ENV_FILE", env_file)
+    monkeypatch.setenv("ARK_API_KEY", "existing-ark-key")
+
+    with TestClient(app_module.app) as client:
+        response = client.put(
+            "/api/settings/models/volcengine",
+            json={
+                "apiKey": None,
+                "models": {
+                    "image": "custom-image-model",
+                    "video": "custom-video-model",
+                },
+                "requestUrls": {
+                    "api": "https://ark.example.com/api/v3/",
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    assert app_module.get_ark_api_key() == "existing-ark-key"
+    assert app_module.PIP_IMAGE_MODEL == "custom-image-model"
+    assert app_module.PIP_VIDEO_MODEL == "custom-video-model"
+    assert app_module.ARK_API_BASE_URL == "https://ark.example.com/api/v3"
+    env_text = env_file.read_text(encoding="utf-8")
+    assert "ARK_API_KEY='existing-ark-key'" in env_text
+    assert "SEEDREAM_MODEL='custom-image-model'" in env_text
+    assert "SEEDANCE_MODEL='custom-video-model'" in env_text
+
+
+def test_model_settings_clear_removes_current_and_legacy_keys(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "DASHSCOPE_API_KEY='current-key'\nASR_API_KEY='legacy-key'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(app_module, "ENV_FILE", env_file)
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "current-key")
+    monkeypatch.setenv("ASR_API_KEY", "legacy-key")
+
+    with TestClient(app_module.app) as client:
+        response = client.delete("/api/settings/models/dashscope")
+
+    assert response.status_code == 200
+    assert response.json()["provider"]["configured"] is False
+    assert "DASHSCOPE_API_KEY" not in env_file.read_text(encoding="utf-8")
+    assert "ASR_API_KEY" not in env_file.read_text(encoding="utf-8")
+    assert app_module.get_asr_api_key() == ""
+
+
+def test_model_settings_reject_invalid_provider_and_whitespace_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(app_module, "ENV_FILE", env_file)
+
+    with TestClient(app_module.app) as client:
+        invalid_provider = client.put(
+            "/api/settings/models/unknown",
+            json={"apiKey": "valid-looking-key"},
+        )
+        invalid_key = client.put(
+            "/api/settings/models/volcengine",
+            json={"apiKey": "invalid key"},
+        )
+        invalid_url = client.put(
+            "/api/settings/models/volcengine",
+            json={"requestUrls": {"api": "ark.example.com/api/v3"}},
+        )
+        unknown_model = client.put(
+            "/api/settings/models/volcengine",
+            json={"models": {"unknown": "model-id"}},
+        )
+
+    assert invalid_provider.status_code == 404
+    assert invalid_key.status_code == 422
+    assert invalid_url.status_code == 422
+    assert unknown_model.status_code == 422
+    assert env_file.read_text(encoding="utf-8") == ""
+
+
+def test_model_settings_allow_updates_from_remote_clients(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(app_module, "ENV_FILE", env_file)
+
+    with TestClient(app_module.app, client=("192.168.1.25", 53000)) as client:
+        settings = client.get("/api/settings/models")
+        update = client.put(
+            "/api/settings/models/dashscope",
+            json={"apiKey": "remote-key"},
+        )
+    assert settings.status_code == 200
+    assert update.status_code == 200
+    assert app_module.get_asr_api_key() == "remote-key"
+    assert "DASHSCOPE_API_KEY='remote-key'" in env_file.read_text(encoding="utf-8")
+
+
+def test_model_settings_page_is_available():
+    with TestClient(app_module.app) as client:
+        response = client.get("/settings")
+
+    assert response.status_code == 200
+    assert "模型设置" in response.text
+    assert "/settings.js" in response.text
+
+
 def test_job_cleanup_removes_only_stale_inactive_job_directories(tmp_path: Path):
     jobs_dir = app_module.jobs_directory()
     history_dir = app_module.history_library_directory() / (
@@ -112,7 +335,7 @@ def test_job_cleanup_removes_only_stale_inactive_job_directories(tmp_path: Path)
     history_dir.mkdir(parents=True)
     (history_dir / "video.mp4").write_bytes(b"history")
     with app_module.JOBS_LOCK:
-        app_module.JOBS[active_id] = {"id": active_id}
+        app_module.JOBS[active_id] = {"id": active_id, "status": "processing"}
         app_module.JOB_FILES[active_id] = active_dir / "source.mp4"
 
     preview = app_module.cleanup_job_directories(
@@ -157,6 +380,56 @@ def test_job_cleanup_removes_only_stale_inactive_job_directories(tmp_path: Path)
     assert active_dir.exists()
 
 
+def test_job_cleanup_removes_stale_completed_in_memory_job(tmp_path: Path):
+    job_id = "abababab-abab-4bab-8bab-abababababab"
+    job_dir = app_module.jobs_directory() / job_id
+    job_dir.mkdir(parents=True)
+    video_path = job_dir / "source.mp4"
+    video_path.write_bytes(b"completed")
+    old_time = app_module.time.time() - 8 * 86400
+    app_module.os.utime(job_dir, (old_time, old_time))
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {"id": job_id, "status": "completed"}
+        app_module.JOB_FILES[job_id] = video_path
+
+    result = app_module.cleanup_job_directories(
+        max_age_days=7,
+        max_directories=0,
+    )
+
+    assert result["deleted"] == 1
+    assert not job_dir.exists()
+    assert job_id not in app_module.JOBS
+    assert job_id not in app_module.JOB_FILES
+
+
+def test_periodic_storage_cleanup_runs_after_interval(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        app_module,
+        "run_storage_maintenance",
+        lambda: calls.append(True),
+    )
+
+    async def exercise() -> None:
+        stop_event = asyncio.Event()
+        task = asyncio.create_task(
+            app_module.periodic_storage_cleanup(stop_event, interval_seconds=0.01)
+        )
+        for _ in range(50):
+            if calls:
+                break
+            await asyncio.sleep(0.01)
+        stop_event.set()
+        await task
+
+    asyncio.run(exercise())
+
+    assert calls
+
+
 def test_job_cleanup_api_supports_preview_and_execution(tmp_path: Path):
     jobs_dir = app_module.jobs_directory()
     old_id = "77777777-7777-4777-8777-777777777777"
@@ -181,6 +454,42 @@ def test_job_cleanup_api_supports_preview_and_execution(tmp_path: Path):
     assert execute_response.status_code == 200
     assert execute_response.json()["deleted"] == 1
     assert not old_dir.exists()
+
+
+def test_failed_transcription_removes_job_working_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    job_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    job_dir = app_module.jobs_directory() / job_id
+    job_dir.mkdir(parents=True)
+    video_path = job_dir / "source.mp4"
+    video_path.write_bytes(b"source")
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "duration": 1.0,
+            "status": "queued",
+            "error": None,
+        }
+        app_module.JOB_FILES[job_id] = video_path
+
+    monkeypatch.setattr(
+        app_module,
+        "extract_audio",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("测试解析失败")
+        ),
+    )
+
+    app_module.process_job(job_id)
+
+    with app_module.JOBS_LOCK:
+        job = app_module.JOBS[job_id]
+    assert job["status"] == "failed"
+    assert job["error"] == "测试解析失败"
+    assert not job_dir.exists()
+    assert job_id not in app_module.JOB_FILES
 
 
 def test_history_versions_are_persistent_manageable_and_reusable(
@@ -308,12 +617,51 @@ def test_history_version_uses_custom_name_or_bounded_safe_default(
     assert not any(character in default["name"] for character in '<>:"/\\|?*')
 
 
+def test_history_limit_keeps_latest_twenty_and_removes_old_directories(
+    tmp_path: Path,
+):
+    records = []
+    for index in range(22):
+        history_id = f"history-{index:032x}"
+        version_dir = app_module.history_version_directory(history_id)
+        version_dir.mkdir(parents=True)
+        (version_dir / "video.mp4").write_bytes(str(index).encode())
+        records.append(
+            {
+                "id": history_id,
+                "name": f"版本 {index}",
+                "kind": "composed",
+                "duration": 1.0,
+                "fileSize": 1,
+                "sourceJobId": "source-job",
+                "videoFilename": "video.mp4",
+                "transcriptFilename": "transcript.json",
+                "thumbnailFilename": None,
+                "createdAt": f"2026-01-{index + 1:02d}T00:00:00+00:00",
+                "updatedAt": f"2026-01-{index + 1:02d}T00:00:00+00:00",
+            }
+        )
+    app_module.save_history_versions_unlocked(records)
+
+    result = app_module.trim_history_versions(max_stored=20)
+    retained = app_module.load_history_versions_unlocked()
+
+    assert result["deleted"] == 2
+    assert len(retained) == 20
+    assert {record["id"] for record in retained} == {
+        record["id"] for record in records[2:]
+    }
+    assert not app_module.history_version_directory(records[0]["id"]).exists()
+    assert not app_module.history_version_directory(records[1]["id"]).exists()
+
+
 def test_frontend_assets_are_versioned_and_not_cached():
     with TestClient(app_module.app) as client:
         page_response = client.get("/")
         styles_response = client.get("/styles.css")
         script_response = client.get("/app.js")
         feedback_script_response = client.get("/ui-feedback.js")
+        timeline_script_response = client.get("/timeline-model.js")
         editor_suite_script_response = client.get("/editor-suite.js")
         art_page_response = client.get("/art-text")
         art_script_response = client.get("/art-text.js")
@@ -327,10 +675,18 @@ def test_frontend_assets_are_versioned_and_not_cached():
 
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
-    assert "/app.js?v=20260807-01" in page_response.text
-    assert "/styles.css?v=20260810-09" in page_response.text
+    assert "/app.js?v=20260817-01" in page_response.text
+    assert "/styles.css?v=20260814-13" in page_response.text
     assert "/ui-feedback.js?v=20260807-03" in page_response.text
-    assert "/editor-suite.js?v=20260810-05" in page_response.text
+    assert "/timeline-model.js?v=20260810-01" in page_response.text
+    assert "/editor-suite.js?v=20260814-02" in page_response.text
+    assert timeline_script_response.status_code == 200
+    assert timeline_script_response.headers["cache-control"] == "no-store, max-age=0"
+    assert "function createStore" in timeline_script_response.text
+    assert "function createPointerSession" in timeline_script_response.text
+    assert page_response.text.index("/timeline-model.js") < page_response.text.index(
+        "/editor-suite.js"
+    )
     assert 'class="preview-grid"' in page_response.text
     assert 'data-preview-grid-toggle' in page_response.text
     assert 'data-douyin-preview-toggle' in page_response.text
@@ -365,6 +721,8 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert header_start < editor_suite_start < header_actions_start
     assert editor_suite_script_response.status_code == 200
     assert "editor-suite:move-finish" in editor_suite_script_response.text
+    assert "editor-suite:timeline-action" in editor_suite_script_response.text
+    assert "setTimelineTracks" in editor_suite_script_response.text
     assert "job.pictureInPicture?.composition" in editor_suite_script_response.text
     assert "job.art?.composition" in editor_suite_script_response.text
     assert "最终导出会同时保留两种效果" in editor_suite_script_response.text
@@ -391,7 +749,21 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert 'type: "editor-suite:sync-time"' in editor_suite_script_response.text
     assert 'type: "editor-suite:open-tool"' in editor_suite_script_response.text
     assert 'data.type === "editor-suite:job-state"' in editor_suite_script_response.text
-    assert "cutTabbar.hidden = !isCut" in editor_suite_script_response.text
+    assert "const cutTabbar" not in editor_suite_script_response.text
+    assert "cutTabbar.hidden" not in editor_suite_script_response.text
+    assert "cutPanelStack.hidden = !isCut" in editor_suite_script_response.text
+    inline_support_start = editor_suite_script_response.text.index(
+        "function supportsInlineWorkspace()"
+    )
+    inline_support_end = editor_suite_script_response.text.index(
+        "function currentJobId()", inline_support_start
+    )
+    inline_support_contract = editor_suite_script_response.text[
+        inline_support_start:inline_support_end
+    ]
+    assert 'stage === "cut"' in inline_support_contract
+    assert "cutPanelStack" in inline_support_contract
+    assert "cutTabbar" not in inline_support_contract
     assert 'type: "editor-suite:generate-video"' not in editor_suite_script_response.text
     assert 'target: "all"' in editor_suite_script_response.text
     assert '/compose`' in editor_suite_script_response.text
@@ -489,20 +861,27 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert ".history-kind-badge {" in styles_response.text
     assert 'id="skipToArtButton"' in page_response.text
     assert 'id="directPipButton"' in page_response.text
-    assert 'id="selectAllSuggestionsButton"' in page_response.text
-    assert 'id="selectAllNoSpeechButton"' in page_response.text
-    assert 'id="noSpeechState"' in page_response.text
-    assert 'id="noSpeechList"' in page_response.text
+    assert 'id="textSuggestionsTab"' not in page_response.text
+    assert 'id="suggestionsBlock"' not in page_response.text
+    assert 'id="selectAllSuggestionsButton"' not in page_response.text
+    assert 'id="suggestionList"' not in page_response.text
+    assert 'id="textSilenceTab"' not in page_response.text
+    assert 'id="textSilencePanel"' not in page_response.text
+    assert 'id="selectAllNoSpeechButton"' not in page_response.text
+    assert 'id="noSpeechState"' not in page_response.text
+    assert 'id="noSpeechList"' not in page_response.text
     assert 'id="directToolsPrompt"' in page_response.text
     assert 'id="continuePipButton"' in page_response.text
-    assert 'selectAllSuggestionsButton.addEventListener("click"' in script_response.text
-    assert "一键删除" in page_response.text
-    assert "已全部删除" in script_response.text
-    assert "撤销标记" not in script_response.text
-    assert "renderNoSpeechSuggestions" in script_response.text
+    assert 'selectAllSuggestionsButton.addEventListener("click"' not in script_response.text
+    assert "AI 删减建议" not in page_response.text
+    assert "已全部删除" not in script_response.text
+    assert "const ignoredSuggestions" not in script_response.text
+    assert "setCurrentNoSpeechSuggestions" in script_response.text
+    assert "seedAutomaticNoSpeechRanges" in script_response.text
     assert "selectedNoSpeechRanges" in script_response.text
-    assert "一键删除可删片段" in page_response.text
-    assert "可删片段已删除" in script_response.text
+    assert "renderNoSpeechSegmentItem" in script_response.text
+    assert "一键删除可删片段" not in page_response.text
+    assert "可删片段已删除" not in script_response.text
     assert "previewNoSpeechSuggestion" in script_response.text
     assert "setOriginalSourceActionsAllowed(!job.edit?.status);" in script_response.text
     assert "setOriginalSourceActionsAllowed(false);" in script_response.text
@@ -523,7 +902,8 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert 'id="timelineRangeConfirmActions"' not in page_response.text
     assert 'id="cancelTimelineRangeButton"' not in page_response.text
     assert 'id="confirmTimelineRangeButton"' not in page_response.text
-    assert "松开后弹窗确认" in page_response.text
+    assert "松开后弹窗确认" not in page_response.text
+    assert "选区可微调，再次点击确认删除" in page_response.text
     assert "触碰文字时仅吸附完整文字边界" in page_response.text
     assert 'id="clearSelectionButton" class="secondary-button" type="button" disabled hidden' in page_response.text
     assert 'clearSelectionButton.addEventListener("click"' not in script_response.text
@@ -534,43 +914,32 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert 'id="transcriptSegmentList"' not in page_response.text
     assert "识别全文" not in page_response.text
     assert "saveTranscriptText" not in script_response.text
-    assert 'class="text-editor-tabbar"' in page_response.text
-    cuts_tab_position = page_response.text.index('data-text-editor-tab="cuts"')
-    suggestions_tab_position = page_response.text.index(
-        'data-text-editor-tab="suggestions"'
-    )
-    silence_tab_position = page_response.text.index('data-text-editor-tab="silence"')
-    history_tab_position = page_response.text.index('data-text-editor-tab="history"')
-    assert (
-        cuts_tab_position
-        < suggestions_tab_position
-        < silence_tab_position
-        < history_tab_position
-    )
-    cuts_tab_markup = page_response.text[
-        page_response.text.index('id="textCutsTab"') : cuts_tab_position
-    ]
-    assert 'aria-selected="true"' in cuts_tab_markup
-    assert 'data-text-editor-tab="cuts"' in page_response.text
-    assert 'data-text-editor-panel="cuts"' in page_response.text
-    assert 'data-text-editor-tab="silence"' in page_response.text
-    assert 'data-text-editor-panel="silence"' in page_response.text
-    assert 'id="cutUndoButton"' in page_response.text
-    assert 'id="cutRedoButton"' in page_response.text
-    assert 'id="cutHistoryStatus"' in page_response.text
-    assert 'id="cutHistoryList"' in page_response.text
-    assert 'data-text-editor-tab="history"' in page_response.text
-    assert 'data-text-editor-panel="history"' in page_response.text
+    assert 'class="text-editor-tabbar"' not in page_response.text
+    assert 'id="textCutsTab"' not in page_response.text
+    assert 'data-text-editor-tab=' not in page_response.text
+    assert 'data-text-editor-panel=' not in page_response.text
+    assert 'id="textCutsPanel"' in page_response.text
+    assert 'aria-labelledby="text-cuts-title"' in page_response.text
+    assert 'data-text-editor-tab="silence"' not in page_response.text
+    assert 'data-text-editor-panel="silence"' not in page_response.text
+    assert 'id="cutUndoButton"' not in page_response.text
+    assert 'id="cutRedoButton"' not in page_response.text
+    assert 'id="cutHistoryStatus"' not in page_response.text
+    assert 'id="cutHistoryList"' not in page_response.text
+    assert 'id="textHistoryTab"' not in page_response.text
+    assert 'id="textHistoryPanel"' not in page_response.text
+    assert "操作记录" not in page_response.text
     assert "function undoCutHistory()" in script_response.text
     assert "function redoCutHistory()" in script_response.text
     assert "handleGlobalCutHistoryShortcut" in script_response.text
+    assert "isNativeUndoTarget" in script_response.text
     assert "video-editor:cut-history:${jobId}" in script_response.text
     assert 'stageCutHistoryOperation("删除时间轴区间")' in script_response.text
-    assert 'aria-controls="textSilencePanel"' in page_response.text
+    assert 'aria-controls="textSilencePanel"' not in page_response.text
     assert 'data-text-editor-tab="output"' not in page_response.text
     assert '>生成结果</button>' not in page_response.text
     output_panel_start = page_response.text.index('id="textOutputPanel"')
-    output_panel_end = page_response.text.index('id="suggestionsBlock"')
+    output_panel_end = page_response.text.index('id="textCutsPanel"')
     output_panel_markup = page_response.text[output_panel_start:output_panel_end]
     assert page_response.text.count('id="generateCutButton"') == 1
     assert 'id="generateCutButton"' in output_panel_markup
@@ -604,6 +973,14 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert "getRetainedSegmentParts" in script_response.text
     assert "function updateCutSegmentTimestamps" in script_response.text
     assert 'currentBadge.textContent = "播放中"' in script_response.text
+    assert 'playButton.className = "segment-play-button"' in script_response.text
+    assert 'playButton.dataset.segmentPreview = "true"' in script_response.text
+    assert 'playButton.setAttribute("aria-label", `播放文案：${run.text}`)' in (
+        script_response.text
+    )
+    assert "function previewTextSegment(item)" in script_response.text
+    assert "transcriptPreviewRange" in script_response.text
+    assert 'event.target.closest(".segment-play-button")' in script_response.text
     assert "function getActiveTranscriptSegmentIndex" in script_response.text
     assert 'nextItem.setAttribute("aria-current", "true")' in script_response.text
     assert "scrollActiveTranscriptSegmentIntoView" in script_response.text
@@ -611,17 +988,34 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert ".segment-item.is-playback-active" in styles_response.text
     assert 'id="cutDraftSaveStatus"' in page_response.text
     assert "function restorePersistedCutDraft" in script_response.text
+    assert "function applyPersistedCutDraftAlignment" in script_response.text
+    assert "function reconcileCurrentCutHistorySnapshot" in script_response.text
     assert "function scheduleCutDraftSave" in script_response.text
     assert "function clearPersistedCutDraft" in script_response.text
     assert "function resolvePersistedCutDraft" in script_response.text
     assert "window.localStorage.setItem(key" in script_response.text
     assert "/cut-draft`" in script_response.text
     assert "keepalive: true" in script_response.text
-    assert "resolvePersistedCutDraft(job.cutDraft || null" in script_response.text
+    assert "function setCurrentSuggestions" in script_response.text
+    assert "function seedAutomaticSuggestionRanges" in script_response.text
+    assert "function seedAutomaticNoSpeechRanges" in script_response.text
+    assert "if (suggestion.deletable === false) continue" in script_response.text
+    assert "const persistedDraft = resolvePersistedCutDraft(" in script_response.text
+    assert "job.cutDraft ?? null" in script_response.text
+    assert "if (persistedDraft === null)" in script_response.text
+    assert "restorePersistedCutDraft(persistedDraft)" in script_response.text
+    assert "automaticNoSpeechInitialized" in script_response.text
+    assert 'noSpeechStatus === "completed" && !automaticNoSpeechInitialized' in (
+        script_response.text
+    )
     assert ".cut-draft-save-status" in styles_response.text
-    assert "function updateCutInspectorTimestamps" in script_response.text
-    assert 'time.textContent = "已删除"' in script_response.text
-    assert "sourceTimeToEditedTime(suggestion.start, spans)" in script_response.text
+    assert 'item.dataset.noSpeechId = range.id' in script_response.text
+    assert '"no-speech-restore"' in script_response.text
+    assert 'item.classList.toggle("is-removed-from-timeline", !timing)' in script_response.text
+    assert "function protectRestoredNoSpeechFromTextRanges" in script_response.text
+    assert "...protectRestoredNoSpeechFromTextRanges(textRanges)" in script_response.text
+    assert 'stageCutHistoryOperation("恢复空白片段")' in script_response.text
+    assert 'stageCutHistoryOperation("删除空白片段")' in script_response.text
     assert "window.EditorSuite?.setCutDraft(state)" in script_response.text
     assert "function buildLiveCutDraftState" in script_response.text
     assert "sourceDuration: cutTimelineDuration()" in script_response.text
@@ -645,7 +1039,7 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert "const total = editedCutTimelineDuration(spans);" in script_response.text
     assert "function previewSelectedCutRange" in script_response.text
     assert "正在左侧预览裁剪衔接" in script_response.text
-    assert script_response.text.count("previewSelectedCutRange(") >= 6
+    assert script_response.text.count("previewSelectedCutRange(") >= 4
     assert "function getRecognizedSpeechRanges" in script_response.text
     assert "function getRecognizedWordRanges" in script_response.text
     assert "function expandRangeToAdjacentSilence" in script_response.text
@@ -658,7 +1052,7 @@ def test_frontend_assets_are_versioned_and_not_cached():
         "function alignManualRangeToTranscript"
     )
     manual_align_end = script_response.text.index(
-        "function getMergedTextSelection", manual_align_start
+        "function getCommittedTimelineDeleteRanges", manual_align_start
     )
     manual_align_script = script_response.text[manual_align_start:manual_align_end]
     assert "expandRangeToAdjacentSilence" not in manual_align_script
@@ -672,14 +1066,48 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert "cancelPendingTimelineRange" in script_response.text
     assert "requestTimelineRangeConfirmation" in script_response.text
     assert "timelineRangeConfirmationOpen" in script_response.text
+    assert 'cancelButton.className = "cut-timeline-range-cancel"' in script_response.text
+    assert 'cancelButton.dataset.timelineRangeAction = "cancel"' in script_response.text
+    assert 'cancelIcon.setAttribute("icon", "ph:x-bold")' in script_response.text
+    assert 'cancelPendingTimelineRange("已取消时间轴选区。")' in script_response.text
+    assert ".cut-timeline-range-cancel {" in styles_response.text
+    assert ".cut-timeline-range-cancel iconify-icon {" in styles_response.text
+    assert 'rangeElement.dataset.cancelSide' not in script_response.text
+    selection_start = script_response.text.index(
+        "function beginCutTimelineSelection"
+    )
+    selection_end = script_response.text.index(
+        "function beginTimelineRangeAdjustment", selection_start
+    )
+    selection_script = script_response.text[selection_start:selection_end]
+    assert "requestTimelineRangeConfirmation" not in selection_script
+    adjustment_start = selection_end
+    adjustment_end = script_response.text.index(
+        "function cancelPendingTimelineRange", adjustment_start
+    )
+    adjustment_script = script_response.text[adjustment_start:adjustment_end]
+    assert 'finishEvent.type === "pointerup"' in adjustment_script
+    assert 'mode === "move"' in adjustment_script
+    assert "if (!hasDragged)" in adjustment_script
+    confirmation_start = script_response.text.index(
+        "async function requestTimelineRangeConfirmation"
+    )
+    confirmation_end = script_response.text.index(
+        "function adjustTimelineRangeWithKeyboard", confirmation_start
+    )
+    confirmation_script = script_response.text[
+        confirmation_start:confirmation_end
+    ]
+    assert "cancelPendingTimelineRange();" not in confirmation_script
+    assert "已保留待确认区间" in confirmation_script
     assert 'eyebrow: "时间轴滑动删除"' in script_response.text
     assert 'title: "删除这个时间轴区间？"' in script_response.text
     assert 'confirmText: "确认删除"' in script_response.text
-    assert "已取消时间轴选区" not in script_response.text
-    assert "hasPendingRange || !hasCutSelection()" in script_response.text
+    assert "已取消时间轴选区。" in script_response.text
+    assert "hasPendingRange || getMergedSelection().length === 0" in script_response.text
     assert "已调整待确认区间" in script_response.text
     assert "CUT_TIMELINE_MIN_RANGE" in script_response.text
-    assert "activateTextEditorPanel" in script_response.text
+    assert "activateTextEditorPanel" not in script_response.text
     assert "splitTextIntoCharacterTokens" in script_response.text
     assert "formatPreciseTime" in script_response.text
     assert "点击左侧圆圈删除整段，再次点击可撤销" not in page_response.text
@@ -688,13 +1116,32 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert "圆圈切换删除，点击文案调整分段" in page_response.text
     assert "点击文字删除会一并收紧前后无声区" in page_response.text
     assert "再次点击可撤销" in page_response.text
-    assert 'time.textContent = formatTime(segment.start)' in script_response.text
-    assert 'segmentText.type = "button"' in script_response.text
+    assert 'time.textContent = formatTime(segmentStart)' in script_response.text
     assert 'segmentText.className = "segment-text"' in script_response.text
+    assert "function suggestionTextRangeKeysAtTime" in script_response.text
+    assert "function buildSegmentTextRuns" in script_response.text
+    assert "previous.presentationKey === presentationKey" in script_response.text
+    assert "item.dataset.displayStart" in script_response.text
+    assert "item.dataset.displayEnd" in script_response.text
+    assert "item.dataset.displayKey" in script_response.text
+    assert '"is-restored-fragment"' in script_response.text
+    assert "fragment.append(item)" in script_response.text
+    assert 'className = "segment-text-run segment-restore-button"' in script_response.text
+    assert "restoreButton.dataset.rangeKeys" in script_response.text
+    assert "所有 AI 建议都需由用户确认" not in page_response.text
+    assert 'stageCutHistoryOperation("恢复已删除文字")' in script_response.text
     assert "segment-edit-hint" not in script_response.text
-    assert "grid-template-columns: 44px 52px minmax(0, 1fr)" in styles_response.text
-    assert "button.disabled = cutControlsLocked;" in script_response.text
-    assert '`${allSelected ? "撤销删除" : "删除"}第' in script_response.text
+    assert "grid-template-columns: 44px 52px minmax(0, 1fr) 44px" in (
+        styles_response.text
+    )
+    assert ".segment-play-button {" in styles_response.text
+    assert ".segment-play-button:focus-visible" in styles_response.text
+    assert "@media (max-width: 480px)" in styles_response.text
+    assert "grid-template-columns: 44px minmax(0, 1fr) 44px" in (
+        styles_response.text
+    )
+    assert "selectSegmentButton.disabled =" in script_response.text
+    assert '`${allSelected ? "恢复删除文字" : "删除文字"}：${run.text}`' in script_response.text
     assert 'id="segmentEditDialog"' in page_response.text
     assert 'id="splitSegmentButton"' in page_response.text
     assert 'id="mergeSegmentUpButton"' in page_response.text
@@ -707,17 +1154,17 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert ".timeline-range-confirm-actions {" not in styles_response.text
     assert ".cut-timeline-delete-range.is-pending {" in styles_response.text
     assert "transcript-segment-text" not in script_response.text
-    assert "grid-template-columns: repeat(4, minmax(0, 1fr))" in styles_response.text
-    assert "grid-template-columns: repeat(4, minmax(96px, 1fr))" in styles_response.text
-    assert ".cut-history-toolbar {" in styles_response.text
+    assert ".text-editor-tabbar {" not in styles_response.text
+    assert ".text-editor-tab {" not in styles_response.text
+    assert ".cut-history-toolbar {" not in styles_response.text
+    assert ".cut-history-panel {" not in styles_response.text
     assert "min-height: 44px" in styles_response.text
-    assert 'activateTextEditorPanel("cuts");' in script_response.text
+    assert 'activateTextEditorPanel("cuts");' not in script_response.text
     assert 'job.edit ? "output" : "cuts"' not in script_response.text
     assert 'words.className = "word-list transcript-word-list"' not in script_response.text
     assert 'characters.className = "word-list"' not in script_response.text
     assert 'event.target.closest(".word-chip")' not in script_response.text
     assert "`${selectedSegmentCount} 段文字`" in script_response.text
-    assert "previous.end + 0.12" in script_response.text
     assert r"/\p{P}|\s/u" in script_response.text
     assert 'toDataURL("image/jpeg"' in script_response.text
     assert page_response.headers["cache-control"] == "no-store, max-age=0"
@@ -734,9 +1181,10 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert "margin-left: 13px" not in styles_response.text
     assert "margin-left: 9px" not in styles_response.text
     assert "grid-template-columns: 38px minmax(0, 1fr)" in styles_response.text
-    assert ".suggestion-card-footer {" in styles_response.text
-    assert ".no-speech-panel {" in styles_response.text
-    assert ".no-speech-selection-footer {" in styles_response.text
+    assert ".segment-restore-button {" in styles_response.text
+    assert ".segment-restore-button:focus-visible" in styles_response.text
+    assert ".segment-item.is-no-speech-fragment {" in styles_response.text
+    assert ".segment-no-speech-button {" in styles_response.text
     assert ".output-cut-builder {" in styles_response.text
     assert ".cut-timeline-no-speech-range {" in styles_response.text
     assert "grid-template-columns: minmax(0, 1fr) auto" in styles_response.text
@@ -745,18 +1193,24 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert "display: none !important" in styles_response.text
     assert "height: min(72dvh, 840px, calc(100dvh - 112px))" in styles_response.text
     assert art_page_response.status_code == 200
-    assert "/art-text.js?v=20260810-03" in art_page_response.text
+    assert "/art-text.js?v=20260814-02" in art_page_response.text
     assert 'class="cut-progress art-generation-progress full-row"' in art_page_response.text
     assert "art-particle art-particle-1" in art_page_response.text
     assert "解析时间轴" in art_page_response.text
     assert ".art-generation-progress" in styles_response.text
     assert "@keyframes art-particle-float" in styles_response.text
     assert "@keyframes art-panel-scan" in styles_response.text
-    assert "/styles.css?v=20260810-09" in art_page_response.text
+    assert "/styles.css?v=20260814-10" in art_page_response.text
     assert "/ui-feedback.js?v=20260807-03" in art_page_response.text
     assert 'id="overlayCoordinateReadout"' in art_page_response.text
     assert 'id="positionPresetGrid"' in art_page_response.text
-    assert "/editor-suite.js?v=20260810-05" in art_page_response.text
+    assert 'id="positionXPercent"' in art_page_response.text
+    assert 'id="positionYPercent"' in art_page_response.text
+    assert 'aria-label="手动输入艺术字坐标"' in art_page_response.text
+    assert "commitPositionCoordinate" in art_script_response.text
+    assert ".position-coordinate-fields {" in styles_response.text
+    assert "/timeline-model.js?v=20260810-01" in art_page_response.text
+    assert "/editor-suite.js?v=20260814-02" in art_page_response.text
     assert 'class="preview-grid"' in art_page_response.text
     assert 'data-preview-grid-toggle' in art_page_response.text
     assert "从保留文案中选择一句" not in art_page_response.text
@@ -846,10 +1300,11 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert 'id="applyCurrentSettingsToAll"' in art_page_response.text
     assert 'id="applyAllSettingsMessage"' in art_page_response.text
     assert 'id="fitArtToTranscript"' in art_page_response.text
-    assert 'id="artHistoryName"' in art_page_response.text
-    assert 'historyName: artHistoryName.value.trim() || null' in art_script_response.text
-    assert 'id="cutHistoryName"' in page_response.text
-    assert 'historyName: cutHistoryName.value.trim() || null' in script_response.text
+    assert 'id="artHistoryName"' not in art_page_response.text
+    assert 'id="cutHistoryName"' not in page_response.text
+    assert "data-editor-suite-save" in editor_suite_script_response.text
+    assert "saveCurrentVersion" in editor_suite_script_response.text
+    assert '/history`' in editor_suite_script_response.text
     assert 'id="artTimeFitMessage"' in art_page_response.text
     assert 'id="frameTimeline"' in art_page_response.text
     assert 'id="frameTimelineSeek"' in art_page_response.text
@@ -940,6 +1395,16 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert "timelineTrackCount" in art_script_response.text
     assert "beginFrameTimelineSegmentAdjustment" in art_script_response.text
     assert "updateManualOverlayTimelineRange" in art_script_response.text
+    assert "function syncFrameTimelineSegmentRange(overlay)" in art_script_response.text
+    manual_range_start = art_script_response.text.index(
+        "function updateManualOverlayTimelineRange(overlay, start, end)"
+    )
+    manual_range_end = art_script_response.text.index(
+        "function beginFrameTimelineSegmentAdjustment", manual_range_start
+    )
+    assert "syncFrameTimelineSegmentRange(overlay);" in (
+        art_script_response.text[manual_range_start:manual_range_end]
+    )
     assert "data-art-time-drag" in art_script_response.text
     assert "segment.dataset.effectStart" in art_script_response.text
     assert "segment.dataset.effectEnd" in art_script_response.text
@@ -971,6 +1436,19 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert "editorHostCurrentTime" in art_script_response.text
     assert "previewVisibilitySignature" in art_script_response.text
     assert "renderPreview({ timeOnly: true })" in art_script_response.text
+    assert "renderArtTextCharacters" in art_script_response.text
+    assert "alignCharacterTimingsToAudioActivity" in art_script_response.text
+    assert "audioQuietRanges: retainedAudioQuietRanges" in art_script_response.text
+    assert "compactArtStyleSample" in art_script_response.text
+    assert "speechAnimationPreviewSignature" in art_script_response.text
+    assert "characterTimings" in art_script_response.text
+    assert "spokenDuration + 0.18" in art_script_response.text
+    assert '"center-highlight"' in art_script_response.text
+    assert '"character-bounce"' in art_script_response.text
+    assert "getEditedAudioQuietRanges" in script_response.text
+    assert "audioQuietRanges: getEditedAudioQuietRanges(spans)" in script_response.text
+    assert "resolveOverlappingRepeatAndQuietRanges" in script_response.text
+    assert "protectRecognizedSpeechFromQuietRanges" in script_response.text
     art_sync_start = art_script_response.text.index(
         'if (data.type === "editor-suite:sync-time")'
     )
@@ -983,16 +1461,20 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert "已按当前剪后文案实时同步" in art_script_response.text
     assert "剪辑视频生成后即可使用 AI 全文分句" not in art_script_response.text
     assert "beginFrameTimelineScrub" in art_script_response.text
+    assert "artTimelineStore" in art_script_response.text
+    assert "createPointerSession" in art_script_response.text
+    assert 'data.type === "editor-suite:timeline-action"' in art_script_response.text
     assert "toDataURL(\"image/jpeg\"" in art_script_response.text
     assert "const edgeOffset = Math.min(0.04, total / 2)" in art_script_response.text
     assert 'videoSource === "original" && payload.edit?.status' in art_script_response.text
     assert art_page_response.headers["cache-control"] == "no-store, max-age=0"
     assert art_script_response.headers["cache-control"] == "no-store, max-age=0"
     assert pip_page_response.status_code == 200
-    assert "/picture-in-picture.js?v=20260810-10" in pip_page_response.text
+    assert "/picture-in-picture.js?v=20260812-01" in pip_page_response.text
     assert "/ui-feedback.js?v=20260807-03" in pip_page_response.text
-    assert "/styles.css?v=20260810-09" in pip_page_response.text
-    assert "/editor-suite.js?v=20260810-05" in pip_page_response.text
+    assert "/styles.css?v=20260812-02" in pip_page_response.text
+    assert "/timeline-model.js?v=20260810-01" in pip_page_response.text
+    assert "/editor-suite.js?v=20260814-02" in pip_page_response.text
     assert 'class="preview-grid"' in pip_page_response.text
     assert 'data-preview-grid-toggle' in pip_page_response.text
     assert 'data-editor-suite-nav data-stage="pip"' in pip_page_response.text
@@ -1003,6 +1485,9 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert 'class="frame-timeline editor-layer-timeline pip-timeline"' in pip_page_response.text
     assert 'id="segmentList"' in pip_page_response.text
     assert "time.textContent = formatTime(segment.start)" in pip_script_response.text
+    assert "beginPipTimelineSegmentAdjustment" in pip_script_response.text
+    assert "pipTimelineStore" in pip_script_response.text
+    assert "handle.dataset.timelineResize = mode" in pip_script_response.text
     assert "grid-template-columns: 28px minmax(0, 1fr)" in styles_response.text
     assert "grid-template-columns: 46px minmax(0, 1fr)" in styles_response.text
     assert 'id="pipPrompt"' in pip_page_response.text
@@ -1111,8 +1596,9 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert editor_suite_script_response.headers["cache-control"] == "no-store, max-age=0"
     assert pip_script_response.headers["cache-control"] == "no-store, max-age=0"
     assert template_page_response.status_code == 200
-    assert "/styles.css?v=20260810-09" in template_page_response.text
-    assert "/art-template-library.js?v=20260810-01" in template_page_response.text
+    assert "/styles.css?v=20260812-02" in template_page_response.text
+    assert "/art-template-library.js?v=20260812-02" in template_page_response.text
+    assert "当前模板主色" in template_page_response.text
     assert 'id="templateCardGrid"' in template_page_response.text
     assert 'id="useTemplateButton"' in template_page_response.text
     assert 'id="openTemplateUpload"' in template_page_response.text
@@ -1126,10 +1612,28 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert "点击恢复后重新出现在模板库" in template_page_response.text
     assert "/api/art-templates" in template_script_response.text
     assert "preferredArtTemplateSettings" in template_script_response.text
+    assert "characterLayout" in art_script_response.text
+    assert "is-character-staggered" in template_script_response.text
+    assert "const effects = normalizedTemplateEffects(template, color);" in (
+        template_script_response.text
+    )
+    assert "function fitEffectPreviewText(element)" in (
+        template_script_response.text
+    )
+    assert "const templateColors = new Map();" in template_script_response.text
+    assert "function templateColorFor(template)" in template_script_response.text
+    assert "templateColors.set(template.id, templatePreviewColor.value);" in (
+        template_script_response.text
+    )
+    assert 'window.addEventListener("resize", scheduleEffectPreviewFit);' in (
+        template_script_response.text
+    )
     assert 'method: "PATCH"' in template_script_response.text
     assert 'method: "DELETE"' in template_script_response.text
     assert "loadArtTemplateLibrary" in art_script_response.text
     assert "ART_STYLE_BASES" in art_script_response.text
+    assert "renderTemplateCharacters" in template_script_response.text
+    assert 'type: "character-bounce"' in template_script_response.text
     assert template_page_response.headers["cache-control"] == "no-store, max-age=0"
     assert template_script_response.headers["cache-control"] == "no-store, max-age=0"
     assert template_api_response.status_code == 200
@@ -1141,7 +1645,7 @@ def test_frontend_assets_are_versioned_and_not_cached():
         for template in template_api_response.json()["templates"]
     } == app_module.ART_TEXT_STYLES
     assert font_page_response.status_code == 200
-    assert "/styles.css?v=20260810-09" in font_page_response.text
+    assert "/styles.css?v=20260812-02" in font_page_response.text
     assert "/font-manager.js?v=" in font_page_response.text
     assert 'id="fontUploadForm"' in font_page_response.text
     assert 'id="fontCardGrid"' in font_page_response.text
@@ -1158,6 +1662,100 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert ".next-step-copy" not in styles_response.text
     assert ".output-note" not in styles_response.text
     assert ".template-library-note" not in styles_response.text
+
+
+def test_timeline_model_shares_selection_drag_resize_and_persistence():
+    script = r"""
+const timeline = require('./web/timeline-model.js');
+const commits = [];
+const store = timeline.createStore({
+  duration: 12,
+  tracks: [
+    { id: 'cut:deletions', kind: 'cut', clips: [
+      { id: 'cut:1', start: 1, end: 2, minDuration: 0.1 }
+    ] },
+    { id: 'art:overlay:1', kind: 'art', clips: [
+      { id: 'art:1', start: 2, end: 4, minDuration: 0.1 }
+    ] },
+    { id: 'pip:track:1', kind: 'pip', clips: [
+      { id: 'pip:1', start: 5, end: 8, minDuration: 0.1, payload: { width: 0.3 } }
+    ] }
+  ]
+}, { onCommit: (state, reason) => commits.push({ state, reason }) });
+
+store.selectClip('art:1');
+const move = timeline.createPointerSession(store, {
+  clipId: 'art:1', mode: 'move', startClientX: 100,
+  trackWidth: 1200, duration: 12
+});
+move.update(300);
+move.finish();
+const moved = store.findClip('art:1');
+if (moved.start !== 4 || moved.end !== 6) throw new Error('move failed');
+
+const resize = timeline.createPointerSession(store, {
+  clipId: 'pip:1', mode: 'start', startClientX: 0,
+  trackWidth: 1200, duration: 12
+});
+resize.update(200);
+resize.finish();
+const resized = store.findClip('pip:1');
+if (resized.start !== 7 || resized.end !== 8) throw new Error('resize failed');
+
+const boundaryMove = timeline.createPointerSession(store, {
+  clipId: 'art:1', mode: 'move', startClientX: 0,
+  trackWidth: 1200, duration: 12
+});
+boundaryMove.update(2400);
+boundaryMove.finish({ commit: false });
+const bounded = store.findClip('art:1');
+if (bounded.start !== 10 || bounded.end !== 12) {
+  throw new Error('boundary move changed clip duration');
+}
+
+const boundaryResize = timeline.createPointerSession(store, {
+  clipId: 'pip:1', mode: 'start', startClientX: 0,
+  trackWidth: 1200, duration: 12
+});
+boundaryResize.update(1200);
+boundaryResize.finish({ commit: false });
+const minSized = store.findClip('pip:1');
+if (minSized.start !== 7.9 || minSized.end !== 8) {
+  throw new Error('boundary resize moved the fixed edge');
+}
+
+store.patchClipPayload('pip:1', { width: 0.42 }, { commit: true });
+if (store.findClip('pip:1').payload.width !== 0.42) throw new Error('payload failed');
+
+const values = new Map();
+const storage = {
+  setItem: (key, value) => values.set(key, value),
+  getItem: (key) => values.get(key) || null
+};
+if (!timeline.saveDraft(storage, 'project', store.snapshot(), { name: 'draft' })) {
+  throw new Error('save failed');
+}
+const restored = timeline.loadDraft(storage, 'project');
+if (restored.metadata.name !== 'draft') throw new Error('metadata failed');
+if (restored.timeline.tracks.length !== 3) throw new Error('tracks failed');
+if (commits.length !== 3) throw new Error('commit mechanism failed');
+console.log(JSON.stringify({ commits: commits.length, selection: store.snapshot().selection }));
+"""
+    try:
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except FileNotFoundError:
+        pytest.skip("Node.js is required for the timeline model unit test.")
+
+    payload = json.loads(result.stdout)
+    assert payload["commits"] == 3
+    assert payload["selection"]["clipId"] == "pip:1"
 
 
 def test_douyin_preview_is_inline_only():
@@ -1189,14 +1787,74 @@ def test_douyin_preview_is_inline_only():
     assert 'class="douyin-content-type"' not in page_response.text
     assert "font-size: clamp(8px, 3.8cqw, 13px)" in styles_response.text
     assert "font-size: clamp(7px, 3.2cqw, 11px)" in styles_response.text
-    assert ".douyin-shoot-same {" in styles_response.text
+    assert 'class="douyin-action-button is-liked"' in page_response.text
+    assert page_response.text.count('class="douyin-action-button') == 4
+    assert page_response.text.count('tabindex="-1"') >= 4
+    assert 'class="douyin-music-disc"' in page_response.text
+    assert "douyin-shoot-same" not in page_response.text
     assert ".douyin-location {" not in styles_response.text
     assert ".douyin-content-type {" not in styles_response.text
-    assert "--douyin-video-top: 8%" in styles_response.text
-    assert "--douyin-video-bottom: 6%" in styles_response.text
-    assert "aspect-ratio: 9 / 18.6 !important" in styles_response.text
-    assert "bottom: calc(var(--douyin-video-bottom) + 1%)" in styles_response.text
+    assert "--iphone-screen-width: 440" in styles_response.text
+    assert "--iphone-screen-height: 956" in styles_response.text
+    assert "--iphone-safe-top: 6.4854%" in styles_response.text
+    assert "--iphone-safe-bottom: 3.5565%" in styles_response.text
+    assert "--iphone-safe-top-space: 14.0909cqw" in styles_response.text
+    assert "--iphone-safe-bottom-space: 7.7273cqw" in styles_response.text
+    assert "var(--iphone-safe-top) + var(--douyin-header-content-height)" in (
+        styles_response.text
+    )
+    assert "var(--iphone-safe-bottom) + var(--douyin-tabbar-content-height)" in (
+        styles_response.text
+    )
+    assert "--douyin-video-bottom: var(--douyin-tabbar-height)" in (
+        styles_response.text
+    )
+    assert "aspect-ratio: 440 / 956 !important" in styles_response.text
+    assert "padding: var(--iphone-safe-top-space) var(--douyin-side-inset) 0" in (
+        styles_response.text
+    )
+    assert "padding: 0 var(--douyin-side-inset) var(--iphone-safe-bottom-space)" in (
+        styles_response.text
+    )
+    assert "bottom: var(--douyin-content-bottom)" in styles_response.text
     assert "object-fit: contain" in styles_response.text
+    douyin_video_rule = styles_response.text.split(
+        ".cut-video-stage.is-douyin-preview #cutPreviewVideo {",
+        maxsplit=1,
+    )[1].split("}", maxsplit=1)[0]
+    assert "top: 0;" in douyin_video_rule
+    assert "height: calc(100% - var(--douyin-video-bottom));" in douyin_video_rule
+    assert "object-fit: cover;" in douyin_video_rule
+    douyin_base_video_rule = styles_response.text.split(
+        ".editor-suite-douyin-base-video {",
+        maxsplit=1,
+    )[1].split("}", maxsplit=1)[0]
+    assert "top: 0;" in douyin_base_video_rule
+    assert (
+        "height: calc(100% - var(--douyin-video-bottom, 0%));"
+        in douyin_base_video_rule
+    )
+    assert "object-fit: cover;" in douyin_base_video_rule
+    assert "const fitScale = douyinPreviewEnabled ? Math.max : Math.min;" in (
+        editor_suite_script_response.text
+    )
+    assert "const scale = fitScale(" in editor_suite_script_response.text
+    douyin_overlay_rule = styles_response.text.split(
+        ".cut-video-stage.is-douyin-preview .editor-suite-preview-overlay {",
+        maxsplit=1,
+    )[1].split("}", maxsplit=1)[0]
+    assert "inset: 0 0 var(--douyin-video-bottom);" in douyin_overlay_rule
+    douyin_top_bar_rule = styles_response.text.rsplit(
+        ".douyin-top-bar {",
+        maxsplit=1,
+    )[1].split("}", maxsplit=1)[0]
+    assert "background: transparent;" in douyin_top_bar_rule
+    assert "backdrop-filter: none;" in douyin_top_bar_rule
+    douyin_bottom_nav_rule = styles_response.text.rsplit(
+        ".douyin-bottom-nav {",
+        maxsplit=1,
+    )[1].split("}", maxsplit=1)[0]
+    assert "background: transparent;" in douyin_bottom_nav_rule
     assert ".cut-video-stage.is-douyin-preview .editor-suite-preview-overlay" in (
         styles_response.text
     )
@@ -1204,11 +1862,21 @@ def test_douyin_preview_is_inline_only():
     assert ".editor-suite-douyin-base-video" in styles_response.text
     assert "grid-template-rows: minmax(0, 1fr)" in styles_response.text
     assert "container-type: inline-size" in styles_response.text
-    assert "clamp(11px, 7.4cqw, 25px)" in styles_response.text
-    assert "clamp(19px, 11cqw, 38px)" in styles_response.text
+    assert "--douyin-action-gap: 5.6818cqw" in styles_response.text
+    assert "--douyin-action-right: 1.3636%" in styles_response.text
+    assert "--douyin-action-top: 48.954%" in styles_response.text
+    assert "clamp(20px, 7.7273cqw, 34px)" in styles_response.text
+    assert "bottom: 9.728%" in styles_response.text
     assert "clamp(20px, 10cqw, 34px)" in styles_response.text
     assert ".douyin-music-disc {" in styles_response.text
     assert ".douyin-safety-zone" not in styles_response.text
+    assert "@keyframes art-character-bounce" in styles_response.text
+    assert "prefers-reduced-motion: reduce" in styles_response.text
+    assert ".art-style-sample.has-character-effect" in styles_response.text
+    assert "animation-fill-mode: forwards" in styles_response.text
+    assert ".art-character.is-character-staggered" in styles_response.text
+    assert ".template-card-preview.has-character-effect" in styles_response.text
+    assert "flex: 0 0 178px" in styles_response.text
 
     assert 'data-douyin-preview href' not in editor_suite_script_response.text
     assert "setDouyinPreviewLink" not in editor_suite_script_response.text
@@ -1232,6 +1900,20 @@ def test_art_template_library_upload_rename_render_and_delete(tmp_path: Path):
         "baseStyle": "impact",
         "color": "#59C7FF",
         "strokeColor": "#102A43",
+        "letterSpacing": 6,
+        "textColorMode": "center-highlight",
+        "secondaryColor": "#FFFFFF",
+        "animation": {
+            "type": "character-bounce",
+            "duration": 0.56,
+            "stagger": 0.07,
+            "amplitude": 0.18,
+        },
+        "characterLayout": {
+            "type": "staggered",
+            "rotationPattern": [-8, 6, -4],
+            "verticalOffsetPattern": [0.06, -0.04, 0.03],
+        },
     }
 
     with TestClient(app_module.app) as client:
@@ -1255,6 +1937,11 @@ def test_art_template_library_upload_rename_render_and_delete(tmp_path: Path):
         assert uploaded["source"] == "uploaded"
         assert uploaded["id"].startswith("custom-art-")
         assert uploaded["baseStyle"] == "impact"
+        assert uploaded["textColorMode"] == "center-highlight"
+        assert uploaded["secondaryColor"] == "#FFFFFF"
+        assert uploaded["letterSpacing"] == 6
+        assert uploaded["animation"] == template_payload["animation"]
+        assert uploaded["characterLayout"] == template_payload["characterLayout"]
 
         library_response = client.get("/api/art-templates")
         assert library_response.json()["uploadedCount"] == 1
@@ -1281,12 +1968,26 @@ def test_art_template_library_upload_rename_render_and_delete(tmp_path: Path):
                     y=0.5,
                     start=0,
                     end=1,
+                    letterSpacing=uploaded["letterSpacing"],
                     artStyle=uploaded["id"],
+                    textColorMode=uploaded["textColorMode"],
+                    secondaryColor=uploaded["secondaryColor"],
+                    animation=app_module.ArtTextAnimation(
+                        **uploaded["animation"]
+                    ),
+                    characterLayout=app_module.ArtTextCharacterLayout(
+                        **uploaded["characterLayout"]
+                    ),
                 )
             ],
             1,
         )
         assert normalized[0]["artStyle"] == uploaded["id"]
+        assert normalized[0]["textColorMode"] == "center-highlight"
+        assert normalized[0]["secondaryColor"] == "#FFFFFF"
+        assert normalized[0]["letterSpacing"] == 6
+        assert normalized[0]["animation"]["type"] == "character-bounce"
+        assert normalized[0]["characterLayout"] == template_payload["characterLayout"]
         output_path = tmp_path / "custom-art-template-layer.png"
         app_module.render_art_text_layer(output_path, normalized[0])
         assert output_path.is_file()
@@ -1313,6 +2014,33 @@ def test_art_template_library_rejects_font_upload():
         )
     assert response.status_code == 400
     assert "不支持字体文件" in response.json()["detail"]
+
+
+def test_art_template_library_rejects_unknown_character_animation():
+    payload = {
+        "name": "错误动画",
+        "sample": "测试",
+        "baseStyle": "comic",
+        "color": "#FFF36A",
+        "strokeColor": "#0A0A0A",
+        "animation": {"type": "spin-away"},
+    }
+    with TestClient(app_module.app) as client:
+        response = client.post(
+            "/api/art-templates",
+            files={
+                "file": (
+                    "invalid-animation.arttext",
+                    io.BytesIO(
+                        json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                    ),
+                    "application/json",
+                )
+            },
+        )
+
+    assert response.status_code == 400
+    assert "动画类型无效" in response.json()["detail"]
 
 
 def test_art_template_hide_and_restore():
@@ -2610,6 +3338,7 @@ def test_cut_draft_is_persisted_versioned_restored_and_cleared():
 
     payload = {
         "revision": 0,
+        "automaticNoSpeechInitialized": True,
         "textRanges": [
             {
                 "key": "1.000-2.000",
@@ -2655,6 +3384,7 @@ def test_cut_draft_is_persisted_versioned_restored_and_cleared():
     draft = saved.json()["cutDraft"]
     assert draft["schemaVersion"] == 1
     assert draft["revision"] == 1
+    assert draft["automaticNoSpeechInitialized"] is True
     assert draft["textRanges"][0]["key"] == "1.000-2.000"
     assert draft["textRanges"][0]["start"] == 0.8
     assert draft["noSpeechRanges"] == [
@@ -2671,6 +3401,160 @@ def test_cut_draft_is_persisted_versioned_restored_and_cleared():
     assert cleared.json() == {"status": "cleared"}
     assert after_clear.json()["cutDraft"] is None
     assert not app_module.cut_draft_path(job_id).exists()
+
+
+def test_cut_draft_preserves_explicitly_empty_text_ranges():
+    job_id = "34343434-3434-4434-8434-343434343434"
+    job_dir = app_module.jobs_directory() / job_id
+    job_dir.mkdir(parents=True)
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "status": "completed",
+            "duration": 10.0,
+            "result": {"segments": []},
+            "cutDraft": None,
+        }
+
+    with TestClient(app_module.app) as client:
+        saved = client.put(
+            f"/api/transcriptions/{job_id}/cut-draft",
+            json={
+                "revision": 0,
+                "automaticNoSpeechInitialized": True,
+                "textRanges": [],
+                "noSpeechRanges": [],
+                "timelineRanges": [],
+            },
+        )
+        restored = client.get(f"/api/transcriptions/{job_id}/cut-draft")
+
+    assert saved.status_code == 200
+    draft = saved.json()["cutDraft"]
+    assert draft is not None
+    assert draft["automaticNoSpeechInitialized"] is True
+    assert draft["textRanges"] == []
+    assert draft["noSpeechRanges"] == []
+    assert draft["timelineRanges"] == []
+    assert restored.json()["cutDraft"] == draft
+
+
+def test_cut_draft_defaults_automatic_no_speech_marker_for_legacy_clients():
+    job_id = "35353535-3535-4535-8535-353535353535"
+    job_dir = app_module.jobs_directory() / job_id
+    job_dir.mkdir(parents=True)
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "status": "completed",
+            "duration": 10.0,
+            "result": {"segments": []},
+            "cutDraft": None,
+        }
+
+    with TestClient(app_module.app) as client:
+        saved = client.put(
+            f"/api/transcriptions/{job_id}/cut-draft",
+            json={
+                "revision": 0,
+                "textRanges": [],
+                "noSpeechRanges": [],
+                "timelineRanges": [],
+            },
+        )
+
+    assert saved.status_code == 200
+    assert saved.json()["cutDraft"]["automaticNoSpeechInitialized"] is False
+
+
+def test_cut_draft_aligns_text_media_ranges_before_preview_and_is_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    job_id = "36363636-3636-4636-8636-363636363636"
+    video_path = tmp_path / "source.mp4"
+    video_path.write_bytes(b"source")
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    samples = array("h", [6_000]) * (sample_rate * 3)
+    for valley in (0.78, 2.14):
+        start = round((valley - 0.03) * sample_rate)
+        end = round((valley + 0.03) * sample_rate)
+        samples[start:end] = array("h", [0]) * (end - start)
+    monkeypatch.setattr(
+        app_module,
+        "decode_cut_audio_samples",
+        lambda _path: samples,
+    )
+
+    segments = [
+        {
+            "start": 0.0,
+            "end": 3.0,
+            "text": "ABC",
+            "words": [
+                {"text": "A", "start": 0.0, "end": 1.0},
+                {"text": "B", "start": 1.0, "end": 2.0},
+                {"text": "C", "start": 2.0, "end": 3.0},
+            ],
+        }
+    ]
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "status": "completed",
+            "duration": 3.0,
+            "result": {"segments": segments},
+            "cutDraft": None,
+        }
+        app_module.JOB_FILES[job_id] = video_path
+
+    payload = {
+        "revision": 0,
+        "textRanges": [
+            {
+                "key": "1.000-2.000",
+                "start": 1.0,
+                "end": 2.0,
+                "text": "B",
+                "originalStart": 1.0,
+                "originalEnd": 2.0,
+            }
+        ],
+        "noSpeechRanges": [],
+        "timelineRanges": [],
+    }
+    with TestClient(app_module.app) as client:
+        first = client.put(
+            f"/api/transcriptions/{job_id}/cut-draft",
+            json=payload,
+        )
+        first_draft = first.json()["cutDraft"]
+        second_payload = {
+            **payload,
+            "revision": first_draft["revision"],
+            "textRanges": first_draft["textRanges"],
+        }
+        second = client.put(
+            f"/api/transcriptions/{job_id}/cut-draft",
+            json=second_payload,
+        )
+
+    assert first.status_code == 200
+    aligned = first_draft["textRanges"][0]
+    assert 0.76 <= aligned["start"] <= 0.8
+    assert 2.12 <= aligned["end"] <= 2.16
+    assert aligned["originalStart"] == 1.0
+    assert aligned["originalEnd"] == 2.0
+    assert aligned["adjacentSilenceBefore"] == pytest.approx(
+        1.0 - aligned["start"],
+        abs=0.001,
+    )
+    assert aligned["adjacentSilenceAfter"] == pytest.approx(
+        aligned["end"] - 2.0,
+        abs=0.001,
+    )
+    assert second.status_code == 200
+    assert second.json()["cutDraft"]["textRanges"] == first_draft["textRanges"]
 
 
 def test_editable_transcript_segments_can_split_and_merge_by_selected_text():
@@ -2917,6 +3801,144 @@ def test_delete_ranges_are_merged_and_cannot_remove_everything():
         )
 
 
+def test_overlapping_quiet_range_cannot_delete_the_retained_repeat_take():
+    words = [
+        {"text": "你", "start": 33.16, "end": 33.52},
+        {"text": "身边", "start": 33.52, "end": 34.24},
+        {"text": "你", "start": 34.24, "end": 34.60},
+        {"text": "身边", "start": 34.60, "end": 35.32},
+        {"text": "人人", "start": 35.32, "end": 36.04},
+        {"text": "都", "start": 36.04, "end": 36.40},
+        {"text": "觉得", "start": 36.40, "end": 37.12},
+        {"text": "你", "start": 37.12, "end": 37.48},
+        {"text": "身边", "start": 37.48, "end": 38.20},
+        {"text": "人人", "start": 38.20, "end": 38.92},
+        {"text": "都", "start": 38.92, "end": 39.28},
+        {"text": "觉得", "start": 39.28, "end": 40.00},
+    ]
+    segments = [
+        {
+            "start": 33.16,
+            "end": 40.0,
+            "text": "".join(word["text"] for word in words),
+            "words": words,
+        }
+    ]
+    suggestion = {
+        "type": "\u91cd\u590d",
+        "startIndex": 0,
+        "endIndex": 6,
+        "start": 33.16,
+        "end": 37.12,
+        "ranges": [{"start": 33.16, "end": 37.12}],
+    }
+    draft = {
+        "textRanges": [
+            {
+                "key": "33.160-37.120",
+                "start": 32.28,
+                "end": 37.12,
+                "originalStart": 33.16,
+                "originalEnd": 37.12,
+            }
+        ],
+        "noSpeechRanges": [
+            {"key": "quiet", "start": 37.8, "end": 39.68}
+        ],
+        "timelineRanges": [],
+    }
+
+    resolved = app_module.resolve_cut_draft_delete_ranges(
+        draft,
+        [suggestion],
+        segments,
+        40.0,
+    )
+
+    assert resolved == [{"start": 32.28, "end": 37.12}]
+    retained = app_module.build_retained_transcript(
+        segments,
+        resolved,
+        35.16,
+    )
+    assert retained["text"] == "你身边人人都觉得"
+
+
+def test_cut_draft_keeps_semantic_text_ranges_separate_from_media_boundaries():
+    segments = [
+        {
+            "start": 0.0,
+            "end": 3.0,
+            "text": "保留删除保留",
+            "words": [
+                {"text": "保留", "start": 0.0, "end": 1.0},
+                {"text": "删除", "start": 1.0, "end": 2.0},
+                {"text": "保留", "start": 2.0, "end": 3.0},
+            ],
+        }
+    ]
+    draft = {
+        "textRanges": [
+            {
+                "key": "1.000-2.000",
+                "start": 0.82,
+                "end": 2.14,
+                "originalStart": 1.0,
+                "originalEnd": 2.0,
+            }
+        ],
+        "noSpeechRanges": [],
+        "timelineRanges": [],
+    }
+
+    media_ranges = app_module.resolve_cut_draft_delete_ranges(
+        draft,
+        [],
+        segments,
+        3.0,
+    )
+    transcript_ranges = app_module.resolve_cut_draft_delete_ranges(
+        draft,
+        [],
+        segments,
+        3.0,
+        use_text_semantic_boundaries=True,
+    )
+
+    assert media_ranges == [{"start": 0.82, "end": 2.14}]
+    assert transcript_ranges == [{"start": 1.0, "end": 2.0}]
+    retained = app_module.build_retained_transcript(
+        segments,
+        transcript_ranges,
+        1.68,
+        timeline_delete_ranges=media_ranges,
+    )
+    assert retained["text"] == "保留保留"
+
+
+def test_quiet_range_is_trimmed_to_the_gap_between_recognized_words():
+    segments = [
+        {
+            "start": 100.937,
+            "end": 103.42,
+            "text": "你的极限，周围",
+            "words": [
+                {"text": "你", "start": 100.937, "end": 101.151},
+                {"text": "的", "start": 101.151, "end": 101.366},
+                {"text": "极限，", "start": 101.366, "end": 101.795},
+                {"text": "周围", "start": 103.08, "end": 103.42},
+            ],
+        }
+    ]
+
+    protected = app_module.protect_recognized_speech_from_quiet_ranges(
+        [{"start": 101.16, "end": 103.12}],
+        segments,
+    )
+
+    assert protected == [{"start": 101.795, "end": 103.08}]
+
+
 def test_media_cut_boundaries_snap_to_waveform_valleys_without_changing_text():
     sample_rate = 16_000
     samples = array("h", [6_000]) * (sample_rate * 2)
@@ -3061,6 +4083,27 @@ def test_media_cut_boundaries_extend_to_remove_a_high_energy_word_tail():
     assert media_ranges[0]["start"] == requested_ranges[0]["start"]
     assert 2.12 <= media_ranges[0]["end"] <= 2.16
     assert media_ranges[0]["end"] >= requested_ranges[0]["end"]
+
+
+def test_media_cut_boundaries_extend_a_quietly_recorded_word_tail():
+    sample_rate = 16_000
+    samples = array("h", [30]) * (sample_rate * 3)
+    speech_start = round(1.7 * sample_rate)
+    speech_end = round(2.04 * sample_rate)
+    samples[speech_start:speech_end] = array("h", [80]) * (
+        speech_end - speech_start
+    )
+
+    media_ranges = app_module.snap_delete_ranges_to_samples(
+        [{"start": 1.0, "end": 2.0}],
+        3.0,
+        samples,
+        sample_rate,
+        boundary_limits=[{"start": 1.0, "end": 2.75}],
+    )
+
+    assert media_ranges[0]["start"] == 1.0
+    assert media_ranges[0]["end"] > 2.04
 
 
 def test_ai_suggestion_ranges_do_not_extend_into_next_retained_word():
@@ -3404,12 +4447,20 @@ def test_cut_endpoint_renders_preview_video(
             f"/api/transcriptions/{job_id}/cuts",
             json={
                 "ranges": [{"start": 0.25, "end": 0.55}],
-                "historyName": "第一版剪辑",
             },
         )
         job_response = client.get(f"/api/transcriptions/{job_id}")
         video_response = client.get(
             f"/api/transcriptions/{job_id}/edited-video"
+        )
+        history_after_cut_response = client.get("/api/history")
+        save_edit_response = client.post(
+            f"/api/transcriptions/{job_id}/history",
+            json={"kind": "edited", "name": "第一版剪辑"},
+        )
+        duplicate_save_edit_response = client.post(
+            f"/api/transcriptions/{job_id}/history",
+            json={"kind": "edited", "name": "不会重复保存"},
         )
         with app_module.JOBS_LOCK:
             app_module.JOBS[job_id]["pictureInPicture"] = {
@@ -3420,7 +4471,6 @@ def test_cut_endpoint_renders_preview_video(
         art_response = client.post(
             f"/api/transcriptions/{job_id}/art-text",
             json={
-                "historyName": "客户艺术字版",
                 "overlays": [
                     {
                         "text": "重点",
@@ -3448,6 +4498,11 @@ def test_cut_endpoint_renders_preview_video(
         art_video_response = client.get(
             f"/api/transcriptions/{job_id}/art-text-video"
         )
+        history_after_art_response = client.get("/api/history")
+        save_art_response = client.post(
+            f"/api/transcriptions/{job_id}/history",
+            json={"kind": "art", "name": "客户艺术字版"},
+        )
         history_response = client.get("/api/history")
 
     assert cut_response.status_code == 202
@@ -3465,6 +4520,12 @@ def test_cut_endpoint_renders_preview_video(
     }
     assert video_response.status_code == 200
     assert video_response.headers["content-type"] == "video/mp4"
+    assert history_after_cut_response.json()["count"] == 0
+    assert save_edit_response.status_code == 201
+    assert save_edit_response.json()["kind"] == "edited"
+    assert save_edit_response.json()["name"] == "第一版剪辑"
+    assert duplicate_save_edit_response.status_code == 201
+    assert duplicate_save_edit_response.json()["id"] == save_edit_response.json()["id"]
     output_path = app_module.DATA_DIR / "jobs" / job_id / "edited.mp4"
     assert output_path.is_file()
     assert 0.45 < app_module.probe_video(output_path) < 0.8
@@ -3479,13 +4540,18 @@ def test_cut_endpoint_renders_preview_video(
     assert art["overlays"][0]["artStyle"] == "metal"
     assert art_video_response.status_code == 200
     assert art_video_response.headers["content-type"] == "video/mp4"
+    assert history_after_art_response.json()["count"] == 1
+    assert save_art_response.status_code == 201
+    assert save_art_response.json()["kind"] == "art"
+    assert save_art_response.json()["name"] == "客户艺术字版"
     assert history_response.status_code == 200
     assert history_response.json()["count"] == 2
     assert history_response.json()["editedCount"] == 1
     assert history_response.json()["artCount"] == 1
-    assert edit["historyId"] != art["historyId"]
-    assert edit["historyName"] == "第一版剪辑"
-    assert art["historyName"] == "客户艺术字版"
+    assert "historyId" not in edit
+    assert "historyName" not in edit
+    assert "historyId" not in art
+    assert "historyName" not in art
     assert {item["name"] for item in history_response.json()["versions"]} == {
         "第一版剪辑",
         "客户艺术字版",
@@ -3495,6 +4561,86 @@ def test_cut_endpoint_renders_preview_video(
     assert art_output_path.is_file()
     assert art_layer_path.is_file()
     assert 0.5 < app_module.probe_video(art_output_path) < 0.9
+
+
+def test_cut_endpoint_uses_semantic_draft_ranges_for_retained_transcript(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    job_id = "37373737-3737-4737-8737-373737373737"
+    job_dir = app_module.jobs_directory() / job_id
+    job_dir.mkdir(parents=True)
+    video_path = job_dir / "source.mp4"
+    video_path.write_bytes(b"source")
+    segments = [
+        {
+            "id": 0,
+            "start": 0.0,
+            "end": 3.0,
+            "text": "保留删除保留",
+            "words": [
+                {"text": "保留", "start": 0.0, "end": 1.0},
+                {"text": "删除", "start": 1.0, "end": 2.0},
+                {"text": "保留", "start": 2.0, "end": 3.0},
+            ],
+        }
+    ]
+    draft = {
+        "schemaVersion": 1,
+        "revision": 1,
+        "automaticNoSpeechInitialized": True,
+        "textRanges": [
+            {
+                "key": "1.000-2.000",
+                "start": 0.82,
+                "end": 2.14,
+                "originalStart": 1.0,
+                "originalEnd": 2.0,
+            }
+        ],
+        "noSpeechRanges": [],
+        "timelineRanges": [],
+    }
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "filename": "source.mp4",
+            "status": "completed",
+            "duration": 3.0,
+            "result": {"segments": segments, "suggestions": []},
+            "cutDraft": draft,
+            "edit": None,
+        }
+        app_module.JOB_FILES[job_id] = video_path
+
+    def fake_render_cut_video(
+        _input_path: Path,
+        output_path: Path,
+        ranges: list[dict[str, float]],
+        _duration: float,
+    ) -> None:
+        assert ranges == [{"start": 0.82, "end": 2.14}]
+        output_path.write_bytes(b"edited")
+
+    monkeypatch.setattr(app_module, "render_cut_video", fake_render_cut_video)
+    monkeypatch.setattr(
+        app_module,
+        "decode_cut_audio_samples",
+        lambda _path: (_ for _ in ()).throw(RuntimeError("no decoded audio")),
+    )
+
+    with TestClient(app_module.app) as client:
+        response = client.post(
+            f"/api/transcriptions/{job_id}/cuts",
+            json={"ranges": [{"start": 0.82, "end": 2.14}]},
+        )
+        job = client.get(f"/api/transcriptions/{job_id}").json()
+
+    assert response.status_code == 202
+    assert job["edit"]["ranges"] == [{"start": 0.82, "end": 2.14}]
+    assert job["edit"]["requestedRanges"] == [{"start": 0.82, "end": 2.14}]
+    assert job["edit"]["transcriptRanges"] == [{"start": 1.0, "end": 2.0}]
+    assert job["edit"]["transcript"]["text"] == "保留保留"
 
 
 def test_art_text_can_use_original_video_without_cut(sample_video: Path):
@@ -4237,10 +5383,12 @@ def test_preview_composition_renders_cut_art_and_pip_in_one_request(
     monkeypatch: pytest.MonkeyPatch,
 ):
     job_id = "77777777-7777-4777-8777-777777777777"
-    video_path = tmp_path / "source.mp4"
+    job_dir = app_module.jobs_directory() / job_id
+    job_dir.mkdir(parents=True)
+    video_path = job_dir / "source.mp4"
     video_path.write_bytes(b"source")
     asset_id = "preview-composition-image"
-    (tmp_path / f"picture-in-picture-{asset_id}.png").write_bytes(b"png")
+    (job_dir / f"picture-in-picture-{asset_id}.png").write_bytes(b"png")
     calls: list[tuple[str, Path, Path, list[dict[str, object]]]] = []
 
     def fake_cut(
@@ -4364,8 +5512,8 @@ def test_preview_composition_renders_cut_art_and_pip_in_one_request(
 
     assert response.status_code == 202
     assert [call[0] for call in calls] == ["cut", "art", "pip"]
-    assert calls[1][1] == tmp_path / "edited.mp4"
-    assert calls[2][1] == tmp_path / "art-text.mp4"
+    assert calls[1][1] == job_dir / "edited.mp4"
+    assert calls[2][1] == job_dir / "art-text.mp4"
     assert calls[0][3] == [{"start": 0.2, "end": 0.4}]
     assert calls[1][3][0]["start"] == 0.4
     assert calls[1][3][0]["end"] == 0.7
@@ -4379,14 +5527,18 @@ def test_preview_composition_renders_cut_art_and_pip_in_one_request(
     assert payload["pictureInPicture"]["stage"] == "当前预览已生成视频"
     assert payload["composition"]["status"] == "completed"
     assert payload["composition"]["outputUrl"].endswith("/composition-video")
-    assert (tmp_path / "composition.mp4").read_bytes() == b"pip"
+    assert payload["composition"]["historyId"].startswith("history-")
+    assert not job_dir.exists()
 
     with TestClient(app_module.app) as client:
         output_response = client.get(
             f"/api/transcriptions/{job_id}/composition-video"
         )
+        history_response = client.get("/api/history")
     assert output_response.status_code == 200
     assert output_response.content == b"pip"
+    assert history_response.json()["count"] == 1
+    assert history_response.json()["versions"][0]["kind"] == "composed"
 
 
 def test_preview_composition_allows_unchanged_timeline(
@@ -4394,7 +5546,9 @@ def test_preview_composition_allows_unchanged_timeline(
     monkeypatch: pytest.MonkeyPatch,
 ):
     job_id = "88888888-8888-4888-8888-888888888888"
-    video_path = tmp_path / "source.mp4"
+    job_dir = app_module.jobs_directory() / job_id
+    job_dir.mkdir(parents=True)
+    video_path = job_dir / "source.mp4"
     video_path.write_bytes(b"source")
     calls: list[list[dict[str, float]]] = []
 
@@ -4449,7 +5603,72 @@ def test_preview_composition_allows_unchanged_timeline(
     assert calls == [[]]
     assert payload["edit"]["outputDuration"] == 1.0
     assert payload["composition"]["status"] == "completed"
-    assert (tmp_path / "composition.mp4").read_bytes() == b"unchanged"
+    assert not job_dir.exists()
+
+    with TestClient(app_module.app) as client:
+        output_response = client.get(
+            f"/api/transcriptions/{job_id}/composition-video"
+        )
+    assert output_response.status_code == 200
+    assert output_response.content == b"unchanged"
+
+
+def test_failed_preview_composition_removes_job_working_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    job_id = "99999999-9999-4999-8999-999999999999"
+    job_dir = app_module.jobs_directory() / job_id
+    job_dir.mkdir(parents=True)
+    video_path = job_dir / "source.mp4"
+    video_path.write_bytes(b"source")
+
+    def fail_cut(*args, **kwargs) -> None:
+        raise RuntimeError("测试生成失败")
+
+    monkeypatch.setattr(app_module, "render_cut_video", fail_cut)
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "filename": "source.mp4",
+            "duration": 1.0,
+            "status": "completed",
+            "result": {
+                "text": "生成失败",
+                "segments": [
+                    {
+                        "id": 0,
+                        "start": 0.0,
+                        "end": 1.0,
+                        "text": "生成失败",
+                        "words": [
+                            {"text": "生成失败", "start": 0.0, "end": 1.0}
+                        ],
+                    }
+                ],
+            },
+            "edit": None,
+            "art": None,
+            "artSuggestion": None,
+            "pictureInPictureImages": [],
+            "pictureInPictureVideos": [],
+            "pictureInPicture": None,
+            "composition": None,
+        }
+        app_module.JOB_FILES[job_id] = video_path
+
+    with TestClient(app_module.app) as client:
+        response = client.post(
+            f"/api/transcriptions/{job_id}/compose",
+            json={"target": "all", "ranges": []},
+        )
+        payload = client.get(f"/api/transcriptions/{job_id}").json()
+
+    assert response.status_code == 202
+    assert payload["composition"]["status"] == "failed"
+    assert payload["composition"]["error"] == "测试生成失败"
+    assert not job_dir.exists()
+    assert job_id not in app_module.JOB_FILES
 
 
 def test_art_text_rejects_invalid_overlay_time():
@@ -4779,6 +5998,16 @@ def test_full_transcript_art_track_uses_word_times_and_single_line_cues():
     assert result["cues"][0]["end"] == words[5]["end"]
     assert result["cues"][1]["start"] == words[5]["end"]
     assert result["cues"][-1]["end"] == words[-1]["end"]
+    assert result["cues"][0]["characterTimings"][:3] == [
+        {"start": 0.0, "end": 0.14},
+        {"start": 0.14, "end": 0.28},
+        {"start": 0.28, "end": 0.42},
+    ]
+    assert all(
+        len(cue["characterTimings"])
+        == len(app_module.content_characters(cue["text"]))
+        for cue in result["cues"]
+    )
 
 def test_full_transcript_art_track_keeps_complete_sentences_and_avoids_orphans():
     words = [
@@ -5410,7 +6639,10 @@ def test_full_transcript_art_track_keeps_spoken_clause_and_word_time_together():
         stroke_width=3,
     )
 
-    assert result["cues"] == [
+    assert [
+        {key: cue[key] for key in ("text", "start", "end")}
+        for cue in result["cues"]
+    ] == [
         {
             "text": "你身边人人都觉得",
             "start": 22.92,
@@ -5432,6 +6664,11 @@ def test_full_transcript_art_track_keeps_spoken_clause_and_word_time_together():
             "end": 32.2,
         },
     ]
+    assert all(
+        len(cue["characterTimings"])
+        == len(app_module.content_characters(cue["text"]))
+        for cue in result["cues"]
+    )
     assert all(
         len(app_module.content_characters(cue["text"]))
         <= app_module.TRANSCRIPT_ART_TEXT_MAX_CHARS_PER_CUE
@@ -5480,6 +6717,50 @@ def test_transcript_track_allows_many_cues_but_keeps_one_shared_style():
     inconsistent[-1] = inconsistent[-1].model_copy(update={"color": "#FFFFFF"})
     with pytest.raises(ValueError, match="同一套样式"):
         app_module.normalize_text_overlays(inconsistent, 3.0)
+
+
+def test_spoken_character_bounce_requires_matching_transcript_timings():
+    shared = {
+        "text": "同步",
+        "font": "bold",
+        "fontSize": 54,
+        "color": "#FFF36A",
+        "strokeColor": "#0A0A0A",
+        "strokeWidth": 4,
+        "shadow": True,
+        "x": 0.5,
+        "y": 0.82,
+        "start": 0.2,
+        "end": 1.0,
+        "direction": "horizontal",
+        "textAlign": "center",
+        "charsPerLine": 0,
+        "letterSpacing": 0,
+        "lineSpacing": 0,
+        "artStyle": "comic",
+        "trackId": "transcript-full",
+        "trackType": "transcript",
+        "animation": app_module.ArtTextAnimation(type="character-bounce"),
+    }
+    overlay = app_module.TextOverlay(
+        **shared,
+        characterTimings=[
+            app_module.ArtTextCharacterTiming(start=0.2, end=0.5),
+            app_module.ArtTextCharacterTiming(start=0.5, end=0.9),
+        ],
+    )
+
+    normalized = app_module.normalize_text_overlays([overlay], 1.2)
+
+    assert normalized[0]["characterTimings"] == [
+        {"start": 0.2, "end": 0.5},
+        {"start": 0.5, "end": 0.9},
+    ]
+    with pytest.raises(ValueError, match="缺少词级时间"):
+        app_module.normalize_text_overlays(
+            [app_module.TextOverlay(**shared)],
+            1.2,
+        )
 
 
 def test_transcript_track_rejects_legacy_long_cue_before_rendering():
@@ -5562,6 +6843,7 @@ def test_transcript_track_endpoint_uses_selected_video_transcript(
     assert response.status_code == 200
     assert response.json()["trackType"] == "transcript"
     assert "".join(cue["text"] for cue in response.json()["cues"]) == "词级同步"
+    assert len(response.json()["cues"][0]["characterTimings"]) == 4
 
 
 def test_transcript_track_endpoint_uses_live_cut_draft_with_source_anchors(
@@ -5908,6 +7190,117 @@ def test_impact_art_text_keeps_preview_like_thin_rim_and_soft_shadow(
     assert white_pixels < yellow_pixels * 0.18
 
 
+def test_center_highlight_art_text_renders_white_edges_and_yellow_center(
+    tmp_path: Path,
+):
+    output_path = tmp_path / "center-highlight.png"
+    overlay = {
+        "text": "别再乱买衣服啦!",
+        "font": "bold",
+        "fontSize": 72,
+        "color": "#FFF36A",
+        "strokeColor": "#0A0A0A",
+        "strokeWidth": 4,
+        "shadow": True,
+        "direction": "horizontal",
+        "textAlign": "center",
+        "charsPerLine": 0,
+        "letterSpacing": 0,
+        "lineSpacing": 8,
+        "artStyle": "comic",
+        "textColorMode": "center-highlight",
+        "secondaryColor": "#FFFFFF",
+    }
+
+    app_module.render_art_text_layer(output_path, overlay)
+
+    with Image.open(output_path).convert("RGBA") as rendered:
+        pixels = list(rendered.get_flattened_data())
+    white_pixels = sum(
+        1
+        for red, green, blue, alpha in pixels
+        if alpha > 220 and red > 238 and green > 238 and blue > 238
+    )
+    yellow_pixels = sum(
+        1
+        for red, green, blue, alpha in pixels
+        if alpha > 220 and red > 230 and green > 210 and blue < 150
+    )
+
+    assert white_pixels > 100
+    assert yellow_pixels > 100
+
+
+def test_character_bounce_art_text_asset_contains_multiple_frames(
+    tmp_path: Path,
+):
+    output_path = tmp_path / "character-bounce.png"
+    overlay = {
+        "text": "别再乱买衣服啦!",
+        "font": "bold",
+        "fontSize": 72,
+        "color": "#FFF36A",
+        "strokeColor": "#0A0A0A",
+        "strokeWidth": 4,
+        "shadow": True,
+        "direction": "horizontal",
+        "textAlign": "center",
+        "charsPerLine": 0,
+        "letterSpacing": 0,
+        "lineSpacing": 8,
+        "artStyle": "comic",
+        "textColorMode": "center-highlight",
+        "secondaryColor": "#FFFFFF",
+        "animation": {
+            "type": "character-bounce",
+            "duration": 0.56,
+            "stagger": 0.07,
+            "amplitude": 0.18,
+        },
+        "start": 0.0,
+        "end": 2.0,
+        "characterTimings": [
+            {"start": index * 0.2, "end": index * 0.2 + 0.16}
+            for index in range(8)
+        ],
+    }
+
+    assert app_module.render_art_text_asset(output_path, overlay) is True
+    with Image.open(output_path) as rendered:
+        assert rendered.is_animated
+        assert rendered.n_frames >= 24
+        rendered.seek(0)
+        first_frame = rendered.convert("RGBA").tobytes()
+        rendered.seek(rendered.n_frames // 2)
+        middle_frame = rendered.convert("RGBA").tobytes()
+
+    assert first_frame != middle_frame
+
+
+def test_character_bounce_without_speech_times_stays_static(tmp_path: Path):
+    output_path = tmp_path / "untimed-character-bounce.png"
+    overlay = {
+        "text": "没有时间",
+        "font": "bold",
+        "fontSize": 54,
+        "color": "#FFF36A",
+        "strokeColor": "#0A0A0A",
+        "strokeWidth": 3,
+        "shadow": True,
+        "direction": "horizontal",
+        "textAlign": "center",
+        "charsPerLine": 0,
+        "letterSpacing": 0,
+        "lineSpacing": 8,
+        "artStyle": "comic",
+        "animation": {"type": "character-bounce"},
+    }
+
+    assert app_module.render_art_text_asset(output_path, overlay) is False
+    with Image.open(output_path) as rendered:
+        assert not rendered.is_animated
+
+
 def test_impact_art_text_has_no_opaque_duplicate_glyph_below_text(
     tmp_path: Path,
 ):
@@ -5974,7 +7367,7 @@ def test_art_text_video_uses_short_relative_ffmpeg_command_for_many_cues(
         (Path(kwargs["cwd"]) / command[-1]).write_bytes(b"rendered")
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(app_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(app_module, "run_ffmpeg", fake_run)
     overlays = [
         {
             "text": f"第{index + 1}条同步文案",
@@ -6006,6 +7399,68 @@ def test_art_text_video_uses_short_relative_ffmpeg_command_for_many_cues(
     assert captured["cwd"] == input_path.parent
     assert str(input_path) not in command
     assert len(subprocess.list2cmdline(command)) < 12000
+    assert output_path.is_file()
+
+
+def test_character_bounce_video_plays_asset_once_from_overlay_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    input_path = tmp_path / "source.mp4"
+    output_path = tmp_path / "animated-art-text.mp4"
+    input_path.write_bytes(b"source")
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        app_module,
+        "probe_video_dimensions",
+        lambda path: (1080, 1920),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "render_art_text_asset",
+        lambda *args, **kwargs: True,
+    )
+
+    def fake_run_ffmpeg(command, **kwargs):
+        captured["command"] = command
+        filter_path = Path(kwargs["cwd"]) / command[
+            command.index("-filter_complex_script") + 1
+        ]
+        captured["filter"] = filter_path.read_text(encoding="utf-8")
+        (Path(kwargs["cwd"]) / command[-1]).write_bytes(b"rendered")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(app_module, "run_ffmpeg", fake_run_ffmpeg)
+    overlay = {
+        "text": "逐字跃动",
+        "font": "bold",
+        "fontSize": 72,
+        "color": "#FFF36A",
+        "strokeColor": "#0A0A0A",
+        "strokeWidth": 4,
+        "shadow": True,
+        "x": 0.5,
+        "y": 0.5,
+        "start": 1.25,
+        "end": 3.0,
+        "direction": "horizontal",
+        "textAlign": "center",
+        "charsPerLine": 0,
+        "letterSpacing": 0,
+        "lineSpacing": 8,
+        "artStyle": "comic",
+        "animation": {"type": "character-bounce"},
+    }
+
+    app_module.render_art_text_video(input_path, output_path, [overlay])
+
+    assert "-stream_loop" not in captured["command"]
+    assert ["-i", "art-text-0.png"] == captured["command"][
+        captured["command"].index("art-text-0.png") - 1 :
+        captured["command"].index("art-text-0.png") + 1
+    ]
+    assert "[1:v]setpts=PTS-STARTPTS+1.250/TB[art0]" in captured["filter"]
+    assert "[0:v][art0]overlay=" in captured["filter"]
     assert output_path.is_file()
 
 
@@ -6136,3 +7591,170 @@ def test_missing_job_returns_404():
         response = client.get("/api/transcriptions/not-found")
 
     assert response.status_code == 404
+
+
+def test_audio_quiet_ranges_detect_pause_hidden_inside_asr_word_block():
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    samples = array("h", [4_000]) * (sample_rate * 4)
+    quiet_start = round(1.0 * sample_rate)
+    quiet_end = round(3.2 * sample_rate)
+    samples[quiet_start:quiet_end] = array("h", [0]) * (quiet_end - quiet_start)
+
+    ranges = app_module.detect_audio_quiet_ranges(samples, 4.0)
+
+    assert ranges == [{"start": 1.0, "end": 3.2}]
+    suggestions = app_module.detect_no_speech_ranges(
+        [
+            {
+                "start": 0.0,
+                "end": 4.0,
+                "text": "你身边人人都觉得",
+                "words": [{"text": "你身边人人都觉得", "start": 0.0, "end": 4.0}],
+            }
+        ],
+        4.0,
+        samples,
+    )
+    assert [(item["start"], item["end"], item["audioState"]) for item in suggestions] == [
+        (1.2, 3.0, "quiet")
+    ]
+
+
+def test_retained_transcript_maps_audio_quiet_ranges_to_edited_timeline():
+    transcript = app_module.build_retained_transcript(
+        [
+            {
+                "start": 0.0,
+                "end": 5.0,
+                "text": "保留内容",
+                "words": [{"text": "保留内容", "start": 1.0, "end": 5.0}],
+            }
+        ],
+        [],
+        4.0,
+        timeline_delete_ranges=[{"start": 0.0, "end": 1.0}],
+        audio_quiet_ranges=[{"start": 2.0, "end": 3.5}],
+    )
+
+    assert transcript["audioQuietRanges"] == [{"start": 1.0, "end": 2.5}]
+
+
+def test_character_bounce_timings_skip_real_audio_pause():
+    timings = app_module.transcript_art_text_character_timings(
+        [{"text": "你身边人人都觉得", "start": 0.0, "end": 8.0}],
+        0.0,
+        8.0,
+        [{"start": 1.2, "end": 4.2}],
+    )
+
+    assert len(timings) == 8
+    assert all(not 1.2 <= timing["start"] < 4.2 for timing in timings)
+    assert any(timing["start"] >= 4.2 for timing in timings)
+
+
+def test_supplied_audio_aligned_timings_are_not_clamped_back_into_silence():
+    timings = app_module.transcript_art_text_character_timings(
+        [
+            {
+                "text": "AB",
+                "start": 0.0,
+                "end": 0.5,
+                "characterTimings": [
+                    {"start": 2.0, "end": 2.25},
+                    {"start": 2.25, "end": 2.5},
+                ],
+            }
+        ],
+        0.0,
+        0.5,
+        [{"start": 0.0, "end": 2.0}],
+    )
+
+    assert timings == [
+        {"start": 2.0, "end": 2.25},
+        {"start": 2.25, "end": 2.5},
+    ]
+
+
+def test_character_bounce_overlay_starts_at_voice_after_leading_pause():
+    overlays = app_module.align_text_overlays_to_audio_activity(
+        [
+            {
+                "text": "开始",
+                "start": 0.0,
+                "end": 4.0,
+                "animation": {"type": "character-bounce"},
+                "characterTimings": [
+                    {"start": 0.0, "end": 2.0},
+                    {"start": 2.0, "end": 4.0},
+                ],
+            }
+        ],
+        [{"start": 0.0, "end": 2.0}],
+    )
+
+    assert overlays[0]["start"] == pytest.approx(2.0)
+    assert all(timing["start"] >= 2.0 for timing in overlays[0]["characterTimings"])
+
+
+def test_static_transcript_overlays_share_segment_audio_alignment():
+    overlays = app_module.align_text_overlays_to_audio_activity(
+        [
+            {
+                "text": "AB",
+                "start": 0.0,
+                "end": 0.5,
+                "trackType": app_module.TRANSCRIPT_ART_TEXT_TRACK_TYPE,
+                "animation": {"type": "none"},
+                "characterTimings": [
+                    {"start": 0.0, "end": 0.25},
+                    {"start": 0.25, "end": 0.5},
+                ],
+            },
+            {
+                "text": "CD",
+                "start": 2.0,
+                "end": 3.0,
+                "trackType": app_module.TRANSCRIPT_ART_TEXT_TRACK_TYPE,
+                "animation": {"type": "none"},
+                "characterTimings": [
+                    {"start": 2.0, "end": 2.5},
+                    {"start": 2.5, "end": 3.0},
+                ],
+            },
+        ],
+        [{"start": 0.0, "end": 2.0}],
+        [{"start": 0.0, "end": 3.0, "text": "ABCD"}],
+    )
+
+    assert overlays[0]["start"] == pytest.approx(2.0)
+    assert overlays[0]["end"] <= overlays[1]["start"]
+    assert all(
+        timing["start"] >= 2.0
+        for overlay in overlays
+        for timing in overlay["characterTimings"]
+    )
+
+
+def test_cut_render_normalizes_output_audio(tmp_path: Path, monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_run_ffmpeg(command, **options):
+        captured["command"] = command
+        Path(command[-1]).write_bytes(b"rendered")
+        return type("Result", (), {"returncode": 0, "stderr": ""})()
+
+    monkeypatch.setattr(app_module, "run_ffmpeg", fake_run_ffmpeg)
+    output_path = tmp_path / "edited.mp4"
+
+    app_module.render_cut_video(
+        tmp_path / "source.mp4",
+        output_path,
+        [{"start": 1.0, "end": 2.0}],
+        4.0,
+    )
+
+    command = captured["command"]
+    filter_graph = command[command.index("-filter_complex") + 1]
+    assert app_module.CUT_AUDIO_LOUDNESS_FILTER in filter_graph
+    assert output_path.read_bytes() == b"rendered"

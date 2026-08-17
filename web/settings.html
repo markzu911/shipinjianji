@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="管理视频剪辑应用使用的模型名称、请求地址与 API Key。"
+    />
+    <title>模型设置 · 视频文字剪辑</title>
+    <link rel="stylesheet" href="/styles.css?v=20260812-03" />
+    <script src="https://code.iconify.design/iconify-icon/3.0.0/iconify-icon.min.js" defer></script>
+    <script src="/ui-feedback.js?v=20260807-03" defer></script>
+    <script src="/settings.js?v=20260812-01" defer></script>
+  </head>
+  <body class="settings-body">
+    <a class="skip-link" href="#main">跳到主要内容</a>
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="brand" href="/" aria-label="返回视频文字剪辑">
+          <span class="brand-mark" aria-hidden="true">
+            <iconify-icon icon="ph:waveform-bold"></iconify-icon>
+          </span>
+          <span>视频文字剪辑</span>
+        </a>
+        <div class="header-actions">
+          <span class="mvp-badge">模型设置</span>
+          <a class="header-restart-button header-link-button" href="/">
+            返回视频编辑
+          </a>
+        </div>
+      </div>
+    </header>
+
+    <main id="main" class="settings-shell">
+      <section class="settings-heading" aria-labelledby="settings-page-title">
+        <div>
+          <p class="eyebrow">AI 服务凭证</p>
+          <h1 id="settings-page-title">模型设置</h1>
+          <p>配置模型名称、兼容请求地址和 API Key。保存后立即生效。</p>
+        </div>
+        <div class="settings-summary" aria-live="polite">
+          <span id="configuredProviderCount">正在读取配置</span>
+        </div>
+      </section>
+
+      <section id="settingsLoading" class="panel settings-loading" aria-live="polite">
+        <span class="loading-spinner" aria-hidden="true"></span>
+        <strong>正在读取模型配置…</strong>
+      </section>
+
+      <section id="settingsError" class="panel settings-page-error" role="alert" hidden>
+        <iconify-icon icon="ph:warning-octagon-bold" aria-hidden="true"></iconify-icon>
+        <div>
+          <strong>模型配置读取失败</strong>
+          <p id="settingsErrorText">请确认本地服务正在运行后重试。</p>
+        </div>
+        <button id="retrySettingsButton" class="secondary-button compact-button" type="button">
+          重新读取
+        </button>
+      </section>
+
+      <div id="providerSettings" class="provider-settings" hidden></div>
+
+      <aside class="settings-security-note" aria-label="密钥安全说明">
+        <iconify-icon icon="ph:shield-check-bold" aria-hidden="true"></iconify-icon>
+        <p>
+          配置保存在项目根目录的 <code>.env</code> 中，浏览器不会读取 Key 明文。
+          自定义地址需要兼容对应服务商当前使用的 API 协议。
+        </p>
+      </aside>
+    </main>
+  </body>
+</html>

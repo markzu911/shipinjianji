@@ -32,6 +32,8 @@ const positionPresetMessage = document.querySelector(
   "#positionPresetMessage",
 );
 const positionPresetHint = document.querySelector("#positionPresetHint");
+const positionXPercent = document.querySelector("#positionXPercent");
+const positionYPercent = document.querySelector("#positionYPercent");
 const overlayCount = document.querySelector("#overlayCount");
 const customText = document.querySelector("#customText");
 const addCustomText = document.querySelector("#addCustomText");
@@ -90,7 +92,6 @@ const addAllRetainedSegments = document.querySelector(
 );
 const retainedBulkMessage = document.querySelector("#retainedBulkMessage");
 const generateArtVideo = document.querySelector("#generateArtVideo");
-const artHistoryName = document.querySelector("#artHistoryName");
 const artFormError = document.querySelector("#artFormError");
 const artProgress = document.querySelector("#artProgress");
 const artStatus = document.querySelector("#artStatus");
@@ -169,8 +170,10 @@ let aiSuggestionBusy = false;
 let availableFontIds = new Set(BUILTIN_FONT_IDS);
 let availableArtTemplateIds = new Set();
 const ART_STYLE_BASES = {};
+const ART_TEMPLATE_EFFECTS = {};
 let preferredArtFontId = "bold";
 let retainedTranscriptSegments = [];
+let retainedAudioQuietRanges = [];
 let selectedRetainedSegmentKeys = new Set();
 let transcriptTrackBusy = false;
 let transcriptTrackRefreshTimer = null;
@@ -183,16 +186,35 @@ let frameTimelineSignature = "";
 let frameTimelineRulerSignature = "";
 let frameTimelineResizeTimer = null;
 let editorHostCurrentTime = null;
+let editorHostPlaying = false;
 let editorHostStateSignature = "";
 let previewVisibilitySignature = "";
 let cutDraftActive = false;
 let pendingCutDraft = null;
 let appliedCutDraftState = null;
 let artEditorReady = false;
+const artTimelineStore = window.EditorTimeline.createStore(
+  { duration: 0, tracks: [] },
+  { onCommit: () => persistEmbeddedArtDraft() },
+);
 let preferredArtTemplateSettings = {
   id: "impact",
   color: "#FFD84D",
   strokeColor: "#15110A",
+  letterSpacing: 0,
+  textColorMode: "solid",
+  secondaryColor: "#FFD84D",
+  animation: {
+    type: "none",
+    duration: 0.56,
+    stagger: 0.07,
+    amplitude: 0.18,
+  },
+  characterLayout: {
+    type: "none",
+    rotationPattern: [],
+    verticalOffsetPattern: [],
+  },
   font: "bold",
   fontSize: 54,
 };
@@ -207,6 +229,7 @@ try {
     preferredArtTemplateSettings = {
       ...preferredArtTemplateSettings,
       ...savedTemplateSettings,
+      ...normalizedTemplateEffects(savedTemplateSettings),
     };
   }
 } catch {
@@ -272,6 +295,59 @@ async function loadFontLibrary() {
   if (availableFontIds.has(previousValue)) fontSelect.value = previousValue;
 }
 
+function normalizedTemplateEffects(template = {}) {
+  const animation = template.animation || {};
+  const characterLayout = template.characterLayout || {};
+  const staggered = characterLayout.type === "staggered";
+  const rotations = Array.isArray(characterLayout.rotationPattern)
+    ? characterLayout.rotationPattern
+        .slice(0, 12)
+        .map((value) => clamp(Number(value) || 0, -12, 12))
+    : [];
+  const verticalOffsets = Array.isArray(characterLayout.verticalOffsetPattern)
+    ? characterLayout.verticalOffsetPattern
+        .slice(0, 12)
+        .map((value) => clamp(Number(value) || 0, -0.25, 0.25))
+    : [];
+  return {
+    letterSpacing: clamp(Math.round(Number(template.letterSpacing) || 0), -20, 40),
+    textColorMode:
+      template.textColorMode === "center-highlight"
+        ? "center-highlight"
+        : "solid",
+    secondaryColor: normalizedTemplateColor(
+      template.secondaryColor,
+      template.color || "#FFFFFF",
+    ),
+    animation: {
+      type:
+        animation.type === "character-bounce"
+          ? "character-bounce"
+          : "none",
+      duration: clamp(Number(animation.duration) || 0.56, 0.2, 2),
+      stagger: clamp(Number(animation.stagger) || 0.07, 0, 0.3),
+      amplitude: clamp(Number(animation.amplitude) || 0.18, 0.05, 0.5),
+    },
+    characterLayout: {
+      type: staggered ? "staggered" : "none",
+      rotationPattern: staggered
+        ? rotations.length
+          ? rotations
+          : [-7, 5, -4, 3, -6, 4]
+        : [],
+      verticalOffsetPattern: staggered
+        ? verticalOffsets.length
+          ? verticalOffsets
+          : [0.06, -0.04, 0.03, -0.05]
+        : [],
+    },
+  };
+}
+
+function templateEffectsFor(artStyle) {
+  return ART_TEMPLATE_EFFECTS[artStyle] || normalizedTemplateEffects();
+}
+
 async function loadArtTemplateLibrary() {
   const response = await fetch("/api/art-templates");
   const payload = await response.json();
@@ -289,6 +365,7 @@ async function loadArtTemplateLibrary() {
       strokeColor: template.strokeColor,
     };
     ART_STYLE_BASES[template.id] = template.baseStyle || template.id;
+    ART_TEMPLATE_EFFECTS[template.id] = normalizedTemplateEffects(template);
 
     buttons.push(createArtStyleButton(template));
   }
@@ -300,6 +377,7 @@ async function loadArtTemplateLibrary() {
       ...preferredArtTemplateSettings,
       id: "impact",
       ...ART_STYLE_PALETTES.impact,
+      ...templateEffectsFor("impact"),
     };
   }
   renderTranscriptStyleGrid(templates);
@@ -310,6 +388,7 @@ function replaceUnavailableOverlayTemplates() {
     if (!availableArtTemplateIds.has(overlay.artStyle)) {
       overlay.artStyle = "impact";
       Object.assign(overlay, ART_STYLE_PALETTES.impact);
+      Object.assign(overlay, templateEffectsFor("impact"));
     }
   }
 }
@@ -324,6 +403,117 @@ function normalizedTemplateColor(value, fallback) {
   return /^#[0-9a-f]{6}$/i.test(String(value || ""))
     ? String(value).toUpperCase()
     : fallback;
+}
+
+function renderArtTextCharacters(
+  element,
+  text,
+  settings = {},
+  currentTime = null,
+  playing = true,
+) {
+  const value = String(text || "");
+  const effects = {
+    ...normalizedTemplateEffects(settings),
+    color: settings.color || "#FFFFFF",
+  };
+  const visibleCount = [...value].filter(
+    (character) => !/\s/u.test(character),
+  ).length;
+  const characterTimings = Array.isArray(settings.characterTimings)
+    ? settings.characterTimings.filter(
+        (timing) =>
+          Number.isFinite(Number(timing?.start)) &&
+          Number.isFinite(Number(timing?.end)) &&
+          Number(timing.end) > Number(timing.start),
+      )
+    : [];
+  const hasSpeechTimings = characterTimings.length === visibleCount;
+  const isTimelineOverlay =
+    Number.isFinite(Number(settings.start)) &&
+    Number.isFinite(Number(settings.end));
+  const animateCharacters =
+    effects.animation.type === "character-bounce" &&
+    (hasSpeechTimings || !isTimelineOverlay);
+  const staggerCharacters = effects.characterLayout.type === "staggered";
+  const needsCharacters =
+    effects.textColorMode === "center-highlight" ||
+    animateCharacters ||
+    staggerCharacters;
+  element.classList.toggle("has-character-effect", needsCharacters);
+  element.setAttribute("aria-label", value);
+  if (!needsCharacters) {
+    element.textContent = value;
+    return;
+  }
+
+  const highlightStart = Math.floor(visibleCount * 0.25);
+  const highlightEnd = Math.ceil(visibleCount * 0.75);
+  let visibleIndex = 0;
+  const nodes = [];
+  for (const character of value) {
+    if (/\s/u.test(character)) {
+      nodes.push(document.createTextNode(character));
+      continue;
+    }
+    const span = document.createElement("span");
+    span.className = "art-character";
+    span.textContent = character;
+    span.setAttribute("aria-hidden", "true");
+    if (effects.textColorMode === "center-highlight") {
+      span.style.color =
+        highlightStart <= visibleIndex && visibleIndex < highlightEnd
+          ? effects.color
+          : effects.secondaryColor;
+    }
+    if (staggerCharacters) {
+      const rotations = effects.characterLayout.rotationPattern;
+      const offsets = effects.characterLayout.verticalOffsetPattern;
+      span.classList.add("is-character-staggered");
+      span.style.setProperty(
+        "--art-character-rotation",
+        `${rotations[visibleIndex % rotations.length]}deg`,
+      );
+      span.style.setProperty(
+        "--art-character-offset",
+        `${offsets[visibleIndex % offsets.length]}em`,
+      );
+    }
+    if (animateCharacters) {
+      span.classList.add("is-character-bounce");
+      if (hasSpeechTimings) {
+        const timing = characterTimings[visibleIndex];
+        const spokenDuration = Number(timing.end) - Number(timing.start);
+        span.style.animationDuration = `${Math.min(
+          effects.animation.duration,
+          Math.max(0.2, spokenDuration + 0.18),
+        )}s`;
+        span.style.animationDelay = `${
+          Number(timing.start) - (Number(currentTime) || 0)
+        }s`;
+        span.style.animationPlayState = playing ? "running" : "paused";
+      } else {
+        span.style.animationDuration = `${effects.animation.duration}s`;
+        span.style.animationDelay = `${
+          visibleIndex * effects.animation.stagger
+        }s`;
+      }
+      span.style.setProperty(
+        "--art-character-lift",
+        `${effects.animation.amplitude}em`,
+      );
+    }
+    nodes.push(span);
+    visibleIndex += 1;
+  }
+  element.replaceChildren(...nodes);
+}
+
+function compactArtStyleSample(template) {
+  const characters = Array.from(
+    String(template.sample || template.name || "").replace(/\s+/gu, ""),
+  );
+  return characters.slice(0, 2).join("") || "艺字";
 }
 
 function createArtStyleButton(template, extraClass = "") {
@@ -341,9 +531,9 @@ function createArtStyleButton(template, extraClass = "") {
   const sample = document.createElement("span");
   sample.className =
     `art-style-sample style-${template.baseStyle || template.id}`;
-  sample.textContent = template.sample;
   sample.style.setProperty("--template-color", template.color);
   sample.style.setProperty("--template-stroke", template.strokeColor);
+  renderArtTextCharacters(sample, compactArtStyleSample(template), template);
   const copy = document.createElement("span");
   const name = document.createElement("strong");
   name.textContent = template.name;
@@ -379,6 +569,7 @@ function setTranscriptTrackTemplate(artStyle, options = {}) {
     ...preferredArtTemplateSettings,
     id: artStyle,
     ...ART_STYLE_PALETTES[artStyle],
+    ...templateEffectsFor(artStyle),
   };
   try {
     window.localStorage.setItem(
@@ -428,6 +619,7 @@ function fallbackTemplatesFromStyleButtons() {
         description: button.querySelector("small")?.textContent || "",
         source: "builtin",
         ...ART_STYLE_PALETTES[id],
+        ...templateEffectsFor(id),
       };
     })
     .filter(Boolean);
@@ -465,6 +657,7 @@ function applyRequestedTemplateSelection() {
       ? requestedFont
       : preferredArtFontId,
     fontSize: requestedSize,
+    ...templateEffectsFor(requestedStyle),
   };
 
   const overlay = selectedOverlay();
@@ -475,11 +668,27 @@ function applyRequestedTemplateSelection() {
       strokeColor: preferredArtTemplateSettings.strokeColor,
       font: preferredArtTemplateSettings.font,
       fontSize: preferredArtTemplateSettings.fontSize,
+      letterSpacing: preferredArtTemplateSettings.letterSpacing,
+      textColorMode: preferredArtTemplateSettings.textColorMode,
+      secondaryColor: preferredArtTemplateSettings.secondaryColor,
+      animation: { ...preferredArtTemplateSettings.animation },
+      characterLayout: {
+        ...preferredArtTemplateSettings.characterLayout,
+        rotationPattern: [
+          ...(preferredArtTemplateSettings.characterLayout?.rotationPattern || []),
+        ],
+        verticalOffsetPattern: [
+          ...(preferredArtTemplateSettings.characterLayout?.verticalOffsetPattern || []),
+        ],
+      },
     };
     const targets = isTranscriptTrackOverlay(overlay)
       ? transcriptTrackOverlays(overlay.trackId)
       : [overlay];
     for (const target of targets) Object.assign(target, templateChanges);
+    if (templateChanges.animation.type === "character-bounce") {
+      hydrateOverlayCharacterTimings(targets);
+    }
   }
   try {
     window.localStorage.setItem(
@@ -1125,6 +1334,7 @@ function renderFrameTimelineOverlaySegments() {
     ...overlays.map((overlay) => ({ overlay, isDraft: false })),
     ...(previewDraft ? [{ overlay: previewDraft, isDraft: true }] : []),
   ];
+  syncArtTimelineModel();
   const trackIndexes = new Map();
   for (const { overlay, isDraft } of items) {
     const trackKey = isDraft
@@ -1156,6 +1366,11 @@ function renderFrameTimelineOverlaySegments() {
     if (!isDraft) {
       segment.type = "button";
       segment.dataset.overlayId = String(overlay.id);
+      segment.dataset.timelineClipId = artTimelineClipId(overlay.id);
+      const timelineClip = artTimelineStore.findClip(
+        artTimelineClipId(overlay.id),
+      );
+      if (timelineClip) segment.dataset.timelineTrackId = timelineClip.trackId;
       segment.dataset.effectStart = String(start);
       segment.dataset.effectEnd = String(end);
       segment.setAttribute(
@@ -1175,7 +1390,10 @@ function renderFrameTimelineOverlaySegments() {
     if (!isDraft) segment.setAttribute("aria-pressed", String(isSelected));
     segment.classList.toggle("is-draft", isDraft);
     const isEditable = !isDraft && !isTranscriptTrackOverlay(overlay);
-    if (isEditable) segment.dataset.timelineEditable = "true";
+    if (isEditable) {
+      segment.dataset.timelineEditable = "true";
+      segment.dataset.timelineClipEditable = "true";
+    }
     const trackKey = isDraft
       ? `draft:${overlay.draftId}`
       : isTranscriptTrackOverlay(overlay)
@@ -1194,8 +1412,9 @@ function renderFrameTimelineOverlaySegments() {
     if (isEditable) {
       for (const mode of ["start", "end"]) {
         const handle = document.createElement("span");
-        handle.className = `art-timeline-handle is-${mode}`;
+        handle.className = `art-timeline-handle timeline-clip-handle is-${mode}`;
         handle.dataset.artTimeDrag = mode;
+        handle.dataset.timelineResize = mode;
         handle.setAttribute("aria-hidden", "true");
         segment.append(handle);
       }
@@ -1205,25 +1424,46 @@ function renderFrameTimelineOverlaySegments() {
   notifyEditorHost();
 }
 
+function syncFrameTimelineSegmentRange(overlay) {
+  if (!frameTimelineSegments || !overlay) return;
+  const total = frameTimelineDuration();
+  if (total <= 0) return;
+  const segment = Array.from(
+    frameTimelineSegments.querySelectorAll("[data-overlay-id]"),
+  ).find((item) => item.dataset.overlayId === String(overlay.id));
+  if (!segment) return;
+  const start = clamp(Number(overlay.start) || 0, 0, total);
+  const end = clamp(Number(overlay.end) || start, start, total);
+  segment.dataset.effectStart = String(start);
+  segment.dataset.effectEnd = String(end);
+  segment.style.left = `${(start / total) * 100}%`;
+  segment.style.width = `${Math.max(0.8, ((end - start) / total) * 100)}%`;
+  segment.title = `${overlay.text || ""} ${formatRange(start, end)}`.trim();
+  segment.setAttribute(
+    "aria-label",
+    `${overlay.text || "艺术字"}：${formatRange(start, end)}`,
+  );
+}
+
 function updateManualOverlayTimelineRange(overlay, start, end) {
   if (!overlay || isTranscriptTrackOverlay(overlay)) return false;
-  const safeStart = clamp(
-    Number(start) || 0,
-    0,
-    Math.max(0, duration - FRAME_TIMELINE_MIN_OVERLAY_DURATION),
+  syncArtTimelineModel();
+  const clip = artTimelineStore.setClipRange(
+    artTimelineClipId(overlay.id),
+    start,
+    end,
+    { silent: true },
   );
-  const safeEnd = clamp(
-    Number(end) || safeStart + FRAME_TIMELINE_MIN_OVERLAY_DURATION,
-    safeStart + FRAME_TIMELINE_MIN_OVERLAY_DURATION,
-    duration,
-  );
-  Object.assign(overlay, { start: safeStart, end: safeEnd });
+  if (!clip) return false;
+  Object.assign(overlay, { start: clip.start, end: clip.end });
   anchorOverlayToSourceTimeline(
     overlay,
     appliedCutDraftState || pendingCutDraft,
     true,
   );
   selectedOverlayId = overlay.id;
+  artTimelineStore.selectClip(clip.id, { silent: true });
+  syncFrameTimelineSegmentRange(overlay);
   return true;
 }
 
@@ -1250,9 +1490,29 @@ function beginFrameTimelineSegmentAdjustment(event) {
   const mode =
     event.target.closest("[data-art-time-drag]")?.dataset.artTimeDrag ||
     "move";
-  const original = { start: overlay.start, end: overlay.end };
   const startClientX = event.clientX;
   const total = frameTimelineDuration();
+  syncArtTimelineModel();
+  const pointerSession = window.EditorTimeline.createPointerSession(
+    artTimelineStore,
+    {
+      clipId: artTimelineClipId(overlay.id),
+      mode,
+      startClientX,
+      trackWidth: frameTimelineTrack.getBoundingClientRect().width,
+      duration: total,
+      onUpdate: (clip) => {
+        Object.assign(overlay, { start: clip.start, end: clip.end });
+        anchorOverlayToSourceTimeline(
+          overlay,
+          appliedCutDraftState || pendingCutDraft,
+          true,
+        );
+        syncFrameTimelineSegmentRange(overlay);
+      },
+    },
+  );
+  if (!pointerSession) return;
   let moved = false;
   segment.classList.add("is-selected");
   renderControls();
@@ -1265,28 +1525,8 @@ function beginFrameTimelineSegmentAdjustment(event) {
       return;
     }
     moved = true;
-    const bounds = frameTimelineTrack.getBoundingClientRect();
-    const delta = ((moveEvent.clientX - startClientX) / bounds.width) * total;
-    let start = original.start;
-    let end = original.end;
-    if (mode === "start") {
-      start = clamp(
-        original.start + delta,
-        0,
-        original.end - FRAME_TIMELINE_MIN_OVERLAY_DURATION,
-      );
-    } else if (mode === "end") {
-      end = clamp(
-        original.end + delta,
-        original.start + FRAME_TIMELINE_MIN_OVERLAY_DURATION,
-        total,
-      );
-    } else {
-      const length = original.end - original.start;
-      start = clamp(original.start + delta, 0, total - length);
-      end = start + length;
-    }
-    if (!updateManualOverlayTimelineRange(overlay, start, end)) return;
+    const clip = pointerSession.update(moveEvent.clientX);
+    if (!clip) return;
     segment.classList.add("is-dragging");
     segment.style.left = `${(overlay.start / total) * 100}%`;
     segment.style.width = `${Math.max(
@@ -1305,6 +1545,7 @@ function beginFrameTimelineSegmentAdjustment(event) {
     window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", finish);
     window.removeEventListener("pointercancel", finish);
+    pointerSession.finish();
     renderEditor();
     updateFrameTimelineStatus(
       moved
@@ -1383,6 +1624,10 @@ const TRANSCRIPT_TRACK_STYLE_KEYS = new Set([
   "textAlign",
   "letterSpacing",
   "artStyle",
+  "textColorMode",
+  "secondaryColor",
+  "animation",
+  "characterLayout",
 ]);
 
 function isTranscriptTrackOverlay(overlay) {
@@ -1399,6 +1644,61 @@ function transcriptTrackOverlays(trackId = null) {
 
 function currentTranscriptTrack() {
   return transcriptTrackOverlays();
+}
+
+function artTimelineClipId(overlayId) {
+  return `art:${overlayId}`;
+}
+
+function buildArtTimelineTracks() {
+  const tracks = new Map();
+  for (const overlay of overlays) {
+    const transcriptTrack = isTranscriptTrackOverlay(overlay);
+    const trackId = transcriptTrack
+      ? `art:transcript:${overlay.trackId}`
+      : `art:overlay:${overlay.id}`;
+    if (!tracks.has(trackId)) {
+      tracks.set(trackId, {
+        id: trackId,
+        kind: "art",
+        name: transcriptTrack
+          ? "全文艺术字轨道"
+          : String(overlay.text || "艺术字"),
+        order: tracks.size,
+        locked: transcriptTrack,
+        clips: [],
+      });
+    }
+    tracks.get(trackId).clips.push({
+      id: artTimelineClipId(overlay.id),
+      sourceId: overlay.id,
+      name: String(overlay.text || "艺术字"),
+      start: overlay.start,
+      end: overlay.end,
+      minDuration: transcriptTrack ? 0.02 : FRAME_TIMELINE_MIN_OVERLAY_DURATION,
+      editable: !transcriptTrack,
+      locked: transcriptTrack,
+      payload: {
+        text: String(overlay.text || ""),
+        x: Number(overlay.x),
+        y: Number(overlay.y),
+        trackId: overlay.trackId || null,
+        trackType: overlay.trackType || null,
+      },
+    });
+  }
+  return [...tracks.values()];
+}
+
+function syncArtTimelineModel() {
+  artTimelineStore.setDuration(duration, { silent: true });
+  return artTimelineStore.replaceKind("art", buildArtTimelineTracks(), {
+    selection:
+      selectedOverlayId === null
+        ? null
+        : artTimelineClipId(selectedOverlayId),
+    silent: true,
+  });
 }
 
 function manualOverlayCount() {
@@ -1745,11 +2045,53 @@ function createOverlay(text, start, end, values = {}, options = {}) {
     charsPerLine: Number.isFinite(Number(values.charsPerLine))
       ? Number(values.charsPerLine)
       : 10,
-    letterSpacing: Number(values.letterSpacing) || 0,
+    letterSpacing: Number.isFinite(Number(values.letterSpacing))
+      ? Number(values.letterSpacing)
+      : Number(preferredArtTemplateSettings.letterSpacing) || 0,
     lineSpacing: Number.isFinite(Number(values.lineSpacing))
       ? Number(values.lineSpacing)
       : 8,
     artStyle: values.artStyle || preferredStyle,
+    textColorMode:
+      values.textColorMode ||
+      (values.artStyle
+        ? templateEffectsFor(values.artStyle).textColorMode
+        : preferredArtTemplateSettings.textColorMode) ||
+      templateEffectsFor(values.artStyle || preferredStyle).textColorMode,
+    secondaryColor:
+      values.secondaryColor ||
+      (values.artStyle
+        ? templateEffectsFor(values.artStyle).secondaryColor
+        : preferredArtTemplateSettings.secondaryColor) ||
+      templateEffectsFor(values.artStyle || preferredStyle).secondaryColor,
+    animation: {
+      ...(values.animation ||
+        (values.artStyle
+          ? templateEffectsFor(values.artStyle).animation
+          : preferredArtTemplateSettings.animation) ||
+        templateEffectsFor(values.artStyle || preferredStyle).animation),
+    },
+    characterLayout: normalizedTemplateEffects({
+      characterLayout:
+        values.characterLayout ||
+        (values.artStyle
+          ? templateEffectsFor(values.artStyle).characterLayout
+          : preferredArtTemplateSettings.characterLayout) ||
+        templateEffectsFor(values.artStyle || preferredStyle).characterLayout,
+    }).characterLayout,
+    characterTimings: Array.isArray(values.characterTimings)
+      ? values.characterTimings
+          .map((timing) => ({
+            start: Number(timing?.start),
+            end: Number(timing?.end),
+          }))
+          .filter(
+            (timing) =>
+              Number.isFinite(timing.start) &&
+              Number.isFinite(timing.end) &&
+              timing.end > timing.start,
+          )
+      : [],
     trackId: isTranscriptCue ? String(values.trackId) : null,
     trackType: isTranscriptCue ? TRANSCRIPT_TRACK_TYPE : null,
     sourceStart: Number.isFinite(Number(values.sourceStart))
@@ -1759,6 +2101,12 @@ function createOverlay(text, start, end, values = {}, options = {}) {
       ? Number(values.sourceEnd)
       : null,
   };
+  if (
+    overlay.animation.type === "character-bounce" &&
+    !overlay.characterTimings.length
+  ) {
+    hydrateOverlayCharacterTimings([overlay]);
+  }
   anchorOverlayToSourceTimeline(
     overlay,
     appliedCutDraftState || (artEditorReady ? pendingCutDraft : null),
@@ -1783,6 +2131,7 @@ function addExistingOverlays(items) {
     letterSpacing: 0,
     lineSpacing: 8,
     artStyle: "impact",
+    characterTimings: [],
     trackId: null,
     trackType: null,
     ...item,
@@ -1797,32 +2146,36 @@ function embeddedArtDraftKey() {
 }
 
 function persistEmbeddedArtDraft() {
-  if (!embeddedEditor || !jobId) return;
-  try {
-    window.sessionStorage.setItem(
-      embeddedArtDraftKey(),
-      JSON.stringify({
-        overlays: [...overlays, ...cutSuppressedOverlays],
-        selectedOverlayId,
-      }),
-    );
-  } catch {
-    // The editor remains usable when private browsing blocks session storage.
-  }
+  if (!jobId) return;
+  const timeline = syncArtTimelineModel();
+  window.EditorTimeline.saveDraft(
+    window.sessionStorage,
+    embeddedArtDraftKey(),
+    timeline,
+    {
+      overlays: [...overlays, ...cutSuppressedOverlays],
+      selectedOverlayId,
+    },
+  );
 }
 
 function restoreEmbeddedArtDraft() {
-  if (!embeddedEditor || !jobId) return false;
-  try {
-    const saved = JSON.parse(
-      window.sessionStorage.getItem(embeddedArtDraftKey()) || "null",
-    );
-    if (!saved || !Array.isArray(saved.overlays)) return false;
-    addExistingOverlays(saved.overlays);
-    return true;
-  } catch {
-    return false;
+  if (!jobId) return false;
+  const envelope = window.EditorTimeline.loadDraft(
+    window.sessionStorage,
+    embeddedArtDraftKey(),
+  );
+  const saved = envelope?.metadata;
+  if (!saved || !Array.isArray(saved.overlays)) return false;
+  const selectedIndex = saved.overlays.findIndex(
+    (overlay) => String(overlay.id) === String(saved.selectedOverlayId),
+  );
+  addExistingOverlays(saved.overlays);
+  if (selectedIndex >= 0 && overlays[selectedIndex]) {
+    selectedOverlayId = overlays[selectedIndex].id;
   }
+  syncArtTimelineModel();
+  return true;
 }
 
 function overlayScale() {
@@ -2068,10 +2421,24 @@ function positionPreviewOverlay(element, overlay, cachedSize = null) {
 // Live coordinate readout for the selected art text: normalized percentages
 // plus the pixel center on the overlay layer. Shown in the top-left corner of
 // the stage while an overlay is selected; updates during drag.
+function formatPositionPercent(value) {
+  return String(Math.round(value * 1000) / 10);
+}
+
+function syncPositionCoordinateInputs(overlay) {
+  if (document.activeElement !== positionXPercent) {
+    positionXPercent.value = overlay ? formatPositionPercent(overlay.x) : "";
+  }
+  if (document.activeElement !== positionYPercent) {
+    positionYPercent.value = overlay ? formatPositionPercent(overlay.y) : "";
+  }
+}
+
 function syncOverlayCoordinateReadout() {
   const readout = overlayCoordinateReadout;
   if (!readout) return;
   const overlay = selectedOverlay();
+  syncPositionCoordinateInputs(overlay);
   if (!overlay || !overlayLayer.clientWidth || !overlayLayer.clientHeight) {
     readout.hidden = true;
     if (positionPresetHint) {
@@ -2089,6 +2456,27 @@ function syncOverlayCoordinateReadout() {
   if (positionPresetHint) {
     positionPresetHint.textContent = `当前坐标：横向 ${percentX}% · 纵向 ${percentY}%`;
   }
+}
+
+function commitPositionCoordinate(axis, input, options = {}) {
+  const overlay = selectedOverlay();
+  if (!overlay) return;
+  const rawPercent = Number(input.value);
+  if (!Number.isFinite(rawPercent) || input.value.trim() === "") {
+    if (options.finalize) {
+      input.value = formatPositionPercent(overlay[axis]);
+    }
+    return;
+  }
+  if (!options.finalize && !input.validity.valid) {
+    return;
+  }
+  const percent = clamp(rawPercent, 5, 95);
+  updateSelectedOverlay({ [axis]: percent / 100 });
+  if (options.finalize) {
+    input.value = formatPositionPercent(percent / 100);
+  }
+  renderPositionPresetMessage("");
 }
 
 let positionPresets = [];
@@ -2420,6 +2808,32 @@ function previewPlaybackTime() {
   return clamp(current, 0, duration || Infinity);
 }
 
+function previewIsPlaying() {
+  return embeddedEditor
+    ? editorHostPlaying
+    : !artVideo.paused && !artVideo.ended;
+}
+
+function speechAnimationPreviewSignature(overlay, currentTime) {
+  if (
+    overlay.animation?.type !== "character-bounce" ||
+    !Array.isArray(overlay.characterTimings) ||
+    !overlay.characterTimings.length
+  ) {
+    return "";
+  }
+  let activeIndex = -1;
+  for (let index = 0; index < overlay.characterTimings.length; index += 1) {
+    if (currentTime + 0.0001 < Number(overlay.characterTimings[index].start)) {
+      break;
+    }
+    activeIndex = index;
+  }
+  return previewIsPlaying()
+    ? `spoken:${activeIndex}:playing`
+    : `spoken:${activeIndex}:paused:${Math.round(currentTime * 24)}`;
+}
+
 function seekEditorPreview(seconds) {
   const nextTime = clamp(Number(seconds) || 0, 0, duration || Infinity);
   if (embeddedEditor && window.parent !== window) {
@@ -2448,7 +2862,11 @@ function renderPreview(options = {}) {
     ...(previewDraft ? [{ overlay: previewDraft, isDraft: true }] : []),
   ].filter(({ overlay }) => isOverlayVisibleAtTime(overlay, currentTime));
   const nextVisibilitySignature = visibleItems
-    .map(({ overlay, isDraft }) => `${isDraft ? "draft" : "overlay"}:${overlay.id ?? overlay.draftId}`)
+    .map(
+      ({ overlay, isDraft }) =>
+        `${isDraft ? "draft" : "overlay"}:${overlay.id ?? overlay.draftId}:` +
+        speechAnimationPreviewSignature(overlay, currentTime),
+    )
     .join("|");
   if (options.timeOnly && nextVisibilitySignature === previewVisibilitySignature) {
     return;
@@ -2468,7 +2886,13 @@ function renderPreview(options = {}) {
       );
     element.className = "preview-overlay";
     if (!isDraft) element.dataset.overlayId = String(overlay.id);
-    element.textContent = formatOverlayText(overlay) || "请输入文字";
+    renderArtTextCharacters(
+      element,
+      formatOverlayText(overlay) || "请输入文字",
+      overlay,
+      currentTime,
+      previewIsPlaying(),
+    );
     element.classList.toggle("is-draft", isDraft);
     element.classList.toggle("is-selected", isSelected);
     applyPreviewStyle(element, overlay);
@@ -2485,6 +2909,7 @@ function renderPreview(options = {}) {
 }
 
 function notifyEditorHost(options = {}) {
+  const timeline = syncArtTimelineModel();
   const state = {
     overlayHtml: overlayLayer.innerHTML,
     overlayWidth: overlayLayer.clientWidth,
@@ -2497,13 +2922,13 @@ function notifyEditorHost(options = {}) {
         (segment) => Number(segment.dataset.timelineTrackIndex) + 1,
       ),
     ),
+    timeline,
     generationDisabled: generateArtVideo.disabled,
     generationLabel: generateArtVideo.textContent.trim(),
     generationBusy: !artProgress.hidden,
     generationError: artFormError.hidden ? "" : artFormError.textContent.trim(),
     generationPayload: {
       source: videoSource,
-      historyName: artHistoryName.value.trim() || null,
       overlays: overlays.map(({ id, ...overlay }) => overlay),
     },
   };
@@ -2554,6 +2979,7 @@ async function refreshArtAfterTranscriptUpdate() {
     if (Array.isArray(transcript.segments) && transcript.segments.length) {
       renderRetainedTranscript({
         text: transcript.text || "",
+        audioQuietRanges: transcript.audioQuietRanges || [],
         segments: transcript.segments.map((segment) => ({
           ...segment,
           start: clamp(Number(segment.start) || 0, 0, nextDuration),
@@ -2586,8 +3012,10 @@ async function refreshArtAfterTranscriptUpdate() {
 function buildTranscriptWordMatchIndex(transcript) {
   const wordByStartOffset = new Map();
   const wordByEndOffset = new Map();
+  const characterTimings = [];
   let text = "";
   for (const segment of transcript?.segments || []) {
+    const segmentCharacterTimings = [];
     const segmentWords = Array.isArray(segment.words) && segment.words.length
       ? segment.words
       : [segment];
@@ -2615,12 +3043,31 @@ function buildTranscriptWordMatchIndex(transcript) {
           ? Number(word.sourceEnd)
           : null,
       };
+      const wordDuration = end - start;
+      for (let index = 0; index < comparableText.length; index += 1) {
+        segmentCharacterTimings.push({
+          start: start + (wordDuration * index) / comparableText.length,
+          end: start + (wordDuration * (index + 1)) / comparableText.length,
+        });
+      }
       text += comparableText;
       wordByStartOffset.set(item.textStart, item);
       wordByEndOffset.set(item.textEnd, item);
     }
+    const segmentStart = segmentCharacterTimings[0]?.start;
+    const segmentEnd = segmentCharacterTimings.at(-1)?.end;
+    characterTimings.push(
+      ...(Number.isFinite(segmentStart) && Number.isFinite(segmentEnd)
+        ? alignCharacterTimingsToAudioActivity(
+            segmentCharacterTimings,
+            segmentStart,
+            segmentEnd,
+            transcript?.audioQuietRanges || [],
+          )
+        : segmentCharacterTimings),
+    );
   }
-  return { text, wordByStartOffset, wordByEndOffset };
+  return { text, wordByStartOffset, wordByEndOffset, characterTimings };
 }
 
 function matchOverlayToTranscriptWords(overlay, index, state) {
@@ -2665,19 +3112,47 @@ function matchOverlayToTranscriptWords(overlay, index, state) {
           timelineDistance < bestTimelineDistance
         )
       ) {
+        const matchedCharacterTimings = index.characterTimings.slice(
+          offset,
+          offset + target.length,
+        );
         bestSourceDistance = sourceDistance;
         bestTimelineDistance = timelineDistance;
         bestMatch = {
-          start: firstWord.start,
-          end: lastWord.end,
+          start: matchedCharacterTimings[0]?.start ?? firstWord.start,
+          end: matchedCharacterTimings.at(-1)?.end ?? lastWord.end,
           sourceStart: firstWord.sourceStart,
           sourceEnd: lastWord.sourceEnd,
+          characterTimings: matchedCharacterTimings,
         };
       }
     }
     offset = index.text.indexOf(target, offset + 1);
   }
   return bestMatch;
+}
+
+function hydrateOverlayCharacterTimings(items) {
+  const transcript = currentCutDraftTranscript() || {
+    segments: retainedTranscriptSegments,
+    audioQuietRanges: retainedAudioQuietRanges,
+  };
+  if (!Array.isArray(transcript.segments) || !transcript.segments.length) {
+    return;
+  }
+  const index = buildTranscriptWordMatchIndex(transcript);
+  const state = currentCutDraftTranscript() ? pendingCutDraft : null;
+  for (const overlay of items) {
+    const match = matchOverlayToTranscriptWords(overlay, index, state);
+    if (
+      match?.characterTimings?.length ===
+      Array.from(String(overlay.text || "")).filter(
+        (character) => !/\s/u.test(character),
+      ).length
+    ) {
+      overlay.characterTimings = match.characterTimings;
+    }
+  }
 }
 
 function retimeDraftAnchoredOverlays(data) {
@@ -2710,6 +3185,7 @@ function retimeDraftAnchoredOverlays(data) {
         overlay.sourceStart = wordMatch.sourceStart;
         overlay.sourceEnd = wordMatch.sourceEnd;
       }
+      overlay.characterTimings = wordMatch.characterTimings;
       retained.push(overlay);
       matchedCount += 1;
       continue;
@@ -2852,11 +3328,43 @@ function handleEditorHostMessage(event) {
   if (data.type === "editor-suite:sync-time") {
     const nextTime = clamp(Number(data.currentTime) || 0, 0, duration || Infinity);
     editorHostCurrentTime = nextTime;
+    editorHostPlaying = Boolean(data.playing);
     renderPreview({ timeOnly: true });
     return;
   }
   if (data.type === "editor-suite:transcript-updated") {
     void refreshArtAfterTranscriptUpdate();
+    return;
+  }
+  if (data.type === "editor-suite:timeline-action" && data.kind === "art") {
+    const overlay = overlays.find(
+      (item) => String(item.id) === String(data.sourceId),
+    );
+    if (!overlay) return;
+    selectedOverlayId = overlay.id;
+    artTimelineStore.selectClip(artTimelineClipId(overlay.id), { silent: true });
+    if (data.action === "set-range") {
+      if (!updateManualOverlayTimelineRange(overlay, data.start, data.end)) return;
+      editorHostCurrentTime = clamp(
+        Number(data.currentTime) || overlay.start,
+        0,
+        duration,
+      );
+      renderControls();
+      renderPreview();
+      return;
+    }
+    if (data.action === "commit") {
+      artTimelineStore.commit("host-timeline");
+      renderEditor();
+      return;
+    }
+    editorHostCurrentTime = clamp(
+      Number(data.currentTime) || overlay.start,
+      0,
+      duration,
+    );
+    renderEditor();
     return;
   }
   if (data.type === "editor-suite:select-art-timeline") {
@@ -3131,7 +3639,156 @@ function transcriptTrackDisplayText(words) {
     .trim();
 }
 
-function cutDraftTimedTranscriptWords(segment) {
+function alignCharacterTimingsToAudioActivity(
+  timings,
+  cueStart,
+  cueEnd,
+  audioQuietRanges = [],
+) {
+  if (!timings.length || cueEnd <= cueStart || !audioQuietRanges.length) {
+    return timings;
+  }
+  const clipped = [];
+  for (const quietRange of audioQuietRanges) {
+    const start = Math.max(cueStart, Number(quietRange?.start));
+    const end = Math.min(cueEnd, Number(quietRange?.end));
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
+    const previous = clipped.at(-1);
+    if (previous && start <= previous.end + 0.001) {
+      previous.end = Math.max(previous.end, end);
+    } else {
+      clipped.push({ start, end });
+    }
+  }
+  const overlapsQuiet = timings.some((timing) =>
+    clipped.some(
+      (quiet) => timing.start < quiet.end && timing.end > quiet.start,
+    ),
+  );
+  if (!clipped.length || !overlapsQuiet) return timings;
+
+  const activeSpans = [];
+  let cursor = cueStart;
+  for (const quiet of clipped) {
+    if (quiet.start > cursor + 0.001) {
+      activeSpans.push({ start: cursor, end: quiet.start });
+    }
+    cursor = Math.max(cursor, quiet.end);
+  }
+  if (cursor < cueEnd - 0.001) activeSpans.push({ start: cursor, end: cueEnd });
+  const activeDuration = activeSpans.reduce(
+    (total, span) => total + span.end - span.start,
+    0,
+  );
+  if (!activeSpans.length || activeDuration <= 0.001) return timings;
+
+  const weights = timings.map((timing) =>
+    Math.max(0.001, Number(timing.end) - Number(timing.start)),
+  );
+  const totalWeight = weights.reduce((total, weight) => total + weight, 0);
+  const timelineTime = (activeOffset, endEdge = false) => {
+    let remaining = clamp(activeOffset, 0, activeDuration);
+    for (const [index, span] of activeSpans.entries()) {
+      const spanDuration = span.end - span.start;
+      if (remaining < spanDuration - 0.000001) return span.start + remaining;
+      if (Math.abs(remaining - spanDuration) <= 0.000001) {
+        return endEdge || index === activeSpans.length - 1
+          ? span.end
+          : activeSpans[index + 1].start;
+      }
+      remaining -= spanDuration;
+    }
+    return activeSpans.at(-1).end;
+  };
+
+  let consumedWeight = 0;
+  return weights.map((weight) => {
+    const startOffset = (activeDuration * consumedWeight) / totalWeight;
+    consumedWeight += weight;
+    const endOffset = (activeDuration * consumedWeight) / totalWeight;
+    const start = timelineTime(startOffset);
+    const end = timelineTime(endOffset, true);
+    return { start, end: Math.max(start + 0.001, end) };
+  });
+}
+
+function transcriptCharacterTimings(
+  words,
+  cueStart,
+  cueEnd,
+  cueText,
+  audioQuietRanges = [],
+) {
+  const targetCharacters = Array.from(String(cueText || "")).filter(
+    (character) => !/\s/u.test(character),
+  );
+  if (!targetCharacters.length || cueEnd <= cueStart) return [];
+  const rawTimings = [];
+  let suppliedAll = true;
+  for (const word of words) {
+    const characters = Array.from(String(word.text || "")).filter(
+      (character) => !/[\s\p{P}]/u.test(character),
+    );
+    const suppliedTimings = Array.isArray(word.characterTimings)
+      ? word.characterTimings
+      : [];
+    if (suppliedTimings.length === characters.length) {
+      rawTimings.push(...suppliedTimings.map((timing) => ({ ...timing })));
+      continue;
+    }
+    suppliedAll = false;
+    const start = Number(word.start);
+    const end = Number(word.end);
+    if (!characters.length || !Number.isFinite(start) || !Number.isFinite(end)) {
+      continue;
+    }
+    const wordDuration = Math.max(0.0001, end - start);
+    characters.forEach((character, index) => {
+      rawTimings.push({
+        start: start + (wordDuration * index) / characters.length,
+        end: start + (wordDuration * (index + 1)) / characters.length,
+      });
+    });
+  }
+  if (rawTimings.length === targetCharacters.length && suppliedAll) {
+    return rawTimings.map((timing) => ({
+      start: Number(timing.start),
+      end: Math.max(Number(timing.start) + 0.001, Number(timing.end)),
+    }));
+  }
+  let timings;
+  if (rawTimings.length !== targetCharacters.length) {
+    const cueDuration = cueEnd - cueStart;
+    timings = targetCharacters.map((character, index) => ({
+      start: cueStart + (cueDuration * index) / targetCharacters.length,
+      end: cueStart + (cueDuration * (index + 1)) / targetCharacters.length,
+    }));
+  } else {
+    const minimumDuration = Math.min(
+      0.001,
+      (cueEnd - cueStart) / Math.max(2, rawTimings.length * 2),
+    );
+    timings = rawTimings.map((timing) => {
+      const start = Math.min(
+        Math.max(timing.start, cueStart),
+        Math.max(cueStart, cueEnd - minimumDuration),
+      );
+      const end = Math.min(
+        cueEnd,
+        Math.max(timing.end, start + minimumDuration),
+      );
+      return { start, end };
+    });
+  }
+  return alignCharacterTimingsToAudioActivity(
+    timings,
+    cueStart,
+    cueEnd,
+    audioQuietRanges,
+  );
+}
+
+function cutDraftTimedTranscriptWords(segment, audioQuietRanges = []) {
   const rawWords = Array.isArray(segment.words) && segment.words.length
     ? segment.words
     : [segment];
@@ -3165,6 +3822,38 @@ function cutDraftTimedTranscriptWords(segment) {
   if (textOffset < segmentContent.length && timedWords.length) {
     timedWords.at(-1).text += segmentContent.slice(textOffset);
   }
+  const characterTimings = [];
+  for (const word of timedWords) {
+    const characters = Array.from(String(word.text || "")).filter(
+      (character) => !/[\s\p{P}]/u.test(character),
+    );
+    const start = Number(word.start);
+    const end = Number(word.end);
+    const wordDuration = Math.max(0.0001, end - start);
+    characters.forEach((character, index) => {
+      characterTimings.push({
+        start: start + (wordDuration * index) / characters.length,
+        end: start + (wordDuration * (index + 1)) / characters.length,
+      });
+    });
+  }
+  const alignedTimings = alignCharacterTimingsToAudioActivity(
+    characterTimings,
+    characterTimings[0]?.start ?? 0,
+    characterTimings.at(-1)?.end ?? 0,
+    audioQuietRanges,
+  );
+  let timingOffset = 0;
+  for (const word of timedWords) {
+    const characterCount = Array.from(String(word.text || "")).filter(
+      (character) => !/[\s\p{P}]/u.test(character),
+    ).length;
+    word.characterTimings = alignedTimings.slice(
+      timingOffset,
+      timingOffset + characterCount,
+    );
+    timingOffset += characterCount;
+  }
   return timedWords;
 }
 
@@ -3194,7 +3883,12 @@ function cutDraftTranscriptTrackCues(data, maxChars = TRANSCRIPT_TRACK_MAX_CHARS
     const start = Number(group[0].start);
     const end = Number(group.at(-1).end);
     if (text && Number.isFinite(start) && Number.isFinite(end) && end > start) {
-      const cue = { text, start, end };
+      const cue = {
+        text,
+        start,
+        end,
+        timedWords: [...group],
+      };
       const sourceStart = Number(group[0].sourceStart);
       const sourceEnd = Number(group.at(-1).sourceEnd);
       if (
@@ -3213,7 +3907,10 @@ function cutDraftTranscriptTrackCues(data, maxChars = TRANSCRIPT_TRACK_MAX_CHARS
   const sentences = [];
   for (const segment of data?.transcript?.segments || []) {
     let sentence = [];
-    for (const word of cutDraftTimedTranscriptWords(segment)) {
+    for (const word of cutDraftTimedTranscriptWords(
+      segment,
+      data?.transcript?.audioQuietRanges || [],
+    )) {
       sentence.push(word);
       if (strongBoundary(word)) {
         if (sentence.length) sentences.push(sentence);
@@ -3392,6 +4089,20 @@ function cutDraftTranscriptTrackCues(data, maxChars = TRANSCRIPT_TRACK_MAX_CHARS
     if (current.start - previous.start < 0.019) return [];
     previous.end = current.start;
   }
+  for (const cue of cues) {
+    cue.characterTimings = transcriptCharacterTimings(
+      cue.timedWords,
+      cue.start,
+      cue.end,
+      cue.text,
+      data?.transcript?.audioQuietRanges || [],
+    );
+    if (cue.characterTimings.length) {
+      cue.start = cue.characterTimings[0].start;
+      cue.end = cue.characterTimings.at(-1).end;
+    }
+    delete cue.timedWords;
+  }
   return cues;
 }
 
@@ -3413,6 +4124,7 @@ function replaceTranscriptTrackFromCutDraft(trackSeed, sharedStyle, data) {
         trackType: TRANSCRIPT_TRACK_TYPE,
         sourceStart: cue.sourceStart,
         sourceEnd: cue.sourceEnd,
+        characterTimings: cue.characterTimings,
       },
       { deferRender: true },
     );
@@ -3535,14 +4247,21 @@ function updateSelectedOverlay(changes, options = {}) {
         TRANSCRIPT_TRACK_STYLE_KEYS.has(key),
       ),
     );
-    for (const target of transcriptTrackOverlays(overlay.trackId)) {
+    const trackItems = transcriptTrackOverlays(overlay.trackId);
+    for (const target of trackItems) {
       Object.assign(target, sharedChanges, {
         direction: "horizontal",
         charsPerLine: 0,
       });
     }
+    if (sharedChanges.animation?.type === "character-bounce") {
+      hydrateOverlayCharacterTimings(trackItems);
+    }
   } else {
     Object.assign(overlay, changes);
+    if (changes.animation?.type === "character-bounce") {
+      hydrateOverlayCharacterTimings([overlay]);
+    }
     if (Object.hasOwn(changes, "start") || Object.hasOwn(changes, "end")) {
       anchorOverlayToSourceTimeline(
         overlay,
@@ -3583,10 +4302,23 @@ function applySelectedSettingsToAllOverlays() {
     letterSpacing: source.letterSpacing,
     lineSpacing: source.lineSpacing,
     artStyle: source.artStyle,
+    textColorMode: source.textColorMode,
+    secondaryColor: source.secondaryColor,
+    animation: { ...source.animation },
+    characterLayout: {
+      ...source.characterLayout,
+      rotationPattern: [...(source.characterLayout?.rotationPattern || [])],
+      verticalOffsetPattern: [
+        ...(source.characterLayout?.verticalOffsetPattern || []),
+      ],
+    },
   };
 
   for (const overlay of manualItems) {
     if (overlay.id !== source.id) Object.assign(overlay, sharedSettings);
+  }
+  if (sharedSettings.animation.type === "character-bounce") {
+    hydrateOverlayCharacterTimings(manualItems);
   }
   renderEditor();
   showApplyAllSettingsMessage(
@@ -3764,6 +4496,15 @@ function renderRetainedTranscript(transcript) {
   retainedTranscriptSegments = (transcript?.segments || [])
     .filter((segment) => String(segment.text || "").trim())
     .map((segment) => ({ ...segment }));
+  retainedAudioQuietRanges = (transcript?.audioQuietRanges || []).flatMap(
+    (range) => {
+      const start = Number(range?.start);
+      const end = Number(range?.end);
+      return Number.isFinite(start) && Number.isFinite(end) && end > start
+        ? [{ start, end }]
+        : [];
+    },
+  );
   selectedRetainedSegmentKeys = new Set();
   retainedSavedText = transcript?.text || "";
   retainedText.value = retainedSavedText;
@@ -3885,6 +4626,7 @@ async function addFullTranscriptTrack() {
     letterSpacing: Number(selected?.letterSpacing) || 0,
     lineSpacing: 0,
     artStyle: selectedStyle,
+    ...templateEffectsFor(selectedStyle),
   };
 
   const cutTranscript = currentCutDraftTranscript();
@@ -3954,6 +4696,7 @@ async function addFullTranscriptTrack() {
           trackType: result.trackType,
           sourceStart: cue.sourceStart,
           sourceEnd: cue.sourceEnd,
+          characterTimings: cue.characterTimings,
         },
         { deferRender: true },
       );
@@ -4007,6 +4750,7 @@ function transcriptTrackRequestPayload(sharedStyle) {
     payload.draftTranscript = {
       text: retainedSavedText,
       segments: retainedTranscriptSegments,
+      audioQuietRanges: retainedAudioQuietRanges,
     };
     payload.draftDuration = duration;
   }
@@ -4098,6 +4842,7 @@ async function rebuildTranscriptTrackLayout(options = {}) {
           trackType: result.trackType,
           sourceStart: cue.sourceStart,
           sourceEnd: cue.sourceEnd,
+          characterTimings: cue.characterTimings,
         },
         { deferRender: true },
       );
@@ -4387,6 +5132,7 @@ function renderAiSuggestionReview() {
     styleSelect.addEventListener("change", () => {
       suggestion.artStyle = styleSelect.value;
       Object.assign(suggestion, ART_STYLE_PALETTES[styleSelect.value]);
+      Object.assign(suggestion, templateEffectsFor(styleSelect.value));
       renderPreview();
     });
     previewButton.addEventListener("click", () => {
@@ -4783,7 +5529,6 @@ async function generateVideo(composition = null) {
 
   const payload = {
     source: videoSource,
-    historyName: artHistoryName.value.trim() || null,
     overlays: overlays.map(({ id, ...overlay }) => overlay),
   };
   const compositionRanges = Array.isArray(composition?.ranges)
@@ -4803,7 +5548,6 @@ async function generateVideo(composition = null) {
         ranges: compositionRanges,
         artOverlays: payload.overlays,
         artSource: videoSource,
-        historyName: payload.historyName,
       }
     : payload;
   try {
@@ -5024,6 +5768,24 @@ endTime.addEventListener("change", () => {
 });
 fitArtToTranscript.addEventListener("click", fitSelectedArtTimeToTranscript);
 savePositionPreset.addEventListener("click", saveCurrentPositionPreset);
+for (const [axis, input] of [
+  ["x", positionXPercent],
+  ["y", positionYPercent],
+]) {
+  input.addEventListener("input", () => {
+    commitPositionCoordinate(axis, input);
+  });
+  input.addEventListener("change", () => {
+    commitPositionCoordinate(axis, input, { finalize: true });
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commitPositionCoordinate(axis, input, { finalize: true });
+      input.blur();
+    }
+  });
+}
 positionPresetName.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
@@ -5056,6 +5818,7 @@ artStyleGrid.addEventListener("click", (event) => {
   updateSelectedOverlay({
     artStyle,
     ...ART_STYLE_PALETTES[artStyle],
+    ...templateEffectsFor(artStyle),
   });
   renderControls();
 });

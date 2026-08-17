@@ -1,0 +1,9 @@
+{"file":".trellis/spec/guides/project-overview.md","reason":"先加载当前产品、技术栈、运行模型、目录和核心约束，避免把历史愿景或目标架构当成现状。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"项目状态跨越浏览器、iframe、API、内存任务、文件存储与 FFmpeg，实施前必须明确所有权和时间轴。"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"迁移时优先复用时间轴、payload 归一化、状态更新和 UI 反馈的现有所有者。"}
+{"file":".trellis/spec/backend/index.md","reason":"加载 FastAPI、任务状态、文件持久化、媒体处理、错误和质量规则。"}
+{"file":".trellis/spec/frontend/index.md","reason":"加载原生 JavaScript、EditorTimeline、iframe 消息、UI 和 API 消费规则。"}
+{"file":".trellis/spec/testing/index.md","reason":"实施必须遵守真实 FFmpeg 样片、外部服务 mock、状态终态和浏览器验证要求。"}
+{"file":".trellis/spec/operations/index.md","reason":"配置、数据目录、启动和 Mac 打包不能泄露本机秘密或用户媒体。"}
+{"file":".trellis/tasks/08-13-project-optimization-audit/design.md","reason":"记录目标架构、分阶段迁移、兼容和回滚边界。"}
+{"file":".trellis/tasks/08-13-project-optimization-audit/implement.md","reason":"记录可靠性优先的实施顺序与验证门禁。"}

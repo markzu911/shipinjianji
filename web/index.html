@@ -8,11 +8,12 @@
       content="上传口播视频，自动提取中文语音、识别疑似口误并按文字完成粗剪。"
     />
     <title>视频文字剪辑 · MVP</title>
-    <link rel="stylesheet" href="/styles.css?v=20260810-09" />
+    <link rel="stylesheet" href="/styles.css?v=20260814-13" />
     <script src="https://code.iconify.design/iconify-icon/3.0.0/iconify-icon.min.js" defer></script>
     <script src="/ui-feedback.js?v=20260807-03" defer></script>
-    <script src="/editor-suite.js?v=20260810-05" defer></script>
-    <script src="/app.js?v=20260807-01" defer></script>
+    <script src="/timeline-model.js?v=20260810-01" defer></script>
+    <script src="/editor-suite.js?v=20260814-02" defer></script>
+    <script src="/app.js?v=20260817-01" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main">跳到主要内容</a>
@@ -31,6 +32,14 @@
         </a>
         <div class="editor-suite-slot" data-editor-suite-nav data-stage="cut"></div>
         <div class="header-actions">
+          <a
+            class="header-restart-button header-link-button header-settings-link"
+            href="/settings"
+            aria-label="模型设置"
+            title="模型设置"
+          >
+            <iconify-icon icon="ph:gear-six-bold" aria-hidden="true"></iconify-icon>
+          </a>
           <a class="header-restart-button header-link-button" href="/fonts">
             艺术字模板库
           </a>
@@ -168,7 +177,7 @@
           <div class="history-source-heading">
             <div>
               <p class="step-label">已保存版本</p>
-              <h3>从上次成片继续</h3>
+              <h3>从已保存版本继续</h3>
             </div>
             <button id="refreshHistoryButton" class="history-refresh-button" type="button">
               <iconify-icon icon="ph:arrows-clockwise-bold" aria-hidden="true"></iconify-icon>
@@ -241,79 +250,7 @@
           ></section>
 
           <section class="text-editor-inspector" aria-label="当前工具设置">
-            <div class="text-editor-tabbar" role="tablist" aria-label="文字剪辑工作区">
-              <button
-                id="textCutsTab"
-                class="text-editor-tab"
-                type="button"
-                role="tab"
-                aria-selected="true"
-                aria-controls="textCutsPanel"
-                data-text-editor-tab="cuts"
-              >文字剪辑</button>
-              <button
-                id="textSuggestionsTab"
-                class="text-editor-tab"
-                type="button"
-                role="tab"
-                aria-selected="false"
-                aria-controls="suggestionsBlock"
-                tabindex="-1"
-                data-text-editor-tab="suggestions"
-              >AI 建议</button>
-              <button
-                id="textSilenceTab"
-                class="text-editor-tab"
-                type="button"
-                role="tab"
-                aria-selected="false"
-                aria-controls="textSilencePanel"
-                tabindex="-1"
-                data-text-editor-tab="silence"
-              >空白剪辑</button>
-              <button
-                id="textHistoryTab"
-                class="text-editor-tab"
-                type="button"
-                role="tab"
-                aria-selected="false"
-                aria-controls="textHistoryPanel"
-                tabindex="-1"
-                data-text-editor-tab="history"
-              >操作记录 <span id="cutHistoryCount" class="text-editor-tab-count" hidden>0</span></button>
-            </div>
-
             <div class="text-editor-panel-stack">
-              <div class="cut-history-toolbar" aria-label="全局撤销与重做">
-                <div class="cut-history-actions">
-                  <button
-                    id="cutUndoButton"
-                    class="cut-history-button"
-                    type="button"
-                    title="撤销（Ctrl+Z）"
-                    aria-label="撤销上一步剪辑操作"
-                    disabled
-                  >
-                    <iconify-icon icon="ph:arrow-counter-clockwise-bold" aria-hidden="true"></iconify-icon>
-                    <span>撤销</span>
-                  </button>
-                  <button
-                    id="cutRedoButton"
-                    class="cut-history-button"
-                    type="button"
-                    title="重做（Ctrl+Y / Ctrl+Shift+Z）"
-                    aria-label="重做下一步剪辑操作"
-                    disabled
-                  >
-                    <iconify-icon icon="ph:arrow-clockwise-bold" aria-hidden="true"></iconify-icon>
-                    <span>重做</span>
-                  </button>
-                </div>
-                <p id="cutHistoryStatus" class="cut-history-status" role="status" aria-live="polite">
-                  暂无操作记录
-                </p>
-              </div>
-
         <section
           id="textOutputPanel"
           class="editor-suite-generation-runtime"
@@ -330,18 +267,8 @@
             </div>
             <div class="output-cut-summary" aria-live="polite">
               <strong id="outputCutSummary">尚未选择要删除的内容</strong>
-              <span id="outputCutSelectionDetail">请先在文字剪辑、空白剪辑或时间轴中完成选择</span>
+              <span id="outputCutSelectionDetail">请先在文字剪辑或时间轴中完成选择</span>
             </div>
-            <label class="history-save-name" for="cutHistoryName">
-              <span>保存名称 <small>可选，留空将自动生成安全名称</small></span>
-              <input
-                id="cutHistoryName"
-                type="text"
-                maxlength="80"
-                autocomplete="off"
-                placeholder="例如：口播精简第一版"
-              />
-            </label>
             <button id="generateCutButton" class="danger-button" type="button" disabled>
               <iconify-icon icon="ph:scissors-bold" aria-hidden="true"></iconify-icon>
               <span>生成剪辑视频</span>
@@ -368,106 +295,14 @@
         </section>
 
         <section
-          id="suggestionsBlock"
-          class="suggestions-block text-editor-panel"
-          role="tabpanel"
-          aria-labelledby="textSuggestionsTab"
-          data-text-editor-panel="suggestions"
-          hidden
-        >
-          <div class="suggestions-heading">
-            <div>
-              <p class="step-label">05 · AI 初筛</p>
-              <h3 id="suggestions-title">AI 删减建议</h3>
-            </div>
-            <div class="suggestions-heading-actions">
-              <span class="ai-model-chip">Qwen 分析</span>
-              <button
-                id="selectAllSuggestionsButton"
-                class="secondary-button compact-button suggestions-bulk-button"
-                type="button"
-                aria-pressed="false"
-                hidden
-              >
-                <iconify-icon icon="ph:checks-bold" aria-hidden="true"></iconify-icon>
-                <span>一键删除</span>
-              </button>
-            </div>
-          </div>
-          <p id="suggestionState" class="suggestion-state" aria-live="polite">
-            正在读取 AI 分析结果…
-          </p>
-          <ol id="suggestionList" class="suggestion-list"></ol>
-        </section>
-
-        <section
-          id="textSilencePanel"
-          class="silence-editor-panel text-editor-panel"
-          role="tabpanel"
-          aria-labelledby="textSilenceTab"
-          data-text-editor-panel="silence"
-          hidden
-        >
-          <div class="no-speech-panel" aria-labelledby="no-speech-title">
-            <div class="no-speech-heading">
-              <div>
-                <p class="step-label">06 · 空白剪辑</p>
-                <h3 id="no-speech-title">检查长时间没有说话的画面</h3>
-              </div>
-              <button
-                id="selectAllNoSpeechButton"
-                class="secondary-button compact-button no-speech-bulk-button"
-                type="button"
-                aria-pressed="false"
-                hidden
-              >
-                <iconify-icon icon="ph:selection-all-bold" aria-hidden="true"></iconify-icon>
-                <span>一键删除可删片段</span>
-              </button>
-            </div>
-            <p id="noSpeechState" class="no-speech-state" aria-live="polite">
-              正在读取无文字片段检测结果…
-            </p>
-            <ol id="noSpeechList" class="no-speech-list" aria-label="无文字片段建议"></ol>
-            <div class="no-speech-selection-footer">
-              <div class="no-speech-generate-summary" aria-live="polite">
-                <strong id="noSpeechCutSummary">尚未删除空白片段</strong>
-                <span id="noSpeechCutSelectionDetail">请先试听，再直接删除不需要的区间</span>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section
-          id="textHistoryPanel"
-          class="cut-history-panel text-editor-panel"
-          role="tabpanel"
-          aria-labelledby="textHistoryTab"
-          data-text-editor-panel="history"
-          hidden
-        >
-          <div class="cut-history-panel-heading">
-            <div>
-              <p class="step-label">全局历史</p>
-              <h3>操作记录</h3>
-            </div>
-            <span class="cut-history-shortcut">Ctrl+Z / Ctrl+Y</span>
-          </div>
-          <p id="cutHistoryEmpty" class="cut-history-empty">还没有剪辑操作。删除文字、AI 建议、空白片段或时间轴区间后会显示在这里。</p>
-          <ol id="cutHistoryList" class="cut-history-list" aria-label="剪辑操作记录"></ol>
-        </section>
-
-        <div
           id="textCutsPanel"
           class="segments-block text-editor-panel"
-          role="tabpanel"
-          aria-labelledby="textCutsTab"
-          data-text-editor-panel="cuts"
+          aria-labelledby="text-cuts-title"
         >
           <div class="editor-heading">
             <div>
               <p class="step-label">04 · 文字剪辑</p>
-              <h3>删除不需要的文字段落</h3>
+              <h3 id="text-cuts-title">删除不需要的文字与空白</h3>
             </div>
             <div class="segment-heading-actions">
               <span id="cutDraftSaveStatus" class="cut-draft-save-status" data-tone="neutral" role="status" aria-live="polite">剪辑草稿自动保存</span>
@@ -549,27 +384,24 @@
                       </span>
                       <span class="douyin-follow-badge">+</span>
                     </div>
-                    <button type="button">
+                    <button class="douyin-action-button is-liked" type="button" tabindex="-1">
                       <iconify-icon icon="ph:heart-fill" aria-hidden="true"></iconify-icon>
-                      <small>94</small>
+                      <small>11</small>
                     </button>
-                    <button type="button">
+                    <button class="douyin-action-button" type="button" tabindex="-1">
                       <iconify-icon icon="ph:chat-teardrop-dots-fill" aria-hidden="true"></iconify-icon>
-                      <small>70</small>
+                      <small>2</small>
                     </button>
-                    <button type="button">
+                    <button class="douyin-action-button" type="button" tabindex="-1">
                       <iconify-icon icon="ph:star-fill" aria-hidden="true"></iconify-icon>
                       <small>10</small>
                     </button>
-                    <button type="button">
+                    <button class="douyin-action-button" type="button" tabindex="-1">
                       <iconify-icon icon="ph:share-fat-fill" aria-hidden="true"></iconify-icon>
-                      <small>63</small>
+                      <small>1</small>
                     </button>
-                    <div class="douyin-shoot-same">
-                      <span><iconify-icon icon="ph:camera-fill" aria-hidden="true"></iconify-icon></span>
-                      <small>拍同款</small>
-                    </div>
                   </div>
+                  <div class="douyin-music-disc" aria-hidden="true"></div>
                   <div class="douyin-caption-block">
                     <div class="douyin-account-row">
                       <p class="douyin-account">@视频文字剪辑</p>
@@ -649,7 +481,7 @@
 
               <div id="cutFrameTimeline" class="frame-timeline cut-frame-timeline" aria-label="公共帧时间轴" hidden>
                 <div class="frame-timeline-heading cut-frame-timeline-heading">
-                  <span class="sr-only">拖动自定义区间；触碰文字时仅吸附完整文字边界，松开后弹窗确认</span>
+                  <span class="sr-only">拖动自定义区间；触碰文字时仅吸附完整文字边界，选区可微调，再次点击确认删除</span>
                   <output id="cutFrameTimelineTime">00:00 / 00:00</output>
                 </div>
                 <div id="cutFrameTimelineScroll" class="cut-frame-timeline-scroll">
@@ -735,7 +567,7 @@
               </a>
             </div>
           </section>
-        </div>
+        </section>
             </div>
             <div
               id="editorSuiteInspectorHost"
@@ -749,7 +581,7 @@
     </main>
 
     <footer class="site-footer">
-      支持视频转写、可选文字粗剪、AI 艺术字与画中画；所有 AI 建议都需由用户确认。
+      支持视频转写、文字剪辑、AI 艺术字与画中画。
     </footer>
 
     <div

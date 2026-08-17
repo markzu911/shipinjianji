@@ -1,0 +1,11 @@
+# 前端规范索引
+
+前端是原生多页面应用，没有 npm 构建步骤。脚本通过 `<script defer>` 按顺序加载，并共享 `window` 全局。
+
+| 文档 | 适用范围 |
+| --- | --- |
+| [架构与状态](./architecture-and-state.md) | 页面职责、EditorTimeline、iframe 和事件协议 |
+| [UI 与交互](./ui-and-interactions.md) | DOM、可访问性、响应式、拖动和反馈 |
+| [API 与媒体](./api-and-media.md) | fetch/XHR、轮询、媒体源和时间轴 |
+
+修改前同时阅读 `../guides/project-overview.md` 和 `../guides/cross-layer-thinking-guide.md`。

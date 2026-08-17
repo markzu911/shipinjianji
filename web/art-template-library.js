@@ -83,6 +83,8 @@ const query = new URLSearchParams(window.location.search);
 const jobId = query.get("job") || "";
 const videoSource = query.get("source") === "original" ? "original" : "edited";
 const loadedFontFamilies = new Map();
+const templateColors = new Map();
+let previewFitFrame = 0;
 const fontNames = new Map();
 let templates = [];
 let hiddenBuiltins = [];
@@ -113,6 +115,170 @@ function currentTemplate() {
 
 function currentPreviewText() {
   return templatePreviewText.value.trim() || "新征程新赶考";
+}
+
+function templateColorFor(template) {
+  return templateColors.get(template.id) || template.color;
+}
+
+function syncActiveTemplateColorControl() {
+  const template = currentTemplate();
+  if (!template) return;
+  templatePreviewColor.value = templateColorFor(template);
+}
+
+function normalizedTemplateEffects(template = {}, primaryColor = template.color) {
+  const animation =
+    template.animation && typeof template.animation === "object"
+      ? template.animation
+      : {};
+  const characterLayout =
+    template.characterLayout && typeof template.characterLayout === "object"
+      ? template.characterLayout
+      : {};
+  const staggered = characterLayout.type === "staggered";
+  const rotations = Array.isArray(characterLayout.rotationPattern)
+    ? characterLayout.rotationPattern
+        .slice(0, 12)
+        .map((value) => Math.min(12, Math.max(-12, Number(value) || 0)))
+    : [];
+  const verticalOffsets = Array.isArray(characterLayout.verticalOffsetPattern)
+    ? characterLayout.verticalOffsetPattern
+        .slice(0, 12)
+        .map((value) => Math.min(0.25, Math.max(-0.25, Number(value) || 0)))
+    : [];
+  return {
+    color: primaryColor || "#FFFFFF",
+    letterSpacing: Math.min(
+      40,
+      Math.max(-20, Math.round(Number(template.letterSpacing) || 0)),
+    ),
+    textColorMode:
+      template.textColorMode === "center-highlight"
+        ? "center-highlight"
+        : "solid",
+    secondaryColor: template.secondaryColor || primaryColor || "#FFFFFF",
+    animation: {
+      type:
+        animation.type === "character-bounce"
+          ? "character-bounce"
+          : "none",
+      duration: Math.min(2, Math.max(0.2, Number(animation.duration) || 0.56)),
+      stagger: Math.min(0.3, Math.max(0, Number(animation.stagger) || 0.07)),
+      amplitude: Math.min(0.5, Math.max(0.05, Number(animation.amplitude) || 0.18)),
+    },
+    characterLayout: {
+      type: staggered ? "staggered" : "none",
+      rotationPattern: staggered
+        ? rotations.length
+          ? rotations
+          : [-7, 5, -4, 3, -6, 4]
+        : [],
+      verticalOffsetPattern: staggered
+        ? verticalOffsets.length
+          ? verticalOffsets
+          : [0.06, -0.04, 0.03, -0.05]
+        : [],
+    },
+  };
+}
+
+function renderTemplateCharacters(element, text, template, primaryColor) {
+  const effects = normalizedTemplateEffects(template, primaryColor);
+  const needsCharacters =
+    effects.textColorMode === "center-highlight" ||
+    effects.animation.type === "character-bounce" ||
+    effects.characterLayout.type === "staggered";
+  element.classList.toggle("has-character-effect", needsCharacters);
+  element.setAttribute("aria-label", text);
+  if (!needsCharacters) {
+    element.textContent = text;
+    return;
+  }
+  const characters = Array.from(text);
+  const visibleIndexes = characters
+    .map((character, index) => (/\s/u.test(character) ? -1 : index))
+    .filter((index) => index >= 0);
+  const highlightedStart = Math.floor(visibleIndexes.length * 0.25);
+  const highlightedEnd = Math.ceil(visibleIndexes.length * 0.75);
+  const highlightedIndexes = new Set(
+    visibleIndexes.slice(highlightedStart, highlightedEnd),
+  );
+
+  element.replaceChildren();
+  characters.forEach((character, index) => {
+    if (/\s/u.test(character)) {
+      element.append(document.createTextNode(character));
+      return;
+    }
+    const span = document.createElement("span");
+    span.className = "art-character";
+    span.textContent = character;
+    span.setAttribute("aria-hidden", "true");
+    const isPrimary =
+      effects.textColorMode !== "center-highlight" ||
+      highlightedIndexes.has(index);
+    span.style.color = isPrimary ? effects.color : effects.secondaryColor;
+    if (effects.characterLayout.type === "staggered") {
+      const visibleIndex = visibleIndexes.indexOf(index);
+      const rotations = effects.characterLayout.rotationPattern;
+      const offsets = effects.characterLayout.verticalOffsetPattern;
+      span.classList.add("is-character-staggered");
+      span.style.setProperty(
+        "--art-character-rotation",
+        `${rotations[visibleIndex % rotations.length]}deg`,
+      );
+      span.style.setProperty(
+        "--art-character-offset",
+        `${offsets[visibleIndex % offsets.length]}em`,
+      );
+    }
+    if (effects.animation.type === "character-bounce") {
+      const visibleIndex = visibleIndexes.indexOf(index);
+      span.classList.add("is-character-bounce");
+      span.style.animationDuration = `${effects.animation.duration}s`;
+      span.style.animationDelay = `${visibleIndex * effects.animation.stagger}s`;
+      span.style.setProperty(
+        "--art-character-lift",
+        `${effects.animation.amplitude}em`,
+      );
+    }
+    element.append(span);
+  });
+}
+
+function fitEffectPreviewText(element) {
+  const visibleCharacterCount = Number(element.dataset.characterCount) || 1;
+  const requestedFontSize = Number(element.dataset.requestedFontSize) || 24;
+  const letterSpacing = Number(element.dataset.templateLetterSpacing) || 0;
+  const fallbackWidth = element.classList.contains("template-card-preview")
+    ? 232
+    : 190;
+  const styles = window.getComputedStyle(element);
+  const contentWidth =
+    element.clientWidth -
+    (Number.parseFloat(styles.paddingLeft) || 0) -
+    (Number.parseFloat(styles.paddingRight) || 0);
+  const availableTextWidth = Math.max(
+    48,
+    (contentWidth > 0 ? contentWidth : fallbackWidth) - 12,
+  );
+  const spacingWidth = letterSpacing * Math.max(0, visibleCharacterCount - 1);
+  const fittedFontSize = Math.max(
+    10,
+    (availableTextWidth - spacingWidth) / visibleCharacterCount,
+  );
+  element.style.fontSize = `${Math.min(requestedFontSize, fittedFontSize)}px`;
+}
+
+function scheduleEffectPreviewFit() {
+  window.cancelAnimationFrame(previewFitFrame);
+  previewFitFrame = window.requestAnimationFrame(() => {
+    previewFitFrame = 0;
+    document
+      .querySelectorAll(".template-card-preview, .template-detail-preview")
+      .forEach(fitEffectPreviewText);
+  });
 }
 
 function announce(message) {
@@ -149,16 +315,36 @@ function applyEffectPreview(element, template, options = {}) {
   if (!template) return;
   const fontId = templateFont.value || "bold";
   const size = Number(templatePreviewSize.value) || 46;
-  const color = templatePreviewColor.value || template.color;
-  const fontSize = options.card ? Math.min(44, size) : Math.min(72, size + 8);
+  const color = templateColorFor(template);
+  const effects = normalizedTemplateEffects(template, color);
+  const previewText = currentPreviewText();
+  const visibleCharacterCount = Math.max(
+    1,
+    Array.from(previewText).filter((character) => !/\s/u.test(character)).length,
+  );
+  const requestedFontSize = options.card
+    ? Math.min(44, size)
+    : Math.min(72, size + 8);
   element.className =
     `${options.card ? "template-card-preview" : "template-detail-preview"} ` +
     `style-${template.baseStyle || template.id}`;
-  element.textContent = currentPreviewText();
   element.style.fontFamily = FONT_FAMILIES[fontId] || "sans-serif";
-  element.style.fontSize = `${fontSize}px`;
+  element.dataset.characterCount = String(visibleCharacterCount);
+  element.dataset.requestedFontSize = String(requestedFontSize);
+  element.dataset.templateLetterSpacing = String(effects.letterSpacing);
+  element.style.letterSpacing = "0px";
+  element.style.setProperty(
+    "--template-letter-spacing",
+    `${effects.letterSpacing}px`,
+  );
   element.style.setProperty("--template-color", color);
   element.style.setProperty("--template-stroke", template.strokeColor);
+  renderTemplateCharacters(element, previewText, template, color);
+  if (!element.classList.contains("has-character-effect")) {
+    element.style.letterSpacing = `${effects.letterSpacing}px`;
+  }
+  fitEffectPreviewText(element);
+  scheduleEffectPreviewFit();
 }
 
 function filteredTemplates() {
@@ -257,7 +443,7 @@ function renderTemplateDetail() {
   templateDetailFont.textContent =
     fontNames.get(templateFont.value) || "醒目粗体";
   templateDetailSize.textContent = templatePreviewSize.value;
-  templatePrimarySwatch.style.background = templatePreviewColor.value;
+  templatePrimarySwatch.style.background = templateColorFor(template);
   templateStrokeSwatch.style.background = template.strokeColor;
   preferredTemplateName.textContent =
     `默认模板 ${
@@ -280,16 +466,24 @@ function render() {
 function selectTemplate(templateId) {
   if (!templates.some((template) => template.id === templateId)) return;
   activeTemplateId = templateId;
+  syncActiveTemplateColorControl();
   render();
 }
 
 function storeTemplateChoice(template) {
+  const color = templateColorFor(template);
+  const effects = normalizedTemplateEffects(template, color);
   const selection = {
     id: template.id,
-    color: templatePreviewColor.value,
+    color,
     strokeColor: template.strokeColor,
     font: templateFont.value,
     fontSize: Number(templatePreviewSize.value) || 46,
+    letterSpacing: effects.letterSpacing,
+    textColorMode: effects.textColorMode,
+    secondaryColor: effects.secondaryColor,
+    animation: effects.animation,
+    characterLayout: effects.characterLayout,
   };
   preferredTemplateId = template.id;
   try {
@@ -308,6 +502,7 @@ function useTemplate(templateId) {
   const template = templates.find((item) => item.id === templateId);
   if (!template) return;
   activeTemplateId = template.id;
+  syncActiveTemplateColorControl();
   const selection = storeTemplateChoice(template);
   render();
   announce(`已选择 ${template.name}。`);
@@ -331,6 +526,10 @@ async function loadTemplates(options = {}) {
     throw new Error(payload.detail || "无法读取艺术字模板库。");
   }
   templates = payload.templates || [];
+  const currentTemplateIds = new Set(templates.map((template) => template.id));
+  for (const templateId of templateColors.keys()) {
+    if (!currentTemplateIds.has(templateId)) templateColors.delete(templateId);
+  }
   hiddenBuiltins = Array.isArray(payload.hiddenBuiltins)
     ? payload.hiddenBuiltins
     : [];
@@ -355,9 +554,7 @@ async function loadTemplates(options = {}) {
     ? requestedActiveId
     : preferredTemplateId;
   const active = currentTemplate();
-  if (active && options.restoreColor !== false) {
-    templatePreviewColor.value = active.color;
-  }
+  if (active && options.restoreColor !== false) syncActiveTemplateColorControl();
   render();
   return payload;
 }
@@ -399,7 +596,7 @@ async function uploadTemplate(event) {
     closeDialog(templateUploadDialog);
     await loadTemplates({ activeId: payload.id });
     activeTemplateId = payload.id;
-    templatePreviewColor.value = payload.color;
+    syncActiveTemplateColorControl();
     render();
     announce(`已上传艺术字模板 ${payload.name}。`);
   } catch (error) {
@@ -565,12 +762,20 @@ async function restoreTemplate(templateId) {
 
 function downloadTemplateExampleFile() {
   const example = {
-    name: "我的蓝色立体字",
-    sample: "蓝色",
-    description: "蓝色主色与深蓝描边的立体艺术字。",
-    baseStyle: "impact",
-    color: "#59C7FF",
-    strokeColor: "#102A43",
+    name: "逐字跃动",
+    sample: "别再乱买衣服啦!",
+    description: "黄白分字的漫画描边字，入场时逐字跃动。",
+    baseStyle: "comic",
+    color: "#FFF36A",
+    strokeColor: "#0A0A0A",
+    textColorMode: "center-highlight",
+    secondaryColor: "#FFFFFF",
+    animation: {
+      type: "character-bounce",
+      duration: 0.56,
+      stagger: 0.07,
+      amplitude: 0.18,
+    },
   };
   const url = URL.createObjectURL(
     new Blob([JSON.stringify(example, null, 2)], {
@@ -636,8 +841,14 @@ async function initialize() {
 templatePreviewText.addEventListener("input", render);
 templateFont.addEventListener("change", render);
 templatePreviewSize.addEventListener("input", render);
-templatePreviewColor.addEventListener("input", render);
+templatePreviewColor.addEventListener("input", () => {
+  const template = currentTemplate();
+  if (!template) return;
+  templateColors.set(template.id, templatePreviewColor.value);
+  render();
+});
 templateSearch.addEventListener("input", renderTemplateCards);
+window.addEventListener("resize", scheduleEffectPreviewFit);
 openTemplateUpload.addEventListener("click", () => {
   showDialogError(templateUploadError);
   templateUploadDialog.showModal();
@@ -674,7 +885,8 @@ useTemplateButton.addEventListener("click", () => {
 restoreTemplateColor.addEventListener("click", () => {
   const template = currentTemplate();
   if (!template) return;
-  templatePreviewColor.value = template.color;
+  templateColors.delete(template.id);
+  syncActiveTemplateColorControl();
   render();
   announce(`已恢复 ${template.name} 的默认配色。`);
 });
