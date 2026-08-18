@@ -7,6 +7,7 @@
 - `web/art-text.html/js`：艺术字工具，可独立页面运行，也可嵌入工作台。
 - `web/picture-in-picture.html/js`：画中画工具，可独立或嵌入。
 - `web/timeline-model.js`：版本化轨道文档、clip 归一化、选择、拖动/缩放和 localStorage 草稿。
+- `web/transcript-follow-scroll.js`：文字播放跟随滚动的目标计算、RAF 动画、去重、中断和临时样式清理。
 - `web/ui-feedback.js`：对话框、生成进度和通用播放器反馈。
 
 ## 加载方式
@@ -18,6 +19,14 @@
 3. 修改静态资源时更新 HTML 的 `?v=` 版本；
 4. 同步 `disable_frontend_cache` 的资源路径（如属于其覆盖范围）；
 5. 更新静态资源测试。
+
+### 文案跟随滚动模块契约
+
+`web/transcript-follow-scroll.js` 是播放中活动文案跟随滚动的唯一实现边界，并通过 `window.TranscriptFollowScroll` 暴露 `createController()`。`app.js` 只负责确定活动行、更新 `aria-current`/播放 badge，并调用控制器的 `follow()`、`reset()` 和 `destroy()`；不得在入口中复制目标计算、RAF 或跟随 key 状态。
+
+控制器在同一条可取消 RAF 时间线上同步写入面板 `scrollTop` 与活动行临时 `transform`。切换目标、列表重渲染、关闭跟随或收到 `wheel`、`touchstart`、`pointerdown`、滚动键意图时，必须取消旧帧并清除 transform、will-change、动画 class 和监听器；旧回调即使迟到也不得写入新 DOM。`prefers-reduced-motion: reduce` 直接定位，不建立动画状态。
+
+跟随 key 只能在目标行和滚动面板通过有效性校验后记录；首次调用遇到隐藏/脱离 DOM 的目标不得消耗 key，运行中的目标失效也要释放 key，使面板恢复后同一行可以重试。用户主动滚动中断则保留已跟随 key，避免后续 `timeupdate` 立即抢回滚动控制权。
 
 ## 状态所有权
 

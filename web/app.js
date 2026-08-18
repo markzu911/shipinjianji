@@ -157,6 +157,8 @@ const CUT_TIMELINE_TEXT_CHAR_WIDTH = 10;
 const CUT_TIMELINE_TEXT_LINES = 2;
 const CUT_HISTORY_LIMIT = 40;
 const CUT_HISTORY_COALESCE_MS = 800;
+const transcriptFollowScrollController =
+  window.TranscriptFollowScroll.createController();
 
 let selectedFile = null;
 let selectedPreviewUrl = "";
@@ -189,8 +191,6 @@ let cutSelectionPreviewEnd = null;
 let transcriptPreviewRange = null;
 let activeTranscriptSegmentIndex = -1;
 let activeTranscriptSegmentKey = "";
-let followedTranscriptSegmentKey = "";
-let transcriptFollowScrollFrame = 0;
 let cutDraftReady = false;
 let cutDraftRevision = 0;
 let cutDraftLastSignature = "";
@@ -820,9 +820,9 @@ function renderNoSpeechSegmentItem(suggestion, displayIndex) {
 }
 
 function renderCutSegments() {
+  transcriptFollowScrollController.reset();
   activeTranscriptSegmentIndex = -1;
   activeTranscriptSegmentKey = "";
-  followedTranscriptSegmentKey = "";
   const deletedRanges = getCommittedTimelineDeleteRanges();
   const displayItems = [];
   currentEditableSegments.forEach((segment, segmentIndex) => {
@@ -1764,55 +1764,11 @@ function getActiveTranscriptSegmentIndex(
   return -1;
 }
 
-function getTranscriptFollowScrollTarget(panel, item, toolbar) {
-  const panelRect = panel.getBoundingClientRect();
-  const itemRect = item.getBoundingClientRect();
-  const toolbarRect = toolbar?.getBoundingClientRect();
-  const anchorTop = (toolbarRect?.bottom ?? panelRect.top) + 8;
-  const maxScrollTop = Math.max(0, panel.scrollHeight - panel.clientHeight);
-  return clamp(
-    panel.scrollTop + itemRect.top - anchorTop,
-    0,
-    maxScrollTop,
-  );
-}
-
-function scrollActiveTranscriptSegmentToAnchor(item) {
-  const panel = item.closest(".text-editor-panel");
-  if (!panel || panel.hidden || panel.clientHeight <= 0) return;
-  const toolbar = panel.querySelector(".cut-toolbar");
-  window.cancelAnimationFrame(transcriptFollowScrollFrame);
-  transcriptFollowScrollFrame = window.requestAnimationFrame(() => {
-    transcriptFollowScrollFrame = 0;
-    if (!item.isConnected || !item.classList.contains("is-playback-active")) {
-      return;
-    }
-    const targetScrollTop = getTranscriptFollowScrollTarget(
-      panel,
-      item,
-      toolbar,
-    );
-    if (Math.abs(targetScrollTop - panel.scrollTop) < 1) return;
-    const reduceMotion = window.matchMedia?.(
-      "(prefers-reduced-motion: reduce)",
-    ).matches;
-    panel.scrollTo({
-      top: targetScrollTop,
-      behavior: reduceMotion ? "auto" : "smooth",
-    });
-  });
-}
-
-function followActiveTranscriptSegment(item, displayKey) {
-  if (!displayKey || displayKey === followedTranscriptSegmentKey) return;
-  followedTranscriptSegmentKey = displayKey;
-  scrollActiveTranscriptSegmentToAnchor(item);
-}
-
 function updateActiveTranscriptSegment(
   currentTime = cutPreviewVideo.currentTime || 0,
   { follow = false } = {},
 ) {
+  if (!follow) transcriptFollowScrollController.reset();
   const sourceTime = Number(currentTime);
   const allItems = [
     ...segmentList.querySelectorAll(
@@ -1876,7 +1832,9 @@ function updateActiveTranscriptSegment(
     nextKey === activeTranscriptSegmentKey &&
     currentItem === nextItem
   ) {
-    if (follow && nextItem) followActiveTranscriptSegment(nextItem, nextKey);
+    if (follow && nextItem) {
+      transcriptFollowScrollController.follow(nextItem, nextKey);
+    }
     return;
   }
 
@@ -1890,7 +1848,7 @@ function updateActiveTranscriptSegment(
   activeTranscriptSegmentIndex = nextIndex;
   activeTranscriptSegmentKey = nextKey;
   if (!nextItem) {
-    followedTranscriptSegmentKey = "";
+    transcriptFollowScrollController.reset();
     return;
   }
   nextItem.classList.add("is-playback-active");
@@ -1898,9 +1856,7 @@ function updateActiveTranscriptSegment(
   const badge = nextItem.querySelector(".segment-current-badge");
   if (badge) badge.hidden = false;
   if (follow) {
-    followActiveTranscriptSegment(nextItem, nextKey);
-  } else {
-    followedTranscriptSegmentKey = "";
+    transcriptFollowScrollController.follow(nextItem, nextKey);
   }
 }
 
@@ -4959,6 +4915,7 @@ selectedVideoPreview.addEventListener("error", () => {
 });
 
 window.addEventListener("beforeunload", () => {
+  transcriptFollowScrollController.destroy();
   if (selectedPreviewUrl) URL.revokeObjectURL(selectedPreviewUrl);
 });
 

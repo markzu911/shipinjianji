@@ -20,6 +20,7 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
         "/",
         "/styles.css",
         "/app.js",
+        "/transcript-follow-scroll.js",
         "/ui-feedback.js",
         "/timeline-model.js",
         "/art-text.js",
@@ -28,6 +29,7 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     page_response = responses["/"]
     styles_response = responses["/styles.css"]
     script_response = responses["/app.js"]
+    follow_scroll_response = responses["/transcript-follow-scroll.js"]
     feedback_script_response = responses["/ui-feedback.js"]
     timeline_script_response = responses["/timeline-model.js"]
     art_script_response = responses["/art-text.js"]
@@ -35,8 +37,9 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
 
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
-    assert "/app.js?v=20260817-06" in page_response.text
-    assert "/styles.css?v=20260814-13" in page_response.text
+    assert "/app.js?v=20260818-01" in page_response.text
+    assert "/styles.css?v=20260818-01" in page_response.text
+    assert "/transcript-follow-scroll.js?v=20260818-01" in page_response.text
     assert "/ui-feedback.js?v=20260807-03" in page_response.text
     assert "/timeline-model.js?v=20260810-01" in page_response.text
     assert "/editor-suite.js?v=20260814-02" in page_response.text
@@ -47,6 +50,15 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     assert page_response.text.index("/timeline-model.js") < page_response.text.index(
         "/editor-suite.js"
     )
+    assert page_response.text.index("/transcript-follow-scroll.js") < (
+        page_response.text.index("/app.js")
+    )
+
+    assert follow_scroll_response.status_code == 200
+    assert follow_scroll_response.headers["cache-control"] == "no-store, max-age=0"
+    assert "root.TranscriptFollowScroll = api" in follow_scroll_response.text
+    assert "function createController" in follow_scroll_response.text
+    assert "function getTranscriptFollowScrollTarget" in follow_scroll_response.text
 
     assert feedback_script_response.status_code == 200
     assert 'className = "app-dialog-shell"' in feedback_script_response.text
@@ -413,11 +425,16 @@ def test_cut_timeline_and_draft_frontend_contracts():
     assert 'event.target.closest(".segment-play-button")' in script_response.text
     assert "function getActiveTranscriptSegmentIndex" in script_response.text
     assert 'nextItem.setAttribute("aria-current", "true")' in script_response.text
-    assert "function getTranscriptFollowScrollTarget" in script_response.text
-    assert "function scrollActiveTranscriptSegmentToAnchor" in script_response.text
-    assert "function followActiveTranscriptSegment" in script_response.text
+    assert "window.TranscriptFollowScroll.createController()" in script_response.text
+    assert "function getTranscriptFollowScrollTarget" not in script_response.text
+    assert "function scrollActiveTranscriptSegmentToAnchor" not in script_response.text
+    assert "function followActiveTranscriptSegment" not in script_response.text
     assert "updateActiveTranscriptSegment(sourceCurrent" in script_response.text
     assert ".segment-item.is-playback-active" in styles_response.text
+    assert ".segment-item.is-playback-active.is-follow-animating" in (
+        styles_response.text
+    )
+    assert "var(--surface)" in styles_response.text
     assert 'id="cutDraftSaveStatus"' in page_response.text
     assert "function restorePersistedCutDraft" in script_response.text
     assert "function applyPersistedCutDraftAlignment" in script_response.text
@@ -1417,7 +1434,7 @@ const currentEditableSegments = [];
 const currentNoSpeechSuggestions = [];
 let activeTranscriptSegmentIndex = -1;
 let activeTranscriptSegmentKey = "";
-let followedTranscriptSegmentKey = "";
+const transcriptFollowScrollController = {{ reset() {{}} }};
 const renderedItems = [];
 const historyActions = [];
 const seekTimes = [];
@@ -1702,86 +1719,269 @@ console.log(JSON.stringify({{ tail, head }}));
 
 
 def test_frontend_transcript_follow_scroll_anchors_clamps_and_deduplicates():
-    app_source = (Path(__file__).resolve().parents[2] / "web" / "app.js").read_text(
-        encoding="utf-8"
-    )
-    helper_start = app_source.index("function getTranscriptFollowScrollTarget")
-    helper_end = app_source.index("function updateActiveTranscriptSegment", helper_start)
-    helper_source = app_source[helper_start:helper_end]
-    script = f"""
-const frames = [];
-const scrollCalls = [];
-let reduceMotion = false;
-let toolbarHeight = 60;
-const toolbarOffset = 18;
-const window = {{
-  cancelAnimationFrame: () => {{}},
-  requestAnimationFrame: (callback) => {{
-    frames.push(callback);
-    return frames.length;
-  }},
-  getComputedStyle: () => ({{ top: "0px" }}),
-  matchMedia: () => ({{ matches: reduceMotion }}),
-}};
-const clamp = (value, minimum, maximum) => (
-  Math.min(maximum, Math.max(minimum, value))
-);
-let transcriptFollowScrollFrame = 0;
-let followedTranscriptSegmentKey = "";
-{helper_source}
-const toolbar = {{
-  getBoundingClientRect: () => ({{
-    top: 100 + toolbarOffset,
-    bottom: 100 + toolbarOffset + toolbarHeight,
-    height: toolbarHeight,
-  }}),
-}};
-const panel = {{
-  hidden: false,
-  clientHeight: 300,
-  scrollHeight: 1000,
-  scrollTop: 100,
-  getBoundingClientRect: () => ({{ top: 100, bottom: 400, height: 300 }}),
-  querySelector: (selector) => selector === ".cut-toolbar" ? toolbar : null,
-  scrollTo: (options) => {{
-    scrollCalls.push(options);
-    panel.scrollTop = options.top;
-  }},
-}};
-let itemContentTop = 300;
-const item = {{
-  isConnected: true,
-  classList: {{ contains: (name) => name === "is-playback-active" }},
-  closest: (selector) => selector === ".text-editor-panel" ? panel : null,
-  getBoundingClientRect: () => {{
-    const top = 100 + itemContentTop - panel.scrollTop;
-    return {{ top, bottom: top + 64, height: 64 }};
-  }},
-}};
+    script = r"""
+const followScroll = require('./web/transcript-follow-scroll.js');
 
-const shortToolbarTarget = getTranscriptFollowScrollTarget(panel, item, toolbar);
-toolbarHeight = 92;
-const tallToolbarTarget = getTranscriptFollowScrollTarget(panel, item, toolbar);
-toolbarHeight = 60;
-followActiveTranscriptSegment(item, "row-a");
-followActiveTranscriptSegment(item, "row-a");
-const queuedAfterDuplicate = frames.length;
-frames.shift()();
-const anchorTop = 100 + toolbarOffset + toolbarHeight + 8;
-const middleAnchorOffset = item.getBoundingClientRect().top - anchorTop;
-itemContentTop = 1000;
+function createClassList(initial = []) {
+  const values = new Set(initial);
+  return {
+    add: (...names) => names.forEach((name) => values.add(name)),
+    contains: (name) => values.has(name),
+    remove: (...names) => names.forEach((name) => values.delete(name)),
+  };
+}
+
+function createRaf() {
+  let nextId = 1;
+  let scheduled = 0;
+  const callbacks = new Map();
+  const history = new Map();
+  return {
+    cancel: (id) => callbacks.delete(id),
+    count: () => scheduled,
+    firstPending: () => callbacks.entries().next().value || null,
+    history,
+    request: (callback) => {
+      const id = nextId++;
+      scheduled += 1;
+      callbacks.set(id, callback);
+      history.set(id, callback);
+      return id;
+    },
+    runNext: (timestamp) => {
+      const entry = callbacks.entries().next().value;
+      if (!entry) throw new Error('Expected a queued animation frame.');
+      const [id, callback] = entry;
+      callbacks.delete(id);
+      callback(timestamp);
+    },
+  };
+}
+
+function createFixture() {
+  const listenerMap = new Map();
+  let toolbarHeight = 60;
+  const toolbarOffset = 18;
+  const toolbar = {
+    getBoundingClientRect: () => ({
+      bottom: 100 + toolbarOffset + toolbarHeight,
+      height: toolbarHeight,
+      top: 100 + toolbarOffset,
+    }),
+  };
+  const panel = {
+    clientHeight: 300,
+    hidden: false,
+    scrollHeight: 1000,
+    scrollTop: 100,
+    addEventListener(type, callback) {
+      if (!listenerMap.has(type)) listenerMap.set(type, new Set());
+      listenerMap.get(type).add(callback);
+    },
+    dispatch(type, key = '') {
+      for (const callback of listenerMap.get(type) || []) {
+        callback({ key, type });
+      }
+    },
+    getBoundingClientRect: () => ({ bottom: 400, height: 300, top: 100 }),
+    listenerCount: () => [...listenerMap.values()].reduce(
+      (total, callbacks) => total + callbacks.size,
+      0,
+    ),
+    querySelector: (selector) => selector === '.cut-toolbar' ? toolbar : null,
+    removeEventListener(type, callback) {
+      listenerMap.get(type)?.delete(callback);
+    },
+  };
+  function createItem(contentTop) {
+    const classList = createClassList(['is-playback-active']);
+    const item = {
+      classList,
+      isConnected: true,
+      style: { transform: '', willChange: '' },
+      closest: (selector) => selector === '.text-editor-panel' ? panel : null,
+      getBoundingClientRect() {
+        const transformMatch = item.style.transform.match(
+          /translateY\((-?[\d.]+)px\)/,
+        );
+        const transformY = transformMatch ? Number(transformMatch[1]) : 0;
+        const top = 100 + contentTop - panel.scrollTop + transformY;
+        return { bottom: top + 64, height: 64, top };
+      },
+    };
+    return item;
+  }
+  return {
+    createItem,
+    panel,
+    setToolbarHeight: (height) => { toolbarHeight = height; },
+    toolbar,
+    toolbarAnchor: () => 100 + toolbarOffset + toolbarHeight + 8,
+  };
+}
+
+let reduceMotion = false;
+const fixture = createFixture();
+const raf = createRaf();
+const controller = followScroll.createController({
+  cancelAnimationFrame: raf.cancel,
+  duration: 240,
+  matchMedia: () => ({ matches: reduceMotion }),
+  requestAnimationFrame: raf.request,
+});
+const middleItem = fixture.createItem(300);
+const shortToolbarTarget = followScroll.getTranscriptFollowScrollTarget(
+  fixture.panel,
+  middleItem,
+  fixture.toolbar,
+);
+fixture.setToolbarHeight(92);
+const tallToolbarTarget = followScroll.getTranscriptFollowScrollTarget(
+  fixture.panel,
+  middleItem,
+  fixture.toolbar,
+);
+fixture.setToolbarHeight(60);
+
+controller.follow(middleItem, 'row-a');
+const scheduledBeforeDuplicate = raf.count();
+controller.follow(middleItem, 'row-a');
+const queuedAfterDuplicate = raf.count();
+const middleVisualTops = [middleItem.getBoundingClientRect().top];
+const middleScrollTops = [fixture.panel.scrollTop];
+for (const timestamp of [0, 120, 240]) {
+  raf.runNext(timestamp);
+  middleVisualTops.push(middleItem.getBoundingClientRect().top);
+  middleScrollTops.push(fixture.panel.scrollTop);
+}
+
+middleItem.classList.remove('is-playback-active');
+const tailItem = fixture.createItem(1000);
+controller.follow(tailItem, 'row-tail');
+const tailVisualTops = [tailItem.getBoundingClientRect().top];
+const tailScrollTops = [fixture.panel.scrollTop];
+for (const timestamp of [300, 420, 540]) {
+  raf.runNext(timestamp);
+  tailVisualTops.push(tailItem.getBoundingClientRect().top);
+  tailScrollTops.push(fixture.panel.scrollTop);
+}
+const tailStylesCleared =
+  tailItem.style.transform === '' &&
+  tailItem.style.willChange === '' &&
+  !tailItem.classList.contains('is-follow-animating');
+
+const retargetFixture = createFixture();
+const retargetRaf = createRaf();
+const retargetController = followScroll.createController({
+  cancelAnimationFrame: retargetRaf.cancel,
+  duration: 240,
+  matchMedia: () => ({ matches: false }),
+  requestAnimationFrame: retargetRaf.request,
+});
+const staleItem = retargetFixture.createItem(300);
+const newItem = retargetFixture.createItem(520);
+retargetController.follow(staleItem, 'stale-row');
+const [staleFrameId] = retargetRaf.firstPending();
+const staleFrame = retargetRaf.history.get(staleFrameId);
+staleItem.classList.remove('is-playback-active');
+retargetController.follow(newItem, 'new-row');
+const scrollBeforeStaleFrame = retargetFixture.panel.scrollTop;
+staleFrame(0);
+const staleFrameIgnored =
+  retargetFixture.panel.scrollTop === scrollBeforeStaleFrame &&
+  staleItem.style.transform === '' &&
+  !staleItem.classList.contains('is-follow-animating');
+retargetRaf.runNext(0);
+const manualFrameEntry = retargetRaf.firstPending();
+retargetRaf.runNext(120);
+const scrollBeforeManualCancel = retargetFixture.panel.scrollTop;
+retargetFixture.panel.dispatch('wheel');
+const scrollAfterManualCancel = retargetFixture.panel.scrollTop;
+retargetRaf.history.get(manualFrameEntry[0])(240);
+const scheduledBeforeSameKey = retargetRaf.count();
+retargetController.follow(newItem, 'new-row');
+const manualCancelClean =
+  scrollBeforeManualCancel === scrollAfterManualCancel &&
+  retargetFixture.panel.scrollTop === scrollAfterManualCancel &&
+  newItem.style.transform === '' &&
+  newItem.style.willChange === '' &&
+  !newItem.classList.contains('is-follow-animating') &&
+  retargetFixture.panel.listenerCount() === 0 &&
+  retargetRaf.count() === scheduledBeforeSameKey;
+
+const resetItem = retargetFixture.createItem(760);
+newItem.classList.remove('is-playback-active');
+retargetController.follow(resetItem, 'reset-row');
+const [resetFrameId] = retargetRaf.firstPending();
+const resetFrame = retargetRaf.history.get(resetFrameId);
+retargetController.reset();
+const scrollBeforeResetFrame = retargetFixture.panel.scrollTop;
+resetFrame(400);
+const resetClean =
+  retargetFixture.panel.scrollTop === scrollBeforeResetFrame &&
+  resetItem.style.transform === '' &&
+  !resetItem.classList.contains('is-follow-animating') &&
+  retargetFixture.panel.listenerCount() === 0;
+
+const delayedFixture = createFixture();
+const delayedRaf = createRaf();
+const delayedController = followScroll.createController({
+  cancelAnimationFrame: delayedRaf.cancel,
+  matchMedia: () => ({ matches: false }),
+  requestAnimationFrame: delayedRaf.request,
+});
+const delayedItem = delayedFixture.createItem(300);
+delayedFixture.panel.hidden = true;
+const hiddenFollowRejected =
+  delayedController.follow(delayedItem, 'delayed-row') === false &&
+  delayedRaf.count() === 0;
+delayedFixture.panel.hidden = false;
+const visibleFollowRetried =
+  delayedController.follow(delayedItem, 'delayed-row') === true &&
+  delayedRaf.count() === 1;
+delayedFixture.panel.hidden = true;
+delayedRaf.runNext(0);
+delayedFixture.panel.hidden = false;
+const visibleFollowRetriedAfterInvalidation =
+  delayedController.follow(delayedItem, 'delayed-row') === true &&
+  delayedRaf.count() === 2;
+delayedController.reset();
+
+const reducedFixture = createFixture();
+const reducedRaf = createRaf();
 reduceMotion = true;
-followActiveTranscriptSegment(item, "row-b");
-frames.shift()();
-const tailAnchorOffset = item.getBoundingClientRect().top - anchorTop;
-console.log(JSON.stringify({{
+const reducedController = followScroll.createController({
+  cancelAnimationFrame: reducedRaf.cancel,
+  matchMedia: () => ({ matches: reduceMotion }),
+  requestAnimationFrame: reducedRaf.request,
+});
+const reducedItem = reducedFixture.createItem(1000);
+reducedController.follow(reducedItem, 'reduced-row');
+const reducedMotionImmediate =
+  reducedFixture.panel.scrollTop === 700 &&
+  reducedRaf.count() === 0 &&
+  reducedItem.style.transform === '' &&
+  !reducedItem.classList.contains('is-follow-animating');
+
+console.log(JSON.stringify({
+  anchorTop: fixture.toolbarAnchor(),
+  hiddenFollowRejected,
+  manualCancelClean,
+  middleScrollTops,
+  middleVisualTops,
   queuedAfterDuplicate,
+  reducedMotionImmediate,
+  resetClean,
+  scheduledBeforeDuplicate,
   shortToolbarTarget,
+  staleFrameIgnored,
+  tailScrollTops,
+  tailStylesCleared,
+  tailVisualTops,
   tallToolbarTarget,
-  middleAnchorOffset,
-  tailAnchorOffset,
-  scrollCalls,
-}}));
+  visibleFollowRetried,
+  visibleFollowRetriedAfterInvalidation,
+}));
 """
 
     try:
@@ -1797,15 +1997,28 @@ console.log(JSON.stringify({{
         pytest.skip("Node.js is required for the transcript follow-scroll test.")
 
     payload = json.loads(result.stdout)
+    assert payload["scheduledBeforeDuplicate"] == 1
     assert payload["queuedAfterDuplicate"] == 1
     assert payload["shortToolbarTarget"] == 214
     assert payload["tallToolbarTarget"] == 182
-    assert payload["middleAnchorOffset"] == 0
-    assert payload["tailAnchorOffset"] == 214
-    assert payload["scrollCalls"] == [
-        {"top": 214, "behavior": "smooth"},
-        {"top": 700, "behavior": "auto"},
-    ]
+    assert payload["middleScrollTops"] == sorted(payload["middleScrollTops"])
+    assert payload["middleScrollTops"][-1] == pytest.approx(214)
+    assert payload["middleVisualTops"] == pytest.approx(
+        [payload["anchorTop"]] * len(payload["middleVisualTops"])
+    )
+    assert payload["tailScrollTops"] == sorted(payload["tailScrollTops"])
+    assert max(payload["tailScrollTops"]) == pytest.approx(700)
+    assert payload["tailVisualTops"] == sorted(payload["tailVisualTops"])
+    assert payload["tailVisualTops"][0] == pytest.approx(payload["anchorTop"])
+    assert payload["tailVisualTops"][-1] == pytest.approx(400)
+    assert payload["tailStylesCleared"] is True
+    assert payload["staleFrameIgnored"] is True
+    assert payload["manualCancelClean"] is True
+    assert payload["resetClean"] is True
+    assert payload["hiddenFollowRejected"] is True
+    assert payload["visibleFollowRetried"] is True
+    assert payload["visibleFollowRetriedAfterInvalidation"] is True
+    assert payload["reducedMotionImmediate"] is True
 
 
 def test_timeline_model_shares_selection_drag_resize_and_persistence():

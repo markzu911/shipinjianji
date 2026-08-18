@@ -2314,6 +2314,15 @@ h1 {
     inset 0 0 0 1px rgba(71, 215, 172, 0.22);
 }
 
+.segment-item.is-playback-active.is-follow-animating {
+  position: relative;
+  z-index: 9;
+  isolation: isolate;
+  background:
+    linear-gradient(90deg, rgba(71, 215, 172, 0.16), rgba(71, 215, 172, 0.045)),
+    var(--surface);
+}
+
 .segment-time-column {
   min-width: 0;
   display: grid;

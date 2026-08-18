@@ -115,7 +115,7 @@ if (document.activeElement !== positionXPercent) {
 
 已删除文字同样必须能试听。点击其播放按钮时，只在该展示行的源时间范围内临时绕过剪辑预览的“跳过已删除区间”逻辑；播放到展示行末时必须保存终点、暂停、清除临时范围，再把播放头校准到行末，避免校准产生的新 `timeupdate` 再次命中旧范围。用户执行其他 seek 时也立即清除临时范围，后续公共播放恢复正常跳过删除内容。当前行高亮优先命中该临时范围，因此已删除行试听时也显示 `aria-current` 和“播放中”。
 
-播放跟随滚动以文字面板为 scroll container，并读取当前 sticky `.cut-toolbar` 的实际位置和高度，把活动行顶部对齐到工具栏下方固定间距。锚点必须直接使用 `toolbar.getBoundingClientRect().bottom + 8`；不能用 `panelRect.top + toolbarHeight` 推算，因为面板 padding、边框或 sticky 偏移会让活动行被工具栏遮挡。目标 `scrollTop` 必须 clamp 到 `0..scrollHeight-clientHeight`：中段行保持顶部锚点，接近尾部时面板停在最大滚动量，活动行随剩余内容自然下移。同一 `data-display-key` 只调度一次滚动；`prefers-reduced-motion: reduce` 使用即时滚动，其他情况可使用平滑滚动。
+播放跟随滚动以文字面板为 scroll container，并读取当前 sticky `.cut-toolbar` 的实际位置和高度，把活动行顶部对齐到工具栏下方固定间距。锚点必须直接使用 `toolbar.getBoundingClientRect().bottom + 8`；不能用 `panelRect.top + toolbarHeight` 推算，因为面板 padding、边框或 sticky 偏移会让活动行被工具栏遮挡。目标 `scrollTop` 必须 clamp 到 `0..scrollHeight-clientHeight`：中段行通过同步的 `scrollTop + transform` RAF 动画保持顶部锚点，接近尾部时面板停在最大滚动量，活动行再随剩余距离连续向下移动。同一 `data-display-key` 只调度一次滚动；切换行、重渲染或用户滚动意图会取消旧动画并清除临时样式，`prefers-reduced-motion: reduce` 只使用即时定位。
 
 ```javascript
 const anchorTop = (toolbarRect?.bottom ?? panelRect.top) + 8;

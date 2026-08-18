@@ -380,6 +380,7 @@ async def disable_frontend_cache(request, call_next):
         "/",
         "/index.html",
         "/app.js",
+        "/transcript-follow-scroll.js",
         "/timeline-model.js",
         "/editor-suite.js",
         "/ui-feedback.js",
