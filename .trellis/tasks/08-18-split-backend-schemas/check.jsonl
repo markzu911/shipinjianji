@@ -1,0 +1,4 @@
+{"file":".trellis/spec/backend/directory-structure.md","reason":"Verify schema ownership, explicit re-export compatibility, and one-way dependency direction."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Check validation behavior, full backend regression, and scope discipline."}
+{"file":".trellis/spec/testing/index.md","reason":"Verify the focused schema compatibility test fits the split application test structure and full-suite rules."}
+{"file":".trellis/tasks/08-18-split-backend-schemas/research/schema-extraction-inventory.md","reason":"Audit exact model completeness, OpenAPI hash, imports, and expected test count."}

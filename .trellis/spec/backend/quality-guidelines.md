@@ -29,4 +29,4 @@
 - 涉及 FFmpeg 的逻辑必须至少有一个真实 1 秒媒体样片测试，外部 AI 请求继续 monkeypatch，避免费用和网络不确定性。
 - 最后运行 `git diff --check`。
 
-参考：`server/app.py` 中 cut boundary 常量与 `render_*`；`tests/test_app.py` 的剪辑、时间轴、艺术字和画中画测试。
+参考：`server/app.py` 中 cut boundary 常量与 `render_*`；`tests/app/` 中的剪辑、时间轴、艺术字和画中画功能测试。

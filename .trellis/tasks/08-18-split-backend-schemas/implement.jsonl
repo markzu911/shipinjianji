@@ -1,0 +1,4 @@
+{"file":".trellis/spec/backend/directory-structure.md","reason":"Follow the existing single-process backend boundaries, placement rules, and behavior-preserving extraction contract."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Preserve API validation invariants and run the required backend verification gates."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Keep browser payload fields and Pydantic validation contracts unchanged across the extraction."}
+{"file":".trellis/tasks/08-18-split-backend-schemas/research/schema-extraction-inventory.md","reason":"Use the exact 29-model inventory, dependency evidence, compatibility consumers, and OpenAPI baseline."}

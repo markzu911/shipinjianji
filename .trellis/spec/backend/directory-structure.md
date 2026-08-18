@@ -13,7 +13,7 @@
 
 ## 修改位置
 
-- 请求/响应模型：`server/app.py` 中的 Pydantic `BaseModel`。
+- 请求/领域载荷模型：`server/schemas.py` 中的 Pydantic `BaseModel`；`server/app.py` 显式导入并重导出公开名称以保持旧调用路径。
 - 路由：`@app.get/post/put/patch/delete` 装饰的函数。
 - 后台任务：`process_job`、`process_cut_job`、`process_art_text_job`、`process_picture_in_picture_job`、`process_preview_composition_job`。
 - 媒体处理：`probe_video*`、`run_ffmpeg`、`render_*`、时间轴归一化函数。
@@ -29,6 +29,8 @@
 - 继续内联会让路由同时承担校验、状态迁移、I/O 和渲染。
 
 提取必须是行为保持型的渐进改动，先保留原函数作为适配入口并运行完整测试。不要在同一改动中同时拆模块、改 API 字段和改用户行为。
+
+`server/schemas.py` 只能依赖类型工具和 Pydantic，不得反向导入 `server.app`、FastAPI 路由、媒体依赖、路径常量或全局可变状态。新增或删除公开模型时，必须同步更新 schema 的显式 `__all__`、`server.app` 的显式导入和兼容回归测试。
 
 ## 命名与数据形状
 
