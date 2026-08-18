@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/index.md","reason":"复核后端拆分是否符合整体质量门槛。"}
+{"file":".trellis/spec/backend/directory-structure.md","reason":"检查模块所有权、反向导入、适配器厚度和循环依赖。"}
+{"file":".trellis/spec/backend/persistence-and-jobs.md","reason":"检查 manifest/目录/原子保存/清理与动态 DATA_DIR 契约。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"检查兼容、错误文案、全量回归、data 隔离和生产 refs。"}
+{"file":".trellis/spec/testing/index.md","reason":"核对聚焦回归、历史专项和完整测试节点。"}
+{"file":".trellis/tasks/08-18-split-history-repository/research/history-repository-inventory.md","reason":"逐项核对 14 个实现所有权、显式依赖和保留在 app 的职责。"}

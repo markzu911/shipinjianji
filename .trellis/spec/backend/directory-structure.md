@@ -17,7 +17,8 @@
 - 路由：`@app.get/post/put/patch/delete` 装饰的函数。
 - 后台任务：`process_job`、`process_cut_job`、`process_art_text_job`、`process_picture_in_picture_job`、`process_preview_composition_job`。
 - 媒体处理：`probe_video*`、`run_ffmpeg`、`render_*`、时间轴归一化函数。
-- 文件持久化：cut draft、history、font、art template、position preset 的 `load_*` / `save_*` 函数。
+- 历史版本持久化：`server/history_repository.py` 中的 `HistoryRepository`；`server/app.py` 只保留旧函数名的兼容适配器、路由与维护协调。
+- 其他文件持久化：cut draft、font、art template、position preset 的 `load_*` / `save_*` 函数仍在 `server/app.py`。
 - 浏览器资源：`web/`，由 FastAPI 静态挂载和显式页面路由提供。
 
 ## 新代码组织规则
@@ -31,6 +32,8 @@
 提取必须是行为保持型的渐进改动，先保留原函数作为适配入口并运行完整测试。不要在同一改动中同时拆模块、改 API 字段和改用户行为。
 
 `server/schemas.py` 只能依赖类型工具和 Pydantic，不得反向导入 `server.app`、FastAPI 路由、媒体依赖、路径常量或全局可变状态。新增或删除公开模型时，必须同步更新 schema 的显式 `__all__`、`server.app` 的显式导入和兼容回归测试。
+
+`server/history_repository.py` 只能依赖标准库和构造时显式传入的目录、容量上限、共享锁、FFmpeg 解析器与时钟，不得反向导入 `server.app`。`server.app` 的历史兼容适配器必须在每次调用时使用当前 `DATA_DIR` 和 `HISTORY_MAX_STORED` 构造仓库，不能缓存包含运行时路径的实例。
 
 ## 命名与数据形状
 

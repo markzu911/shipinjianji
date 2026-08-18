@@ -95,6 +95,81 @@ if (
 - 成功保存历史或任务终态失败后可以清理工作目录；不得删除历史成片或用户上传的模板/字体。
 - 新的持久化目录必须同步更新 README、`.env.example`、打包清洁数据规则和测试。
 
+## 场景：历史版本仓库边界
+
+### 1. Scope / Trigger
+
+- `server/history_repository.py` 唯一拥有 `data/history` 的目录、manifest 过滤与原子写入、公开投影、缩略图、版本保存和容量裁剪实现。
+- 修改历史版本的磁盘布局、清单、保留上限或 `server.app` 兼容入口时适用本契约；API 路由、job 复用和周期维护协调仍由 `server.app` 拥有。
+
+### 2. Signatures
+
+```python
+HistoryRepository(
+    *,
+    data_dir: Path,
+    max_stored: int,
+    lock: ContextManager[Any],
+    resolve_ffmpeg: Callable[[str], str],
+    utc_now: Callable[[], str],
+    local_now: Callable[[], datetime],
+)
+
+def _history_repository() -> HistoryRepository: ...
+```
+
+`server.app` 保留拆分前 14 个历史函数的名称和签名；适配器只把调用转发给 `_history_repository()` 返回的实例。
+
+### 3. Contracts
+
+- `HistoryRepository` 只依赖标准库和构造参数，不得导入 `server.app`、FastAPI、`JOBS` 或运行时环境全局。
+- `HISTORY_KINDS` 与 `HISTORY_LIBRARY_LOCK` 由仓库模块创建，`server.app` 重导出同一对象；每个临时仓库实例必须共享该锁。
+- `_history_repository()` 每次调用读取当前 `DATA_DIR` 和 `HISTORY_MAX_STORED`，同时传入当前 FFmpeg 解析器与时钟；不得缓存包含运行时路径或上限的实例。
+- library root、manifest、版本目录和文件名保持 `data/history`、`manifest.json`、`history-<32hex>`、`video.mp4`、`transcript.json`、`thumbnail.jpg`。
+- 保存版本依次原子落盘视频与 transcript、尝试生成缩略图、在锁内更新 manifest，随后删除被容量上限淘汰的目录；任一异常删除本次新建的整个版本目录。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 结果 |
+| --- | --- |
+| manifest 不存在 | 返回空列表，不创建或覆盖文件 |
+| manifest 无法读取、JSON 损坏或根节点不是列表 | 抛出可诊断 `RuntimeError`，不覆盖现有清单 |
+| 记录 id、kind 或 `videoFilename` 不符合既有白名单 | 读取时过滤该记录 |
+| history id 不是 `history-<32hex>` | 目录解析抛 `ValueError`；查找返回 `None` |
+| 源视频不存在或 transcript 没有 segments 列表 | 抛 `RuntimeError`，不创建成功记录 |
+| FFmpeg 缩略图失败 | 删除失败的缩略图并继续保存无缩略图版本 |
+| 视频、transcript 或 manifest 保存中途失败 | 删除本次新建版本目录并继续抛出异常 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：测试把 `server.app.DATA_DIR` 改为临时目录、把 `HISTORY_MAX_STORED` 改为 1 后，下一次旧函数调用立即写入临时目录并使用新上限。
+- Base：保存版本后，视频和 transcript 已完成临时文件替换，manifest 在共享锁内包含新记录，公开投影字段和 URL 与拆分前一致。
+- Bad：模块导入时创建全局仓库并捕获真实 `DATA_DIR`；这会绕过测试隔离，也会让运行时配置变更失效。
+
+### 6. Tests Required
+
+- 独立进程只导入 `server.history_repository`，断言 `server.app` 未进入 `sys.modules`。
+- 断言 `server.app` 重导出的类、`HISTORY_KINDS` 和 `HISTORY_LIBRARY_LOCK` 与仓库模块对象同一。
+- monkeypatch `server.app.DATA_DIR` 与 `HISTORY_MAX_STORED`，断言旧适配器读取当前目录和默认上限。
+- 继续运行 history/maintenance 生命周期测试，覆盖真实短视频、缩略图、保存、重命名、复用、删除和容量裁剪。
+- 完整回归同时校验 OpenAPI path/schema 数量和稳定哈希，防止结构拆分改变 API。
+
+### 7. Wrong vs Correct
+
+```python
+# Wrong: 导入时捕获目录和容量，fixture 或运行时修改不会生效。
+HISTORY_REPOSITORY = HistoryRepository(data_dir=DATA_DIR, max_stored=HISTORY_MAX_STORED, ...)
+
+# Correct: 旧入口的每次调用都使用当前配置，但共享同一个模块锁。
+def _history_repository() -> HistoryRepository:
+    return HistoryRepository(
+        data_dir=DATA_DIR,
+        max_stored=HISTORY_MAX_STORED,
+        lock=HISTORY_LIBRARY_LOCK,
+        ...,
+    )
+```
+
 ## 演进边界
 
 当前优化规划建议未来引入版本化 `ProjectDocument`。在真正实现、迁移和测试完成前，不得让新代码假定它存在；迁移期必须保留旧 job/cut draft 兼容读取。

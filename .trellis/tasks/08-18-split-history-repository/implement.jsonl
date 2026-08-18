@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/index.md","reason":"加载后端入口、层级导航和修改前质量要求。"}
+{"file":".trellis/spec/backend/directory-structure.md","reason":"遵守渐进式提取、单向依赖和 server.app 兼容适配规则。"}
+{"file":".trellis/spec/backend/persistence-and-jobs.md","reason":"保持历史 manifest、原子写入、数据目录和清理生命周期契约。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"执行显式依赖、完整回归、数据隔离和作用域检查。"}
+{"file":".trellis/spec/testing/index.md","reason":"按拆分后的测试职责增加聚焦模块测试并运行完整基线。"}
+{"file":".trellis/tasks/08-18-split-history-repository/research/history-repository-inventory.md","reason":"使用已核对的函数清单、依赖注入边界、基线和保留职责。"}

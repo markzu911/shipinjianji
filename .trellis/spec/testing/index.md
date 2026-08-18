@@ -14,7 +14,8 @@
 
 - `tests/app/conftest.py`：应用测试专用的 `isolated_jobs` 和 `sample_video` fixture。
 - `test_schemas.py`：后端 Pydantic 模型公开清单与 `server.app` 旧导入路径的同一性兼容契约。
-- `test_settings.py`、`test_maintenance_history.py`：运行配置、任务清理和历史版本。
+- `test_settings.py`、`test_maintenance_history.py`：运行配置、任务清理和历史版本完整生命周期。
+- `test_history_repository.py`：历史仓库独立导入、模块常量/共享锁同一性，以及旧适配器对运行时目录和容量配置的惰性读取。
 - `test_frontend_contracts.py`：资源版本、DOM/ARIA、跨页面消息安全和 Node 行为契约。
 - `test_asset_libraries.py`：艺术字模板、位置预设和字体资源库。
 - `test_transcription_suggestions.py`：语音识别、语义分词、AI 建议和无语音检测。
