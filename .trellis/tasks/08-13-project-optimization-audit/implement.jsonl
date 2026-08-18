@@ -7,3 +7,4 @@
 {"file":".trellis/spec/operations/index.md","reason":"配置、数据目录、启动和 Mac 打包不能泄露本机秘密或用户媒体。"}
 {"file":".trellis/tasks/08-13-project-optimization-audit/design.md","reason":"记录目标架构、分阶段迁移、兼容和回滚边界。"}
 {"file":".trellis/tasks/08-13-project-optimization-audit/implement.md","reason":"记录可靠性优先的实施顺序与验证门禁。"}
+{"file":".trellis/tasks/08-13-project-optimization-audit/research/single-page-editor-architecture.md","reason":"实施单页编辑器前加载现有多运行时证据、目标模块边界、状态与时间契约、迁移顺序及主要风险。"}
