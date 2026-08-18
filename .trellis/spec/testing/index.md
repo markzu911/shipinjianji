@@ -13,6 +13,7 @@
 ## 目录与职责
 
 - `tests/app/conftest.py`：应用测试专用的 `isolated_jobs` 和 `sample_video` fixture。
+- `tests/app/browser/`：真实 Chromium 编辑器工作流，详细 fixture、网络隔离、错误和 xfail 契约见 [真实浏览器工作流测试](./browser-workflows.md)。
 - `test_schemas.py`：后端 Pydantic 模型公开清单与 `server.app` 旧导入路径的同一性兼容契约。
 - `test_settings.py`、`test_maintenance_history.py`：运行配置、任务清理和历史版本完整生命周期。
 - `test_history_repository.py`：历史仓库独立导入、模块常量/共享锁同一性，以及旧适配器对运行时目录和容量配置的惰性读取。
@@ -51,6 +52,7 @@
 - overlay 或统一合成：art + pip + composition 对应模块，随后完整测试。
 - 打包/数据目录：`tests/test_build_mac_package.py`，确认不包含本机 jobs/history/秘密。
 - HTML/CSS/JS 行为变更：Python 静态契约测试之外，用浏览器验证桌面和 375px 窄屏的核心工作流。
+- 编辑器加载、保存、工具切换、公共预览或 compose 变更：运行 `\.venv\Scripts\python.exe -m pytest -q tests/app/browser`；首次运行先执行 `python -m playwright install chromium`。
 
 播放跟随等涉及 reparent、占位和展示层的动效，不能只验证最终坐标或与实现同构的几何公式。Node 行为回归必须检查真实行/按钮唯一、占位无交互和 data、原索引恢复、重渲染前清理、同 key 中断、迟到动画完成、reduced-motion、单次目标 `scrollTop` 写入、列表 FLIP keyframe、尾部晚于列表阶段，以及工具栏尚未吸顶时首行从原位置连续进入最终 sticky 锚点。连续尾部行必须检查展示层从上一视觉位置到新余量单调下移，不能途经锚点；浏览器还要在中间帧检查按钮数量、列表 `scrollHeight`、锚点误差、尾部位移和横向溢出。
 

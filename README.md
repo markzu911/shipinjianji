@@ -111,6 +111,15 @@ Invoke-RestMethod http://127.0.0.1:8001/api/maintenance/jobs/cleanup -Method Pos
 
 测试会用 FFmpeg 生成一个 1 秒样片，并用模拟在线接口验证“上传—提取音频—返回文字—按时间段剪辑—读取成片”的完整 API 链路，不会产生真实 API 请求或费用。
 
+首次运行真实浏览器工作流测试前，需要安装 Chromium：
+
+```powershell
+.\.venv\Scripts\python.exe -m playwright install chromium
+.\.venv\Scripts\python.exe -m pytest -q tests/app/browser
+```
+
+浏览器测试使用随机本地端口和隔离的临时数据目录，不会连接已启动的 8001 开发服务，也不会调用外部 AI 服务。
+
 ## 当前剪辑 API
 
 - `POST /api/transcriptions/{job_id}/cuts`：提交需要删除的 `{start, end}` 时间区间，创建后台剪辑任务。

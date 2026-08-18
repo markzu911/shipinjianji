@@ -1,0 +1,6 @@
+{"file":".trellis/spec/guides/project-overview.md","reason":"检查测试是否保持当前 Python/FastAPI/原生 JavaScript 技术栈并隔离真实数据与秘密。"}
+{"file":".trellis/spec/frontend/index.md","reason":"检查真实浏览器断言是否覆盖当前页面职责、iframe、媒体和可观察交互。"}
+{"file":".trellis/spec/testing/index.md","reason":"检查 fixture 作用域、外部网络阻断、真实短媒体、失败诊断和完整回归。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"检查端口绑定、浏览器 context 隔离、错误矩阵、compose 等待和重启 xfail 是否符合可执行契约。"}
+{"file":".trellis/spec/operations/index.md","reason":"检查临时服务生命周期、健康检查和开发/打包环境兼容性。"}
+{"file":".trellis/tasks/08-13-project-optimization-audit/research/single-page-editor-architecture.md","reason":"检查基线是否真正保护后续统一状态、预览、时间轴和 compose 迁移所需的用户行为。"}

@@ -1,0 +1,6 @@
+{"file":".trellis/spec/guides/project-overview.md","reason":"加载项目技术栈、运行端口、数据目录和秘密隔离约束，避免浏览器测试依赖开发服务或真实用户数据。"}
+{"file":".trellis/spec/frontend/index.md","reason":"进入当前原生多页面前端规范，并继续加载其架构、交互和 API/媒体边界。"}
+{"file":".trellis/spec/testing/index.md","reason":"遵守 tests/app fixture 作用域、外部服务模拟、真实短媒体和浏览器验证要求。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"遵守真实浏览器 fixture、临时服务、网络隔离、诊断、浏览器回退和精确 xfail 契约。"}
+{"file":".trellis/spec/operations/index.md","reason":"确认开发启动、健康检查、配置秘密和打包隔离约束。"}
+{"file":".trellis/tasks/08-13-project-optimization-audit/research/single-page-editor-architecture.md","reason":"理解 Phase 0 要保护的现有多运行时数据流，以及后续单页迁移将复用的行为基线。"}
