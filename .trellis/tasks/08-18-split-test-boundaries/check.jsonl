@@ -1,0 +1,5 @@
+{"file":".trellis/spec/testing/index.md","reason":"最终质量检查的测试隔离、断言层级和禁止事项"}
+{"file":".trellis/spec/guides/project-overview.md","reason":"确认结构迁移没有越界修改生产代码"}
+{"file":".trellis/tasks/08-18-split-test-boundaries/research/test-module-migration.md","reason":"检查 176 节点、13 模块和函数行数门禁"}
+{"file":".trellis/tasks/08-18-split-test-boundaries/research/test-split-migration-matrix.md","reason":"核对每个原测试只迁移一次且 imports 完整"}
+{"file":".trellis/tasks/08-18-split-test-boundaries/research/fixture-scope-and-frontend-contracts.md","reason":"核对 Mac fixture 隔离和前端 830 条断言完整性"}

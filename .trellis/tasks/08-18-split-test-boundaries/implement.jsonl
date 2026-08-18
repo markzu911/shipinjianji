@@ -1,0 +1,6 @@
+{"file":".trellis/spec/testing/index.md","reason":"测试隔离、外部服务 mock、真实媒体和回归命令约定"}
+{"file":".trellis/spec/guides/project-overview.md","reason":"单体应用与当前测试所有权边界"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"避免在结构拆分中新增重复测试 helper 和领域所有者"}
+{"file":".trellis/tasks/08-18-split-test-boundaries/research/test-module-migration.md","reason":"13 个目标模块、节点计数和机器完整性门禁"}
+{"file":".trellis/tasks/08-18-split-test-boundaries/research/test-split-migration-matrix.md","reason":"164 个原测试的逐函数唯一映射和 imports"}
+{"file":".trellis/tasks/08-18-split-test-boundaries/research/fixture-scope-and-frontend-contracts.md","reason":"fixture 目录作用域和 830 条前端断言拆分矩阵"}

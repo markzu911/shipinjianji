@@ -2,13 +2,26 @@
 
 ## 测试基线
 
-主要测试位于 `tests/test_app.py`，覆盖 API、时间轴、真实 FFmpeg 小样片、前端资源契约和外部服务模拟；Mac 打包规则位于 `tests/test_build_mac_package.py`。
+应用测试按功能拆分在 `tests/app/`，覆盖 API、时间轴、真实 FFmpeg 小样片、前端资源契约和外部服务模拟；Mac 打包规则位于 `tests/test_build_mac_package.py`。
 
 完整命令：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
 ```
+
+## 目录与职责
+
+- `tests/app/conftest.py`：应用测试专用的 `isolated_jobs` 和 `sample_video` fixture。
+- `test_settings.py`、`test_maintenance_history.py`：运行配置、任务清理和历史版本。
+- `test_frontend_contracts.py`：资源版本、DOM/ARIA、跨页面消息安全和 Node 行为契约。
+- `test_asset_libraries.py`：艺术字模板、位置预设和字体资源库。
+- `test_transcription_suggestions.py`：语音识别、语义分词、AI 建议和无语音检测。
+- `test_cut_draft.py`、`test_cut_acoustic_boundaries.py`、`test_cut_rendering.py`：文字草稿、声学边界和剪辑渲染。
+- `test_art_text_api.py`、`test_art_text_track.py`、`test_art_text_rendering.py`：艺术字 API、轨道分段和视觉渲染。
+- `test_picture_in_picture.py`、`test_composition.py`：画中画生成、时间锚点和统一合成。
+
+`tests/app/conftest.py` 的 autouse fixture 只能作用于 `tests/app/`。不要把它上移到 `tests/conftest.py`，否则独立的 Mac 打包测试会加载 `server.app` 并受到应用全局状态隔离影响。应用测试 fixture 必须继续恢复模型名、请求 URL 和 DashScope 客户端 URL，并在 `JOBS_LOCK` 下清空 `JOBS` 与 `JOB_FILES`。
 
 ## 测试写法
 
@@ -29,8 +42,11 @@
 
 ## 回归选择
 
-- API/后端通用：完整 `tests/test_app.py`。
-- 时间轴或 overlay：剪辑 + art + pip + preview composition 相关 `-k`，随后完整测试。
+- API/后端通用：完整 `tests/app/`。
+- 设置、维护或历史：对应 `test_settings.py` 或 `test_maintenance_history.py`，随后完整测试。
+- 转写或建议：`test_transcription_suggestions.py`。
+- 时间轴或剪辑：`test_cut_draft.py`、`test_cut_acoustic_boundaries.py` 和 `test_cut_rendering.py`。
+- overlay 或统一合成：art + pip + composition 对应模块，随后完整测试。
 - 打包/数据目录：`tests/test_build_mac_package.py`，确认不包含本机 jobs/history/秘密。
 - HTML/CSS/JS 行为变更：Python 静态契约测试之外，用浏览器验证桌面和 375px 窄屏的核心工作流。
 
