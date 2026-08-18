@@ -1,0 +1,6 @@
+{"file":".trellis/spec/frontend/index.md","reason":"加载原生脚本模块、资源版本和前端修改入口规范。"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"替换现有错误的跟随模块所有权与 scrollTop/row-transform 契约。"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"保持播放按钮、ARIA、稳定尺寸、尾部跟随和移动端交互契约。"}
+{"file":".trellis/spec/testing/index.md","reason":"按前端静态/Node/真实浏览器分层验证重构。"}
+{"file":".trellis/tasks/08-18-refactor-transcript-follow-animation/research/root-cause-analysis.md","reason":"使用录屏中间帧和失败方案复盘约束实现，禁止表面修补。"}
+{"file":".trellis/tasks/archive/2026-08/08-17-transcript-current-segment-playback/design.md","reason":"对照上一版同步 scrollTop 与真实行 transform 的失败设计和兼容边界。"}

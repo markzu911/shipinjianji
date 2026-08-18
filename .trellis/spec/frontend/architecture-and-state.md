@@ -7,7 +7,7 @@
 - `web/art-text.html/js`：艺术字工具，可独立页面运行，也可嵌入工作台。
 - `web/picture-in-picture.html/js`：画中画工具，可独立或嵌入。
 - `web/timeline-model.js`：版本化轨道文档、clip 归一化、选择、拖动/缩放和 localStorage 草稿。
-- `web/transcript-follow-scroll.js`：文字播放跟随滚动的目标计算、RAF 动画、去重、中断和临时样式清理。
+- `web/transcript-follow-scroll.js`：文字播放跟随滚动的目标计算、真实行 reparent、列表 FLIP/WAAPI 动画、去重、中断和临时样式清理。
 - `web/ui-feedback.js`：对话框、生成进度和通用播放器反馈。
 
 ## 加载方式
@@ -22,11 +22,19 @@
 
 ### 文案跟随滚动模块契约
 
-`web/transcript-follow-scroll.js` 是播放中活动文案跟随滚动的唯一实现边界，并通过 `window.TranscriptFollowScroll` 暴露 `createController()`。`app.js` 只负责确定活动行、更新 `aria-current`/播放 badge，并调用控制器的 `follow()`、`reset()` 和 `destroy()`；不得在入口中复制目标计算、RAF 或跟随 key 状态。
+`web/transcript-follow-scroll.js` 是播放中活动文案跟随滚动的唯一实现边界，并通过 `window.TranscriptFollowScroll` 暴露 `createController()`。控制器唯一拥有真实活动行的 reparent、等高占位、单行展示层定位、一次性目标 `scrollTop` 提交、列表 FLIP/WAAPI、跟随 key、用户中断和恢复顺序；不得再对仍位于 `segmentList` 的真实行执行跟随 transform，也不得由 `app.js` 建立逐帧滚动控制器。
 
-控制器在同一条可取消 RAF 时间线上同步写入面板 `scrollTop` 与活动行临时 `transform`。切换目标、列表重渲染、关闭跟随或收到 `wheel`、`touchstart`、`pointerdown`、滚动键意图时，必须取消旧帧并清除 transform、will-change、动画 class 和监听器；旧回调即使迟到也不得写入新 DOM。`prefers-reduced-motion: reduce` 直接定位，不建立动画状态。
+`app.js` 只负责确定活动行、更新 `aria-current`/播放 badge，并调用控制器的 `follow()`、`reset()` 和 `destroy()`。列表与展示层中的真实行必须经统一查询 helper 读取，所有行交互复用同一个命名事件处理器；`renderCutSegments()` 必须在替换列表内容前调用 `reset()`，先把展示层中的真实行恢复到占位位置。
+
+控制器移动真实行前要插入不含按钮、时间 data 或可聚焦后代的等高占位，使展示行和播放按钮始终只有一份。每次换段只提交一次目标 `scrollTop`，列表通过从 `scrollDelta` 到 `0` 的 FLIP transform 表达滚动过程；中段展示层同时进入工具栏锚点。滚动目标被最大值截断时，列表阶段必须保持展示层的上一视觉位置，列表动画完成后再从该位置直接、单调地移动到新的尾部余量，不得先返回锚点再折返。换段、重渲染、关闭跟随、目标失效或收到 `wheel`、`touchstart`、`pointerdown`、滚动键意图时，必须取消旧动画、恢复原顺序并清除占位、展示层尺寸/transform、动画 class 和监听器；迟到旧动画完成回调不得写入新 DOM。`prefers-reduced-motion: reduce` 使用相同的唯一 DOM/占位结构，但即时定位且不建立运动带。
 
 跟随 key 只能在目标行和滚动面板通过有效性校验后记录；首次调用遇到隐藏/脱离 DOM 的目标不得消耗 key，运行中的目标失效也要释放 key，使面板恢复后同一行可以重试。用户主动滚动中断则保留已跟随 key，避免后续 `timeupdate` 立即抢回滚动控制权。
+
+### 播放帧热路径契约
+
+剪辑预览只允许一个可取消的播放帧时钟，按 `requestVideoFrameCallback -> requestAnimationFrame -> timeupdate` 顺序降级。`play`、`pause`、`seeking`、`seeked`、`ended`、`emptied` 和销毁必须统一管理其生命周期；每次停止都递增 generation，取消后迟到的旧回调必须在读取或清空当前 callback id 前退出，不能发出旧时间或建立第二条循环。
+
+每帧更新只消费预先缓存的剪后区间、时间轴宽度/比例和文案元素索引，不得调用 `updateTime()`、重建区间、全量查询 DOM 或重建时间轴结构。文案与时间轴高亮都要分别保存“最新开始项 floor cursor”和“当前命中 active cursor”：向前播放时复用当前命中项，重叠短项结束后允许恢复仍有效的长项；向后 seek 时通过二分重新定位 floor，再重算 active，不能把两个游标合并。
 
 ## 状态所有权
 

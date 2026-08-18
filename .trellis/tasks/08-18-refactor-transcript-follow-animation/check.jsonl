@@ -1,0 +1,6 @@
+{"file":".trellis/spec/frontend/index.md","reason":"检查模块加载、版本和全局边界。"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"检查唯一实现、状态恢复、取消和旧错误契约是否移除。"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"检查稳定布局、交互可用性、ARIA、reduced-motion 和 375px 行为。"}
+{"file":".trellis/spec/testing/index.md","reason":"核对 Node 行为、完整 pytest 和真实浏览器证据。"}
+{"file":".trellis/tasks/08-18-refactor-transcript-follow-animation/research/root-cause-analysis.md","reason":"逐项检查根因、失败机制和预防措施是否真正闭环。"}
+{"file":".trellis/tasks/archive/2026-08/08-17-transcript-current-segment-playback/prd.md","reason":"确认旧任务已承诺但未被真实中间帧覆盖的行为已补充可观察验收。"}

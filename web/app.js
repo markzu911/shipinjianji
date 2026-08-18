@@ -33,6 +33,9 @@ const jobError = document.querySelector("#jobError");
 const jobErrorText = document.querySelector("#jobErrorText");
 const retryButton = document.querySelector("#retryButton");
 const segmentList = document.querySelector("#segmentList");
+const transcriptNowPlayingLayer = document.querySelector(
+  "#transcriptNowPlayingLayer",
+);
 const segmentStructureStatus = document.querySelector("#segmentStructureStatus");
 const cutDraftSaveStatus = document.querySelector("#cutDraftSaveStatus");
 const segmentEditDialog = document.querySelector("#segmentEditDialog");
@@ -158,7 +161,9 @@ const CUT_TIMELINE_TEXT_LINES = 2;
 const CUT_HISTORY_LIMIT = 40;
 const CUT_HISTORY_COALESCE_MS = 800;
 const transcriptFollowScrollController =
-  window.TranscriptFollowScroll.createController();
+  window.TranscriptFollowScroll.createController({
+    layer: transcriptNowPlayingLayer,
+  });
 
 let selectedFile = null;
 let selectedPreviewUrl = "";
@@ -191,6 +196,21 @@ let cutSelectionPreviewEnd = null;
 let transcriptPreviewRange = null;
 let activeTranscriptSegmentIndex = -1;
 let activeTranscriptSegmentKey = "";
+let activeTranscriptItem = null;
+let transcriptPlaybackEntries = [];
+let transcriptPlaybackEntryByKey = new Map();
+let transcriptPlaybackCursor = -1;
+let transcriptPlaybackActiveCursor = -1;
+let transcriptPlaybackLastTime = Number.NEGATIVE_INFINITY;
+let cutPlaybackFrameClock = null;
+let editedTimelineSpansCache = null;
+let cutTimelinePixelsPerSecondCache = null;
+let cutTimelineScaleSignature = "";
+let cutTimelineTrackWidthCache = 0;
+let cutTimelineTextPlaybackEntries = [];
+let cutTimelineTextPlaybackFloorCursor = -1;
+let cutTimelineTextPlaybackCursor = -1;
+let cutTimelineTextPlaybackLastTime = Number.NEGATIVE_INFINITY;
 let cutDraftReady = false;
 let cutDraftRevision = 0;
 let cutDraftLastSignature = "";
@@ -823,6 +843,7 @@ function renderCutSegments() {
   transcriptFollowScrollController.reset();
   activeTranscriptSegmentIndex = -1;
   activeTranscriptSegmentKey = "";
+  activeTranscriptItem = null;
   const deletedRanges = getCommittedTimelineDeleteRanges();
   const displayItems = [];
   currentEditableSegments.forEach((segment, segmentIndex) => {
@@ -871,6 +892,140 @@ function updateCutSegmentText() {
   renderCutSegments();
 }
 
+function transcriptDisplayItems() {
+  return [segmentList, transcriptNowPlayingLayer].flatMap((container) =>
+    container
+      ? [...container.querySelectorAll(".segment-item")]
+      : [],
+  );
+}
+
+function playbackCursorFloor(entries, currentIndex, lastTime, currentTime) {
+  if (
+    currentIndex >= 0 &&
+    currentIndex < entries.length &&
+    currentTime >= lastTime
+  ) {
+    let nextIndex = currentIndex;
+    while (
+      nextIndex + 1 < entries.length &&
+      entries[nextIndex + 1].start <= currentTime
+    ) {
+      nextIndex += 1;
+    }
+    return nextIndex;
+  }
+  let low = 0;
+  let high = entries.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (entries[middle].start <= currentTime) low = middle + 1;
+    else high = middle;
+  }
+  return low - 1;
+}
+
+function rebuildTranscriptPlaybackEntries() {
+  transcriptPlaybackEntries = transcriptDisplayItems()
+    .flatMap((item) => {
+      const start = Number(item.dataset.displayStart);
+      const end = Number(item.dataset.displayEnd);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+        return [];
+      }
+      const type = item.dataset.noSpeechId ? "no-speech" : "text";
+      return [{
+        displayIndex: Number(item.dataset.displayIndex) || 0,
+        eligible: !item.classList.contains("is-removed-from-timeline"),
+        end,
+        item,
+        key: String(item.dataset.displayKey || ""),
+        priority: type === "no-speech" ? 2 : 1,
+        segmentIndex: item.dataset.segmentIndex === undefined
+          ? -1
+          : Number(item.dataset.segmentIndex),
+        start,
+        type,
+      }];
+    })
+    .sort((left, right) =>
+      left.start - right.start ||
+      left.end - right.end ||
+      left.displayIndex - right.displayIndex,
+    );
+  let maximumEnd = Number.NEGATIVE_INFINITY;
+  for (const entry of transcriptPlaybackEntries) {
+    maximumEnd = Math.max(maximumEnd, entry.end);
+    entry.maximumEnd = maximumEnd;
+  }
+  transcriptPlaybackEntryByKey = new Map(
+    transcriptPlaybackEntries.map((entry) => [entry.key, entry]),
+  );
+  transcriptPlaybackCursor = -1;
+  transcriptPlaybackActiveCursor = -1;
+  transcriptPlaybackLastTime = Number.NEGATIVE_INFINITY;
+}
+
+function transcriptPlaybackEntryAtTime(currentTime) {
+  const sourceTime = Number(currentTime);
+  if (!Number.isFinite(sourceTime)) return null;
+  if (transcriptPreviewRange) {
+    const previewEntry = transcriptPlaybackEntryByKey.get(
+      String(transcriptPreviewRange.displayKey || ""),
+    );
+    if (
+      previewEntry &&
+      sourceTime >= previewEntry.start &&
+      sourceTime < previewEntry.end
+    ) {
+      return previewEntry;
+    }
+  }
+
+  const previousFloorCursor = transcriptPlaybackCursor;
+  const movingForward = sourceTime >= transcriptPlaybackLastTime;
+  transcriptPlaybackCursor = playbackCursorFloor(
+    transcriptPlaybackEntries,
+    transcriptPlaybackCursor,
+    transcriptPlaybackLastTime,
+    sourceTime,
+  );
+  transcriptPlaybackLastTime = sourceTime;
+  if (movingForward && transcriptPlaybackCursor === previousFloorCursor) {
+    const activeEntry = transcriptPlaybackEntries[transcriptPlaybackActiveCursor];
+    if (
+      activeEntry?.eligible &&
+      sourceTime >= activeEntry.start &&
+      sourceTime < activeEntry.end
+    ) {
+      return activeEntry;
+    }
+    if (transcriptPlaybackActiveCursor < 0) return null;
+  }
+  let selectedEntry = null;
+  let selectedIndex = -1;
+  for (let index = transcriptPlaybackCursor; index >= 0; index -= 1) {
+    const entry = transcriptPlaybackEntries[index];
+    if (
+      entry.eligible &&
+      sourceTime >= entry.start &&
+      sourceTime < entry.end &&
+      (!selectedEntry || entry.priority > selectedEntry.priority)
+    ) {
+      selectedEntry = entry;
+      selectedIndex = index;
+    }
+    if (
+      index === 0 ||
+      transcriptPlaybackEntries[index - 1].maximumEnd <= sourceTime
+    ) {
+      break;
+    }
+  }
+  transcriptPlaybackActiveCursor = selectedIndex;
+  return selectedEntry;
+}
+
 function getLiveEditedSegmentTiming(
   segment,
   spans = getEditedTimelineSpans(),
@@ -897,9 +1052,9 @@ function getLiveEditedSegmentTiming(
 
 function updateCutSegmentTimestamps() {
   const spans = getEditedTimelineSpans();
-  segmentList
-    .querySelectorAll(
-      ".segment-item[data-display-start][data-display-end]",
+  transcriptDisplayItems()
+    .filter((item) =>
+      item.matches(".segment-item[data-display-start][data-display-end]"),
     )
     .forEach((item) => {
       const segment = {
@@ -926,6 +1081,7 @@ function updateCutSegmentTimestamps() {
         `剪辑后从 ${formatPreciseTime(timing.start)} 到 ${formatPreciseTime(timing.end)}`,
       );
     });
+  rebuildTranscriptPlaybackEntries();
   updateActiveTranscriptSegment(undefined, { follow: false });
 }
 
@@ -1584,7 +1740,24 @@ function getMergedSelection() {
   );
 }
 
-function getEditedTimelineSpans() {
+function invalidateCutTimelineScale() {
+  cutTimelinePixelsPerSecondCache = null;
+  cutTimelineScaleSignature = "";
+  cutTimelineTrackWidthCache = 0;
+}
+
+function invalidateCutPlaybackStructure() {
+  editedTimelineSpansCache = null;
+  invalidateCutTimelineScale();
+  cutTimelineTextPlaybackEntries = [];
+  cutTimelineTextPlaybackFloorCursor = -1;
+  cutTimelineTextPlaybackCursor = -1;
+  cutTimelineTextPlaybackLastTime = Number.NEGATIVE_INFINITY;
+  transcriptPlaybackCursor = -1;
+  transcriptPlaybackLastTime = Number.NEGATIVE_INFINITY;
+}
+
+function buildEditedTimelineSpans() {
   const sourceTotal = cutTimelineDuration();
   if (sourceTotal <= 0) return [];
   const displayedDeletedRanges = getMergedSelection();
@@ -1621,17 +1794,30 @@ function getEditedTimelineSpans() {
   return spans;
 }
 
+function getEditedTimelineSpans() {
+  if (editedTimelineSpansCache === null) {
+    editedTimelineSpansCache = buildEditedTimelineSpans();
+  }
+  return editedTimelineSpansCache;
+}
+
 function editedCutTimelineDuration(spans = getEditedTimelineSpans()) {
   return spans.at(-1)?.editedEnd || 0;
 }
 
 function sourceTimeToEditedTime(seconds, spans = getEditedTimelineSpans()) {
   const sourceTime = clamp(Number(seconds) || 0, 0, cutTimelineDuration());
-  for (const span of spans) {
+  let low = 0;
+  let high = spans.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (spans[middle].sourceEnd < sourceTime) low = middle + 1;
+    else high = middle;
+  }
+  const span = spans[low];
+  if (span) {
     if (sourceTime < span.sourceStart) return span.editedStart;
-    if (sourceTime <= span.sourceEnd) {
-      return span.editedStart + sourceTime - span.sourceStart;
-    }
+    return span.editedStart + sourceTime - span.sourceStart;
   }
   return editedCutTimelineDuration(spans);
 }
@@ -1769,68 +1955,14 @@ function updateActiveTranscriptSegment(
   { follow = false } = {},
 ) {
   if (!follow) transcriptFollowScrollController.reset();
-  const sourceTime = Number(currentTime);
-  const allItems = [
-    ...segmentList.querySelectorAll(
-      ".segment-item[data-display-start][data-display-end]",
-    ),
-  ];
-  const transcriptPreviewItem = transcriptPreviewRange
-    ? allItems.find((item) => {
-        const start = Number(item.dataset.displayStart);
-        const end = Number(item.dataset.displayEnd);
-        return (
-          item.dataset.displayKey === transcriptPreviewRange.displayKey &&
-          Number.isFinite(start) &&
-          Number.isFinite(end) &&
-          sourceTime >= start &&
-          sourceTime < end
-        );
-      }) || null
-    : null;
-  const nextNoSpeechItem = allItems.find((item) => {
-    const start = Number(item.dataset.displayStart);
-    const end = Number(item.dataset.displayEnd);
-    return (
-      item.dataset.noSpeechId &&
-      !item.classList.contains("is-removed-from-timeline") &&
-      Number.isFinite(start) &&
-      Number.isFinite(end) &&
-      sourceTime >= start &&
-      sourceTime < end
-    );
-  }) || null;
-  const textSegmentIndex = getActiveTranscriptSegmentIndex(currentTime);
-  const matchingItems = textSegmentIndex < 0
-    ? []
-    : [
-        ...segmentList.querySelectorAll(
-          `.segment-item[data-segment-index="${textSegmentIndex}"]`,
-        ),
-      ];
-  const nextTextItem = matchingItems.find((item) => {
-    const start = Number(item.dataset.displayStart);
-    const end = Number(item.dataset.displayEnd);
-    return (
-      !item.classList.contains("is-removed-from-timeline") &&
-      Number.isFinite(start) &&
-      Number.isFinite(end) &&
-      sourceTime >= start &&
-      sourceTime < end
-    );
-  }) || null;
-  const nextItem = transcriptPreviewItem || nextNoSpeechItem || nextTextItem;
-  const nextIndex = nextItem?.dataset.segmentIndex === undefined
-    ? -1
-    : Number(nextItem.dataset.segmentIndex);
-  const nextKey = nextItem?.dataset.displayKey || "";
-  const currentItem = segmentList.querySelector(
-    ".segment-item.is-playback-active",
-  );
+  const nextEntry = transcriptPlaybackEntryAtTime(currentTime);
+  const nextItem = nextEntry?.item || null;
+  const nextIndex = nextEntry?.segmentIndex ?? -1;
+  const nextKey = nextEntry?.key || "";
   if (
     nextIndex === activeTranscriptSegmentIndex &&
     nextKey === activeTranscriptSegmentKey &&
-    currentItem === nextItem
+    activeTranscriptItem === nextItem
   ) {
     if (follow && nextItem) {
       transcriptFollowScrollController.follow(nextItem, nextKey);
@@ -1838,15 +1970,16 @@ function updateActiveTranscriptSegment(
     return;
   }
 
-  for (const item of segmentList.querySelectorAll(".segment-item.is-playback-active")) {
-    item.classList.remove("is-playback-active");
-    item.removeAttribute("aria-current");
-    const badge = item.querySelector(".segment-current-badge");
+  if (activeTranscriptItem) {
+    activeTranscriptItem.classList.remove("is-playback-active");
+    activeTranscriptItem.removeAttribute("aria-current");
+    const badge = activeTranscriptItem.querySelector(".segment-current-badge");
     if (badge) badge.hidden = true;
   }
 
   activeTranscriptSegmentIndex = nextIndex;
   activeTranscriptSegmentKey = nextKey;
+  activeTranscriptItem = nextItem;
   if (!nextItem) {
     transcriptFollowScrollController.reset();
     return;
@@ -1951,19 +2084,17 @@ function updateTimelineRangeConfirmation() {
 
 function setCutControlsDisabled(disabled) {
   cutControlsLocked = disabled;
-  segmentList
-    .querySelectorAll(".segment-toggle")
-    .forEach((button) => {
+  transcriptDisplayItems().forEach((item) => {
+    item.querySelectorAll(".segment-toggle").forEach((button) => {
       if (button instanceof HTMLButtonElement) {
         button.disabled =
           disabled || button.dataset.selectionDisabled === "true";
       }
     });
-  segmentList
-    .querySelectorAll(".segment-text-run")
-    .forEach((button) => {
+    item.querySelectorAll(".segment-text-run").forEach((button) => {
       if (button instanceof HTMLButtonElement) button.disabled = disabled;
     });
+  });
   cutFrameTimeline?.classList.toggle("is-locked", disabled);
   clearSelectionButton.disabled = disabled || !hasCutSelection();
   generateCutButton.disabled = disabled || getMergedSelection().length === 0;
@@ -2629,6 +2760,7 @@ function handleGlobalCutHistoryShortcut(event) {
 }
 
 function updateSelectionSummary() {
+  invalidateCutPlaybackStructure();
   recordCutHistoryIfChanged();
   const merged = getMergedSelection();
   const deletedDuration = merged.reduce(
@@ -2698,6 +2830,9 @@ function cutTimelineDuration() {
 }
 
 function cutTimelinePixelsPerSecond() {
+  if (cutTimelinePixelsPerSecondCache !== null) {
+    return cutTimelinePixelsPerSecondCache;
+  }
   let pixelsPerSecond = CUT_TIMELINE_MIN_PIXELS_PER_SECOND;
   const spans = getEditedTimelineSpans();
   for (const [segmentIndex, segment] of currentEditableSegments.entries()) {
@@ -2717,21 +2852,28 @@ function cutTimelinePixelsPerSecond() {
       pixelsPerSecond = Math.max(pixelsPerSecond, requiredWidth / duration);
     }
   }
-  return Math.ceil(pixelsPerSecond);
+  cutTimelinePixelsPerSecondCache = Math.ceil(pixelsPerSecond);
+  return cutTimelinePixelsPerSecondCache;
 }
 
 function updateCutTimelineScale() {
   const total = editedCutTimelineDuration();
   const viewportWidth = cutFrameTimelineScroll.clientWidth;
+  const pixelsPerSecond = cutTimelinePixelsPerSecond();
+  const signature = `${total.toFixed(3)}|${viewportWidth}|${pixelsPerSecond}`;
+  if (signature === cutTimelineScaleSignature) return;
+  cutTimelineScaleSignature = signature;
   if (total <= 0 || viewportWidth <= 0) {
     cutFrameTimelineTrack.style.removeProperty("width");
+    cutTimelineTrackWidthCache = 0;
     return;
   }
   const width = Math.max(
     viewportWidth,
-    Math.round(total * cutTimelinePixelsPerSecond()),
+    Math.round(total * pixelsPerSecond),
   );
   cutFrameTimelineTrack.style.width = `${width}px`;
+  cutTimelineTrackWidthCache = width;
 }
 
 function updateCutTimelineStatus(
@@ -2756,28 +2898,88 @@ function syncCutVideoStageLayout() {
 }
 
 function updateCutTimelineTextStates(currentTime = cutPreviewVideo.currentTime || 0) {
-  cutFrameTimelineText.querySelectorAll(".cut-timeline-text-segment").forEach((item) => {
-    const start = Number(item.dataset.sourceStart) || 0;
-    const end = Number(item.dataset.sourceEnd) || start;
-    item.classList.toggle(
-      "is-active",
-      currentTime >= start && currentTime < end,
-    );
-  });
+  const sourceTime = Number(currentTime) || 0;
+  const previousFloorCursor = cutTimelineTextPlaybackFloorCursor;
+  const movingForward = sourceTime >= cutTimelineTextPlaybackLastTime;
+  const floorIndex = playbackCursorFloor(
+    cutTimelineTextPlaybackEntries,
+    cutTimelineTextPlaybackFloorCursor,
+    cutTimelineTextPlaybackLastTime,
+    sourceTime,
+  );
+  cutTimelineTextPlaybackFloorCursor = floorIndex;
+  cutTimelineTextPlaybackLastTime = sourceTime;
+  if (movingForward && floorIndex === previousFloorCursor) {
+    const activeEntry = cutTimelineTextPlaybackEntries[cutTimelineTextPlaybackCursor];
+    if (
+      activeEntry &&
+      sourceTime >= activeEntry.start &&
+      sourceTime < activeEntry.end
+    ) {
+      return;
+    }
+    if (cutTimelineTextPlaybackCursor < 0) return;
+  }
+  let nextIndex = -1;
+  for (let index = floorIndex; index >= 0; index -= 1) {
+    const entry = cutTimelineTextPlaybackEntries[index];
+    if (sourceTime >= entry.start && sourceTime < entry.end) {
+      nextIndex = index;
+      break;
+    }
+    if (
+      index === 0 ||
+      cutTimelineTextPlaybackEntries[index - 1].maximumEnd <= sourceTime
+    ) {
+      break;
+    }
+  }
+  if (nextIndex === cutTimelineTextPlaybackCursor) return;
+  cutTimelineTextPlaybackEntries[
+    cutTimelineTextPlaybackCursor
+  ]?.element.classList.remove("is-active");
+  cutTimelineTextPlaybackEntries[nextIndex]?.element.classList.add("is-active");
+  cutTimelineTextPlaybackCursor = nextIndex;
 }
 
-function updateCutTimelinePlayhead({ followTranscript = !cutPreviewVideo.paused } = {}) {
-  const spans = getEditedTimelineSpans();
+function getCutPlaybackFrameState(currentTime = cutPreviewVideo.currentTime || 0) {
+  const spans = editedTimelineSpansCache || [];
   const total = editedCutTimelineDuration(spans);
   const sourceCurrent = clamp(
-    cutPreviewVideo.currentTime || 0,
+    Number(currentTime) || 0,
     0,
     cutTimelineDuration() || 0,
   );
   const current = sourceTimeToEditedTime(sourceCurrent, spans);
   const progress = total > 0 ? current / total : 0;
+  return { current, progress, sourceCurrent, total };
+}
+
+function updateCutPlaybackVisualFrame(
+  currentTime = cutPreviewVideo.currentTime || 0,
+  { followTranscript = true } = {},
+) {
+  const frame = getCutPlaybackFrameState(currentTime);
+  const { progress, sourceCurrent } = frame;
+  const trackWidth = cutTimelineTrackWidthCache;
+  cutFrameTimelinePlayhead.style.transform =
+    `translate3d(${progress * trackWidth - 1}px, 0, 0)`;
+  updateCutTimelineTextStates(sourceCurrent);
+  updateActiveTranscriptSegment(sourceCurrent, { follow: followTranscript });
+  return frame;
+}
+
+function updateCutTimelinePlayhead(
+  { followTranscript = false, renderVisual = true } = {},
+) {
+  const frame = renderVisual
+    ? updateCutPlaybackVisualFrame(
+        cutPreviewVideo.currentTime || 0,
+        { followTranscript },
+      )
+    : getCutPlaybackFrameState(cutPreviewVideo.currentTime || 0);
+  const { current, progress, sourceCurrent, total } = frame;
   cutFrameTimeline.hidden = total <= 0;
-  updateCutTimelineScale();
   cutFrameTimelineSeek.max = String(total);
   cutFrameTimelineSeek.step = String(CUT_TIMELINE_STEP);
   cutFrameTimelineSeek.value = String(current);
@@ -2787,10 +2989,7 @@ function updateCutTimelinePlayhead({ followTranscript = !cutPreviewVideo.paused 
     "aria-valuetext",
     `${formatTime(current)} / ${formatTime(total)}`,
   );
-  cutFrameTimelinePlayhead.style.left = `${progress * 100}%`;
   cutFrameTimelineTime.value = `${formatTime(current)} / ${formatTime(total)}`;
-  updateCutTimelineTextStates(sourceCurrent);
-  updateActiveTranscriptSegment(sourceCurrent, { follow: followTranscript });
   if (!cutPreviewVideo.paused && cutFrameTimelineScroll.clientWidth > 0) {
     const playheadX = progress * cutFrameTimelineTrack.clientWidth;
     const viewportStart = cutFrameTimelineScroll.scrollLeft;
@@ -2809,6 +3008,7 @@ function seekCutPreview(seconds) {
   noSpeechPreviewEnd = null;
   cutSelectionPreviewEnd = null;
   transcriptPreviewRange = null;
+  resetCutPlaybackCursors();
   cutPreviewVideo.currentTime = clamp(Number(seconds) || 0, 0, total);
   updateCutTimelinePlayhead({ followTranscript: true });
 }
@@ -3055,10 +3255,13 @@ function renderCutTimelineRanges() {
 
 function renderCutTimelineTextSegments() {
   cutFrameTimelineText.replaceChildren();
+  cutTimelineTextPlaybackEntries = [];
+  cutTimelineTextPlaybackFloorCursor = -1;
+  cutTimelineTextPlaybackCursor = -1;
+  cutTimelineTextPlaybackLastTime = Number.NEGATIVE_INFINITY;
   const spans = getEditedTimelineSpans();
   const total = editedCutTimelineDuration(spans);
   if (total <= 0) return;
-  updateCutTimelineScale();
 
   currentEditableSegments.forEach((segment, segmentIndex) => {
     for (const part of getRetainedSegmentParts(
@@ -3084,8 +3287,21 @@ function renderCutTimelineTextSegments() {
       );
       item.append(label);
       cutFrameTimelineText.append(item);
+      cutTimelineTextPlaybackEntries.push({
+        element: item,
+        end: part.sourceEnd,
+        start: part.sourceStart,
+      });
     }
   });
+  cutTimelineTextPlaybackEntries.sort((left, right) =>
+    left.start - right.start || left.end - right.end,
+  );
+  let maximumEnd = Number.NEGATIVE_INFINITY;
+  for (const entry of cutTimelineTextPlaybackEntries) {
+    maximumEnd = Math.max(maximumEnd, entry.end);
+    entry.maximumEnd = maximumEnd;
+  }
   updateCutTimelineTextStates();
 }
 
@@ -3235,10 +3451,11 @@ async function buildCutTimelineThumbnails(options = {}) {
 }
 
 function refreshCutTimeline(options = {}) {
-  updateCutTimelinePlayhead();
+  updateCutTimelineScale();
   renderCutTimelineRuler();
   renderCutTimelineTextSegments();
   renderCutTimelineRanges();
+  updateCutTimelinePlayhead();
   buildCutTimelineThumbnails(options);
 }
 
@@ -3561,9 +3778,155 @@ function adjustTimelineRangeWithKeyboard(event) {
   updateSelectionSummary();
 }
 
+function resetCutPlaybackCursors() {
+  transcriptPlaybackCursor = -1;
+  transcriptPlaybackActiveCursor = -1;
+  transcriptPlaybackLastTime = Number.NEGATIVE_INFINITY;
+  cutTimelineTextPlaybackFloorCursor = -1;
+  cutTimelineTextPlaybackCursor = -1;
+  cutTimelineTextPlaybackLastTime = Number.NEGATIVE_INFINITY;
+}
+
+function createPlaybackFrameClock(video, onFrame, options = {}) {
+  const requestFrame = options.requestAnimationFrame ||
+    window.requestAnimationFrame?.bind(window);
+  const cancelFrame = options.cancelAnimationFrame ||
+    window.cancelAnimationFrame?.bind(window);
+  const hasVideoFrameCallback =
+    typeof video.requestVideoFrameCallback === "function";
+  const mode = hasVideoFrameCallback
+    ? "video-frame"
+    : typeof requestFrame === "function"
+      ? "animation-frame"
+      : "timeupdate";
+  let callbackId = null;
+  let callbackGeneration = 0;
+  let destroyed = false;
+
+  function emitFrame(metadata = {}) {
+    const mediaTime = Number(metadata.mediaTime);
+    onFrame(
+      Number.isFinite(mediaTime) ? mediaTime : Number(video.currentTime) || 0,
+      metadata,
+    );
+  }
+
+  function schedule() {
+    if (
+      destroyed ||
+      callbackId !== null ||
+      video.paused ||
+      video.ended
+    ) {
+      return false;
+    }
+    const scheduledGeneration = callbackGeneration;
+    const handleFrame = (timestamp, metadata) => {
+      handleScheduledFrame(scheduledGeneration, timestamp, metadata);
+    };
+    if (mode === "video-frame") {
+      callbackId = video.requestVideoFrameCallback(handleFrame);
+    } else if (mode === "animation-frame") {
+      callbackId = requestFrame(handleFrame);
+    }
+    return callbackId !== null;
+  }
+
+  function handleScheduledFrame(generation, _timestamp, metadata = {}) {
+    if (generation !== callbackGeneration) return;
+    callbackId = null;
+    if (destroyed || video.paused || video.ended) return;
+    emitFrame(metadata);
+    if (generation !== callbackGeneration) return;
+    schedule();
+  }
+
+  function stop({ reset = false } = {}) {
+    callbackGeneration += 1;
+    const pendingCallbackId = callbackId;
+    callbackId = null;
+    if (pendingCallbackId !== null) {
+      if (mode === "video-frame") {
+        video.cancelVideoFrameCallback?.(pendingCallbackId);
+      } else if (mode === "animation-frame") {
+        cancelFrame?.(pendingCallbackId);
+      }
+    }
+    if (reset) options.onReset?.();
+  }
+
+  function sync({ reset = false } = {}) {
+    if (destroyed) return;
+    if (reset) options.onReset?.();
+    emitFrame({ mediaTime: Number(video.currentTime) || 0, reason: "sync" });
+  }
+
+  function handlePlay() {
+    schedule();
+  }
+
+  function handlePause() {
+    stop();
+  }
+
+  function handleEnded() {
+    stop({ reset: true });
+  }
+
+  function handleEmptied() {
+    stop({ reset: true });
+  }
+
+  function handleSeeking() {
+    stop({ reset: true });
+  }
+
+  function handleSeeked() {
+    sync({ reset: true });
+    schedule();
+  }
+
+  function handleTimeupdateFallback() {
+    if (mode === "timeupdate" && !video.paused && !video.ended) emitFrame();
+  }
+
+  video.addEventListener("play", handlePlay);
+  video.addEventListener("pause", handlePause);
+  video.addEventListener("ended", handleEnded);
+  video.addEventListener("emptied", handleEmptied);
+  video.addEventListener("seeking", handleSeeking);
+  video.addEventListener("seeked", handleSeeked);
+  if (mode === "timeupdate") {
+    video.addEventListener("timeupdate", handleTimeupdateFallback);
+  }
+
+  function destroy() {
+    if (destroyed) return;
+    stop({ reset: true });
+    destroyed = true;
+    video.removeEventListener("play", handlePlay);
+    video.removeEventListener("pause", handlePause);
+    video.removeEventListener("ended", handleEnded);
+    video.removeEventListener("emptied", handleEmptied);
+    video.removeEventListener("seeking", handleSeeking);
+    video.removeEventListener("seeked", handleSeeked);
+    video.removeEventListener("timeupdate", handleTimeupdateFallback);
+  }
+
+  return { destroy, mode, schedule, stop, sync };
+}
+
 function setupCutPreviewControls() {
   let lastAudibleVolume = 1;
   const safeDuration = () => cutTimelineDuration();
+  cutPlaybackFrameClock?.destroy();
+  cutPlaybackFrameClock = createPlaybackFrameClock(
+    cutPreviewVideo,
+    (mediaTime) => {
+      updateCutPlaybackVisualFrame(mediaTime, { followTranscript: true });
+    },
+    { onReset: resetCutPlaybackCursors },
+  );
   const skipSelectedRangeDuringPlayback = () => {
     if (cutPreviewVideo.paused) return null;
     const current = cutPreviewVideo.currentTime || 0;
@@ -3647,7 +4010,7 @@ function setupCutPreviewControls() {
       `${formatTime(editedCurrent)} / ${formatTime(total)}`,
     );
     cutPreviewTime.value = `${formatTime(editedCurrent)} / ${formatTime(total)}`;
-    updateCutTimelinePlayhead();
+    updateCutTimelinePlayhead({ renderVisual: cutPreviewVideo.paused });
   };
   const updatePlay = () => {
     const playing = !cutPreviewVideo.paused && !cutPreviewVideo.ended;
@@ -3655,6 +4018,11 @@ function setupCutPreviewControls() {
     cutPreviewPlay.setAttribute("aria-label", playing ? "暂停" : "播放");
     cutPreviewPlayIcon.hidden = playing;
     cutPreviewPauseIcon.hidden = !playing;
+    if (!playing) {
+      updateActiveTranscriptSegment(cutPreviewVideo.currentTime || 0, {
+        follow: false,
+      });
+    }
   };
   const updateVolume = () => {
     const muted = cutPreviewVideo.muted || cutPreviewVideo.volume === 0;
@@ -3724,13 +4092,21 @@ function setupCutPreviewControls() {
       currentVideoDuration,
       Number.isFinite(cutPreviewVideo.duration) ? cutPreviewVideo.duration : 0,
     );
+    invalidateCutPlaybackStructure();
     syncCutVideoStageLayout();
-    updateTime();
     refreshCutTimeline({ force: true });
+    updateTime();
   });
-  for (const eventName of ["durationchange", "timeupdate", "emptied"]) {
-    cutPreviewVideo.addEventListener(eventName, updateTime);
-  }
+  cutPreviewVideo.addEventListener("durationchange", () => {
+    invalidateCutPlaybackStructure();
+    refreshCutTimeline();
+    updateTime();
+  });
+  cutPreviewVideo.addEventListener("timeupdate", updateTime);
+  cutPreviewVideo.addEventListener("emptied", () => {
+    invalidateCutPlaybackStructure();
+    updateTime();
+  });
   for (const eventName of ["play", "pause", "ended"]) {
     cutPreviewVideo.addEventListener(eventName, updatePlay);
   }
@@ -3745,6 +4121,7 @@ function scheduleCutTimelineResize() {
   window.clearTimeout(cutTimelineResizeTimer);
   cutTimelineResizeTimer = window.setTimeout(() => {
     syncCutVideoStageLayout();
+    invalidateCutTimelineScale();
     updateCutTimelineScale();
     cutTimelineRulerSignature = "";
     renderCutTimelineRuler();
@@ -4074,6 +4451,21 @@ async function deleteHistoryVersion(version) {
 }
 
 function resetToUpload() {
+  cutPlaybackFrameClock?.stop({ reset: true });
+  transcriptFollowScrollController.reset();
+  if (activeTranscriptItem) {
+    activeTranscriptItem.classList.remove("is-playback-active");
+    activeTranscriptItem.removeAttribute("aria-current");
+    const badge = activeTranscriptItem.querySelector(".segment-current-badge");
+    if (badge) badge.hidden = true;
+  }
+  activeTranscriptSegmentIndex = -1;
+  activeTranscriptSegmentKey = "";
+  activeTranscriptItem = null;
+  transcriptPlaybackEntries = [];
+  transcriptPlaybackEntryByKey = new Map();
+  transcriptPlaybackCursor = -1;
+  transcriptPlaybackLastTime = Number.NEGATIVE_INFINITY;
   cutDraftReady = false;
   cutDraftRevision = 0;
   cutDraftLastSignature = "";
@@ -4107,6 +4499,7 @@ function resetToUpload() {
   cutTimelineRulerSignature = "";
   selectedRanges.clear();
   selectedNoSpeechRanges.clear();
+  invalidateCutPlaybackStructure();
   resetCutHistoryRuntime();
   noSpeechPreviewEnd = null;
   cutSelectionPreviewEnd = null;
@@ -4243,6 +4636,7 @@ function renderJob(job) {
 }
 
 function renderResult(job) {
+  cutPlaybackFrameClock?.stop({ reset: true });
   cutDraftReady = false;
   cutDraftRevision = 0;
   cutDraftLastSignature = "";
@@ -4285,6 +4679,7 @@ function renderResult(job) {
   cutTimelineRulerSignature = "";
   selectedRanges.clear();
   selectedNoSpeechRanges.clear();
+  invalidateCutPlaybackStructure();
   noSpeechPreviewEnd = null;
   cutSelectionPreviewEnd = null;
   transcriptPreviewRange = null;
@@ -4706,7 +5101,7 @@ dropZone.addEventListener("drop", (event) => {
   if (file) setSelectedFile(file);
 });
 
-segmentList.addEventListener("click", (event) => {
+function handleTranscriptDisplayClick(event) {
   if (!(event.target instanceof Element)) return;
   const playButton = event.target.closest(".segment-play-button");
   if (playButton instanceof HTMLButtonElement) {
@@ -4845,7 +5240,7 @@ segmentList.addEventListener("click", (event) => {
   selectedRanges.set(key, expandedRange);
   updateSelectionSummary();
   previewSelectedCutRange(expandedRange);
-});
+}
 
 for (const eventName of ["select", "mouseup", "keyup"]) {
   segmentEditText.addEventListener(eventName, updateSegmentEditSelection);
@@ -4915,9 +5310,16 @@ selectedVideoPreview.addEventListener("error", () => {
 });
 
 window.addEventListener("beforeunload", () => {
+  cutPlaybackFrameClock?.destroy();
   transcriptFollowScrollController.destroy();
   if (selectedPreviewUrl) URL.revokeObjectURL(selectedPreviewUrl);
 });
+
+segmentList.addEventListener("click", handleTranscriptDisplayClick);
+transcriptNowPlayingLayer.addEventListener(
+  "click",
+  handleTranscriptDisplayClick,
+);
 
 uploadForm.addEventListener("submit", (event) => {
   event.preventDefault();

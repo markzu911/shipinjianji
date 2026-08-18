@@ -115,10 +115,10 @@ if (document.activeElement !== positionXPercent) {
 
 已删除文字同样必须能试听。点击其播放按钮时，只在该展示行的源时间范围内临时绕过剪辑预览的“跳过已删除区间”逻辑；播放到展示行末时必须保存终点、暂停、清除临时范围，再把播放头校准到行末，避免校准产生的新 `timeupdate` 再次命中旧范围。用户执行其他 seek 时也立即清除临时范围，后续公共播放恢复正常跳过删除内容。当前行高亮优先命中该临时范围，因此已删除行试听时也显示 `aria-current` 和“播放中”。
 
-播放跟随滚动以文字面板为 scroll container，并读取当前 sticky `.cut-toolbar` 的实际位置和高度，把活动行顶部对齐到工具栏下方固定间距。锚点必须直接使用 `toolbar.getBoundingClientRect().bottom + 8`；不能用 `panelRect.top + toolbarHeight` 推算，因为面板 padding、边框或 sticky 偏移会让活动行被工具栏遮挡。目标 `scrollTop` 必须 clamp 到 `0..scrollHeight-clientHeight`：中段行通过同步的 `scrollTop + transform` RAF 动画保持顶部锚点，接近尾部时面板停在最大滚动量，活动行再随剩余距离连续向下移动。同一 `data-display-key` 只调度一次滚动；切换行、重渲染或用户滚动意图会取消旧动画并清除临时样式，`prefers-reduced-motion: reduce` 只使用即时定位。
+播放跟随滚动以文字面板为 scroll container，并读取 sticky `.cut-toolbar` 的实际位置和高度，把独立播放中展示层对齐到工具栏下方固定间距。工具栏尚未吸顶时，锚点要使用面板 scrollport、真实 padding、sticky inset 和工具栏实高计算其最终吸顶位置；工具栏吸顶后可直接使用 `toolbar.getBoundingClientRect().bottom + 8`。不能只用 `panelRect.top + toolbarHeight` 推算，因为面板 padding、边框或 sticky 偏移会让活动行被工具栏遮挡。首次跟随从活动行当前可见位置平滑进入锚点，不得在 reparent 时瞬移。控制器把真实活动行移入展示层，并在原位置保留无交互等高占位；不得复制行、按钮或时间 data，也不得 transform 仍位于列表中的真实行。目标 `scrollTop` 必须 clamp 到 `0..scrollHeight-clientHeight` 并一次写入，列表以 FLIP transform 平滑完成视觉滚动：中段展示层随列表阶段进入并停在锚点；接近尾部时面板停在最大滚动量，展示层等待列表完成后再从上一视觉位置直接向新的剩余距离单调下移，连续尾部换段不得先上弹到锚点。尾部阶段不能早于列表和入场动画完成。同一 `data-display-key` 只调度一次；切换行、重渲染或用户滚动意图会恢复真实行原顺序并清除占位、展示层状态和监听器，`prefers-reduced-motion: reduce` 保持同一唯一 DOM 结构但即时定位。
 
 ```javascript
-const anchorTop = (toolbarRect?.bottom ?? panelRect.top) + 8;
+const anchorTop = Math.min(currentToolbarBottom, stickyRestingBottom) + 8;
 const targetScrollTop = clamp(
   panel.scrollTop + itemRect.top - anchorTop,
   0,
