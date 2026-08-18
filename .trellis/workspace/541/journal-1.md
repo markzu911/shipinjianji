@@ -47,3 +47,24 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 3: 拆分应用测试边界
+
+**Date**: 2026-08-18
+**Task**: 拆分应用测试边界
+**Branch**: `develop`
+
+### Summary
+
+将单体应用测试按功能拆分为 tests/app 下 13 个模块，保留 fixture 隔离和全部断言，完整回归 176 passed。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `10dea5b` | (see git log) |
+
+### Status
+
+[OK] **Completed**
