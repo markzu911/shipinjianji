@@ -446,3 +446,23 @@ def seeded_editor_job(sample_video: Path) -> SeededEditorJob:
         pip_overlay=pip_overlay,
         pip_asset_id=asset_id,
     )
+
+
+@pytest.fixture
+def seeded_transcript_track_editor_job(
+    seeded_editor_job: SeededEditorJob,
+) -> SeededEditorJob:
+    with app_module.JOBS_LOCK:
+        job = app_module.JOBS[seeded_editor_job.job_id]
+        overlay = job["art"]["overlays"][0]
+        overlay["trackId"] = "browser-transcript-track"
+        overlay["trackType"] = "transcript"
+        for index, segment in enumerate(job["result"]["editableSegments"]):
+            segment["sourceSegmentIndex"] = index
+        seeded_editor_job.art_overlay.update(
+            {
+                "trackId": "browser-transcript-track",
+                "trackType": "transcript",
+            }
+        )
+    return seeded_editor_job

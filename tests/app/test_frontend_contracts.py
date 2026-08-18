@@ -23,6 +23,7 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
         "/transcript-follow-scroll.js",
         "/ui-feedback.js",
         "/timeline-model.js",
+        "/editor-project-store.js",
         "/art-text.js",
         "/picture-in-picture.js",
     )
@@ -32,22 +33,30 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     follow_scroll_response = responses["/transcript-follow-scroll.js"]
     feedback_script_response = responses["/ui-feedback.js"]
     timeline_script_response = responses["/timeline-model.js"]
+    project_store_script_response = responses["/editor-project-store.js"]
     art_script_response = responses["/art-text.js"]
     pip_script_response = responses["/picture-in-picture.js"]
 
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
-    assert "/app.js?v=20260818-03" in page_response.text
+    assert "/app.js?v=20260818-04" in page_response.text
     assert "/styles.css?v=20260818-03" in page_response.text
     assert "/transcript-follow-scroll.js?v=20260818-03" in page_response.text
     assert "/ui-feedback.js?v=20260807-03" in page_response.text
     assert "/timeline-model.js?v=20260810-01" in page_response.text
-    assert "/editor-suite.js?v=20260814-02" in page_response.text
+    assert "/editor-project-store.js?v=20260818-02" in page_response.text
+    assert "/editor-suite.js?v=20260818-05" in page_response.text
     assert timeline_script_response.status_code == 200
     assert timeline_script_response.headers["cache-control"] == "no-store, max-age=0"
     assert "function createStore" in timeline_script_response.text
     assert "function createPointerSession" in timeline_script_response.text
+    assert project_store_script_response.status_code == 200
+    assert project_store_script_response.headers["cache-control"] == "no-store, max-age=0"
+    assert "function createStore" in project_store_script_response.text
     assert page_response.text.index("/timeline-model.js") < page_response.text.index(
+        "/editor-project-store.js"
+    )
+    assert page_response.text.index("/editor-project-store.js") < page_response.text.index(
         "/editor-suite.js"
     )
     assert page_response.text.index("/transcript-follow-scroll.js") < (
@@ -699,7 +708,7 @@ def test_art_text_frontend_contracts():
     editor_suite_script_response = responses["/editor-suite.js"]
 
     assert art_page_response.status_code == 200
-    assert "/art-text.js?v=20260814-02" in art_page_response.text
+    assert "/art-text.js?v=20260818-05" in art_page_response.text
     assert 'class="cut-progress art-generation-progress full-row"' in art_page_response.text
     assert "art-particle art-particle-1" in art_page_response.text
     assert "解析时间轴" in art_page_response.text
@@ -716,7 +725,7 @@ def test_art_text_frontend_contracts():
     assert "commitPositionCoordinate" in art_script_response.text
     assert ".position-coordinate-fields {" in styles_response.text
     assert "/timeline-model.js?v=20260810-01" in art_page_response.text
-    assert "/editor-suite.js?v=20260814-02" in art_page_response.text
+    assert "/editor-suite.js?v=20260818-05" in art_page_response.text
     assert 'class="preview-grid"' in art_page_response.text
     assert 'data-preview-grid-toggle' in art_page_response.text
     assert "从保留文案中选择一句" not in art_page_response.text
@@ -986,11 +995,11 @@ def test_picture_in_picture_frontend_contracts():
     art_script_response = responses["/art-text.js"]
 
     assert pip_page_response.status_code == 200
-    assert "/picture-in-picture.js?v=20260812-01" in pip_page_response.text
+    assert "/picture-in-picture.js?v=20260818-03" in pip_page_response.text
     assert "/ui-feedback.js?v=20260807-03" in pip_page_response.text
     assert "/styles.css?v=20260812-02" in pip_page_response.text
     assert "/timeline-model.js?v=20260810-01" in pip_page_response.text
-    assert "/editor-suite.js?v=20260814-02" in pip_page_response.text
+    assert "/editor-suite.js?v=20260818-05" in pip_page_response.text
     assert 'class="preview-grid"' in pip_page_response.text
     assert 'data-preview-grid-toggle' in pip_page_response.text
     assert 'data-editor-suite-nav data-stage="pip"' in pip_page_response.text
@@ -2951,3 +2960,107 @@ def test_douyin_preview_is_inline_only():
     assert "repeat(3, minmax(0, 1fr))" in styles_response.text
     assert "is-douyin-preview" in feedback_script_response.text
     assert "stage.parentElement?.querySelector" in feedback_script_response.text
+
+
+def test_editor_project_store_integration_guards_text_and_compose_state():
+    root = Path(__file__).resolve().parents[2]
+    app_source = (root / "web" / "app.js").read_text(encoding="utf-8")
+    suite_source = (root / "web" / "editor-suite.js").read_text(encoding="utf-8")
+    art_source = (root / "web" / "art-text.js").read_text(encoding="utf-8")
+    pip_source = (root / "web" / "picture-in-picture.js").read_text(
+        encoding="utf-8"
+    )
+
+    save_start = app_source.index("async function saveSegmentText()")
+    save_end = app_source.index("function broadcastTranscriptUpdated()", save_start)
+    save_source = app_source[save_start:save_end]
+    assert "beginProjectEffect(\"transcript-save\")" in save_source
+    assert "applyTranscriptTextEffect" in save_source
+    assert "window.location.reload" not in save_source
+    assert "正在刷新页面" not in save_source
+
+    compose_start = suite_source.index("function compositionRequest()")
+    compose_end = suite_source.index("function stableValue", compose_start)
+    compose_source = suite_source[compose_start:compose_end]
+    assert "selectCompositionRequest" in compose_source
+    assert "toolStates.get" not in compose_source
+    assert "projectStoreEnabled" in suite_source
+    assert "window.__EDITOR_PROJECT_STORE_ENABLED__ !== false" in suite_source
+    assert "toolFrameOwnsSource(event.source, data.kind)" in suite_source
+    assert "event.origin !== window.location.origin" in suite_source
+    assert 'type: "editor-suite:transcript-text"' in suite_source
+    assert 'changeKind: "transcript-text"' in suite_source
+    assert "state.project.cut.transcript || state.project.transcript" in suite_source
+    assert "advanceToolBridgeRevision(name, message?.revision)" in suite_source
+    assert 'type: "editor-suite:project-ack"' in suite_source
+    assert "acknowledgeToolProjection(data.kind)" in suite_source
+    acknowledge_start = suite_source.index("function acknowledgeToolProjection")
+    acknowledge_end = suite_source.index(
+        "function postTranscriptTextProjection", acknowledge_start
+    )
+    acknowledge_source = suite_source[acknowledge_start:acknowledge_end]
+    assert "postProjectProjection" not in acknowledge_source
+    assert "advanceToolBridgeRevision(data.kind, messageRevision)" in suite_source
+    assert "messageRevision < previousBridgeRevision" in suite_source
+    assert "messageRevision === null" in suite_source
+    assert "renderJobState(data.job, { hydrateProject: !projectStoreEnabled })" in (
+        suite_source
+    )
+    job_state_start = suite_source.index(
+        'if (data.type === "editor-suite:job-state"'
+    )
+    job_state_end = suite_source.index(
+        'if (data.type === "editor-suite:seek"', job_state_start
+    )
+    job_state_handler = suite_source[job_state_start:job_state_end]
+    assert "if (!projectStoreEnabled)" in job_state_handler
+    assert "new CustomEvent(\"editor-suite:job-state\"" in job_state_handler
+
+    art_text_start = art_source.index(
+        'if (data.type === "editor-suite:transcript-text"'
+    )
+    art_text_end = art_source.index(
+        'if (data.type === "editor-suite:generate-video"', art_text_start
+    )
+    art_text_handler = art_source[art_text_start:art_text_end]
+    assert "acceptEditorHostProjection" in art_text_handler
+    assert "applyEditorTranscriptText" in art_text_handler
+    assert "retimeDraftAnchoredOverlays" not in art_text_handler
+    assert "replaceTranscriptTrackFromCutDraft" not in art_text_handler
+    art_text_apply_start = art_source.index("function applyEditorTranscriptText")
+    art_text_apply_end = art_source.index(
+        "function applyEditorCutDraft", art_text_apply_start
+    )
+    art_text_apply = art_source[art_text_apply_start:art_text_apply_end]
+    assert "renderEditor({ preserveTimeline: true })" in art_text_apply
+    assert "pendingCutDraft =" not in art_text_apply
+    assert "appliedCutDraftState =" not in art_text_apply
+    assert "renderFrameTimelineOverlaySegments" not in art_text_apply
+    assert "syncArtTimelineModel" not in art_text_apply
+    assert 'data.type === "editor-suite:project-ack"' in art_source
+    assert 'changeKind: "job-state"' in art_source
+    assert "event.source !== window.parent" in art_source
+
+    pip_text_start = pip_source.index(
+        'if (data.type === "editor-suite:transcript-text"'
+    )
+    pip_text_end = pip_source.index(
+        'if (data.type === "editor-suite:generate-video"', pip_text_start
+    )
+    pip_text_handler = pip_source[pip_text_start:pip_text_end]
+    assert "acceptEditorHostProjection" in pip_text_handler
+    assert "applyEditorTranscriptText" in pip_text_handler
+    assert "matchingDraftSegment" not in pip_text_handler
+    pip_text_apply_start = pip_source.index("function applyEditorTranscriptText")
+    pip_text_apply_end = pip_source.index(
+        "function applyEditorCutDraft", pip_text_apply_start
+    )
+    pip_text_apply = pip_source[pip_text_apply_start:pip_text_apply_end]
+    assert "renderPreview({ preserveTimeline: true })" in pip_text_apply
+    assert "pendingCutDraft =" not in pip_text_apply
+    assert "renderTimelineSegments" not in pip_text_apply
+    assert "syncPipTimelineModel" not in pip_text_apply
+    assert "function renderTimelineSegments(options = {})" in pip_source
+    assert 'data.type === "editor-suite:project-ack"' in pip_source
+    assert 'changeKind: "job-state"' in pip_source
+    assert "event.source !== window.parent" in pip_source

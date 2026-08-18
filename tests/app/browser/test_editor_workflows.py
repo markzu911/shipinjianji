@@ -239,6 +239,262 @@ def test_unified_generate_posts_current_cut_art_and_pip_state(
     assert payload["historyName"] is None
 
 
+@pytest.mark.parametrize("playing", [False, True], ids=["paused", "playing"])
+def test_text_edit_preserves_media_iframes_and_effect_timing(
+    browser_session,
+    seeded_transcript_track_editor_job,
+    playing,
+):
+    page = open_editor(browser_session, seeded_transcript_track_editor_job)
+
+    page.locator("#cutPreviewVideo").evaluate(
+        """video => {
+          video.pause();
+          video.currentTime = 0.5;
+          video.dispatchEvent(new Event('seeking'));
+          video.dispatchEvent(new Event('timeupdate'));
+        }"""
+    )
+    page.locator('[data-editor-tool="art"]').click()
+    art_frame = page.frame_locator('iframe[title="艺术字设置"]')
+    art_frame.locator("#artWorkspace").wait_for(state="visible")
+    page.locator("#editorSuitePreviewOverlay .is-art").wait_for(state="visible")
+    page.locator('[data-editor-tool="pip"]').click()
+    pip_frame = page.frame_locator('iframe[title="画中画设置"]')
+    pip_frame.locator("#pipWorkspace").wait_for(state="visible")
+    page.locator('[data-editor-tool="cut"]').click()
+    page.locator("#cutPreviewVideo").evaluate(
+        """video => {
+          video.pause();
+          video.currentTime = 0;
+          video.dispatchEvent(new Event('seeking'));
+          video.dispatchEvent(new Event('timeupdate'));
+        }"""
+    )
+    page.get_by_role("button", name="编辑文字段：保留内容").click()
+    assert page.locator("#segmentEditDialog").is_visible()
+    page.locator("#segmentEditText").fill("全新文案")
+
+    before = page.evaluate(
+        """async playing => {
+          const video = document.querySelector('#cutPreviewVideo');
+          video.pause();
+          video.currentTime = 0.42;
+          video.dispatchEvent(new Event('seeking'));
+          video.dispatchEvent(new Event('timeupdate'));
+          if (playing) await video.play();
+          const snapshot = window.EditorSuite.projectSnapshot();
+          const times = overlays => overlays.map(item => ({
+            start: item.start,
+            end: item.end,
+            sourceStart: item.sourceStart ?? null,
+            sourceEnd: item.sourceEnd ?? null,
+          }));
+          window.__b0TextEditIdentity = {
+            video,
+            artFrame: document.querySelector('iframe[title="艺术字设置"]'),
+            pipFrame: document.querySelector('iframe[title="画中画设置"]'),
+          };
+          return {
+            src: video.currentSrc || video.src,
+            currentTime: video.currentTime,
+            paused: video.paused,
+            revision: snapshot.revision,
+            timingRevision: snapshot.timingRevision,
+            artTimes: times(snapshot.project.art.overlays),
+            pipTimes: times(snapshot.project.pip.overlays),
+          };
+        }""",
+        playing,
+    )
+
+    page.locator("#saveSegmentTextButton").click()
+    page.locator("#segmentStructureStatus").filter(
+        has_text="项目预览已同步"
+    ).wait_for()
+
+    after = page.evaluate(
+        """() => {
+          const identity = window.__b0TextEditIdentity;
+          const video = document.querySelector('#cutPreviewVideo');
+          const snapshot = window.EditorSuite.projectSnapshot();
+          const times = overlays => overlays.map(item => ({
+            start: item.start,
+            end: item.end,
+            sourceStart: item.sourceStart ?? null,
+            sourceEnd: item.sourceEnd ?? null,
+          }));
+          const request = window.EditorSuite.compositionRequest();
+          return {
+            identitySurvived: Boolean(identity),
+            sameVideo: identity?.video === video,
+            sameArtFrame:
+              identity?.artFrame === document.querySelector('iframe[title="艺术字设置"]'),
+            samePipFrame:
+              identity?.pipFrame === document.querySelector('iframe[title="画中画设置"]'),
+            src: video.currentSrc || video.src,
+            currentTime: video.currentTime,
+            paused: video.paused,
+            revision: snapshot.revision,
+            timingRevision: snapshot.timingRevision,
+            artTimes: times(snapshot.project.art.overlays),
+            pipTimes: times(snapshot.project.pip.overlays),
+            artTexts: snapshot.project.art.overlays.map(item => item.text || ''),
+            composeArtTexts: request.artOverlays.map(item => item.text || ''),
+          };
+        }"""
+    )
+
+    assert after["identitySurvived"] is True
+    assert after["sameVideo"] is True
+    assert after["sameArtFrame"] is True
+    assert after["samePipFrame"] is True
+    assert after["src"] == before["src"]
+    assert after["timingRevision"] == before["timingRevision"]
+    assert after["revision"] > before["revision"]
+    assert after["artTimes"] == before["artTimes"]
+    assert after["pipTimes"] == before["pipTimes"]
+    assert "全新文案" in after["artTexts"]
+    assert "全新文案" in after["composeArtTexts"]
+    if playing:
+        assert after["paused"] is False
+        assert after["currentTime"] >= before["currentTime"] - 0.05
+    else:
+        assert after["paused"] is True
+        assert after["currentTime"] == pytest.approx(
+            before["currentTime"], abs=0.06
+        )
+
+
+def test_iframe_revision_floor_rejects_stale_state_and_acks_local_edits(
+    browser_session,
+    seeded_editor_job,
+):
+    page = open_editor(browser_session, seeded_editor_job)
+    page.locator("#cutPreviewVideo").evaluate(
+        """video => {
+          video.pause();
+          video.currentTime = 0.5;
+          video.dispatchEvent(new Event('seeking'));
+          video.dispatchEvent(new Event('timeupdate'));
+        }"""
+    )
+    page.locator('[data-editor-tool="art"]').click()
+    art_frame = page.frame_locator('iframe[title="艺术字设置"]')
+    art_frame.locator("#artWorkspace").wait_for(state="visible")
+    page.locator("#editorSuitePreviewOverlay .is-art").wait_for(state="visible")
+
+    child_revision = art_frame.locator("body").evaluate(
+        "body => editorHostLastAppliedRevision"
+    )
+    before = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          return {
+            revision: snapshot.revision,
+            timingRevision: snapshot.timingRevision,
+            art: snapshot.project.art,
+          };
+        }"""
+    )
+    page.evaluate(
+        """() => {
+          window.__staleToolStateHandled = false;
+          const listener = event => {
+            if (event.data?.probeId !== 'stale-art-state') return;
+            window.removeEventListener('message', listener);
+            window.__staleToolStateHandled = true;
+          };
+          window.addEventListener('message', listener);
+        }"""
+    )
+    art_frame.locator("body").evaluate(
+        """(body, payload) => {
+          window.parent.postMessage(payload, window.location.origin);
+        }""",
+        {
+            "type": "editor-suite:tool-state",
+            "kind": "art",
+            "probeId": "stale-art-state",
+            "revision": child_revision - 2,
+            "timingRevision": before["timingRevision"],
+            "changeKind": "tool-state",
+            "generationPayload": {
+                "source": "original",
+                "overlays": [{"text": "迟到旧状态", "start": 7, "end": 8}],
+            },
+        },
+    )
+    page.wait_for_function("window.__staleToolStateHandled === true")
+    after_stale = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          return {
+            revision: snapshot.revision,
+            timingRevision: snapshot.timingRevision,
+            art: snapshot.project.art,
+          };
+        }"""
+    )
+    assert after_stale == before
+
+    first_x = 0.37
+    art_frame.locator("body").evaluate(
+        """(body, x) => {
+          overlays[0].x = x;
+          notifyEditorHost({ force: true });
+        }""",
+        arg=first_x,
+    )
+    page.wait_for_function(
+        """x => {
+          const item = window.EditorSuite.projectSnapshot().project.art.overlays[0];
+          return Math.abs(Number(item?.x) - x) < 0.0001;
+        }""",
+        arg=first_x,
+    )
+    first = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          return { revision: snapshot.revision, timingRevision: snapshot.timingRevision };
+        }"""
+    )
+    art_frame.locator("body").evaluate(
+        """(body, revision) => new Promise(resolve => {
+          const finish = () => resolve(editorHostLastAppliedRevision);
+          if (editorHostLastAppliedRevision >= revision) finish();
+          else window.addEventListener('message', finish, { once: true });
+        })""",
+        first["revision"],
+    )
+
+    second_x = 0.41
+    art_frame.locator("body").evaluate(
+        """(body, x) => {
+          overlays[0].x = x;
+          notifyEditorHost({ force: true });
+        }""",
+        arg=second_x,
+    )
+    page.wait_for_function(
+        """x => {
+          const item = window.EditorSuite.projectSnapshot().project.art.overlays[0];
+          return Math.abs(Number(item?.x) - x) < 0.0001;
+        }""",
+        arg=second_x,
+    )
+    second = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          return { revision: snapshot.revision, timingRevision: snapshot.timingRevision };
+        }"""
+    )
+    assert first["revision"] == before["revision"] + 1
+    assert second["revision"] == first["revision"] + 1
+    assert first["timingRevision"] == before["timingRevision"]
+    assert second["timingRevision"] == before["timingRevision"]
+
+
 def test_job_url_remains_editable_after_service_restart(
     browser_session,
     browser_server,
