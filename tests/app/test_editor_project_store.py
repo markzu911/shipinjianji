@@ -246,3 +246,312 @@ console.log(JSON.stringify({
     assert result["localArt"]["start"] == 1
     assert result["localPip"]["start"] == 2
     assert result["timelineKinds"] == ["cut"]
+
+
+def test_editor_project_store_selects_atomic_semantic_frame_and_explicit_compose_dto() -> None:
+    result = run_store_script(
+        r"""
+const store = projectStore.createStore({}, { timeline });
+store.dispatch({ type: 'projectHydrated', payload: { job: {
+  id: 'job-frame', status: 'completed', duration: 12,
+  result: { mediaDuration: 12, text: '文案', segments: [] },
+  art: { source: 'original', overlays: [{
+    text: '标题', font: 'bold', fontSize: 54, color: '#FFFFFF',
+    strokeColor: '#000000', strokeWidth: 3, shadow: true,
+    x: 0.5, y: 0.2, start: 1, end: 3, localOnly: 'drop-me'
+  }] },
+  pictureInPictureImages: [{
+    id: 'asset-one', text: '图片', imageUrl: '/asset-one.png', status: 'completed'
+  }],
+  pictureInPicture: { source: 'art', overlays: [{
+    assetId: 'asset-one', start: 2, end: 4, x: 0.8, y: 0.2, width: 0.4,
+    assetUrl: '/must-not-compose.png', status: 'completed'
+  }] },
+} } });
+const hydratedArt = store.getState().project.art;
+store.dispatch({ type: 'artStateChanged', payload: {
+  ...hydratedArt,
+  timeline: { duration: 12, tracks: [{
+    id: 'art:track', kind: 'art', clips: [{
+      id: 'art:semantic', sourceId: hydratedArt.overlays[0].id,
+      name: '标题', start: 1, end: 3, editable: true,
+    }]
+  }] },
+} });
+store.dispatch({ type: 'activeToolChanged', payload: { tool: 'pip' } });
+store.dispatch({ type: 'pipStateChanged', payload: {
+  source: 'art',
+  overlays: [{ assetId: 'asset-one', start: 2, end: 4, x: 0.8, y: 0.2, width: 0.4 }],
+  assets: [{ id: 'asset-two', type: 'video', assetUrl: '/asset-two.mp4' }],
+  timeline: { duration: 12, tracks: [{
+    id: 'pip:track', kind: 'pip', clips: [{
+      id: 'pip:asset-one', sourceId: 'asset-one', name: '图片',
+      start: 2, end: 4, editable: true,
+    }]
+  }], selection: { clipId: 'pip:asset-one' } },
+} });
+store.dispatch({ type: 'timelineKindChanged', payload: {
+  kind: 'cut',
+  timeline: { duration: 12, tracks: [{
+    id: 'cut:manual', kind: 'cut', clips: [{
+      id: 'cut:range:1', sourceId: '1', name: '删除区间',
+      start: 6, end: 7, editable: true,
+    }]
+  }] },
+} });
+const snapshot = store.getState();
+const frame = projectStore.selectEditorFrame(snapshot, timeline);
+console.log(JSON.stringify({
+  snapshotRevision: snapshot.revision,
+  frameRevision: frame.revision,
+  previewRevision: frame.preview.revision,
+  timelineKinds: frame.timeline.tracks.map(track => track.kind),
+  selection: frame.timeline.selection,
+  sourceUrl: frame.media.sourceUrl,
+  artId: frame.preview.art.overlays[0].id,
+  pipId: frame.preview.pip.overlays[0].id,
+  assets: frame.preview.pip.assets.map(asset => ({
+    id: asset.id, type: asset.type, assetUrl: asset.assetUrl,
+  })),
+  composeArt: frame.composition.artOverlays[0],
+  composePip: frame.composition.pictureInPictureOverlays[0],
+}));
+"""
+    )
+
+    assert result["snapshotRevision"] == result["frameRevision"]
+    assert result["previewRevision"] == result["frameRevision"]
+    assert result["sourceUrl"].endswith("/job-frame/original-video")
+    assert result["timelineKinds"] == ["cut", "art", "pip"]
+    assert result["selection"]["clipId"] == "pip:asset-one"
+    assert result["artId"] == "art:overlay:0"
+    assert result["pipId"] == "asset-one"
+    assert result["assets"] == [
+        {"id": "asset-one", "type": "image", "assetUrl": "/asset-one.png"},
+        {"id": "asset-two", "type": "video", "assetUrl": "/asset-two.mp4"},
+    ]
+    assert "id" not in result["composeArt"]
+    assert "localOnly" not in result["composeArt"]
+    assert "id" not in result["composePip"]
+    assert "assetUrl" not in result["composePip"]
+    assert "status" not in result["composePip"]
+
+
+def test_editor_project_store_timeline_range_action_is_atomic_and_echo_is_noop() -> None:
+    result = run_store_script(
+        r"""
+const store = projectStore.createStore({}, { timeline });
+store.dispatch({ type: 'projectHydrated', payload: { job: {
+  id: 'job-timeline', duration: 10, result: { text: '', segments: [] }
+} } });
+store.dispatch({ type: 'artStateChanged', payload: {
+  source: 'original',
+  overlays: [{
+    id: 'overlay-one', text: '标题', start: 1, end: 3,
+    sourceStart: 1, sourceEnd: 3,
+  }],
+  timeline: { duration: 10, tracks: [{
+    id: 'art:track', kind: 'art', clips: [{
+      id: 'art:overlay-one', sourceId: 'overlay-one', name: '标题',
+      start: 1, end: 3, minDuration: 0.1, editable: true,
+    }]
+  }] },
+} });
+const before = store.getState();
+const changed = store.dispatch({ type: 'timelineClipRangeChanged', payload: {
+  kind: 'art', clipId: 'art:overlay-one', start: 2, end: 5,
+  sourceStart: 2.5, sourceEnd: 5.5,
+} });
+const after = store.getState();
+const echo = store.dispatch({ type: 'artStateChanged', payload: {
+  ...after.project.art,
+  timeline: after.project.timeline,
+} });
+const frame = projectStore.selectEditorFrame(after, timeline);
+const clip = frame.timeline.tracks
+  .flatMap(track => track.clips)
+  .find(item => item.id === 'art:overlay-one');
+console.log(JSON.stringify({
+  beforeRevision: before.revision,
+  beforeTimingRevision: before.timingRevision,
+  changed,
+  echo,
+  afterRevision: after.revision,
+  afterTimingRevision: after.timingRevision,
+  overlay: after.project.art.overlays[0],
+  clip,
+  selection: frame.timeline.selection,
+}));
+"""
+    )
+
+    assert result["changed"]["accepted"] is True
+    assert result["afterRevision"] == result["beforeRevision"] + 1
+    assert result["afterTimingRevision"] == result["beforeTimingRevision"] + 1
+    assert result["echo"]["accepted"] is False
+    assert result["overlay"]["start"] == 2
+    assert result["overlay"]["end"] == 5
+    assert result["overlay"]["sourceStart"] == 2.5
+    assert result["overlay"]["sourceEnd"] == 5.5
+    assert result["clip"]["start"] == 2
+    assert result["clip"]["end"] == 5
+    assert result["selection"]["clipId"] == "art:overlay-one"
+
+
+def test_editor_project_store_tool_echo_preserves_cross_kind_track_order() -> None:
+    result = run_store_script(
+        r"""
+const store = projectStore.createStore({}, { timeline });
+store.dispatch({ type: 'projectHydrated', payload: { job: {
+  id: 'job-cross-kind-order', duration: 10,
+  result: { text: '文案', segments: [{ id: 'one', text: '文案', start: 0, end: 1 }] },
+} } });
+store.dispatch({ type: 'pipStateChanged', payload: {
+  source: 'original',
+  overlays: [{ id: 'pip-one', assetId: 'asset-one', start: 2, end: 4 }],
+  timeline: { duration: 10, tracks: [{
+    id: 'pip:track', kind: 'pip', order: 0, clips: [{
+      id: 'pip:pip-one', sourceId: 'pip-one', start: 2, end: 4,
+    }],
+  }] },
+} });
+store.dispatch({ type: 'artStateChanged', payload: {
+  source: 'original',
+  overlays: [{ id: 'art-one', text: '标题', start: 1, end: 3 }],
+  timeline: { duration: 10, tracks: [{
+    id: 'art:track', kind: 'art', order: 0, clips: [{
+      id: 'art:art-one', sourceId: 'art-one', start: 1, end: 3,
+    }],
+  }] },
+} });
+const before = store.getState();
+const echo = store.dispatch({ type: 'artStateChanged', payload: {
+  ...before.project.art,
+  timeline: before.project.timeline,
+} });
+const after = store.getState();
+console.log(JSON.stringify({
+  echo,
+  beforeRevision: before.revision,
+  afterRevision: after.revision,
+  beforeTrackKinds: before.project.timeline.tracks.map(track => track.kind),
+  afterTrackKinds: after.project.timeline.tracks.map(track => track.kind),
+}));
+"""
+    )
+
+    assert result["echo"]["accepted"] is False
+    assert result["afterRevision"] == result["beforeRevision"]
+    assert result["beforeTrackKinds"] == ["cut", "art", "pip"]
+    assert result["afterTrackKinds"] == result["beforeTrackKinds"]
+
+
+def test_editor_project_store_track_order_only_change_keeps_timing_revision() -> None:
+    result = run_store_script(
+        r"""
+const store = projectStore.createStore({}, { timeline });
+store.dispatch({ type: 'projectHydrated', payload: { job: {
+  id: 'job-track-order', duration: 10, result: { text: '', segments: [] }
+} } });
+const art = {
+  source: 'original',
+  overlays: [
+    { id: 'art-one', text: '标题一', start: 1, end: 3 },
+    { id: 'art-two', text: '标题二', start: 4, end: 6 },
+  ],
+  timeline: { duration: 10, tracks: [
+    { id: 'art:track-one', kind: 'art', clips: [{
+      id: 'art:art-one', sourceId: 'art-one', start: 1, end: 3,
+    }] },
+    { id: 'art:track-two', kind: 'art', clips: [{
+      id: 'art:art-two', sourceId: 'art-two', start: 4, end: 6,
+    }] },
+  ] },
+};
+store.dispatch({ type: 'artStateChanged', payload: art });
+const before = store.getState();
+const reordered = store.dispatch({
+  type: 'artStateChanged',
+  payload: { ...art, timeline: {
+    ...art.timeline,
+    tracks: [...art.timeline.tracks].reverse(),
+  } },
+});
+const after = store.getState();
+console.log(JSON.stringify({
+  reordered,
+  beforeRevision: before.revision,
+  afterRevision: after.revision,
+  beforeTimingRevision: before.timingRevision,
+  afterTimingRevision: after.timingRevision,
+  beforeTrackIds: before.project.timeline.tracks.map(track => track.id),
+  afterTrackIds: after.project.timeline.tracks.map(track => track.id),
+}));
+"""
+    )
+
+    assert result["reordered"]["accepted"] is True
+    assert result["afterRevision"] == result["beforeRevision"] + 1
+    assert result["beforeTrackIds"] == ["art:track-one", "art:track-two"]
+    assert result["afterTrackIds"] == ["art:track-two", "art:track-one"]
+    assert result["afterTimingRevision"] == result["beforeTimingRevision"]
+
+
+def test_editor_project_store_inactive_tool_projection_cannot_steal_selection() -> None:
+    result = run_store_script(
+        r"""
+const store = projectStore.createStore({}, { timeline });
+store.dispatch({ type: 'projectHydrated', payload: { job: {
+  id: 'job-selection', duration: 10, result: { text: '', segments: [] }
+} } });
+const artState = {
+  source: 'original',
+  overlays: [{ id: 'art-one', text: '标题', start: 1, end: 3 }],
+  timeline: { duration: 10, tracks: [{
+    id: 'art:track', kind: 'art', clips: [{
+      id: 'art:art-one', sourceId: 'art-one', start: 1, end: 3,
+    }],
+  }], selection: { clipId: 'art:art-one' } },
+};
+store.dispatch({ type: 'artStateChanged', payload: artState });
+store.dispatch({ type: 'pipStateChanged', payload: {
+  source: 'original',
+  overlays: [{ id: 'pip-one', assetId: 'asset-one', start: 4, end: 6 }],
+  timeline: { duration: 10, tracks: [{
+    id: 'pip:track', kind: 'pip', clips: [{
+      id: 'pip:pip-one', sourceId: 'pip-one', start: 4, end: 6,
+    }],
+  }] },
+} });
+store.dispatch({ type: 'activeToolChanged', payload: { tool: 'pip' } });
+store.dispatch({
+  type: 'selectionChanged',
+  payload: { selection: { clipId: 'pip:pip-one' } },
+});
+const beforeInactive = store.getState();
+store.dispatch({ type: 'artStateChanged', payload: artState });
+const afterInactive = store.getState();
+store.dispatch({ type: 'activeToolChanged', payload: { tool: 'art' } });
+store.dispatch({
+  type: 'selectionChanged',
+  payload: { selection: { clipId: 'art:art-one' } },
+});
+store.dispatch({ type: 'artStateChanged', payload: {
+  source: 'original', overlays: [],
+  timeline: { duration: 10, tracks: [], selection: null },
+} });
+const afterActiveDelete = store.getState();
+console.log(JSON.stringify({
+  beforeInactiveSelection: beforeInactive.project.timeline.selection,
+  afterInactiveSelection: afterInactive.project.timeline.selection,
+  inactiveAcceptedRevision: afterInactive.revision,
+  beforeInactiveRevision: beforeInactive.revision,
+  afterActiveDeleteSelection: afterActiveDelete.project.timeline.selection,
+}));
+"""
+    )
+
+    assert result["beforeInactiveSelection"]["clipId"] == "pip:pip-one"
+    assert result["afterInactiveSelection"]["clipId"] == "pip:pip-one"
+    assert result["inactiveAcceptedRevision"] == result["beforeInactiveRevision"]
+    assert result["afterActiveDeleteSelection"] is None

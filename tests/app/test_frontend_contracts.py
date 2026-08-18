@@ -24,6 +24,9 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
         "/ui-feedback.js",
         "/timeline-model.js",
         "/editor-project-store.js",
+        "/editor-media-controller.js",
+        "/editor-preview-compositor.js",
+        "/editor-timeline-controller.js",
         "/art-text.js",
         "/picture-in-picture.js",
     )
@@ -34,18 +37,24 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     feedback_script_response = responses["/ui-feedback.js"]
     timeline_script_response = responses["/timeline-model.js"]
     project_store_script_response = responses["/editor-project-store.js"]
+    media_controller_response = responses["/editor-media-controller.js"]
+    preview_compositor_response = responses["/editor-preview-compositor.js"]
+    timeline_controller_response = responses["/editor-timeline-controller.js"]
     art_script_response = responses["/art-text.js"]
     pip_script_response = responses["/picture-in-picture.js"]
 
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
-    assert "/app.js?v=20260818-04" in page_response.text
-    assert "/styles.css?v=20260818-03" in page_response.text
+    assert "/app.js?v=20260818-05" in page_response.text
+    assert "/styles.css?v=20260818-04" in page_response.text
     assert "/transcript-follow-scroll.js?v=20260818-03" in page_response.text
     assert "/ui-feedback.js?v=20260807-03" in page_response.text
     assert "/timeline-model.js?v=20260810-01" in page_response.text
-    assert "/editor-project-store.js?v=20260818-02" in page_response.text
-    assert "/editor-suite.js?v=20260818-05" in page_response.text
+    assert "/editor-project-store.js?v=20260818-03" in page_response.text
+    assert "/editor-media-controller.js?v=20260818-01" in page_response.text
+    assert "/editor-preview-compositor.js?v=20260818-01" in page_response.text
+    assert "/editor-timeline-controller.js?v=20260818-01" in page_response.text
+    assert "/editor-suite.js?v=20260818-06" in page_response.text
     assert timeline_script_response.status_code == 200
     assert timeline_script_response.headers["cache-control"] == "no-store, max-age=0"
     assert "function createStore" in timeline_script_response.text
@@ -53,10 +62,35 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     assert project_store_script_response.status_code == 200
     assert project_store_script_response.headers["cache-control"] == "no-store, max-age=0"
     assert "function createStore" in project_store_script_response.text
+    for response in (
+        media_controller_response,
+        preview_compositor_response,
+        timeline_controller_response,
+    ):
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store, max-age=0"
+    assert "root.EditorMedia = api" in media_controller_response.text
+    assert "root.EditorPreview = api" in preview_compositor_response.text
+    assert "root.EditorTimelineController = api" in timeline_controller_response.text
+    assert 'if (keyboardTarget) {\n      keyboardTarget.addEventListener?.("keydown", keyDown);' in (
+        timeline_controller_response.text
+    )
+    assert '} else {\n      layer?.addEventListener("keydown", keyDown);' in (
+        timeline_controller_response.text
+    )
     assert page_response.text.index("/timeline-model.js") < page_response.text.index(
         "/editor-project-store.js"
     )
     assert page_response.text.index("/editor-project-store.js") < page_response.text.index(
+        "/editor-media-controller.js"
+    )
+    assert page_response.text.index("/editor-media-controller.js") < page_response.text.index(
+        "/editor-preview-compositor.js"
+    )
+    assert page_response.text.index("/editor-preview-compositor.js") < page_response.text.index(
+        "/editor-timeline-controller.js"
+    )
+    assert page_response.text.index("/editor-timeline-controller.js") < page_response.text.index(
         "/editor-suite.js"
     )
     assert page_response.text.index("/transcript-follow-scroll.js") < (
@@ -186,50 +220,39 @@ def test_editor_suite_frontend_contracts():
     assert "data-editor-suite-download" in editor_suite_script_response.text
     assert "syncGenerationButton" in editor_suite_script_response.text
     assert "workspaceSourceTime" in editor_suite_script_response.text
-    assert 'classList.toggle("has-effect-track", nextState.visible)' in editor_suite_script_response.text
-    assert "timelineTrackOffset" in editor_suite_script_response.text
-    assert "timelineTrackCount" in editor_suite_script_response.text
-    assert 'segment.dataset.timelineTrackIndex' in editor_suite_script_response.text
+    assert "window.EditorMedia.createController(previewVideo)" in editor_suite_script_response.text
+    assert "window.EditorPreview.createCompositor" in editor_suite_script_response.text
+    assert "window.EditorTimelineController.createController" in editor_suite_script_response.text
+    assert "function selectCurrentProjectFrame" in editor_suite_script_response.text
+    assert "window.EditorProjectStore.selectEditorFrame(" in editor_suite_script_response.text
     assert "select-art-timeline" in editor_suite_script_response.text
     assert "adjust-art-timeline" in editor_suite_script_response.text
     assert 'ensureToolFrame("art", artHref);' in editor_suite_script_response.text
     assert "Math.abs(nextTime - workspaceCurrentTime()) > 0.05" in editor_suite_script_response.text
     assert "Math.abs(childTime - workspaceCurrentTime()) > 0.05" in editor_suite_script_response.text
     assert "function syncMirroredPlayback" in editor_suite_script_response.text
-    assert "function scheduleFrameSync" in editor_suite_script_response.text
     assert 'for (const name of frameEntries.keys()) syncFrameTime(name);' in (
         editor_suite_script_response.text
     )
-    frame_sync_start = editor_suite_script_response.text.index(
-        "function scheduleFrameSync()"
-    )
-    frame_sync_end = editor_suite_script_response.text.index(
-        "function renderActiveTool()", frame_sync_start
-    )
-    assert 'if (activeTool === "cut") return;' not in (
-        editor_suite_script_response.text[frame_sync_start:frame_sync_end]
-    )
+    assert "mediaController?.subscribeFrame" in editor_suite_script_response.text
+    assert "previewCompositor?.syncTime();" not in editor_suite_script_response.text
+    assert "function scheduleFrameSync" not in editor_suite_script_response.text
     assert 'inspectorHost.classList.toggle("is-background", isCut)' in (
         editor_suite_script_response.text
     )
-    assert "renderedPreviewState" in editor_suite_script_response.text
+    assert "renderedPreviewState" not in editor_suite_script_response.text
     assert "function normalizedToolHref" in editor_suite_script_response.text
     assert 'url.searchParams.delete("embedded")' in editor_suite_script_response.text
     assert "current.frame.dataset.toolHref !== toolHref" in (
         editor_suite_script_response.text
     )
     assert '["art", "pip"]' in editor_suite_script_response.text
-    assert 'canvas.dataset.effectKind = layer.kind' in (
-        editor_suite_script_response.text
-    )
-    assert 'kind: "shared"' in editor_suite_script_response.text
-    assert "if (effectKind !== activeTool) return;" in (
-        editor_suite_script_response.text
-    )
+    assert "overlayHtml" not in editor_suite_script_response.text
+    assert "timelineHtml" not in editor_suite_script_response.text
     assert 'activeTool !== "cut" && Boolean(state)' not in (
         editor_suite_script_response.text
     )
-    assert 'previewVideo?.addEventListener(eventName, scheduleFrameSync)' in editor_suite_script_response.text
+    assert 'previewVideo?.addEventListener(eventName, scheduleFrameSync)' not in editor_suite_script_response.text
     assert "height: auto !important;" in styles_response.text
     assert ".editor-suite-inspector-host" in styles_response.text
     timeline_layer_start = styles_response.text.index(".editor-suite-timeline-layer {")
@@ -255,7 +278,7 @@ def test_editor_suite_frontend_contracts():
     assert "function generationTarget()" not in editor_suite_script_response.text
     assert "function generateCurrentPreview()" in editor_suite_script_response.text
     assert 'target: "all"' in editor_suite_script_response.text
-    assert "generationPayload" in editor_suite_script_response.text
+    assert "generationPayload" not in editor_suite_script_response.text
     assert 'type: "editor-suite:cut-draft"' in editor_suite_script_response.text
     assert "workspaceCurrentTime" in editor_suite_script_response.text
     assert "setCutDraft," in editor_suite_script_response.text
@@ -487,7 +510,7 @@ def test_cut_timeline_and_draft_frontend_contracts():
     assert "...protectRestoredNoSpeechFromTextRanges(textRanges)" in script_response.text
     assert 'stageCutHistoryOperation("恢复空白片段")' in script_response.text
     assert 'stageCutHistoryOperation("删除空白片段")' in script_response.text
-    assert "window.EditorSuite?.setCutDraft(state)" in script_response.text
+    assert "window.EditorSuite?.setCutDraft({" in script_response.text
     assert "function buildLiveCutDraftState" in script_response.text
     assert "sourceDuration: cutTimelineDuration()" in script_response.text
     assert "ranges: edit.ranges || edit.requestedRanges || []" in script_response.text
@@ -725,7 +748,7 @@ def test_art_text_frontend_contracts():
     assert "commitPositionCoordinate" in art_script_response.text
     assert ".position-coordinate-fields {" in styles_response.text
     assert "/timeline-model.js?v=20260810-01" in art_page_response.text
-    assert "/editor-suite.js?v=20260818-05" in art_page_response.text
+    assert "/editor-suite.js?v=20260818-06" in art_page_response.text
     assert 'class="preview-grid"' in art_page_response.text
     assert 'data-preview-grid-toggle' in art_page_response.text
     assert "从保留文案中选择一句" not in art_page_response.text
@@ -999,7 +1022,7 @@ def test_picture_in_picture_frontend_contracts():
     assert "/ui-feedback.js?v=20260807-03" in pip_page_response.text
     assert "/styles.css?v=20260812-02" in pip_page_response.text
     assert "/timeline-model.js?v=20260810-01" in pip_page_response.text
-    assert "/editor-suite.js?v=20260818-05" in pip_page_response.text
+    assert "/editor-suite.js?v=20260818-06" in pip_page_response.text
     assert 'class="preview-grid"' in pip_page_response.text
     assert 'data-preview-grid-toggle' in pip_page_response.text
     assert 'data-editor-suite-nav data-stage="pip"' in pip_page_response.text
@@ -2394,12 +2417,15 @@ console.log(JSON.stringify({
 
 def test_frontend_playback_frame_clock_uses_one_cancellable_callback():
     root = Path(__file__).resolve().parents[2]
-    app_source = (root / "web" / "app.js").read_text(encoding="utf-8")
-    clock_start = app_source.index("function createPlaybackFrameClock")
-    clock_end = app_source.index("function setupCutPreviewControls", clock_start)
-    clock_source = app_source[clock_start:clock_end]
+    media_source = (root / "web" / "editor-media-controller.js").read_text(
+        encoding="utf-8"
+    )
+    clock_start = media_source.index("function createPlaybackFrameClock")
+    clock_end = media_source.index("function createController", clock_start)
+    clock_source = media_source[clock_start:clock_end]
     script = f"""
 const window = {{}};
+const root = window;
 {clock_source}
 
 function createVideo(withVideoFrames = false) {{
@@ -2589,6 +2615,9 @@ console.log(JSON.stringify({{
 def test_frontend_playback_frame_path_uses_cached_indexes_only():
     root = Path(__file__).resolve().parents[2]
     app_source = (root / "web" / "app.js").read_text(encoding="utf-8")
+    media_source = (root / "web" / "editor-media-controller.js").read_text(
+        encoding="utf-8"
+    )
     styles_source = (root / "web" / "styles.css").read_text(encoding="utf-8")
     frame_start = app_source.index("function updateCutPlaybackVisualFrame")
     frame_end = app_source.index("function updateCutTimelinePlayhead", frame_start)
@@ -2613,7 +2642,9 @@ def test_frontend_playback_frame_path_uses_cached_indexes_only():
     assert "translate3d(" in frame_source
     assert "editedTimelineSpansCache || []" in state_source
     assert "getEditedTimelineSpans" not in state_source
-    assert "requestVideoFrameCallback" in app_source
+    assert "requestVideoFrameCallback" in media_source
+    assert "function createPlaybackFrameClock" not in app_source
+    assert "window.EditorSuite?.mediaController?.()" in app_source
     assert "cutPlaybackFrameClock?.destroy()" in app_source
     assert refresh_source.index("updateCutTimelineScale()") < refresh_source.index(
         "renderCutTimelineTextSegments()"
@@ -2905,10 +2936,7 @@ def test_douyin_preview_is_inline_only():
         in douyin_base_video_rule
     )
     assert "object-fit: cover;" in douyin_base_video_rule
-    assert "const fitScale = douyinPreviewEnabled ? Math.max : Math.min;" in (
-        editor_suite_script_response.text
-    )
-    assert "const scale = fitScale(" in editor_suite_script_response.text
+    assert "previewCompositor?.render(nextFrame)" in editor_suite_script_response.text
     douyin_overlay_rule = styles_response.text.split(
         ".cut-video-stage.is-douyin-preview .editor-suite-preview-overlay {",
         maxsplit=1,
@@ -2982,8 +3010,15 @@ def test_editor_project_store_integration_guards_text_and_compose_state():
     compose_start = suite_source.index("function compositionRequest()")
     compose_end = suite_source.index("function stableValue", compose_start)
     compose_source = suite_source[compose_start:compose_end]
-    assert "selectCompositionRequest" in compose_source
+    assert "selectCurrentProjectFrame()" in compose_source
+    assert "frame.composition" in compose_source
+    assert "selectCompositionRequest" not in compose_source
     assert "toolStates.get" not in compose_source
+    generate_start = suite_source.index("async function generateCurrentPreview()")
+    generate_end = suite_source.index("async function cancelComposition", generate_start)
+    generate_source = suite_source[generate_start:generate_end]
+    assert "const frame = selectCurrentProjectFrame();" in generate_source
+    assert "const request = frame?.composition || compositionRequest();" in generate_source
     assert "projectStoreEnabled" in suite_source
     assert "window.__EDITOR_PROJECT_STORE_ENABLED__ !== false" in suite_source
     assert "toolFrameOwnsSource(event.source, data.kind)" in suite_source

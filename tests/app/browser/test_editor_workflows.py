@@ -42,6 +42,35 @@ def wait_for_preview_time(page, expected: float) -> None:
     )
 
 
+def install_base_media_mutation_probe(page) -> None:
+    page.locator("#cutPreviewVideo").evaluate(
+        """video => {
+          const descriptor = Object.getOwnPropertyDescriptor(
+            HTMLMediaElement.prototype,
+            'src',
+          );
+          const originalLoad = video.load;
+          window.__b1MediaMutationProbe = { srcWrites: 0, loadCalls: 0 };
+          Object.defineProperty(video, 'src', {
+            configurable: true,
+            get() { return descriptor.get.call(this); },
+            set(value) {
+              window.__b1MediaMutationProbe.srcWrites += 1;
+              descriptor.set.call(this, value);
+            },
+          });
+          video.load = function loadWithProbe() {
+            window.__b1MediaMutationProbe.loadCalls += 1;
+            return originalLoad.call(this);
+          };
+        }"""
+    )
+
+
+def base_media_mutations(page) -> dict[str, int]:
+    return page.evaluate("window.__b1MediaMutationProbe")
+
+
 def test_cut_draft_survives_refresh(
     browser_session,
     seeded_editor_job,
@@ -93,6 +122,7 @@ def test_tool_switch_keeps_selection_preview_and_playback_position(
           video.dispatchEvent(new Event("timeupdate"));
         }"""
     )
+    install_base_media_mutation_probe(page)
 
     page.locator('[data-editor-tool="art"]').click()
     art_frame = page.frame_locator('iframe[title="艺术字设置"]')
@@ -144,6 +174,74 @@ def test_tool_switch_keeps_selection_preview_and_playback_position(
     assert page.locator("#editorSuitePreviewOverlay .is-art").count() == 1
     assert page.locator("#editorSuitePreviewOverlay .is-pip").count() == 1
     assert "tool=pip" in page.url
+    assert base_media_mutations(page) == {"srcWrites": 0, "loadCalls": 0}
+
+
+@pytest.mark.parametrize("playing", [False, True], ids=["paused", "playing"])
+def test_version_save_preserves_base_media_identity_and_playback(
+    browser_session,
+    seeded_editor_job,
+    playing,
+):
+    page = open_editor(browser_session, seeded_editor_job)
+    page.locator('[data-editor-tool="art"]').click()
+    page.frame_locator('iframe[title="艺术字设置"]').locator(
+        "#artWorkspace"
+    ).wait_for(state="visible")
+    save_button = page.locator("[data-editor-suite-save]")
+    save_button.wait_for(state="visible")
+    install_base_media_mutation_probe(page)
+
+    before = page.locator("#cutPreviewVideo").evaluate(
+        """async (video, playing) => {
+          video.pause();
+          video.currentTime = 0.35;
+          video.dispatchEvent(new Event('seeking'));
+          video.dispatchEvent(new Event('timeupdate'));
+          if (playing) await video.play();
+          window.__b1VersionSaveVideo = video;
+          return {
+            src: video.currentSrc || video.src,
+            currentTime: video.currentTime,
+            paused: video.paused,
+          };
+        }""",
+        playing,
+    )
+    history_url = re.compile(
+        rf".*/api/transcriptions/{seeded_editor_job.job_id}/history$"
+    )
+    page.route(
+        history_url,
+        lambda route: route.fulfill(
+            status=201,
+            content_type="application/json",
+            body='{"id":"b1-version","name":"B1 测试版本"}',
+        ),
+    )
+    with page.expect_response(history_url) as response_info:
+        save_button.click()
+    assert response_info.value.status == 201
+    page.locator("[data-editor-suite-status]").filter(
+        has_text="已保存“B1 测试版本”"
+    ).wait_for(state="attached")
+
+    after = page.locator("#cutPreviewVideo").evaluate(
+        """video => ({
+          sameNode: video === window.__b1VersionSaveVideo,
+          src: video.currentSrc || video.src,
+          currentTime: video.currentTime,
+          paused: video.paused,
+        })"""
+    )
+    assert after["sameNode"] is True
+    assert after["src"] == before["src"]
+    assert after["paused"] is before["paused"]
+    if playing:
+        assert after["currentTime"] >= before["currentTime"] - 0.06
+    else:
+        assert after["currentTime"] == pytest.approx(before["currentTime"], abs=0.06)
+    assert base_media_mutations(page) == {"srcWrites": 0, "loadCalls": 0}
 
 
 def test_unified_generate_posts_current_cut_art_and_pip_state(
@@ -263,6 +361,7 @@ def test_text_edit_preserves_media_iframes_and_effect_timing(
     pip_frame = page.frame_locator('iframe[title="画中画设置"]')
     pip_frame.locator("#pipWorkspace").wait_for(state="visible")
     page.locator('[data-editor-tool="cut"]').click()
+    install_base_media_mutation_probe(page)
     page.locator("#cutPreviewVideo").evaluate(
         """video => {
           video.pause();
@@ -290,11 +389,11 @@ def test_text_edit_preserves_media_iframes_and_effect_timing(
             sourceStart: item.sourceStart ?? null,
             sourceEnd: item.sourceEnd ?? null,
           }));
-          window.__b0TextEditIdentity = {
+              window.__b0TextEditIdentity = {
             video,
             artFrame: document.querySelector('iframe[title="艺术字设置"]'),
-            pipFrame: document.querySelector('iframe[title="画中画设置"]'),
-          };
+                pipFrame: document.querySelector('iframe[title="画中画设置"]'),
+              };
           return {
             src: video.currentSrc || video.src,
             currentTime: video.currentTime,
@@ -340,8 +439,8 @@ def test_text_edit_preserves_media_iframes_and_effect_timing(
             artTimes: times(snapshot.project.art.overlays),
             pipTimes: times(snapshot.project.pip.overlays),
             artTexts: snapshot.project.art.overlays.map(item => item.text || ''),
-            composeArtTexts: request.artOverlays.map(item => item.text || ''),
-          };
+                composeArtTexts: request.artOverlays.map(item => item.text || ''),
+              };
         }"""
     )
 
@@ -364,6 +463,255 @@ def test_text_edit_preserves_media_iframes_and_effect_timing(
         assert after["currentTime"] == pytest.approx(
             before["currentTime"], abs=0.06
         )
+    assert base_media_mutations(page) == {"srcWrites": 0, "loadCalls": 0}
+
+
+def test_b1_atomic_timeline_transaction_and_narrow_workspace(
+    browser_session,
+    seeded_editor_job,
+):
+    page = open_editor(browser_session, seeded_editor_job)
+    page.locator('[data-editor-tool="art"]').click()
+    art_frame = page.frame_locator('iframe[title="艺术字设置"]')
+    art_frame.locator("#artWorkspace").wait_for(state="visible")
+    page.locator("#editorSuitePreviewOverlay .is-art").wait_for(state="visible")
+    page.locator('[data-editor-tool="pip"]').click()
+    page.frame_locator('iframe[title="画中画设置"]').locator(
+        "#pipWorkspace"
+    ).wait_for(state="visible")
+    page.locator('[data-editor-tool="cut"]').click()
+    install_base_media_mutation_probe(page)
+
+    cut_cancel = page.evaluate(
+        """() => {
+          const beforeRevision = window.EditorSuite.projectSnapshot().revision;
+          const track = document.querySelector('#cutFrameTimelineTrack');
+          const bounds = track.getBoundingClientRect();
+          const startX = bounds.left + bounds.width * 0.62;
+          track.dispatchEvent(new PointerEvent('pointerdown', {
+            bubbles: true, button: 0, buttons: 1, clientX: startX,
+          }));
+          window.dispatchEvent(new PointerEvent('pointermove', {
+            bubbles: true, button: 0, buttons: 1, clientX: startX + 28,
+          }));
+          window.dispatchEvent(new PointerEvent('pointercancel', {
+            bubbles: true, button: 0, clientX: startX + 28,
+          }));
+          return {
+            beforeRevision,
+            afterRevision: window.EditorSuite.projectSnapshot().revision,
+            pendingRanges: document.querySelectorAll(
+              '#cutFrameTimelineRanges .cut-timeline-delete-range'
+            ).length,
+          };
+        }"""
+    )
+    assert cut_cancel == {
+        "beforeRevision": cut_cancel["beforeRevision"],
+        "afterRevision": cut_cancel["beforeRevision"],
+        "pendingRanges": 0,
+    }
+
+    page.set_viewport_size({"width": 375, "height": 812})
+    for tool in ("art", "pip", "cut"):
+        page.locator(f'[data-editor-tool="{tool}"]').click()
+        overflow = page.evaluate(
+            """() => ({
+              document: document.documentElement.scrollWidth -
+                document.documentElement.clientWidth,
+              body: document.body.scrollWidth - document.body.clientWidth,
+            })"""
+        )
+        assert overflow["document"] <= 1
+        assert overflow["body"] <= 1
+
+    art_segment = page.locator(
+        '#editorSuiteTimelineLayer [data-effect-kind="art"]'
+    ).first
+    art_segment.wait_for(state="visible")
+    page.locator(
+        '#editorSuiteTimelineLayer [data-effect-kind="pip"]'
+    ).first.click()
+    clip_id = art_segment.get_attribute("data-timeline-clip-id")
+    source_id = art_segment.get_attribute("data-source-id")
+    assert clip_id
+    assert source_id
+    before = page.evaluate(
+        """({ clipId, sourceId }) => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          const overlay = snapshot.project.art.overlays.find(
+            item => String(item.id) === sourceId,
+          );
+          const clip = snapshot.project.timeline.tracks
+            .flatMap(track => track.clips)
+            .find(item => String(item.id) === clipId);
+          return {
+            revision: snapshot.revision,
+            timingRevision: snapshot.timingRevision,
+            start: overlay.start,
+            end: overlay.end,
+            clipStart: clip.start,
+            clipEnd: clip.end,
+            selectedClipId: snapshot.project.timeline.selection?.clipId || null,
+          };
+        }""",
+        {"clipId": clip_id, "sourceId": source_id},
+    )
+    assert before["selectedClipId"] != clip_id
+    page.evaluate(
+        """() => {
+          window.__b1ProjectActions = [];
+          window.EditorSuite.subscribeProject((next, previous, action) => {
+            window.__b1ProjectActions.push({
+              type: action.type,
+              previousRevision: previous.revision,
+              previousTimingRevision: previous.timingRevision,
+              revision: next.revision,
+              timingRevision: next.timingRevision,
+            });
+          });
+        }"""
+    )
+
+    def dispatch_drag(finish_event: str) -> None:
+        art_segment.evaluate(
+            """(segment, finishEvent) => {
+              const segmentRect = segment.getBoundingClientRect();
+              const track = document.querySelector('#cutFrameTimelineTrack');
+              const trackRect = track.getBoundingClientRect();
+              const startX = segmentRect.left + segmentRect.width / 2;
+              const delta = Math.max(8, Math.min(40, trackRect.width * 0.08));
+              segment.dispatchEvent(new PointerEvent('pointerdown', {
+                bubbles: true, button: 0, buttons: 1, clientX: startX,
+              }));
+              window.dispatchEvent(new PointerEvent('pointermove', {
+                bubbles: true, button: 0, buttons: 1, clientX: startX + delta,
+              }));
+              window.dispatchEvent(new PointerEvent(finishEvent, {
+                bubbles: true, button: 0, clientX: startX + delta,
+              }));
+            }""",
+            finish_event,
+        )
+
+    dispatch_drag("pointercancel")
+    after_cancel = page.evaluate(
+        """sourceId => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          const overlay = snapshot.project.art.overlays.find(
+            item => String(item.id) === sourceId,
+          );
+          return {
+            revision: snapshot.revision,
+            timingRevision: snapshot.timingRevision,
+            start: overlay.start,
+            end: overlay.end,
+            actions: window.__b1ProjectActions,
+          };
+        }""",
+        source_id,
+    )
+    assert after_cancel == {
+        "revision": before["revision"],
+        "timingRevision": before["timingRevision"],
+        "start": before["start"],
+        "end": before["end"],
+        "actions": [],
+    }
+
+    page.evaluate("window.__b1ProjectActions = []")
+    dispatch_drag("pointerup")
+    art_frame.locator("body").evaluate(
+        """body => new Promise(resolve => {
+          const check = () => {
+            const parentRevision = window.parent.EditorSuite.projectSnapshot().revision;
+            if (editorHostLastAppliedRevision >= parentRevision) resolve(true);
+            else window.requestAnimationFrame(check);
+          };
+          check();
+        })"""
+    )
+    committed = page.evaluate(
+        """sourceId => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          const overlay = snapshot.project.art.overlays.find(
+            item => String(item.id) === sourceId,
+          );
+          return {
+            revision: snapshot.revision,
+            timingRevision: snapshot.timingRevision,
+            start: overlay.start,
+            end: overlay.end,
+            actions: window.__b1ProjectActions,
+          };
+        }""",
+        source_id,
+    )
+    assert len(committed["actions"]) == 1, committed["actions"]
+    commit_action = committed["actions"][0]
+    assert commit_action["type"] == "timelineClipRangeChanged", commit_action
+    assert commit_action["revision"] == commit_action["previousRevision"] + 1
+    assert (
+        commit_action["timingRevision"]
+        == commit_action["previousTimingRevision"] + 1
+    )
+    assert committed["timingRevision"] == before["timingRevision"] + 1
+    assert committed["start"] > before["start"]
+    assert committed["end"] > before["end"]
+    page.wait_for_function(
+        """expected => {
+          const frame = document.querySelector('iframe[title="艺术字设置"]');
+          const input = frame?.contentDocument?.querySelector('#startTime');
+          return input && Math.abs(Number(input.value) - expected) < 0.001;
+        }""",
+        arg=committed["start"],
+    )
+
+    page.keyboard.press("Control+z")
+    page.wait_for_function(
+        """({ sourceId, start }) => {
+          const overlay = window.EditorSuite.projectSnapshot().project.art.overlays
+            .find(item => String(item.id) === sourceId);
+          return Math.abs(Number(overlay?.start) - start) < 0.0001;
+        }""",
+        arg={"sourceId": source_id, "start": before["start"]},
+    )
+    undone = page.evaluate("window.EditorSuite.projectSnapshot().revision")
+    assert undone == committed["revision"] + 1
+
+    page.keyboard.press("Control+Shift+z")
+    page.wait_for_function(
+        """({ sourceId, start }) => {
+          const overlay = window.EditorSuite.projectSnapshot().project.art.overlays
+            .find(item => String(item.id) === sourceId);
+          return Math.abs(Number(overlay?.start) - start) < 0.0001;
+        }""",
+        arg={"sourceId": source_id, "start": committed["start"]},
+    )
+    final = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          const expectedComposition = window.EditorProjectStore
+            .selectCompositionRequest(snapshot);
+          const revisions = [
+            document.querySelector('#cutPreviewVideo').dataset.projectRevision,
+            document.querySelector('#editorSuitePreviewOverlay').dataset.projectRevision,
+            document.querySelector('#editorSuiteTimelineLayer').dataset.projectRevision,
+          ].map(Number);
+          return {
+            revision: snapshot.revision,
+            timingRevision: snapshot.timingRevision,
+            revisions,
+            request: window.EditorSuite.compositionRequest(),
+            expectedComposition,
+          };
+        }"""
+    )
+    assert final["revision"] == undone + 1
+    assert final["timingRevision"] == committed["timingRevision"] + 2
+    assert final["revisions"] == [final["revision"]] * 3
+    assert final["request"] == final["expectedComposition"]
+    assert base_media_mutations(page) == {"srcWrites": 0, "loadCalls": 0}
 
 
 def test_iframe_revision_floor_rejects_stale_state_and_acks_local_edits(
