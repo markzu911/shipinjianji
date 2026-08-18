@@ -152,3 +152,25 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 8: 建立单页编辑器迁移方案与浏览器行为基线
+
+**Date**: 2026-08-18
+**Task**: 建立单页编辑器迁移方案与浏览器行为基线
+**Branch**: `develop`
+
+### Summary
+
+完成单页编辑器目标架构与分阶段迁移规划；新增隔离的真实 Chromium 工作流，覆盖草稿刷新、三工具切换、compose 载荷和服务重启预期失败；完整回归 185 passed, 1 xfailed。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `2790864` | (see git log) |
+| `fb1447d` | (see git log) |
+
+### Status
+
+[OK] **Completed**
