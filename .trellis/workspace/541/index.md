@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 9
+- **Total Sessions**: 10
 - **Last Active**: 2026-08-18
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~199 | Active |
+| `journal-1.md` | ~222 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 10 | 2026-08-18 | 完成 B1 单页统一媒体预览与时间轴 | `97a1397`, `cf42ae2`, `bf0054a` | `develop` |
 | 9 | 2026-08-18 | 完成单页编辑器状态核心 B0 | `fa36fa0`, `671a712`, `4a83df8` | `develop` |
 | 8 | 2026-08-18 | 建立单页编辑器迁移方案与浏览器行为基线 | `2790864`, `fb1447d` | `develop` |
 | 7 | 2026-08-18 | 优化文案播放跟随动画 | `22c0e56` | `develop` |

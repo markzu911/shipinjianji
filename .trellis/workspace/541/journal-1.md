@@ -197,3 +197,26 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 10: 完成 B1 单页统一媒体预览与时间轴
+
+**Date**: 2026-08-18
+**Task**: 完成 B1 单页统一媒体预览与时间轴
+**Branch**: `develop`
+
+### Summary
+
+完成唯一 MediaController、语义 PreviewCompositor 与统一 TimelineController，确保预览、时间轴和 compose 消费同一原子 frame/revision；补齐媒体保持、事务回滚、iframe 回声和浏览器回归契约。完整 tests/app 209 passed、1 xfailed。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `97a1397` | (see git log) |
+| `cf42ae2` | (see git log) |
+| `bf0054a` | (see git log) |
+
+### Status
+
+[OK] **Completed**
