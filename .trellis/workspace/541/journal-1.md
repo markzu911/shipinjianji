@@ -131,3 +131,24 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 7: 优化文案播放跟随动画
+
+**Date**: 2026-08-18
+**Task**: 优化文案播放跟随动画
+**Branch**: `develop`
+
+### Summary
+
+将文案跟随改为单次滚动提交与 FLIP/WAAPI，拆分视频帧热路径并加入可取消帧时钟；修复连续尾段上弹与重叠游标问题，完成桌面及 375px 浏览器验证。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `22c0e56` | (see git log) |
+
+### Status
+
+[OK] **Completed**
