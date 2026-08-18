@@ -1220,10 +1220,17 @@ async function saveSegmentText() {
     closeSegmentEditDialog();
     return;
   }
+  const textSaveJobId = currentJobId;
+  const projectStoreEnabled = Boolean(
+    window.EditorSuite?.projectStoreEnabled?.(),
+  );
+  const textSaveEffect = projectStoreEnabled
+    ? window.EditorSuite.beginProjectEffect("transcript-save")
+    : null;
   setSegmentOperationBusy(true);
   try {
     const response = await fetch(
-      `/api/transcriptions/${encodeURIComponent(currentJobId)}/editable-segments`,
+      `/api/transcriptions/${encodeURIComponent(textSaveJobId)}/editable-segments`,
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -1238,18 +1245,49 @@ async function saveSegmentText() {
     if (!response.ok) {
       throw new Error(result.detail || "文字保存失败，请重试。");
     }
+    if (currentJobId !== textSaveJobId) {
+      throw new Error("文字已保存，但当前项目已切换，未覆盖新项目状态。");
+    }
     currentEditableSegments = result.editableSegments || currentEditableSegments;
     syncCorrectedWords();
     renderCutSegments();
     renderCutTimelineTextSegments();
     updateSelectionSummary();
+    if (textSaveEffect) {
+      const readProject = async () => {
+        const jobResponse = await fetch(
+          `/api/transcriptions/${encodeURIComponent(textSaveJobId)}`,
+        );
+        const jobPayload = await jobResponse.json();
+        if (!jobResponse.ok) {
+          throw new Error(jobPayload.detail || "文字已保存，但同步项目状态失败。");
+        }
+        return jobPayload;
+      };
+      const jobPayload = await readProject();
+      let applied = window.EditorSuite.applyTranscriptTextEffect(
+        textSaveEffect,
+        jobPayload,
+      );
+      if (!applied.accepted) {
+        const refreshEffect = window.EditorSuite.beginProjectEffect(
+          "transcript-refresh",
+        );
+        const refreshedJob = await readProject();
+        applied = window.EditorSuite.applyTranscriptTextEffect(
+          refreshEffect,
+          refreshedJob,
+        );
+      }
+      if (!applied.accepted) {
+        throw new Error("文字已保存，但当前时间轴已变化，请稍后重试同步。");
+      }
+    } else {
+      broadcastTranscriptUpdated();
+    }
     setSegmentOperationBusy(false);
     closeSegmentEditDialog();
-    setSegmentStructureStatus("已保存这段文字，正在刷新页面同步艺术字…", "success");
-    broadcastTranscriptUpdated();
-    // Reload once so every view (including the art-text track) re-reads the
-    // updated transcript and its stable subtitle timeline from the server.
-    window.setTimeout(() => window.location.reload(), 500);
+    setSegmentStructureStatus("已保存这段文字，项目预览已同步。", "success");
   } catch (error) {
     setSegmentOperationBusy(false);
     segmentEditSelectionStatus.textContent = error.message;

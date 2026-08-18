@@ -109,6 +109,7 @@
   const saveButton = root.querySelector("[data-editor-suite-save]");
   const frameEntries = new Map();
   const toolStates = new Map();
+  const toolBridgeRevisions = new Map();
   const desiredToolUrls = new Map();
   let activeTool = stage;
   let refreshToken = 0;
@@ -132,6 +133,91 @@
   const timelineStore = window.EditorTimeline.createStore({
     duration: 0,
     tracks: [],
+  });
+  const projectStoreEnabled = Boolean(
+    stage === "cut" &&
+      window.EditorProjectStore &&
+      window.__EDITOR_PROJECT_STORE_ENABLED__ !== false,
+  );
+  const projectStore = projectStoreEnabled
+    ? window.EditorProjectStore.createStore(
+        { ui: { activeTool } },
+        { timeline: window.EditorTimeline },
+      )
+    : null;
+
+  function projectSnapshot() {
+    return projectStore?.getState() || null;
+  }
+
+  function syncProjectTimeline() {
+    if (!projectStoreEnabled) return timelineStore.snapshot();
+    const documentState = projectStore.select(
+      window.EditorProjectStore.selectTimelineDocument,
+    );
+    return timelineStore.replace(documentState, { silent: true });
+  }
+
+  function bridgeRevision(value) {
+    if (value === undefined || value === null || value === "") return null;
+    const revision = Number(value);
+    return Number.isFinite(revision) ? revision : null;
+  }
+
+  function advanceToolBridgeRevision(name, revision) {
+    const normalized = bridgeRevision(revision);
+    if (!projectStoreEnabled || normalized === null) return;
+    toolBridgeRevisions.set(
+      name,
+      Math.max(toolBridgeRevisions.get(name) ?? -1, normalized),
+    );
+  }
+
+  function postProjectProjection(name, message) {
+    const entry = frameEntries.get(name);
+    if (!entry?.frame?.contentWindow) return;
+    advanceToolBridgeRevision(name, message?.revision);
+    entry.frame.contentWindow.postMessage(message, window.location.origin);
+  }
+
+  function acknowledgeToolProjection(name, state = projectSnapshot()) {
+    const entry = frameEntries.get(name);
+    if (!state || !entry?.frame?.contentWindow) return;
+    entry.frame.contentWindow.postMessage({
+      type: "editor-suite:project-ack",
+      kind: name,
+      revision: state.revision,
+      timingRevision: state.timingRevision,
+      changeKind: "tool-state-ack",
+    }, window.location.origin);
+  }
+
+  function postTranscriptTextProjection(name, state = projectSnapshot()) {
+    if (!state) return;
+    postProjectProjection(
+      name,
+      {
+        type: "editor-suite:transcript-text",
+        kind: name,
+        transcript:
+          state.project.cut.transcript || state.project.transcript,
+        editableSegments: state.project.editableSegments,
+        art: state.project.art,
+        revision: state.revision,
+        timingRevision: state.timingRevision,
+        changeKind: "transcript-text",
+      },
+    );
+  }
+
+  projectStore?.subscribe((next, previous, action) => {
+    syncProjectTimeline();
+    if (action.type === window.EditorProjectStore.ACTIONS.TRANSCRIPT_TEXT_CHANGED) {
+      for (const name of ["art", "pip"]) postTranscriptTextProjection(name, next);
+    }
+    if (next.ui.activeTool !== previous.ui.activeTool) {
+      activeTool = next.ui.activeTool;
+    }
   });
 
   function syncToolTimeline(kind, timeline, options = {}) {
@@ -346,6 +432,22 @@
   }
 
   function previewCompositionState() {
+    if (projectStoreEnabled) {
+      const request = projectStore.select(
+        window.EditorProjectStore.selectCompositionRequest,
+      );
+      return {
+        ranges: request.ranges,
+        art: {
+          source: request.artSource,
+          overlays: request.artOverlays,
+        },
+        pictureInPicture: {
+          source: request.pictureInPictureSource,
+          overlays: request.pictureInPictureOverlays,
+        },
+      };
+    }
     const ranges = cutDraftActive
       ? cutDraftState.ranges
       : currentJob?.edit?.status === "completed"
@@ -375,6 +477,11 @@
   }
 
   function compositionRequest() {
+    if (projectStoreEnabled) {
+      return projectStore.select(
+        window.EditorProjectStore.selectCompositionRequest,
+      );
+    }
     const composition = previewCompositionState();
     return {
       target: "all",
@@ -725,15 +832,13 @@
   }
 
   function syncFrameCutDraft(name) {
-    const entry = frameEntries.get(name);
-    if (!entry?.frame?.contentWindow) return;
-    entry.frame.contentWindow.postMessage(
-      {
-        type: "editor-suite:cut-draft",
-        ...cutDraftState,
-      },
-      window.location.origin,
-    );
+    const message = projectStoreEnabled
+      ? projectStore.select(window.EditorProjectStore.selectCutDraftMessage)
+      : {
+          type: "editor-suite:cut-draft",
+          ...cutDraftState,
+        };
+    postProjectProjection(name, message);
   }
 
   function syncFrameTime(name = activeTool) {
@@ -768,6 +873,7 @@
     frame.addEventListener("load", () => {
       panel.classList.remove("is-loading");
       syncFrameCutDraft(name);
+      if (projectStoreEnabled) postTranscriptTextProjection(name);
       syncFrameTime(name);
     });
     panel.append(frame);
@@ -1005,6 +1111,10 @@
       ensureToolFrame(name, targetHref);
     }
     activeTool = name;
+    projectStore?.dispatch({
+      type: window.EditorProjectStore.ACTIONS.ACTIVE_TOOL_CHANGED,
+      payload: { tool: name },
+    });
     renderActiveTool();
     if (!options.skipHistory) updateBrowserTool(name, options.replaceHistory);
     return true;
@@ -1024,12 +1134,18 @@
     renderActiveTool();
   }
 
-  function renderJobState(job) {
+  function renderJobState(job, options = {}) {
     if (!job?.id || !JOB_ID_PATTERN.test(job.id)) {
       renderEmptyState();
       return;
     }
 
+    if (options.hydrateProject !== false) {
+      projectStore?.dispatch({
+        type: window.EditorProjectStore.ACTIONS.PROJECT_HYDRATED,
+        payload: { job, preserveLocalTools: true },
+      });
+    }
     const jobChanged = job.id !== previousJobId;
     previousJobId = job.id;
     if (jobChanged) {
@@ -1215,21 +1331,67 @@
           .filter((range) => range.end > range.start)
           .sort((left, right) => left.start - right.start)
       : [];
-    cutDraftState = {
+    const nextCutDraftState = {
       active: Boolean(payload.active),
       ranges,
       sourceDuration: Math.max(0, Number(payload.sourceDuration) || 0),
       duration: Math.max(0, Number(payload.duration) || 0),
       transcript: payload.transcript || null,
     };
+    const previousTimingRevision = projectSnapshot()?.timingRevision ?? -1;
+    const dispatchResult = projectStore?.dispatch({
+      type: window.EditorProjectStore.ACTIONS.CUT_TIMING_CHANGED,
+      payload: nextCutDraftState,
+    });
+    cutDraftState = projectStoreEnabled
+      ? projectSnapshot().project.cut
+      : nextCutDraftState;
     cutDraftActive = cutDraftState.active;
     updateDouyinBaseVideo();
-    for (const name of ["art", "pip"]) syncFrameCutDraft(name);
+    const timingChanged = projectStoreEnabled
+      ? dispatchResult?.accepted &&
+        projectSnapshot().timingRevision !== previousTimingRevision
+      : true;
+    if (timingChanged) {
+      for (const name of ["art", "pip"]) syncFrameCutDraft(name);
+    }
     if (currentJob) renderJobState(currentJob);
     else syncGenerationButton();
   }
 
   function setTimelineTracks(kind, tracks, options = {}) {
+    if (projectStoreEnabled) {
+      if (["art", "pip"].includes(kind)) {
+        const currentTool = projectSnapshot().project[kind];
+        projectStore.dispatch({
+          type:
+            kind === "art"
+              ? window.EditorProjectStore.ACTIONS.ART_STATE_CHANGED
+              : window.EditorProjectStore.ACTIONS.PIP_STATE_CHANGED,
+          payload: {
+            ...currentTool,
+            timeline: {
+              duration: Math.max(0, Number(options.duration) || 0),
+              tracks: Array.isArray(tracks) ? tracks : [],
+              selection: options.selection
+                ? { clipId: String(options.selection) }
+                : null,
+            },
+          },
+        });
+      }
+      if (options.selection !== undefined) {
+        projectStore.dispatch({
+          type: window.EditorProjectStore.ACTIONS.SELECTION_CHANGED,
+          payload: {
+            selection: options.selection
+              ? { clipId: String(options.selection) }
+              : null,
+          },
+        });
+      }
+      return syncProjectTimeline();
+    }
     syncToolTimeline(
       kind,
       {
@@ -1292,21 +1454,48 @@
     true,
   );
 
+  function toolFrameOwnsSource(source, kind = "") {
+    if (kind) return frameEntries.get(kind)?.frame.contentWindow === source;
+    return [...frameEntries.values()].some(
+      (entry) => entry.frame.contentWindow === source,
+    );
+  }
+
   window.addEventListener("message", (event) => {
     if (event.origin !== window.location.origin || !supportsInlineWorkspace()) return;
     const data = event.data || {};
     if (data.type === "editor-suite:open-tool" && tools.has(data.kind)) {
+      if (!toolFrameOwnsSource(event.source)) return;
       openTool(data.kind, data.href || desiredToolUrls.get(data.kind));
       return;
     }
     if (data.type === "editor-suite:job-state" && data.job?.id) {
-      renderJobState(data.job);
-      window.dispatchEvent(
-        new CustomEvent("editor-suite:job-state", { detail: data.job }),
-      );
+      if (
+        !["art", "pip"].includes(data.kind) ||
+        !toolFrameOwnsSource(event.source, data.kind)
+      ) {
+        return;
+      }
+      if (projectStoreEnabled) {
+        const messageRevision = bridgeRevision(data.revision);
+        const acceptanceFloor = toolBridgeRevisions.get(data.kind) ?? -1;
+        if (
+          messageRevision === null ||
+          messageRevision < acceptanceFloor
+        ) {
+          return;
+        }
+      }
+      renderJobState(data.job, { hydrateProject: !projectStoreEnabled });
+      if (!projectStoreEnabled) {
+        window.dispatchEvent(
+          new CustomEvent("editor-suite:job-state", { detail: data.job }),
+        );
+      }
       return;
     }
     if (data.type === "editor-suite:seek" && data.kind === activeTool) {
+      if (!toolFrameOwnsSource(event.source, data.kind)) return;
       const nextTime = Number(data.currentTime);
       if (
         Number.isFinite(nextTime) &&
@@ -1327,7 +1516,19 @@
     if (data.type !== "editor-suite:tool-state" || !["art", "pip"].includes(data.kind)) {
       return;
     }
-    toolStates.set(data.kind, {
+    if (!toolFrameOwnsSource(event.source, data.kind)) return;
+    const messageRevision = bridgeRevision(data.revision);
+    const previousBridgeRevision = toolBridgeRevisions.get(data.kind) ?? -1;
+    if (projectStoreEnabled) {
+      if (
+        messageRevision === null ||
+        messageRevision < previousBridgeRevision
+      ) {
+        return;
+      }
+    }
+    advanceToolBridgeRevision(data.kind, messageRevision);
+    const bridgeState = {
       overlayHtml: String(data.overlayHtml || ""),
       overlayWidth: Number(data.overlayWidth) || 1,
       overlayHeight: Number(data.overlayHeight) || 1,
@@ -1342,8 +1543,29 @@
         data.generationPayload && typeof data.generationPayload === "object"
           ? data.generationPayload
           : null,
-    });
-    syncToolTimeline(data.kind, data.timeline);
+      revision: messageRevision,
+      timingRevision: bridgeRevision(data.timingRevision),
+      changeKind: String(data.changeKind || "tool-state"),
+    };
+    toolStates.set(data.kind, bridgeState);
+    if (projectStoreEnabled) {
+      const semantic = bridgeState.generationPayload || {};
+      projectStore.dispatch({
+        type:
+          data.kind === "art"
+            ? window.EditorProjectStore.ACTIONS.ART_STATE_CHANGED
+            : window.EditorProjectStore.ACTIONS.PIP_STATE_CHANGED,
+        payload: {
+          source: semantic.source || projectSnapshot().project[data.kind].source,
+          overlays: Array.isArray(semantic.overlays) ? semantic.overlays : [],
+          timeline: data.timeline || null,
+        },
+      });
+      acknowledgeToolProjection(data.kind);
+      syncProjectTimeline();
+    } else {
+      syncToolTimeline(data.kind, data.timeline);
+    }
     syncGenerationButton();
     renderMirroredPreview();
     renderMirroredTimeline();
@@ -1362,7 +1584,23 @@
     const data = event.detail || {};
     if (!['art', 'pip'].includes(data.kind)) return;
     toolStates.set(data.kind, data);
-    syncToolTimeline(data.kind, data.timeline);
+    if (projectStoreEnabled) {
+      const semantic = data.generationPayload || {};
+      projectStore.dispatch({
+        type:
+          data.kind === "art"
+            ? window.EditorProjectStore.ACTIONS.ART_STATE_CHANGED
+            : window.EditorProjectStore.ACTIONS.PIP_STATE_CHANGED,
+        payload: {
+          source: semantic.source || projectSnapshot().project[data.kind].source,
+          overlays: Array.isArray(semantic.overlays) ? semantic.overlays : [],
+          timeline: data.timeline || null,
+        },
+      });
+      syncProjectTimeline();
+    } else {
+      syncToolTimeline(data.kind, data.timeline);
+    }
     syncGenerationButton();
     renderMirroredPreview();
     renderMirroredTimeline();
@@ -1599,6 +1837,10 @@
         if (!clip || !frame?.contentWindow) return;
         openTool(kind, desiredToolUrls.get(kind));
         timelineStore.selectClip(clipId, { silent: true });
+        projectStore?.dispatch({
+          type: window.EditorProjectStore.ACTIONS.SELECTION_CHANGED,
+          payload: { selection: { clipId } },
+        });
         for (const candidate of timelineLayer.querySelectorAll(
           "[data-timeline-clip-id]",
         )) {
@@ -1891,10 +2133,41 @@
     setCutDraft,
     setTimelineTracks,
     timelineSnapshot: () => timelineStore.snapshot(),
+    projectStoreEnabled: () => projectStoreEnabled,
+    projectSnapshot,
+    beginProjectEffect: (scope) => projectStore?.beginEffect(scope) || null,
+    isCurrentProjectEffect: (token) =>
+      projectStore?.isCurrentEffect(token) || false,
+    applyTranscriptTextEffect: (token, job) => {
+      if (
+        !projectStore ||
+        !job?.result ||
+        String(job.id || "") !== projectSnapshot().jobId
+      ) {
+        return { accepted: false, revision: 0, timingRevision: 0 };
+      }
+      const result = projectStore.applyEffect(token, {
+        type: window.EditorProjectStore.ACTIONS.TRANSCRIPT_TEXT_CHANGED,
+        payload: {
+          job,
+          transcript: job.result,
+          editableSegments: job.result.editableSegments || [],
+          serverArt: job.art || null,
+          serverVersion: job.updatedAt || "",
+        },
+      });
+      if (result.accepted) {
+        currentJob = projectSnapshot().project.job;
+        syncGenerationButton();
+      }
+      return result;
+    },
+    compositionRequest: () => compositionRequest(),
     generateCurrentPreview,
   };
   document.addEventListener("editor-suite:refresh", () => refresh());
   document.addEventListener("editor-suite:transcript-updated", (event) => {
+    if (projectStoreEnabled) return;
     // The cut page edited transcript text; ask an embedded art page to
     // re-read the re-segmented subtitle track from the server.
     const artEntry = frameEntries.get("art");

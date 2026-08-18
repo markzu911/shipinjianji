@@ -188,9 +188,13 @@ let frameTimelineResizeTimer = null;
 let editorHostCurrentTime = null;
 let editorHostPlaying = false;
 let editorHostStateSignature = "";
+let editorHostLastAppliedRevision = -1;
+let editorHostLastTimingRevision = 0;
+let editorHostLastChangeKind = "tool-state";
 let previewVisibilitySignature = "";
 let cutDraftActive = false;
 let pendingCutDraft = null;
+let pendingEditorTranscriptText = null;
 let appliedCutDraftState = null;
 let artEditorReady = false;
 const artTimelineStore = window.EditorTimeline.createStore(
@@ -2904,12 +2908,14 @@ function renderPreview(options = {}) {
     overlayLayer.append(element);
     positionPreviewOverlay(element, overlay);
   }
-  notifyEditorHost();
+  notifyEditorHost({ preserveTimeline: options.preserveTimeline });
   syncOverlayCoordinateReadout();
 }
 
 function notifyEditorHost(options = {}) {
-  const timeline = syncArtTimelineModel();
+  const timeline = options.preserveTimeline
+    ? artTimelineStore.snapshot()
+    : syncArtTimelineModel();
   const state = {
     overlayHtml: overlayLayer.innerHTML,
     overlayWidth: overlayLayer.clientWidth,
@@ -2931,6 +2937,9 @@ function notifyEditorHost(options = {}) {
       source: videoSource,
       overlays: overlays.map(({ id, ...overlay }) => overlay),
     },
+    revision: Math.max(0, editorHostLastAppliedRevision),
+    timingRevision: Math.max(0, editorHostLastTimingRevision),
+    changeKind: editorHostLastChangeKind,
   };
   const signature = JSON.stringify(state);
   if (!options.force && signature === editorHostStateSignature) return;
@@ -2958,7 +2967,14 @@ function updateEditorSuiteJobState(payload) {
   window.EditorSuite?.update(payload);
   if (!embeddedEditor || window.parent === window) return;
   window.parent.postMessage(
-    { type: "editor-suite:job-state", job: payload },
+    {
+      type: "editor-suite:job-state",
+      kind: "art",
+      job: payload,
+      revision: Math.max(0, editorHostLastAppliedRevision),
+      timingRevision: Math.max(0, editorHostLastTimingRevision),
+      changeKind: "job-state",
+    },
     window.location.origin,
   );
 }
@@ -3243,7 +3259,67 @@ function cutDraftTimingSignature(state) {
   ]);
 }
 
+function acceptEditorHostProjection(data) {
+  const revision = Number(data?.revision);
+  if (!Number.isFinite(revision)) return true;
+  if (revision < editorHostLastAppliedRevision) return false;
+  editorHostLastAppliedRevision = revision;
+  if (Number.isFinite(Number(data.timingRevision))) {
+    editorHostLastTimingRevision = Number(data.timingRevision);
+  }
+  editorHostLastChangeKind = String(data.changeKind || "tool-state");
+  return true;
+}
+
+function transcriptCueKey(overlay, index) {
+  const sourceStart = Number(overlay?.sourceStart);
+  const sourceEnd = Number(overlay?.sourceEnd);
+  return [
+    String(overlay?.trackId || ""),
+    Number.isFinite(sourceStart) ? sourceStart : "",
+    Number.isFinite(sourceEnd) ? sourceEnd : "",
+    index,
+  ].join(":");
+}
+
+function applyEditorTranscriptText(data) {
+  if (!data?.transcript) return;
+  if (!artEditorReady) {
+    pendingEditorTranscriptText = data;
+    return;
+  }
+  pendingEditorTranscriptText = null;
+  const segments = (data.transcript.segments || []).map((segment) => ({
+    ...segment,
+    start: clamp(Number(segment.start) || 0, 0, duration),
+    end: clamp(Number(segment.end) || 0, 0, duration),
+  }));
+  renderRetainedTranscript({ ...data.transcript, segments });
+
+  const serverCues = (data.art?.overlays || []).filter(
+    (overlay) => overlay?.trackType === TRANSCRIPT_TRACK_TYPE,
+  );
+  const serverByKey = new Map(
+    serverCues.map((overlay, index) => [transcriptCueKey(overlay, index), overlay]),
+  );
+  let cueIndex = 0;
+  for (const overlay of overlays) {
+    if (!isTranscriptTrackOverlay(overlay)) continue;
+    const serverCue =
+      serverByKey.get(transcriptCueKey(overlay, cueIndex)) ||
+      serverCues[cueIndex];
+    if (serverCue?.text !== undefined) overlay.text = String(serverCue.text || "");
+    cueIndex += 1;
+  }
+  renderEditor({ preserveTimeline: true });
+  showRetainedBulkMessage("已同步文案，艺术字时间保持不变。", "success");
+}
+
 function applyEditorCutDraft(data) {
+  if (data.changeKind === "transcript-text") {
+    applyEditorTranscriptText(data);
+    return;
+  }
   pendingCutDraft = data;
   transcriptTrackDraftVersion += 1;
   cutDraftActive = Boolean(data.active);
@@ -3316,8 +3392,18 @@ function handleEditorHostMessage(event) {
     return;
   }
   const data = event.data || {};
+  if (data.type === "editor-suite:project-ack" && data.kind === "art") {
+    if (acceptEditorHostProjection(data)) editorHostLastChangeKind = "tool-state";
+    return;
+  }
   if (data.type === "editor-suite:cut-draft") {
+    if (!acceptEditorHostProjection(data)) return;
     applyEditorCutDraft(data);
+    return;
+  }
+  if (data.type === "editor-suite:transcript-text" && data.kind === "art") {
+    if (!acceptEditorHostProjection(data)) return;
+    applyEditorTranscriptText(data);
     return;
   }
   if (data.type === "editor-suite:generate-video" && data.kind === "art") {
@@ -3499,7 +3585,7 @@ function renderControls() {
   endTime.max = duration.toFixed(1);
 }
 
-function renderOverlayList() {
+function renderOverlayList(options = {}) {
   const trackItems = currentTranscriptTrack();
   const manualItems = overlays.filter(
     (overlay) => !isTranscriptTrackOverlay(overlay),
@@ -3573,13 +3659,13 @@ function renderOverlayList() {
   }
   generateArtVideo.disabled = overlays.length === 0;
   updateAiSuggestionLimit();
-  renderFrameTimelineOverlaySegments();
+  if (!options.preserveTimeline) renderFrameTimelineOverlaySegments();
 }
 
-function renderEditor() {
+function renderEditor(options = {}) {
   renderControls();
-  renderOverlayList();
-  renderPreview();
+  renderOverlayList(options);
+  renderPreview(options);
   persistEmbeddedArtDraft();
 }
 
@@ -5646,6 +5732,9 @@ async function initialize() {
     artWorkspace.hidden = false;
     artEditorReady = true;
     if (pendingCutDraft?.transcript) applyEditorCutDraft(pendingCutDraft);
+    if (pendingEditorTranscriptText) {
+      applyEditorTranscriptText(pendingEditorTranscriptText);
+    }
     loadPositionPresets();
     window.requestAnimationFrame(() => {
       syncVideoStageLayout();

@@ -116,9 +116,13 @@ let pipTimelineRulerSignature = "";
 let pipTimelineResizeTimer = null;
 let editorHostCurrentTime = null;
 let editorHostStateSignature = "";
+let editorHostLastAppliedRevision = -1;
+let editorHostLastTimingRevision = 0;
+let editorHostLastChangeKind = "tool-state";
 let previewVisibilitySignature = "";
 let cutDraftActive = false;
 let pendingCutDraft = null;
+let pendingEditorTranscriptText = null;
 let pipEditorReady = false;
 const pipTimelineStore = window.EditorTimeline.createStore(
   { duration: 0, tracks: [] },
@@ -913,7 +917,7 @@ function beginPipTimelineSegmentAdjustment(event) {
   window.addEventListener("pointercancel", finish, { once: true });
 }
 
-function renderTimelineSegments() {
+function renderTimelineSegments(options = {}) {
   syncPipTimelineModel();
   updatePipTimelineScale();
   pipTimelineSegments.replaceChildren();
@@ -932,7 +936,7 @@ function renderTimelineSegments() {
     `${PIP_TIMELINE_BASE_HEIGHT + trackAreaHeight}px`,
   );
   if (duration <= 0) {
-    notifyEditorHost();
+    notifyEditorHost({ preserveTimeline: options.preserveTimeline });
     return;
   }
   for (const [trackIndex, { item, index }] of enabledItems.entries()) {
@@ -1103,7 +1107,7 @@ function renderPreview(options = {}) {
     if (options.timeOnly && previewVisibilitySignature === "final") return;
     previewVisibilitySignature = "final";
     pipOverlayLayer.replaceChildren();
-    notifyEditorHost();
+    notifyEditorHost({ preserveTimeline: options.preserveTimeline });
     return;
   }
   const visibleItems = pictureItems.filter(
@@ -1143,11 +1147,13 @@ function renderPreview(options = {}) {
       syncPreviewVideo(overlay.querySelector("video"), item, current);
     }
   }
-  notifyEditorHost();
+  notifyEditorHost({ preserveTimeline: options.preserveTimeline });
 }
 
 function notifyEditorHost(options = {}) {
-  const timeline = syncPipTimelineModel();
+  const timeline = options.preserveTimeline
+    ? pipTimelineStore.snapshot()
+    : syncPipTimelineModel();
   const state = {
     overlayHtml: pipOverlayLayer.innerHTML,
     overlayWidth: pipOverlayLayer.clientWidth,
@@ -1180,6 +1186,9 @@ function notifyEditorHost(options = {}) {
           width: item.width,
         })),
     },
+    revision: Math.max(0, editorHostLastAppliedRevision),
+    timingRevision: Math.max(0, editorHostLastTimingRevision),
+    changeKind: editorHostLastChangeKind,
   };
   const signature = JSON.stringify(state);
   if (!options.force && signature === editorHostStateSignature) return;
@@ -1207,7 +1216,14 @@ function updateEditorSuiteJobState(payload) {
   window.EditorSuite?.update(payload);
   if (!embeddedEditor || window.parent === window) return;
   window.parent.postMessage(
-    { type: "editor-suite:job-state", job: payload },
+    {
+      type: "editor-suite:job-state",
+      kind: "pip",
+      job: payload,
+      revision: Math.max(0, editorHostLastAppliedRevision),
+      timingRevision: Math.max(0, editorHostLastTimingRevision),
+      changeKind: "job-state",
+    },
     window.location.origin,
   );
 }
@@ -1311,7 +1327,68 @@ function matchingDraftSegment(item, segments) {
   )[0] || null;
 }
 
+function acceptEditorHostProjection(data) {
+  const revision = Number(data?.revision);
+  if (!Number.isFinite(revision)) return true;
+  if (revision < editorHostLastAppliedRevision) return false;
+  editorHostLastAppliedRevision = revision;
+  if (Number.isFinite(Number(data.timingRevision))) {
+    editorHostLastTimingRevision = Number(data.timingRevision);
+  }
+  editorHostLastChangeKind = String(data.changeKind || "tool-state");
+  return true;
+}
+
+function applyEditorTranscriptText(data) {
+  if (!data?.transcript) return;
+  if (!pipEditorReady) {
+    pendingEditorTranscriptText = data;
+    return;
+  }
+  pendingEditorTranscriptText = null;
+  const previousSegment = selectedSegment();
+  transcriptSegments = (data.transcript.segments || [])
+    .map((segment) => ({
+      text: String(segment.text || "").trim(),
+      start: clamp(Number(segment.start) || 0, 0, duration),
+      end: clamp(Number(segment.end) || 0, 0, duration),
+      sourceStart: Number(segment.sourceStart ?? segment.start),
+      sourceEnd: Number(segment.sourceEnd ?? segment.end),
+    }))
+    .filter((segment) => segment.text && segment.end > segment.start);
+  for (const item of pictureItems) {
+    if (item.sourceStart === null || item.sourceEnd === null) continue;
+    const sourceStart = Number(item.sourceStart);
+    const sourceEnd = Number(item.sourceEnd);
+    if (!Number.isFinite(sourceStart) || !Number.isFinite(sourceEnd)) continue;
+    const segment = transcriptSegments.find(
+      (candidate) =>
+        Math.min(sourceEnd, Number(candidate.sourceEnd)) -
+          Math.max(sourceStart, Number(candidate.sourceStart)) > 0.01,
+    );
+    if (segment) item.text = segment.text;
+  }
+  selectedSegmentIndex = Math.max(
+    0,
+    transcriptSegments.findIndex((segment) =>
+      previousSegment?.sourceStart !== undefined
+        ? Math.abs(
+            Number(segment.sourceStart) - Number(previousSegment.sourceStart),
+          ) < 0.01
+        : segment.text === previousSegment?.text,
+    ),
+  );
+  renderSegmentList();
+  renderGeneratedList();
+  renderPreview({ preserveTimeline: true });
+  showPromptWriterStatus("已同步文案，画中画时间保持不变。", "success");
+}
+
 function applyEditorCutDraft(data) {
+  if (data.changeKind === "transcript-text") {
+    applyEditorTranscriptText(data);
+    return;
+  }
   pendingCutDraft = data;
   cutDraftActive = Boolean(data.active);
   if (!pipEditorReady || !data.transcript) return;
@@ -1369,8 +1446,18 @@ function handleEditorHostMessage(event) {
     return;
   }
   const data = event.data || {};
+  if (data.type === "editor-suite:project-ack" && data.kind === "pip") {
+    if (acceptEditorHostProjection(data)) editorHostLastChangeKind = "tool-state";
+    return;
+  }
   if (data.type === "editor-suite:cut-draft") {
+    if (!acceptEditorHostProjection(data)) return;
     applyEditorCutDraft(data);
+    return;
+  }
+  if (data.type === "editor-suite:transcript-text" && data.kind === "pip") {
+    if (!acceptEditorHostProjection(data)) return;
+    applyEditorTranscriptText(data);
     return;
   }
   if (data.type === "editor-suite:generate-video" && data.kind === "pip") {
@@ -2254,6 +2341,9 @@ async function initialize() {
     pipWorkspace.hidden = false;
     pipEditorReady = true;
     if (pendingCutDraft?.transcript) applyEditorCutDraft(pendingCutDraft);
+    if (pendingEditorTranscriptText) {
+      applyEditorTranscriptText(pendingEditorTranscriptText);
+    }
     restoreEmbeddedPipDraft();
     pipTimelineRulerSignature = "";
     renderTimelineRuler();
