@@ -26,3 +26,24 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 2: 文案剪辑边界与段落播放修复
+
+**Date**: 2026-08-18
+**Task**: 文案剪辑边界与段落播放修复
+**Branch**: `develop`
+
+### Summary
+
+完成字符级语义删除、共享声学边界、保留下一字符保护、连续删除文案合并显示、当前段落播放与滚动跟随；全量 168 tests passed，并发布到 origin/master。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `7337413` | (see git log) |
+
+### Status
+
+[OK] **Completed**
