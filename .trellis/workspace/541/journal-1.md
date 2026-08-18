@@ -89,3 +89,24 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 5: 拆分并修复文案播放跟随动画
+
+**Date**: 2026-08-18
+**Task**: 拆分并修复文案播放跟随动画
+**Branch**: `develop`
+
+### Summary
+
+将文字播放跟随滚动从 app.js 拆为独立控制器，使用可取消 RAF 同步滚动与活动行运动，补齐隐藏目标重试、尾部、用户中断和 reduced-motion 回归，并完成桌面与 375px 浏览器验收。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `f1f943c` | (see git log) |
+
+### Status
+
+[OK] **Completed**
