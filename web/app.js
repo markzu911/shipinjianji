@@ -189,6 +189,7 @@ let cutSelectionPreviewEnd = null;
 let transcriptPreviewRange = null;
 let activeTranscriptSegmentIndex = -1;
 let activeTranscriptSegmentKey = "";
+let followedTranscriptSegmentKey = "";
 let transcriptFollowScrollFrame = 0;
 let cutDraftReady = false;
 let cutDraftRevision = 0;
@@ -269,23 +270,25 @@ function formatCutRange(start, end) {
 }
 
 function syncCorrectedWords() {
-  const textByRange = new Map();
-  for (const segment of [...currentSegments, ...currentEditableSegments]) {
-    textByRange.set(
-      rangeKey(segment.start, segment.end),
-      String(segment.text || ""),
-    );
-    for (const token of getSegmentTokens(segment)) {
-      textByRange.set(rangeKey(token.start, token.end), token.text);
-    }
-  }
+  const sourceSegments = currentEditableSegments.length
+    ? currentEditableSegments
+    : currentSegments;
+  const tokens = sourceSegments.flatMap((segment) => getSegmentTokens(segment));
 
   for (const [key, range] of [...selectedRanges.entries()]) {
-    if (textByRange.has(key)) {
-      selectedRanges.set(key, { ...range, text: textByRange.get(key) });
-    } else {
+    const start = Number(range.originalStart ?? range.start);
+    const end = Number(range.originalEnd ?? range.end);
+    const selectedTokens = tokens.filter(
+      (token) => Number(token.start) < end && Number(token.end) > start,
+    );
+    if (!selectedTokens.length) {
       selectedRanges.delete(key);
+      continue;
     }
+    selectedRanges.set(key, {
+      ...range,
+      text: selectedTokens.map((token) => token.text).join(""),
+    });
   }
   renderCutSegments();
 }
@@ -342,7 +345,8 @@ function getRememberedJobId() {
 }
 
 function splitTextIntoCharacterTokens(text, start, end) {
-  const characters = [...String(text || "")].filter(
+  const value = String(text || "");
+  const characters = [...value].filter(
     (character) => !/\p{P}|\s/u.test(character),
   );
   if (!characters.length) return [];
@@ -355,31 +359,81 @@ function splitTextIntoCharacterTokens(text, start, end) {
     : safeStart;
   const duration = safeEnd - safeStart;
 
-  return characters.map((character, index) => ({
-    text: character,
-    start: Number(
-      (safeStart + (duration * index) / characters.length).toFixed(3),
-    ),
-    end: Number(
-      (index === characters.length - 1
-        ? safeEnd
-        : safeStart + (duration * (index + 1)) / characters.length
-      ).toFixed(3),
-    ),
-  }));
+  const tokens = [];
+  let pendingPrefix = "";
+  let spokenIndex = 0;
+  for (const character of value) {
+    if (/\p{P}|\s/u.test(character)) {
+      if (tokens.length) {
+        tokens.at(-1).text += character;
+      } else {
+        pendingPrefix += character;
+      }
+      continue;
+    }
+    const tokenStart = safeStart + (duration * spokenIndex) / characters.length;
+    spokenIndex += 1;
+    const tokenEnd = spokenIndex === characters.length
+      ? safeEnd
+      : safeStart + (duration * spokenIndex) / characters.length;
+    tokens.push({
+      text: `${pendingPrefix}${character}`,
+      start: Number(tokenStart.toFixed(3)),
+      end: Number(tokenEnd.toFixed(3)),
+    });
+    pendingPrefix = "";
+  }
+  if (pendingPrefix && tokens.length) tokens.at(-1).text += pendingPrefix;
+  return tokens;
+}
+
+function getValidTimedTranscriptItems(items) {
+  if (!Array.isArray(items)) return [];
+  return items.flatMap((item) => {
+    const start = Number(item?.start);
+    const end = Number(item?.end);
+    return String(item?.text || "").trim() &&
+      Number.isFinite(start) &&
+      Number.isFinite(end) &&
+      end > start
+      ? [{ ...item, start, end }]
+      : [];
+  });
 }
 
 function getSegmentTokens(segment) {
-  const words = Array.isArray(segment.words) ? segment.words : [];
-  if (words.length) {
-    return words.flatMap((word) =>
-      splitTextIntoCharacterTokens(word.text, word.start, word.end),
-    );
+  const timedItems = [segment.words, segment.asrWords, [segment]]
+    .map(getValidTimedTranscriptItems)
+    .find((items) => items.length) || [];
+  return timedItems.flatMap((item) =>
+    splitTextIntoCharacterTokens(item.text, item.start, item.end).map(
+      (token) => ({
+        ...token,
+        parentWordStart: item.start,
+        parentWordEnd: item.end,
+      }),
+    ),
+  );
+}
+
+function getTranscriptCharacterUnits(segments = null) {
+  const sourceSegments = Array.isArray(segments)
+    ? segments
+    : currentSegments.length
+      ? currentSegments
+      : currentEditableSegments;
+  const seen = new Set();
+  const units = [];
+  for (const segment of sourceSegments) {
+    for (const token of getSegmentTokens(segment)) {
+      const key = `${rangeKey(token.start, token.end)}:${token.text}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      units.push(token);
+    }
   }
-  return splitTextIntoCharacterTokens(
-    segment.text,
-    segment.start,
-    segment.end,
+  return units.sort(
+    (left, right) => left.start - right.start || left.end - right.end,
   );
 }
 
@@ -485,8 +539,9 @@ function suggestionTextRangeKeysAtTime(sourceTime) {
 }
 
 function buildSegmentTextRuns(segment, deletedRanges) {
-  const words = Array.isArray(segment.words) && segment.words.length
-    ? segment.words
+  const tokens = getSegmentTokens(segment);
+  const words = tokens.length
+    ? tokens
     : [
         {
           text: String(segment.text || "暂无识别文字"),
@@ -525,7 +580,7 @@ function buildSegmentTextRuns(segment, deletedRanges) {
     const canMerge = Boolean(
       previous &&
         previous.kind === kind &&
-        previous.presentationKey === presentationKey,
+        (kind === "restore" || previous.presentationKey === presentationKey),
     );
     if (canMerge) {
       previous.text += String(word.text || "");
@@ -660,8 +715,8 @@ function renderTextSegmentItem(run, segmentIndex, displayIndex) {
   playButton.className = "segment-play-button";
   playButton.dataset.segmentPreview = "true";
   playButton.disabled = cutControlsLocked || !hasValidRange;
-  playButton.title = "从这段文案开始播放";
-  playButton.setAttribute("aria-label", `播放文案：${run.text}`);
+  playButton.title = "播放当前段落";
+  playButton.setAttribute("aria-label", `播放当前段落：${run.text}`);
   const playIcon = document.createElement("iconify-icon");
   playIcon.setAttribute("icon", "ph:play-fill");
   playIcon.setAttribute("aria-hidden", "true");
@@ -767,7 +822,8 @@ function renderNoSpeechSegmentItem(suggestion, displayIndex) {
 function renderCutSegments() {
   activeTranscriptSegmentIndex = -1;
   activeTranscriptSegmentKey = "";
-  const deletedRanges = getMergedSelection();
+  followedTranscriptSegmentKey = "";
+  const deletedRanges = getCommittedTimelineDeleteRanges();
   const displayItems = [];
   currentEditableSegments.forEach((segment, segmentIndex) => {
     for (const run of buildSegmentTextRuns(segment, deletedRanges)) {
@@ -1079,14 +1135,28 @@ function seedAutomaticSuggestionRanges() {
   let seededCount = 0;
   for (const suggestion of currentSuggestions) {
     for (const range of getSuggestionRanges(suggestion)) {
-      const key = rangeKey(range.start, range.end);
+      const hasSemanticBounds =
+        Number.isFinite(Number(range.originalStart)) &&
+        Number.isFinite(Number(range.originalEnd));
+      const semanticRange = canonicalizeTextSelectionRange({
+        ...range,
+        start: hasSemanticBounds ? Number(range.originalStart) : range.start,
+        end: hasSemanticBounds ? Number(range.originalEnd) : range.end,
+        text: String(suggestion.text || ""),
+      });
+      const key = rangeKey(semanticRange.start, semanticRange.end);
       if (selectedRanges.has(key)) continue;
       selectedRanges.set(
         key,
-        expandRangeToAdjacentSilence({
-          ...range,
-          text: String(suggestion.text || ""),
-        }),
+        hasSemanticBounds
+          ? canonicalizeTextDeleteRange({
+              ...semanticRange,
+              start: Number(range.start),
+              end: Number(range.end),
+              originalStart: semanticRange.start,
+              originalEnd: semanticRange.end,
+            })
+          : expandRangeToAdjacentSilence(semanticRange),
       );
       seededCount += 1;
     }
@@ -1145,7 +1215,7 @@ function setCurrentNoSpeechSuggestions(suggestions, status) {
     : [];
 }
 
-function mergeCutRanges(ranges) {
+function mergeCutRanges(ranges, protectedRanges = []) {
   const normalized = ranges
     .map(({ start, end }) => ({ start: Number(start), end: Number(end) }))
     .filter(
@@ -1156,7 +1226,20 @@ function mergeCutRanges(ranges) {
   const merged = [];
   for (const range of normalized) {
     const previous = merged.at(-1);
-    if (previous && range.start <= previous.end + 0.12) {
+    const crossesProtectedRange = Boolean(
+      previous &&
+        range.start > previous.end &&
+        protectedRanges.some(
+          (protectedRange) =>
+            Number(protectedRange.start) < range.start &&
+            Number(protectedRange.end) > previous.end,
+        ),
+    );
+    if (
+      previous &&
+      range.start <= previous.end + 0.12 &&
+      !crossesProtectedRange
+    ) {
       previous.end = Math.max(previous.end, range.end);
     } else {
       merged.push({ ...range });
@@ -1165,37 +1248,17 @@ function mergeCutRanges(ranges) {
   return merged;
 }
 
-function getRecognizedWordRanges() {
-  const sourceSegments = currentSegments.length
-    ? currentSegments
-    : currentEditableSegments;
-  const ranges = [];
-
-  for (const segment of sourceSegments) {
-    const words = Array.isArray(segment.words)
-      ? segment.words.filter((word) => String(word.text || "").trim())
-      : [];
-    const speechParts = words.length ? words : [segment];
-    for (const part of speechParts) {
-      const start = Number(part.start);
-      const end = Number(part.end);
-      if (Number.isFinite(start) && Number.isFinite(end) && end > start) {
-        ranges.push({
-          start,
-          end,
-          text: String(part.text || segment.text || ""),
-        });
-      }
-    }
-  }
-
-  ranges.sort((a, b) => a.start - b.start || a.end - b.end);
-  return ranges;
+function getRecognizedCharacterRanges() {
+  return getTranscriptCharacterUnits().map((token) => ({
+    start: token.start,
+    end: token.end,
+    text: String(token.text || ""),
+  }));
 }
 
 function getRecognizedSpeechRanges() {
   const normalized = [];
-  for (const range of getRecognizedWordRanges()) {
+  for (const range of getRecognizedCharacterRanges()) {
     const previous = normalized.at(-1);
     if (
       previous &&
@@ -1207,6 +1270,54 @@ function getRecognizedSpeechRanges() {
     }
   }
   return normalized;
+}
+
+function subtractProtectedRanges(ranges, protectedRanges, minimumDuration = 0) {
+  const normalizedProtectedRanges = protectedRanges
+    .map(({ start, end }) => ({ start: Number(start), end: Number(end) }))
+    .filter(
+      ({ start, end }) =>
+        Number.isFinite(start) && Number.isFinite(end) && end > start,
+    )
+    .sort((a, b) => a.start - b.start || a.end - b.end);
+  const safeRanges = [];
+  for (const range of ranges) {
+    let fragments = [{ start: Number(range.start), end: Number(range.end) }];
+    for (const protectedRange of normalizedProtectedRanges) {
+      if (!fragments.length || protectedRange.start >= fragments.at(-1).end) break;
+      const nextFragments = [];
+      for (const fragment of fragments) {
+        if (
+          protectedRange.end <= fragment.start ||
+          protectedRange.start >= fragment.end
+        ) {
+          nextFragments.push(fragment);
+          continue;
+        }
+        if (protectedRange.start > fragment.start) {
+          nextFragments.push({
+            start: fragment.start,
+            end: protectedRange.start,
+          });
+        }
+        if (protectedRange.end < fragment.end) {
+          nextFragments.push({
+            start: protectedRange.end,
+            end: fragment.end,
+          });
+        }
+      }
+      fragments = nextFragments;
+    }
+    safeRanges.push(
+      ...fragments.filter(
+        ({ start, end }) =>
+          end - start >= minimumDuration &&
+          end - start > CUT_SPEECH_BOUNDARY_EPSILON,
+      ),
+    );
+  }
+  return safeRanges;
 }
 
 function expandRangeToAdjacentSilence(range) {
@@ -1264,6 +1375,69 @@ function expandRangeToAdjacentSilence(range) {
   return expanded;
 }
 
+function canonicalizeTextSelectionRange(range) {
+  const total = cutTimelineDuration();
+  let start = clamp(Number(range?.start) || 0, 0, total);
+  let end = clamp(Number(range?.end) || start, start, total);
+  const words = getRecognizedCharacterRanges();
+  while (true) {
+    const intersectingWords = words.filter(
+      (word) => word.start < end && word.end > start,
+    );
+    if (!intersectingWords.length) break;
+    const expandedStart = Math.min(
+      start,
+      ...intersectingWords.map((word) => word.start),
+    );
+    const expandedEnd = Math.max(
+      end,
+      ...intersectingWords.map((word) => word.end),
+    );
+    if (expandedStart === start && expandedEnd === end) break;
+    start = expandedStart;
+    end = expandedEnd;
+  }
+  return { ...range, start, end };
+}
+
+function canonicalizeTextDeleteRange(range) {
+  const suppliedOriginalStart = Number(range.originalStart);
+  const suppliedOriginalEnd = Number(range.originalEnd);
+  const semanticRange = canonicalizeTextSelectionRange({
+    start: Number(range.originalStart ?? range.start),
+    end: Number(range.originalEnd ?? range.end),
+  });
+  const total = cutTimelineDuration();
+  const requestedStart = Number(range.start);
+  const requestedEnd = Number(range.end);
+  const physicalStart = Number.isFinite(requestedStart)
+    ? clamp(requestedStart, 0, total)
+    : semanticRange.start;
+  const physicalEnd = Number.isFinite(requestedEnd)
+    ? clamp(requestedEnd, physicalStart, total)
+    : semanticRange.end;
+  const hasAlignedPhysicalRange =
+    Number.isFinite(suppliedOriginalStart) &&
+    Number.isFinite(suppliedOriginalEnd) &&
+    (Math.abs(physicalStart - suppliedOriginalStart) >
+      CUT_SPEECH_BOUNDARY_EPSILON ||
+      Math.abs(physicalEnd - suppliedOriginalEnd) >
+        CUT_SPEECH_BOUNDARY_EPSILON);
+  return {
+    ...range,
+    start:
+      hasAlignedPhysicalRange && physicalEnd > physicalStart
+        ? physicalStart
+        : semanticRange.start,
+    end:
+      hasAlignedPhysicalRange && physicalEnd > physicalStart
+        ? physicalEnd
+        : semanticRange.end,
+    originalStart: semanticRange.start,
+    originalEnd: semanticRange.end,
+  };
+}
+
 function alignManualRangeToTranscript(range) {
   const total = cutTimelineDuration();
   const originalStart = clamp(Number(range?.start) || 0, 0, total);
@@ -1273,57 +1447,10 @@ function alignManualRangeToTranscript(range) {
     total,
   );
   if (originalEnd <= originalStart) return null;
-
-  const words = getRecognizedWordRanges();
-  if (words.length === 0) {
-    return {
-      ...range,
-      start: originalStart,
-      end: originalEnd,
-      originalStart,
-      originalEnd,
-      adjacentSilenceBefore: 0,
-      adjacentSilenceAfter: 0,
-    };
-  }
-
-  const selectedWords = new Set(
-    words.filter((word) => {
-      const midpoint = word.start + (word.end - word.start) / 2;
-      return (
-        midpoint >= originalStart - CUT_SPEECH_BOUNDARY_EPSILON &&
-        midpoint <= originalEnd + CUT_SPEECH_BOUNDARY_EPSILON
-      );
-    }),
-  );
-  let start = selectedWords.size
-    ? Math.min(originalStart, ...[...selectedWords].map((word) => word.start))
-    : originalStart;
-  let end = selectedWords.size
-    ? Math.max(originalEnd, ...[...selectedWords].map((word) => word.end))
-    : originalEnd;
-
-  for (const word of words) {
-    if (selectedWords.has(word)) continue;
-    if (
-      word.start < start - CUT_SPEECH_BOUNDARY_EPSILON &&
-      word.end > start + CUT_SPEECH_BOUNDARY_EPSILON
-    ) {
-      start = Math.max(start, word.end);
-    }
-    if (
-      word.start < end - CUT_SPEECH_BOUNDARY_EPSILON &&
-      word.end > end + CUT_SPEECH_BOUNDARY_EPSILON
-    ) {
-      end = Math.min(end, word.start);
-    }
-  }
-
-  if (end <= start) return null;
   return {
     ...range,
-    start,
-    end,
+    start: originalStart,
+    end: originalEnd,
     originalStart,
     originalEnd,
     adjacentSilenceBefore: 0,
@@ -1339,48 +1466,11 @@ function getCommittedTimelineDeleteRanges() {
 }
 
 function protectRecognizedSpeechFromQuietRanges(quietRanges) {
-  const speechRanges = getRecognizedSpeechRanges();
-  const safeRanges = [];
-  for (const quietRange of quietRanges) {
-    let fragments = [
-      {
-        start: Number(quietRange.start),
-        end: Number(quietRange.end),
-      },
-    ];
-    for (const speechRange of speechRanges) {
-      if (!fragments.length || speechRange.start >= fragments.at(-1).end) break;
-      const nextFragments = [];
-      for (const fragment of fragments) {
-        if (
-          speechRange.end <= fragment.start ||
-          speechRange.start >= fragment.end
-        ) {
-          nextFragments.push(fragment);
-          continue;
-        }
-        if (speechRange.start > fragment.start) {
-          nextFragments.push({
-            start: fragment.start,
-            end: speechRange.start,
-          });
-        }
-        if (speechRange.end < fragment.end) {
-          nextFragments.push({
-            start: speechRange.end,
-            end: fragment.end,
-          });
-        }
-      }
-      fragments = nextFragments;
-    }
-    safeRanges.push(
-      ...fragments.filter(
-        ({ start, end }) => end - start >= CUT_SAFE_NO_SPEECH_MIN_DURATION,
-      ),
-    );
-  }
-  return safeRanges;
+  return subtractProtectedRanges(
+    quietRanges,
+    getRecognizedSpeechRanges(),
+    CUT_SAFE_NO_SPEECH_MIN_DURATION,
+  );
 }
 
 function protectRestoredNoSpeechFromTextRanges(textRanges) {
@@ -1396,16 +1486,15 @@ function protectRestoredNoSpeechFromTextRanges(textRanges) {
   for (const textRange of textRanges) {
     const start = Number(textRange.start);
     const end = Number(textRange.end);
-    const originalStart = clamp(
-      Number(textRange.originalStart ?? start),
-      start,
-      end,
-    );
-    const originalEnd = clamp(
-      Number(textRange.originalEnd ?? end),
-      originalStart,
-      end,
-    );
+    const originalStart = Number(textRange.originalStart ?? start);
+    const originalEnd = Number(textRange.originalEnd ?? end);
+    if (
+      start > originalStart + CUT_SPEECH_BOUNDARY_EPSILON ||
+      end < originalEnd - CUT_SPEECH_BOUNDARY_EPSILON
+    ) {
+      safeRanges.push({ start, end });
+      continue;
+    }
     let fragments = [
       { start, end: originalStart },
       { start: originalEnd, end },
@@ -1454,15 +1543,45 @@ function resolveOverlappingRepeatAndQuietRanges(textRanges, quietRanges) {
   ];
 }
 
+function getRetainedTranscriptRanges(textRanges, timelineRanges) {
+  const explicitTextDeleteRanges = [
+    ...textRanges.map(canonicalizeTextDeleteRange).map((range) => ({
+      start: range.originalStart,
+      end: range.originalEnd,
+    })),
+    ...timelineRanges,
+  ];
+  return subtractProtectedRanges(
+    getRecognizedCharacterRanges(),
+    explicitTextDeleteRanges,
+  );
+}
+
 function getMergedSelection() {
+  const textRanges = [...selectedRanges.values()].map(
+    canonicalizeTextDeleteRange,
+  );
+  const timelineRanges = getCommittedTimelineDeleteRanges();
+  const retainedTranscriptRanges = getRetainedTranscriptRanges(
+    textRanges,
+    timelineRanges,
+  );
+  const retainedMediaRanges = subtractProtectedRanges(
+    retainedTranscriptRanges,
+    textRanges,
+  );
   const resolvedAutomaticRanges = resolveOverlappingRepeatAndQuietRanges(
-    [...selectedRanges.values()],
+    textRanges,
     [...selectedNoSpeechRanges.values()],
   );
-  return mergeCutRanges([
-    ...resolvedAutomaticRanges,
-    ...getCommittedTimelineDeleteRanges(),
-  ]);
+  const safeAutomaticRanges = subtractProtectedRanges(
+    resolvedAutomaticRanges,
+    retainedMediaRanges,
+  );
+  return mergeCutRanges(
+    [...safeAutomaticRanges, ...timelineRanges],
+    retainedMediaRanges,
+  );
 }
 
 function getEditedTimelineSpans() {
@@ -1645,26 +1764,49 @@ function getActiveTranscriptSegmentIndex(
   return -1;
 }
 
-function scrollActiveTranscriptSegmentIntoView(item) {
-  const panel = item.closest(".text-editor-panel");
-  if (!panel || panel.hidden || panel.clientHeight <= 0) return;
+function getTranscriptFollowScrollTarget(panel, item, toolbar) {
   const panelRect = panel.getBoundingClientRect();
   const itemRect = item.getBoundingClientRect();
-  const outsideViewport =
-    itemRect.top < panelRect.top + 8 || itemRect.bottom > panelRect.bottom - 8;
-  if (!outsideViewport) return;
+  const toolbarRect = toolbar?.getBoundingClientRect();
+  const anchorTop = (toolbarRect?.bottom ?? panelRect.top) + 8;
+  const maxScrollTop = Math.max(0, panel.scrollHeight - panel.clientHeight);
+  return clamp(
+    panel.scrollTop + itemRect.top - anchorTop,
+    0,
+    maxScrollTop,
+  );
+}
+
+function scrollActiveTranscriptSegmentToAnchor(item) {
+  const panel = item.closest(".text-editor-panel");
+  if (!panel || panel.hidden || panel.clientHeight <= 0) return;
+  const toolbar = panel.querySelector(".cut-toolbar");
   window.cancelAnimationFrame(transcriptFollowScrollFrame);
   transcriptFollowScrollFrame = window.requestAnimationFrame(() => {
-    if (!item.isConnected || !item.classList.contains("is-playback-active")) return;
+    transcriptFollowScrollFrame = 0;
+    if (!item.isConnected || !item.classList.contains("is-playback-active")) {
+      return;
+    }
+    const targetScrollTop = getTranscriptFollowScrollTarget(
+      panel,
+      item,
+      toolbar,
+    );
+    if (Math.abs(targetScrollTop - panel.scrollTop) < 1) return;
     const reduceMotion = window.matchMedia?.(
       "(prefers-reduced-motion: reduce)",
     ).matches;
-    item.scrollIntoView({
+    panel.scrollTo({
+      top: targetScrollTop,
       behavior: reduceMotion ? "auto" : "smooth",
-      block: "nearest",
-      inline: "nearest",
     });
   });
+}
+
+function followActiveTranscriptSegment(item, displayKey) {
+  if (!displayKey || displayKey === followedTranscriptSegmentKey) return;
+  followedTranscriptSegmentKey = displayKey;
+  scrollActiveTranscriptSegmentToAnchor(item);
 }
 
 function updateActiveTranscriptSegment(
@@ -1734,6 +1876,7 @@ function updateActiveTranscriptSegment(
     nextKey === activeTranscriptSegmentKey &&
     currentItem === nextItem
   ) {
+    if (follow && nextItem) followActiveTranscriptSegment(nextItem, nextKey);
     return;
   }
 
@@ -1746,12 +1889,19 @@ function updateActiveTranscriptSegment(
 
   activeTranscriptSegmentIndex = nextIndex;
   activeTranscriptSegmentKey = nextKey;
-  if (!nextItem) return;
+  if (!nextItem) {
+    followedTranscriptSegmentKey = "";
+    return;
+  }
   nextItem.classList.add("is-playback-active");
   nextItem.setAttribute("aria-current", "true");
   const badge = nextItem.querySelector(".segment-current-badge");
   if (badge) badge.hidden = false;
-  if (follow) scrollActiveTranscriptSegmentIntoView(nextItem);
+  if (follow) {
+    followActiveTranscriptSegment(nextItem, nextKey);
+  } else {
+    followedTranscriptSegmentKey = "";
+  }
 }
 
 function hasCutSelection() {
@@ -1924,6 +2074,32 @@ function serializableCutDraftRange(range) {
   return { start, end };
 }
 
+function normalizeRestoredTextDeleteRange(item) {
+  const normalized = serializableCutDraftRange(item);
+  if (!normalized) return null;
+  const restored = canonicalizeTextDeleteRange({
+    ...normalized,
+    text: String(item?.text || ""),
+    originalStart: Number.isFinite(Number(item?.originalStart))
+      ? Number(item.originalStart)
+      : normalized.start,
+    originalEnd: Number.isFinite(Number(item?.originalEnd))
+      ? Number(item.originalEnd)
+      : normalized.end,
+  });
+  return {
+    ...restored,
+    adjacentSilenceBefore: Math.max(
+      0,
+      restored.originalStart - restored.start,
+    ),
+    adjacentSilenceAfter: Math.max(
+      0,
+      restored.end - restored.originalEnd,
+    ),
+  };
+}
+
 function buildPersistedCutDraftPayload() {
   const textRanges = [...selectedRanges.entries()].flatMap(([key, range]) => {
     const normalized = serializableCutDraftRange(range);
@@ -1981,27 +2157,13 @@ function restorePersistedCutDraft(draft) {
   automaticNoSpeechInitialized =
     draft?.automaticNoSpeechInitialized === true;
   for (const item of Array.isArray(draft?.textRanges) ? draft.textRanges : []) {
-    const normalized = serializableCutDraftRange(item);
-    const key = String(item?.key || "");
-    if (!normalized || !key) continue;
-    selectedRanges.set(key, {
-      ...normalized,
-      text: String(item.text || ""),
-      originalStart: Number.isFinite(Number(item.originalStart))
-        ? Number(item.originalStart)
-        : normalized.start,
-      originalEnd: Number.isFinite(Number(item.originalEnd))
-        ? Number(item.originalEnd)
-        : normalized.end,
-      adjacentSilenceBefore: Math.max(
-        0,
-        Number(item.adjacentSilenceBefore) || 0,
-      ),
-      adjacentSilenceAfter: Math.max(
-        0,
-        Number(item.adjacentSilenceAfter) || 0,
-      ),
-    });
+    const restoredRange = normalizeRestoredTextDeleteRange(item);
+    if (!restoredRange) continue;
+    const key = rangeKey(
+      restoredRange.originalStart,
+      restoredRange.originalEnd,
+    );
+    selectedRanges.set(key, restoredRange);
   }
   for (
     const item of Array.isArray(draft?.noSpeechRanges)
@@ -2434,17 +2596,13 @@ function applyCutHistorySnapshot(snapshot) {
   selectedRanges.clear();
   selectedNoSpeechRanges.clear();
   for (const item of normalized.textRanges) {
-    selectedRanges.set(item.key, {
-      start: item.start,
-      end: item.end,
-      text: item.text,
-      originalStart: Number.isFinite(item.originalStart)
-        ? item.originalStart
-        : item.start,
-      originalEnd: Number.isFinite(item.originalEnd) ? item.originalEnd : item.end,
-      adjacentSilenceBefore: item.adjacentSilenceBefore,
-      adjacentSilenceAfter: item.adjacentSilenceAfter,
-    });
+    const restoredRange = normalizeRestoredTextDeleteRange(item);
+    if (!restoredRange) continue;
+    const key = rangeKey(
+      restoredRange.originalStart,
+      restoredRange.originalEnd,
+    );
+    selectedRanges.set(key, restoredRange);
   }
   for (const item of normalized.noSpeechRanges) {
     selectedNoSpeechRanges.set(item.key, {
@@ -2461,7 +2619,7 @@ function applyCutHistorySnapshot(snapshot) {
   selectedTimelineRangeId = null;
   timelineRangeInProgress = false;
   timelineRangeConfirmationOpen = false;
-  cutHistoryLastState = normalized;
+  cutHistoryLastState = cloneCutHistorySnapshot();
   cutHistoryReplaying = true;
   try {
     updateCutTimelineStatus("");
@@ -3177,8 +3335,8 @@ function beginCutTimelineSelection(event) {
     renderCutTimelineRanges();
     updateCutTimelineStatus(
       safeRange
-        ? `将按自定义区间删除 ${formatCutRange(draftRange.start, draftRange.end)}；如触碰文字，仅吸附完整文字边界`
-        : "当前拖动范围落在文字内部，松开后不会删除。",
+        ? `将按精确时间范围删除 ${formatCutRange(draftRange.start, draftRange.end)}；覆盖文字时不会自动扩大`
+        : "当前拖动范围无效，松开后不会删除。",
       safeRange ? "neutral" : "error",
       "selection",
     );
@@ -3204,7 +3362,7 @@ function beginCutTimelineSelection(event) {
       timelineRangeInProgress = false;
       selectedTimelineRangeId = null;
       updateCutTimelineStatus(
-        "未删除：区间过短，或边界落在无法安全裁剪的文字内部。",
+        "未删除：区间过短或无效。",
         "error",
         "selection",
       );
@@ -3483,9 +3641,19 @@ function setupCutPreviewControls() {
     );
     if (
       transcriptPreviewRange &&
-      current >= transcriptPreviewRange.end
+      current >=
+        transcriptPreviewRange.end - CUT_SPEECH_BOUNDARY_EPSILON
     ) {
+      const previewEnd = transcriptPreviewRange.end;
+      cutPreviewVideo.pause();
       transcriptPreviewRange = null;
+      cutPreviewVideo.currentTime = previewEnd;
+      current = previewEnd;
+      updateCutTimelineStatus(
+        "当前段落播放结束。",
+        "success",
+        "transcript",
+      );
     }
     if (
       noSpeechPreviewEnd !== null &&
@@ -4689,7 +4857,8 @@ segmentList.addEventListener("click", (event) => {
   } catch {
     itemRangeKeys = [];
   }
-  const key = rangeKey(range.start, range.end);
+  const semanticRange = canonicalizeTextSelectionRange(range);
+  const key = rangeKey(semanticRange.start, semanticRange.end);
   if (itemRangeKeys.length > 0 || selectedRanges.has(key)) {
     stageCutHistoryOperation("恢复这段文字");
     for (const selectedKey of itemRangeKeys) {
@@ -4710,13 +4879,13 @@ segmentList.addEventListener("click", (event) => {
       selectedRange.originalEnd ?? selectedRange.end,
     );
     if (
-      selectedStart >= range.start &&
-      selectedEnd <= range.end
+      selectedStart >= semanticRange.start &&
+      selectedEnd <= semanticRange.end
     ) {
       selectedRanges.delete(selectedKey);
     }
   }
-  const expandedRange = expandRangeToAdjacentSilence(range);
+  const expandedRange = expandRangeToAdjacentSilence(semanticRange);
   selectedRanges.set(key, expandedRange);
   updateSelectionSummary();
   previewSelectedCutRange(expandedRange);

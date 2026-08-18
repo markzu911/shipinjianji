@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/media-and-timeline.md","reason":"验证删除边界不吞掉保留语音的契约"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"验证时间区间不变量、幂等性与完整测试"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"验证文字语义状态不被空白物理范围污染"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"验证预览与生成时间轴一致"}
+{"file":".trellis/spec/testing/index.md","reason":"按项目测试分层检查单元、API 与媒体回归"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"检查草稿、预览和最终生成的同一物理范围"}

@@ -1,0 +1,10 @@
+{"file":".trellis/spec/backend/index.md","reason":"后端规范导航与开发前检查入口"}
+{"file":".trellis/spec/backend/media-and-timeline.md","reason":"文字语义范围、音频吸附和保留语音边界契约"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"后端时间区间不变量与媒体测试要求"}
+{"file":".trellis/spec/frontend/index.md","reason":"前端状态与媒体规范导航入口"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"文字删除、空白删除和展示边界的状态所有权契约"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"前端预览与后端生成的时间轴一致性"}
+{"file":".trellis/spec/testing/index.md","reason":"时间轴、真实媒体和回归测试约定"}
+{"file":".trellis/spec/guides/project-overview.md","reason":"项目时间轴、预览与生成核心约束"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"复用现有区间边界计算所有者"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"检查浏览器、草稿 API、预览与生成的完整数据流"}

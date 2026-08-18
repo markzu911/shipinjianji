@@ -66,18 +66,18 @@ if (shouldPersistAutomaticDefaults) scheduleCutDraftSave();
 
 - `selectedRanges` 与 `selectedNoSpeechRanges` 分别是文字和长空白删除的主状态；保存、生成和撤销/重做只消费这两个现有集合，不新增“自动删除”副本；
 - AI 建议的原始词级范围可以作为稳定展示边界，但不能作为第二套删除状态；
-- `buildSegmentTextRuns` 按单词中点投影删除状态和展示边界，只合并 `kind` 与 `presentationKey` 均相同的相邻词；
+- `buildSegmentTextRuns` 按单词中点投影删除状态和展示边界；普通文字与“时间轴已删除”只合并 `kind`、`presentationKey` 均相同的相邻词，连续“恢复”文字则允许跨 `presentationKey` 合并为一行并聚合全部 `rangeKeys`；“恢复”状态只来自 `selectedRanges` 的 `originalStart/originalEnd`，“时间轴已删除”只来自已提交的 `timelineRanges`，文字静音扩展和 `noSpeechRanges` 不得改变文案样式；
 - `currentNoSpeechSuggestions` 同样只提供稳定展示边界；文字片段与空白建议按源时间排序，每个片段独立渲染为 `li[data-display-key][data-display-start][data-display-end]`；
 - 空白行用 `data-no-speech-id` 连接 `selectedNoSpeechRanges`，不伪造可编辑文字段 index；播放高亮同时比较片段时间和稳定 key。
 
-恢复 AI 删除片段时，只从 `selectedRanges` 删除对应 range key，不移除原始建议边界。这样“保留 / 删除 / 保留”恢复后仍是三行，中间行只是从恢复按钮变为普通编辑按钮。
+恢复 AI 删除片段时，只从 `selectedRanges` 删除该展示行聚合的全部 range key，不移除原始建议边界。相邻的多个已删范围可以合并显示和一次恢复；中间存在保留文字时仍必须分成不同展示组。
 
 恢复空白片段时，只从 `selectedNoSpeechRanges` 删除对应 id，空白行继续保留并变为可试听状态。文字删除范围可能因 `adjacentSilenceBefore/After` 扩展到该空白，因此 `getMergedSelection` 必须先调用 `protectRestoredNoSpeechFromTextRanges`：仅从文字范围的前后静音扩展中扣除已恢复空白，文字原始 `originalStart/originalEnd` 仍保持删除。否则会出现“列表显示已恢复，但预览和成片仍删除”的状态漂移。
 
 ```javascript
 const canMerge =
   previous?.kind === kind &&
-  previous.presentationKey === presentationKey;
+  (kind === "restore" || previous.presentationKey === presentationKey);
 
 // 恢复只改变剪辑状态，展示边界继续存在。
 for (const key of rangeKeys) selectedRanges.delete(key);
@@ -85,9 +85,36 @@ for (const key of rangeKeys) selectedRanges.delete(key);
 // 空白恢复还必须约束文字范围的物理静音扩展。
 const resolvedTextRanges =
   protectRestoredNoSpeechFromTextRanges([...selectedRanges.values()]);
+
+// 自动范围必须再扣除未被语义/手动范围精确删除的文字片段。
+const retainedTranscriptRanges = getRetainedTranscriptRanges(
+  [...selectedRanges.values()],
+  getCommittedTimelineDeleteRanges(),
+);
+const safeAutomaticRanges = subtractProtectedRanges(
+  resolvedAutomaticRanges,
+  retainedTranscriptRanges,
+);
+const mediaRanges = mergeCutRanges(
+  [...safeAutomaticRanges, ...getCommittedTimelineDeleteRanges()],
+  retainedTranscriptRanges,
+);
 ```
 
-回归测试必须覆盖独立行的静态契约，并在真实浏览器验证：文字与空白按源时间排序；恢复前后行数不变；单独重删只影响目标行；空白恢复后不再被文字静音扩展删除；撤销/重做与刷新持久化正常；播放高亮命中当前片段；375px 无横向溢出且操作目标不少于 44px。
+前后端的保护顺序都是：按来源组装自动范围 -> 从识别文字中精确扣除语义文字删除和已提交手动删除 -> 从自动范围扣除余下保留片段 -> 在感知保留片段的前提下合并。禁止只根据“某个手动范围与词相交”就使整个词失去保护。
+
+回归测试必须覆盖独立行的静态契约和 Node 行为契约，并在真实浏览器验证：文字与空白按源时间排序；连续已删文字跨 range key 只显示一行且一次恢复全部聚合 key；保留文字仍拆分两侧删除组；时间轴删除分组不变；单独重删只影响目标行；空白恢复后不再被文字静音扩展删除；删除空白不使相邻文字出现删除线/恢复按钮且不从预览时间轴消失；小于 `0.12s` 的短保留文字不被两侧自动范围合并；手动范围只删除词的一部分时其余部分仍保留；撤销/重做与刷新持久化正常；播放高亮命中当前片段；375px 无横向溢出且操作目标不少于 44px。
+
+### 双层词时间戳状态契约
+
+- `segments[].words` 是 Jieba 展示和编辑层，也是文字删除字符时序的首选来源；`segments[].asrWords` 只保留模型原始时间供声学参考和旧数据回退。
+- 字符单元按段选择第一个有效层 `words -> asrWords -> segment`，再把每个带时间文本均分为字符；空数组或无效条目只触发当前段回退，不能让混合数据中的历史段落失去保护。
+- 原始 `asrWords` 可以跨越自然词边界，不能作为不可分割删除单元，也不能把“给一”“得你”之类模型 token 的下一字符带入删除。
+- 文案点击、AI 建议初始化、草稿恢复和撤销/重做都必须经 `canonicalizeTextSelectionRange` / `normalizeRestoredTextDeleteRange` 扩展到相交字符，并用规范后的边界重建 map key。
+- `buildSegmentTextRuns` 继续逐字符投影删除状态；文字静音扩展和空白范围不能使未选字符进入恢复态。手动 `timelineRanges` 不使用字符扩展。
+- 手动时间轴范围只 clamp 到媒体时长并保留用户选择的精确起止；二次确认后仍可只覆盖字符的一部分。
+
+具体字段、回退矩阵和跨层测试见后端规格 `media-and-timeline.md` 的“ASR 原始 word 与展示分词使用双层时间契约”。
 
 ## iframe/事件契约
 

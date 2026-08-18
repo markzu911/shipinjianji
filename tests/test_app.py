@@ -675,7 +675,7 @@ def test_frontend_assets_are_versioned_and_not_cached():
 
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
-    assert "/app.js?v=20260817-01" in page_response.text
+    assert "/app.js?v=20260817-06" in page_response.text
     assert "/styles.css?v=20260814-13" in page_response.text
     assert "/ui-feedback.js?v=20260807-03" in page_response.text
     assert "/timeline-model.js?v=20260810-01" in page_response.text
@@ -903,8 +903,9 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert 'id="cancelTimelineRangeButton"' not in page_response.text
     assert 'id="confirmTimelineRangeButton"' not in page_response.text
     assert "松开后弹窗确认" not in page_response.text
-    assert "选区可微调，再次点击确认删除" in page_response.text
-    assert "触碰文字时仅吸附完整文字边界" in page_response.text
+    assert "选区保持精确范围，可微调，再次点击确认删除" in page_response.text
+    assert "选区保持精确范围" in page_response.text
+    assert "触碰文字时仅吸附完整文字边界" not in page_response.text
     assert 'id="clearSelectionButton" class="secondary-button" type="button" disabled hidden' in page_response.text
     assert 'clearSelectionButton.addEventListener("click"' not in script_response.text
     assert 'id="textEditorPreviewPane"' in page_response.text
@@ -975,7 +976,8 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert 'currentBadge.textContent = "播放中"' in script_response.text
     assert 'playButton.className = "segment-play-button"' in script_response.text
     assert 'playButton.dataset.segmentPreview = "true"' in script_response.text
-    assert 'playButton.setAttribute("aria-label", `播放文案：${run.text}`)' in (
+    assert 'playButton.title = "播放当前段落"' in script_response.text
+    assert 'playButton.setAttribute("aria-label", `播放当前段落：${run.text}`)' in (
         script_response.text
     )
     assert "function previewTextSegment(item)" in script_response.text
@@ -983,7 +985,9 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert 'event.target.closest(".segment-play-button")' in script_response.text
     assert "function getActiveTranscriptSegmentIndex" in script_response.text
     assert 'nextItem.setAttribute("aria-current", "true")' in script_response.text
-    assert "scrollActiveTranscriptSegmentIntoView" in script_response.text
+    assert "function getTranscriptFollowScrollTarget" in script_response.text
+    assert "function scrollActiveTranscriptSegmentToAnchor" in script_response.text
+    assert "function followActiveTranscriptSegment" in script_response.text
     assert "updateActiveTranscriptSegment(sourceCurrent" in script_response.text
     assert ".segment-item.is-playback-active" in styles_response.text
     assert 'id="cutDraftSaveStatus"' in page_response.text
@@ -1041,11 +1045,12 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert "正在左侧预览裁剪衔接" in script_response.text
     assert script_response.text.count("previewSelectedCutRange(") >= 4
     assert "function getRecognizedSpeechRanges" in script_response.text
-    assert "function getRecognizedWordRanges" in script_response.text
+    assert "function getRecognizedCharacterRanges" in script_response.text
     assert "function expandRangeToAdjacentSilence" in script_response.text
     assert "function alignManualRangeToTranscript" in script_response.text
-    assert "当前拖动范围落在文字内部" in script_response.text
-    assert "边界落在无法安全裁剪的文字内部" in script_response.text
+    assert "当前拖动范围落在文字内部" not in script_response.text
+    assert "边界落在无法安全裁剪的文字内部" not in script_response.text
+    assert "覆盖文字时不会自动扩大" in script_response.text
     assert "getEditableSegmentCoverageEnd" in script_response.text
     assert "adjacentSilenceBefore" in script_response.text
     manual_align_start = script_response.text.index(
@@ -1056,6 +1061,7 @@ def test_frontend_assets_are_versioned_and_not_cached():
     )
     manual_align_script = script_response.text[manual_align_start:manual_align_end]
     assert "expandRangeToAdjacentSilence" not in manual_align_script
+    assert "getRecognizedCharacterRanges" not in manual_align_script
     assert "adjacentSilenceBefore: 0" in manual_align_script
     assert "拖动自定义区间" in page_response.text
     assert "时间轴拖动按自定义区间处理" in page_response.text
@@ -1109,6 +1115,19 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert "CUT_TIMELINE_MIN_RANGE" in script_response.text
     assert "activateTextEditorPanel" not in script_response.text
     assert "splitTextIntoCharacterTokens" in script_response.text
+    assert "function getTranscriptCharacterUnits" in script_response.text
+    assert "parentWordStart: item.start" in script_response.text
+    assert "parentWordEnd: item.end" in script_response.text
+    assert "function canonicalizeTextSelectionRange" in script_response.text
+    assert "function normalizeRestoredTextDeleteRange" in script_response.text
+    assert "const restoredRange = normalizeRestoredTextDeleteRange(item);" in (
+        script_response.text
+    )
+    assert "canonicalizeTextSelectionRange(semanticRange)" not in script_response.text
+    assert "expandRangeToAdjacentSilence(semanticRange)" in script_response.text
+    assert "const semanticRange = canonicalizeTextSelectionRange(range);" in (
+        script_response.text
+    )
     assert "formatPreciseTime" in script_response.text
     assert "点击左侧圆圈删除整段，再次点击可撤销" not in page_response.text
     assert "仅提示疑似口误、重复、语气词和无效片段" not in page_response.text
@@ -1120,7 +1139,9 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert 'segmentText.className = "segment-text"' in script_response.text
     assert "function suggestionTextRangeKeysAtTime" in script_response.text
     assert "function buildSegmentTextRuns" in script_response.text
-    assert "previous.presentationKey === presentationKey" in script_response.text
+    assert 'kind === "restore" || previous.presentationKey === presentationKey' in (
+        script_response.text
+    )
     assert "item.dataset.displayStart" in script_response.text
     assert "item.dataset.displayEnd" in script_response.text
     assert "item.dataset.displayKey" in script_response.text
@@ -1449,6 +1470,15 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert "audioQuietRanges: getEditedAudioQuietRanges(spans)" in script_response.text
     assert "resolveOverlappingRepeatAndQuietRanges" in script_response.text
     assert "protectRecognizedSpeechFromQuietRanges" in script_response.text
+    assert "getRetainedTranscriptRanges" in script_response.text
+    assert "subtractProtectedRanges" in script_response.text
+    render_segments_start = script_response.text.index("function renderCutSegments()")
+    render_segments_end = script_response.text.index(
+        "function noSpeechKindLabel", render_segments_start
+    )
+    assert "const deletedRanges = getCommittedTimelineDeleteRanges();" in (
+        script_response.text[render_segments_start:render_segments_end]
+    )
     art_sync_start = art_script_response.text.index(
         'if (data.type === "editor-suite:sync-time")'
     )
@@ -1662,6 +1692,646 @@ def test_frontend_assets_are_versioned_and_not_cached():
     assert ".next-step-copy" not in styles_response.text
     assert ".output-note" not in styles_response.text
     assert ".template-library-note" not in styles_response.text
+
+
+def test_frontend_text_ranges_use_character_units_with_per_segment_fallback():
+    app_source = (Path(__file__).resolve().parents[1] / "web" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    helper_start = app_source.index("function splitTextIntoCharacterTokens")
+    helper_end = app_source.index("const EDITABLE_CLAUSE_ENDINGS", helper_start)
+    recognized_start = app_source.index("function getRecognizedCharacterRanges")
+    recognized_end = app_source.index(
+        "function getRecognizedSpeechRanges", recognized_start
+    )
+    canonical_start = app_source.index("function canonicalizeTextSelectionRange")
+    canonical_end = app_source.index("function alignManualRangeToTranscript")
+    manual_end = app_source.index(
+        "function getCommittedTimelineDeleteRanges", canonical_end
+    )
+    restored_start = app_source.index("function serializableCutDraftRange")
+    restored_end = app_source.index("function buildPersistedCutDraftPayload")
+    history_start = app_source.index("function applyCutHistorySnapshot")
+    history_end = app_source.index("function undoCutHistory", history_start)
+    transcript_function_source = "\n".join(
+        [
+            app_source[helper_start:helper_end],
+            app_source[recognized_start:recognized_end],
+            app_source[canonical_start:canonical_end],
+            app_source[canonical_end:manual_end],
+            app_source[restored_start:restored_end],
+            app_source[history_start:history_end],
+        ]
+    )
+    mixed_segments = [
+        {
+            "start": 0.0,
+            "end": 0.6,
+            "text": "一起给",
+            "words": [
+                {"text": "一起", "start": 0.0, "end": 0.4},
+                {"text": "给", "start": 0.4, "end": 0.6},
+            ],
+            "asrWords": [
+                {"text": "一起", "start": 0.0, "end": 0.4},
+                {"text": "给一", "start": 0.4, "end": 0.8},
+            ],
+        },
+        {
+            "start": 1.0,
+            "end": 1.4,
+            "text": "旧段",
+            "words": [],
+            "asrWords": [{"text": "旧段", "start": 1.0, "end": 1.4}],
+        },
+        {
+            "start": 2.0,
+            "end": 2.4,
+            "text": "整段",
+            "words": [],
+            "asrWords": [],
+        },
+        {
+            "start": 2.4,
+            "end": 3.0,
+            "text": "觉得你",
+            "words": [
+                {"text": "觉得", "start": 2.4, "end": 2.8},
+                {"text": "你", "start": 2.8, "end": 3.0},
+            ],
+            "asrWords": [
+                {"text": "觉", "start": 2.4, "end": 2.6},
+                {"text": "得你", "start": 2.6, "end": 3.0},
+            ],
+        },
+    ]
+    script = f"""
+const source = {json.dumps(transcript_function_source)};
+const rangeKey = (start, end) =>
+  Number(start).toFixed(3) + ":" + Number(end).toFixed(3);
+const segments = {json.dumps(mixed_segments, ensure_ascii=False)};
+const transcriptFunctions = new Function(
+  "rangeKey",
+  "currentSegments",
+  "currentEditableSegments",
+  "cutTimelineDuration",
+  "clamp",
+  `
+const CUT_SPEECH_BOUNDARY_EPSILON = 0.001;
+const selectedRanges = new Map();
+const selectedNoSpeechRanges = new Map();
+let timelineDeleteRanges = [];
+let nextTimelineRangeId = 1;
+let selectedTimelineRangeId = null;
+let timelineRangeInProgress = false;
+let timelineRangeConfirmationOpen = false;
+let cutHistoryLastState = null;
+let cutHistoryReplaying = false;
+const cloneCutHistorySnapshot = (snapshot) => snapshot;
+const updateCutTimelineStatus = () => {{}};
+const updateSelectionSummary = () => {{}};
+${{source}}
+return {{
+  getSegmentTokens,
+  getTranscriptCharacterUnits,
+  normalizeRestoredTextDeleteRange,
+  alignManualRangeToTranscript,
+  applyCutHistorySnapshot,
+  selectedRanges,
+}};`,
+)(rangeKey, segments, [], () => 3, (value, minimum, maximum) => (
+  Math.min(maximum, Math.max(minimum, value))
+));
+const units = transcriptFunctions.getTranscriptCharacterUnits(segments);
+const restored = transcriptFunctions.normalizeRestoredTextDeleteRange({{
+  key: "legacy-partial",
+  start: 0.01,
+  end: 0.59,
+  originalStart: 0.01,
+  originalEnd: 0.59,
+}});
+const manual = transcriptFunctions.alignManualRangeToTranscript({{
+  start: 0.41,
+  end: 0.59,
+}});
+const deNiRestored = transcriptFunctions.normalizeRestoredTextDeleteRange({{
+  key: "legacy-de-ni-partial",
+  start: 2.41,
+  end: 2.79,
+  originalStart: 2.41,
+  originalEnd: 2.79,
+}});
+const alignedSharedBoundary = transcriptFunctions.normalizeRestoredTextDeleteRange({{
+  key: "shared-de-ni",
+  start: 2.4,
+  end: 2.84,
+  originalStart: 2.4,
+  originalEnd: 2.8,
+}});
+transcriptFunctions.applyCutHistorySnapshot({{
+  textRanges: [{{
+    key: "history-de-ni-partial",
+    start: 2.41,
+    end: 2.79,
+    originalStart: 2.41,
+    originalEnd: 2.79,
+  }}],
+  noSpeechRanges: [],
+  timelineRanges: [],
+}});
+const historyRestored = [...transcriptFunctions.selectedRanges.values()][0];
+console.log(JSON.stringify({{
+  units,
+  restored,
+  manual,
+  deNiRestored,
+  alignedSharedBoundary,
+  historyRestored,
+}}));
+"""
+
+    try:
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            check=True,
+            capture_output=True,
+            encoding="utf-8",
+            timeout=20,
+        )
+    except FileNotFoundError:
+        pytest.skip("Node.js is required for the frontend transcript unit test.")
+
+    payload = json.loads(result.stdout)
+    assert [item["text"] for item in payload["units"]] == [
+        "一",
+        "起",
+        "给",
+        "旧",
+        "段",
+        "整",
+        "段",
+        "觉",
+        "得",
+        "你",
+    ]
+    assert payload["restored"] == {
+        "start": 0,
+        "end": 0.6,
+        "text": "",
+        "originalStart": 0,
+        "originalEnd": 0.6,
+        "adjacentSilenceBefore": 0,
+        "adjacentSilenceAfter": 0,
+    }
+    assert payload["manual"] == {
+        "start": 0.41,
+        "end": 0.59,
+        "originalStart": 0.41,
+        "originalEnd": 0.59,
+        "adjacentSilenceBefore": 0,
+        "adjacentSilenceAfter": 0,
+    }
+    expected_de_ni = {
+        "start": 2.4,
+        "end": 2.8,
+        "text": "",
+        "originalStart": 2.4,
+        "originalEnd": 2.8,
+        "adjacentSilenceBefore": 0,
+        "adjacentSilenceAfter": 0,
+    }
+    assert payload["deNiRestored"] == expected_de_ni
+    assert payload["historyRestored"] == expected_de_ni
+    assert payload["alignedSharedBoundary"] == {
+        "start": 2.4,
+        "end": 2.84,
+        "text": "",
+        "originalStart": 2.4,
+        "originalEnd": 2.8,
+        "adjacentSilenceBefore": 0,
+        "adjacentSilenceAfter": pytest.approx(0.04),
+    }
+
+
+def test_frontend_merges_adjacent_deleted_text_across_range_keys():
+    app_source = (Path(__file__).resolve().parents[1] / "web" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    token_start = app_source.index("function splitTextIntoCharacterTokens")
+    token_end = app_source.index("const EDITABLE_CLAUSE_ENDINGS", token_start)
+    run_start = app_source.index("function selectedTextRangeKeysAtTime")
+    run_end = app_source.index("function renderSegmentTextRun", run_start)
+    render_start = app_source.index("function renderCutSegments")
+    render_end = app_source.index("function updateCutSegmentText", render_start)
+    click_start = app_source.index('segmentList.addEventListener("click"')
+    click_end = app_source.index("\n\nfor (const eventName", click_start)
+    source = "\n".join(
+        [
+            app_source[token_start:token_end],
+            app_source[run_start:run_end],
+            app_source[render_start:render_end],
+            app_source[click_start:click_end],
+        ]
+    )
+    script = f"""
+const source = {json.dumps(source)};
+const functions = new Function(`
+const selectedRanges = new Map();
+const currentSuggestions = [];
+const currentEditableSegments = [];
+const currentNoSpeechSuggestions = [];
+let activeTranscriptSegmentIndex = -1;
+let activeTranscriptSegmentKey = "";
+let followedTranscriptSegmentKey = "";
+const renderedItems = [];
+const historyActions = [];
+const seekTimes = [];
+let selectionUpdateCount = 0;
+let segmentClickHandler = null;
+let cutControlsLocked = false;
+const rangeKey = (start, end) =>
+  Number(start).toFixed(3) + "-" + Number(end).toFixed(3);
+const getSuggestionRanges = (suggestion) => suggestion.ranges || [];
+const getCommittedTimelineDeleteRanges = () => [];
+const getNoSpeechRange = (suggestion) => suggestion;
+const stageCutHistoryOperation = (label) => historyActions.push(label);
+const updateSelectionSummary = () => {{ selectionUpdateCount += 1; }};
+const seekCutPreview = (time) => seekTimes.push(time);
+const renderTextSegmentItem = (run) => ({{ type: "text", text: run.text }});
+const renderNoSpeechSegmentItem = (suggestion) => ({{
+  type: "no-speech",
+  id: suggestion.id,
+}});
+class Element {{
+  closest() {{ return null; }}
+}}
+class HTMLButtonElement extends Element {{
+  constructor(rangeKeys) {{
+    super();
+    this.disabled = false;
+    this.dataset = {{ rangeKeys: JSON.stringify(rangeKeys) }};
+  }}
+  closest(selector) {{
+    return selector === ".segment-restore-button" ? this : null;
+  }}
+}}
+const document = {{
+  createDocumentFragment: () => ({{
+    children: [],
+    append(item) {{ this.children.push(item); }},
+  }}),
+}};
+const segmentList = {{
+  replaceChildren(fragment) {{ renderedItems.push(...fragment.children); }},
+  addEventListener(type, handler) {{
+    if (type === "click") segmentClickHandler = handler;
+  }},
+}};
+const updateCutSegmentTimestamps = () => {{}};
+${{source}}
+return {{
+  selectedRanges,
+  currentSuggestions,
+  currentEditableSegments,
+  currentNoSpeechSuggestions,
+  renderedItems,
+  buildSegmentTextRuns,
+  renderCutSegments,
+  clickMergedRestoreRangeKeys(rangeKeys) {{
+    segmentClickHandler({{ target: new HTMLButtonElement(rangeKeys) }});
+  }},
+  historyActions,
+  seekTimes,
+  getSelectionUpdateCount: () => selectionUpdateCount,
+}};
+`)();
+const segment = {{
+  start: 0,
+  end: 5,
+  text: "你身边人人都觉得",
+  words: [
+    {{ text: "你", start: 0, end: 1 }},
+    {{ text: "身边", start: 1, end: 2 }},
+    {{ text: "人", start: 2, end: 3 }},
+    {{ text: "人", start: 3, end: 4 }},
+    {{ text: "都觉得", start: 4, end: 5 }},
+  ],
+}};
+for (const [key, start, end] of [
+  ["a", 0, 1],
+  ["b", 1, 2],
+  ["c", 2, 3],
+  ["d", 3, 4],
+  ["e", 4, 5],
+]) {{
+  functions.selectedRanges.set(key, {{
+    start,
+    end,
+    originalStart: start,
+    originalEnd: end,
+  }});
+}}
+const adjacent = functions.buildSegmentTextRuns(segment, []);
+functions.clickMergedRestoreRangeKeys(adjacent[0].rangeKeys);
+const remainingAfterRestore = [...functions.selectedRanges.keys()];
+
+functions.selectedRanges.set("left", {{
+  start: 0,
+  end: 1,
+  originalStart: 0,
+  originalEnd: 1,
+}});
+functions.selectedRanges.set("right", {{
+  start: 2,
+  end: 3,
+  originalStart: 2,
+  originalEnd: 3,
+}});
+functions.currentSuggestions.push({{
+  ranges: [{{ start: 1, end: 2 }}],
+}});
+const split = functions.buildSegmentTextRuns({{
+  start: 0,
+  end: 3,
+  text: "删留删",
+  words: [
+    {{ text: "删", start: 0, end: 1 }},
+    {{ text: "留", start: 1, end: 2 }},
+    {{ text: "删", start: 2, end: 3 }},
+  ],
+}}, []);
+functions.selectedRanges.clear();
+functions.currentSuggestions.length = 0;
+const timelineDeleted = functions.buildSegmentTextRuns({{
+  start: 0,
+  end: 2,
+  text: "甲乙",
+  words: [
+    {{ text: "甲", start: 0, end: 1 }},
+    {{ text: "乙", start: 1, end: 2 }},
+  ],
+}}, [
+  {{ start: 0, end: 1 }},
+  {{ start: 1, end: 2 }},
+]);
+
+functions.currentEditableSegments.push({{
+  start: 0,
+  end: 1,
+  text: "文案",
+  words: [{{ text: "文案", start: 0, end: 1 }}],
+}});
+functions.currentNoSpeechSuggestions.push({{ id: "quiet", start: 1, end: 2 }});
+functions.renderCutSegments();
+console.log(JSON.stringify({{
+  adjacent,
+  split,
+  timelineDeleted,
+  remainingAfterRestore,
+  historyActions: functions.historyActions,
+  seekTimes: functions.seekTimes,
+  selectionUpdateCount: functions.getSelectionUpdateCount(),
+  renderedItems: functions.renderedItems,
+}}));
+"""
+
+    try:
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            check=True,
+            capture_output=True,
+            encoding="utf-8",
+            timeout=20,
+        )
+    except FileNotFoundError:
+        pytest.skip("Node.js is required for the deleted-text grouping test.")
+    except subprocess.CalledProcessError as exc:
+        pytest.fail(exc.stderr)
+
+    payload = json.loads(result.stdout)
+    assert len(payload["adjacent"]) == 1
+    assert payload["adjacent"][0]["kind"] == "restore"
+    assert payload["adjacent"][0]["text"] == "你身边人人都觉得"
+    assert payload["adjacent"][0]["rangeKeys"] == ["a", "b", "c", "d", "e"]
+    assert [run["kind"] for run in payload["split"]] == [
+        "restore",
+        "edit",
+        "restore",
+    ]
+    assert [run["text"] for run in payload["split"]] == ["删", "留", "删"]
+    assert payload["split"][1]["suggestionRangeKeys"] == ["1.000-2.000"]
+    assert [run["text"] for run in payload["timelineDeleted"]] == ["甲", "乙"]
+    assert all(run["kind"] == "deleted" for run in payload["timelineDeleted"])
+    assert payload["remainingAfterRestore"] == []
+    assert payload["historyActions"] == ["恢复已删除文字"]
+    assert payload["seekTimes"] == [0]
+    assert payload["selectionUpdateCount"] == 1
+    assert payload["renderedItems"] == [
+        {"type": "text", "text": "文案"},
+        {"type": "no-speech", "id": "quiet"},
+    ]
+
+
+def test_frontend_merged_selection_preserves_shared_physical_boundaries():
+    app_source = (Path(__file__).resolve().parents[1] / "web" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    helper_start = app_source.index("function splitTextIntoCharacterTokens")
+    helper_end = app_source.index("const EDITABLE_CLAUSE_ENDINGS", helper_start)
+    range_start = app_source.index("function mergeCutRanges")
+    range_end = app_source.index("function expandRangeToAdjacentSilence", range_start)
+    canonical_start = app_source.index("function canonicalizeTextSelectionRange")
+    selection_start = app_source.index("function getCommittedTimelineDeleteRanges")
+    selection_end = app_source.index("function getEditedTimelineSpans", selection_start)
+    source = "\n".join(
+        [
+            app_source[helper_start:helper_end],
+            app_source[range_start:range_end],
+            app_source[canonical_start:selection_start],
+            app_source[selection_start:selection_end],
+        ]
+    )
+    segments = [
+        {
+            "start": 0.0,
+            "end": 0.6,
+            "text": "觉得你",
+            "words": [
+                {"text": "觉得", "start": 0.0, "end": 0.4},
+                {"text": "你", "start": 0.4, "end": 0.6},
+            ],
+        }
+    ]
+    script = f"""
+const source = {json.dumps(source)};
+const segments = {json.dumps(segments, ensure_ascii=False)};
+const functions = new Function(
+  "currentSegments",
+  "currentEditableSegments",
+  "cutTimelineDuration",
+  "clamp",
+  `
+const CUT_SPEECH_BOUNDARY_EPSILON = 0.001;
+const CUT_SAFE_NO_SPEECH_MIN_DURATION = 0.45;
+const rangeKey = (start, end) =>
+  Number(start).toFixed(3) + ":" + Number(end).toFixed(3);
+const selectedRanges = new Map();
+const selectedNoSpeechRanges = new Map();
+const currentNoSpeechSuggestions = [];
+const getNoSpeechRange = () => null;
+let timelineDeleteRanges = [];
+let timelineRangeInProgress = false;
+let selectedTimelineRangeId = null;
+${{source}}
+return {{ selectedRanges, getMergedSelection }};
+`,
+)(segments, [], () => 1, (value, minimum, maximum) => (
+  Math.min(maximum, Math.max(minimum, value))
+));
+functions.selectedRanges.set("tail", {{
+  start: 0.0,
+  end: 0.44,
+  originalStart: 0.0,
+  originalEnd: 0.4,
+}});
+const tail = functions.getMergedSelection();
+functions.selectedRanges.clear();
+functions.selectedRanges.set("head", {{
+  start: 0.04,
+  end: 0.4,
+  originalStart: 0.0,
+  originalEnd: 0.4,
+}});
+const head = functions.getMergedSelection();
+console.log(JSON.stringify({{ tail, head }}));
+"""
+
+    try:
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            check=True,
+            capture_output=True,
+            encoding="utf-8",
+            timeout=20,
+        )
+    except FileNotFoundError:
+        pytest.skip("Node.js is required for the frontend cut-range unit test.")
+    except subprocess.CalledProcessError as exc:
+        pytest.fail(exc.stderr)
+
+    payload = json.loads(result.stdout)
+    assert payload["tail"] == [{"start": 0.0, "end": 0.44}]
+    assert payload["head"] == [{"start": 0.04, "end": 0.4}]
+
+
+def test_frontend_transcript_follow_scroll_anchors_clamps_and_deduplicates():
+    app_source = (Path(__file__).resolve().parents[1] / "web" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    helper_start = app_source.index("function getTranscriptFollowScrollTarget")
+    helper_end = app_source.index("function updateActiveTranscriptSegment", helper_start)
+    helper_source = app_source[helper_start:helper_end]
+    script = f"""
+const frames = [];
+const scrollCalls = [];
+let reduceMotion = false;
+let toolbarHeight = 60;
+const toolbarOffset = 18;
+const window = {{
+  cancelAnimationFrame: () => {{}},
+  requestAnimationFrame: (callback) => {{
+    frames.push(callback);
+    return frames.length;
+  }},
+  getComputedStyle: () => ({{ top: "0px" }}),
+  matchMedia: () => ({{ matches: reduceMotion }}),
+}};
+const clamp = (value, minimum, maximum) => (
+  Math.min(maximum, Math.max(minimum, value))
+);
+let transcriptFollowScrollFrame = 0;
+let followedTranscriptSegmentKey = "";
+{helper_source}
+const toolbar = {{
+  getBoundingClientRect: () => ({{
+    top: 100 + toolbarOffset,
+    bottom: 100 + toolbarOffset + toolbarHeight,
+    height: toolbarHeight,
+  }}),
+}};
+const panel = {{
+  hidden: false,
+  clientHeight: 300,
+  scrollHeight: 1000,
+  scrollTop: 100,
+  getBoundingClientRect: () => ({{ top: 100, bottom: 400, height: 300 }}),
+  querySelector: (selector) => selector === ".cut-toolbar" ? toolbar : null,
+  scrollTo: (options) => {{
+    scrollCalls.push(options);
+    panel.scrollTop = options.top;
+  }},
+}};
+let itemContentTop = 300;
+const item = {{
+  isConnected: true,
+  classList: {{ contains: (name) => name === "is-playback-active" }},
+  closest: (selector) => selector === ".text-editor-panel" ? panel : null,
+  getBoundingClientRect: () => {{
+    const top = 100 + itemContentTop - panel.scrollTop;
+    return {{ top, bottom: top + 64, height: 64 }};
+  }},
+}};
+
+const shortToolbarTarget = getTranscriptFollowScrollTarget(panel, item, toolbar);
+toolbarHeight = 92;
+const tallToolbarTarget = getTranscriptFollowScrollTarget(panel, item, toolbar);
+toolbarHeight = 60;
+followActiveTranscriptSegment(item, "row-a");
+followActiveTranscriptSegment(item, "row-a");
+const queuedAfterDuplicate = frames.length;
+frames.shift()();
+const anchorTop = 100 + toolbarOffset + toolbarHeight + 8;
+const middleAnchorOffset = item.getBoundingClientRect().top - anchorTop;
+itemContentTop = 1000;
+reduceMotion = true;
+followActiveTranscriptSegment(item, "row-b");
+frames.shift()();
+const tailAnchorOffset = item.getBoundingClientRect().top - anchorTop;
+console.log(JSON.stringify({{
+  queuedAfterDuplicate,
+  shortToolbarTarget,
+  tallToolbarTarget,
+  middleAnchorOffset,
+  tailAnchorOffset,
+  scrollCalls,
+}}));
+"""
+
+    try:
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[1],
+            check=True,
+            capture_output=True,
+            encoding="utf-8",
+            timeout=20,
+        )
+    except FileNotFoundError:
+        pytest.skip("Node.js is required for the transcript follow-scroll test.")
+
+    payload = json.loads(result.stdout)
+    assert payload["queuedAfterDuplicate"] == 1
+    assert payload["shortToolbarTarget"] == 214
+    assert payload["tallToolbarTarget"] == 182
+    assert payload["middleAnchorOffset"] == 0
+    assert payload["tailAnchorOffset"] == 214
+    assert payload["scrollCalls"] == [
+        {"top": 214, "behavior": "smooth"},
+        {"top": 700, "behavior": "auto"},
+    ]
 
 
 def test_timeline_model_shares_selection_drag_resize_and_persistence():
@@ -2318,6 +2988,10 @@ def test_paraformer_returns_simplified_timestamps(
                 {"text": "这是", "start": 0.0, "end": 0.3},
                 {"text": "测试。", "start": 0.7, "end": 1.1},
             ],
+            "asrWords": [
+                {"text": "这是", "start": 0.0, "end": 0.3},
+                {"text": "测试。", "start": 0.7, "end": 1.1},
+            ],
         }
     ]
     assert progress == [55, 78, 95]
@@ -2340,6 +3014,11 @@ def test_punctuation_polish_rebuilds_sentence_segments():
         "少年应有凌云志，敢叫日月换新天。\n生如夏花。",
     )
     assert updated_words is not None
+    assert [
+        (word["start"], word["end"]) for word in updated_words
+    ] == [
+        (word["start"], word["end"]) for word in words
+    ]
 
     segments = app_module.build_sentence_segments(updated_words)
 
@@ -2417,6 +3096,16 @@ def test_semantic_tokenization_replaces_mechanical_asr_chunks():
         {"text": "激昂", "start": 1.4, "end": 1.8},
         {"text": "青春。", "start": 1.8, "end": 2.4},
     ]
+
+    segments = app_module.build_sentence_segments(
+        semantic_words,
+        asr_words=words,
+    )
+    assert [
+        word
+        for segment in segments
+        for word in segment["asrWords"]
+    ] == words
 
 
 def test_ai_suggestions_are_validated_and_mapped_to_word_ranges(
@@ -3386,7 +4075,10 @@ def test_cut_draft_is_persisted_versioned_restored_and_cleared():
     assert draft["revision"] == 1
     assert draft["automaticNoSpeechInitialized"] is True
     assert draft["textRanges"][0]["key"] == "1.000-2.000"
-    assert draft["textRanges"][0]["start"] == 0.8
+    assert draft["textRanges"][0]["start"] == 1.0
+    assert draft["textRanges"][0]["end"] == 2.0
+    assert draft["textRanges"][0]["adjacentSilenceBefore"] == 0.0
+    assert draft["textRanges"][0]["adjacentSilenceAfter"] == 0.0
     assert draft["noSpeechRanges"] == [
         {"key": "silence-1", "start": 4.0, "end": 5.5}
     ]
@@ -3492,9 +4184,14 @@ def test_cut_draft_aligns_text_media_ranges_before_preview_and_is_idempotent(
             "end": 3.0,
             "text": "ABC",
             "words": [
-                {"text": "A", "start": 0.0, "end": 1.0},
+                {"text": "A", "start": 0.0, "end": 0.8},
                 {"text": "B", "start": 1.0, "end": 2.0},
-                {"text": "C", "start": 2.0, "end": 3.0},
+                {"text": "C", "start": 2.3, "end": 3.0},
+            ],
+            "asrWords": [
+                {"text": "A", "start": 0.0, "end": 0.8},
+                {"text": "B", "start": 1.0, "end": 2.0},
+                {"text": "C", "start": 2.3, "end": 3.0},
             ],
         }
     ]
@@ -3543,6 +4240,7 @@ def test_cut_draft_aligns_text_media_ranges_before_preview_and_is_idempotent(
     aligned = first_draft["textRanges"][0]
     assert 0.76 <= aligned["start"] <= 0.8
     assert 2.12 <= aligned["end"] <= 2.16
+    assert aligned["end"] < 2.3
     assert aligned["originalStart"] == 1.0
     assert aligned["originalEnd"] == 2.0
     assert aligned["adjacentSilenceBefore"] == pytest.approx(
@@ -3555,6 +4253,245 @@ def test_cut_draft_aligns_text_media_ranges_before_preview_and_is_idempotent(
     )
     assert second.status_code == 200
     assert second.json()["cutDraft"]["textRanges"] == first_draft["textRanges"]
+
+
+def test_cut_draft_put_uses_natural_character_boundaries_not_raw_asr_tokens():
+    job_id = "37373737-3737-4737-8737-373737373737"
+    (app_module.jobs_directory() / job_id).mkdir(parents=True)
+    segments = [
+        {
+            "id": 0,
+            "start": 0.0,
+            "end": 1.2,
+            "text": "一起给一起给",
+            "words": [
+                {"text": "一起", "start": 0.0, "end": 0.4},
+                {"text": "给", "start": 0.4, "end": 0.6},
+                {"text": "一起", "start": 0.6, "end": 1.0},
+                {"text": "给", "start": 1.0, "end": 1.2},
+            ],
+            "asrWords": [
+                {"text": "一起", "start": 0.0, "end": 0.4},
+                {"text": "给一", "start": 0.4, "end": 0.8},
+                {"text": "起给", "start": 0.8, "end": 1.2},
+            ],
+        },
+        {
+            "id": 1,
+            "start": 1.4,
+            "end": 2.0,
+            "text": "觉得你",
+            "words": [
+                {"text": "觉得", "start": 1.4, "end": 1.8},
+                {"text": "你", "start": 1.8, "end": 2.0},
+            ],
+            "asrWords": [
+                {"text": "觉", "start": 1.4, "end": 1.6},
+                {"text": "得你", "start": 1.6, "end": 2.0},
+            ],
+        },
+    ]
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "status": "completed",
+            "duration": 3.0,
+            "result": {"segments": segments},
+            "cutDraft": None,
+        }
+
+    with TestClient(app_module.app) as client:
+        response = client.put(
+            f"/api/transcriptions/{job_id}/cut-draft",
+            json={
+                "revision": 0,
+                "textRanges": [
+                    {
+                        "key": "forged-partial-word",
+                        "start": 0.01,
+                        "end": 0.59,
+                        "originalStart": 0.01,
+                        "originalEnd": 0.59,
+                    },
+                    {
+                        "key": "forged-de-ni-partial",
+                        "start": 1.41,
+                        "end": 1.79,
+                        "originalStart": 1.41,
+                        "originalEnd": 1.79,
+                    },
+                ],
+                "noSpeechRanges": [],
+                "timelineRanges": [{"start": 2.05, "end": 2.1}],
+            },
+        )
+
+    assert response.status_code == 200
+    draft = response.json()["cutDraft"]
+    assert draft["textRanges"][0]["start"] == 0.0
+    assert draft["textRanges"][0]["end"] == 0.6
+    assert draft["textRanges"][0]["originalStart"] == 0.0
+    assert draft["textRanges"][0]["originalEnd"] == 0.6
+    assert draft["textRanges"][1]["start"] == 1.4
+    assert draft["textRanges"][1]["end"] == 1.8
+    assert draft["textRanges"][1]["originalStart"] == 1.4
+    assert draft["textRanges"][1]["originalEnd"] == 1.8
+    assert draft["timelineRanges"] == [{"start": 2.05, "end": 2.1}]
+
+    media_ranges = app_module.resolve_cut_draft_delete_ranges(
+        draft,
+        [],
+        segments,
+        3.0,
+    )
+    transcript_ranges = app_module.resolve_cut_draft_delete_ranges(
+        draft,
+        [],
+        segments,
+        3.0,
+        use_text_semantic_boundaries=True,
+    )
+    assert media_ranges == [
+        {"start": 0.0, "end": 0.6},
+        {"start": 1.4, "end": 1.8},
+        {"start": 2.05, "end": 2.1},
+    ]
+    assert transcript_ranges == media_ranges
+
+
+def test_text_ranges_use_character_units_but_manual_timeline_ranges_stay_exact():
+    segments = [
+        {
+            "start": 0.0,
+            "end": 2.0,
+            "text": "多字词保留",
+            "words": [
+                {"text": "多", "start": 0.0, "end": 0.25},
+                {"text": "字词", "start": 0.25, "end": 1.0},
+                {"text": "保留", "start": 1.2, "end": 2.0},
+            ],
+            "asrWords": [
+                {"text": "多字词", "start": 0.0, "end": 1.0},
+                {"text": "保留", "start": 1.2, "end": 2.0},
+            ],
+        }
+    ]
+
+    assert app_module.canonicalize_transcript_semantic_ranges(
+        [{"start": 0.3, "end": 0.4}],
+        segments,
+        3.0,
+    ) == [{"start": 0.25, "end": 0.625}]
+    assert app_module.resolve_cut_draft_delete_ranges(
+        {
+            "textRanges": [],
+            "noSpeechRanges": [],
+            "timelineRanges": [{"start": 0.25, "end": 0.5}],
+        },
+        [],
+        segments,
+        3.0,
+    ) == [{"start": 0.25, "end": 0.5}]
+
+    legacy_segments = [{**segments[0], "asrWords": None}]
+    assert app_module.canonicalize_transcript_semantic_ranges(
+        [{"start": 0.3, "end": 0.4}],
+        legacy_segments,
+        3.0,
+    ) == [{"start": 0.25, "end": 0.625}]
+
+
+def test_character_units_fall_back_per_segment_in_mixed_transcript():
+    segments = [
+        {
+            "start": 0.0,
+            "end": 0.8,
+            "text": "原始词",
+            "words": [
+                {"text": "原", "start": 0.0, "end": 0.4},
+                {"text": "始词", "start": 0.4, "end": 0.8},
+            ],
+            "asrWords": [{"text": "原始词", "start": 0.0, "end": 0.8}],
+        },
+        {
+            "start": 1.0,
+            "end": 1.8,
+            "text": "旧段一",
+            "words": [{"text": "旧段一", "start": 1.0, "end": 1.8}],
+        },
+        {
+            "start": 2.0,
+            "end": 2.8,
+            "text": "旧段二",
+            "words": [{"text": "旧段二", "start": 2.0, "end": 2.8}],
+            "asrWords": [],
+        },
+        {
+            "start": 3.0,
+            "end": 3.8,
+            "text": "整段回退",
+            "words": [],
+            "asrWords": [{"text": "无效", "start": 3.0, "end": 3.0}],
+        },
+    ]
+
+    character_units = app_module.transcript_character_units(segments)
+
+    assert [item["text"] for item in character_units] == [
+        "原",
+        "始",
+        "词",
+        "旧",
+        "段",
+        "一",
+        "旧",
+        "段",
+        "二",
+        "整",
+        "段",
+        "回",
+        "退",
+    ]
+    assert app_module.collect_speech_intervals(segments, 4.0) == [
+        (0.0, 0.8),
+        (1.0, 1.8),
+        (2.0, 2.8),
+        (3.0, 3.8),
+    ]
+    assert app_module.protect_recognized_speech_from_quiet_ranges(
+        [{"start": 1.0, "end": 1.8}, {"start": 2.0, "end": 2.8}],
+        segments,
+    ) == []
+    assert app_module.canonicalize_transcript_semantic_ranges(
+        [{"start": 1.05, "end": 1.1}, {"start": 2.05, "end": 2.1}],
+        segments,
+        4.0,
+    ) == [{"start": 1.0, "end": 1.267}, {"start": 2.0, "end": 2.267}]
+
+
+def test_semantic_range_ignores_overlapping_raw_asr_token():
+    segments = [
+        {
+            "start": 0.0,
+            "end": 0.5,
+            "text": "为",
+            "words": [{"text": "为", "start": 0.0, "end": 0.5}],
+            "asrWords": [],
+        },
+        {
+            "start": 0.5,
+            "end": 1.0,
+            "text": "啥",
+            "words": [{"text": "啥", "start": 0.5, "end": 1.0}],
+            "asrWords": [{"text": "为啥", "start": 0.0, "end": 1.0}],
+        },
+    ]
+
+    assert app_module.canonicalize_transcript_semantic_ranges(
+        [{"start": 0.1, "end": 0.2}],
+        segments,
+        1.0,
+    ) == [{"start": 0.0, "end": 0.5}]
 
 
 def test_editable_transcript_segments_can_split_and_merge_by_selected_text():
@@ -3871,9 +4808,9 @@ def test_cut_draft_keeps_semantic_text_ranges_separate_from_media_boundaries():
             "end": 3.0,
             "text": "保留删除保留",
             "words": [
-                {"text": "保留", "start": 0.0, "end": 1.0},
+                {"text": "保留", "start": 0.0, "end": 0.8},
                 {"text": "删除", "start": 1.0, "end": 2.0},
-                {"text": "保留", "start": 2.0, "end": 3.0},
+                {"text": "保留", "start": 2.2, "end": 3.0},
             ],
         }
     ]
@@ -3916,6 +4853,72 @@ def test_cut_draft_keeps_semantic_text_ranges_separate_from_media_boundaries():
     assert retained["text"] == "保留保留"
 
 
+def test_retained_transcript_does_not_drop_next_natural_word_character():
+    segments = [
+        {
+            "id": 0,
+            "start": 0.0,
+            "end": 2.0,
+            "text": "一起给一起给",
+            "words": [
+                {"text": "一起", "start": 0.0, "end": 0.4},
+                {"text": "给", "start": 0.4, "end": 0.6},
+                {"text": "一起", "start": 0.6, "end": 1.0},
+                {"text": "给", "start": 1.0, "end": 1.2},
+            ],
+            "asrWords": [
+                {"text": "一起", "start": 0.0, "end": 0.4},
+                {"text": "给一", "start": 0.4, "end": 0.8},
+                {"text": "起给", "start": 0.8, "end": 1.2},
+            ],
+        }
+    ]
+
+    retained = app_module.build_retained_transcript(
+        segments,
+        [{"start": 0.0, "end": 0.6}],
+        1.4,
+        timeline_delete_ranges=[{"start": 0.0, "end": 0.6}],
+    )
+
+    assert retained["text"] == "一起给"
+    assert retained["segments"][0]["asrWords"] == [
+        {"text": "一", "start": 0.0, "end": 0.2},
+        {"text": "起给", "start": 0.2, "end": 0.6},
+    ]
+
+    de_ni_segments = [
+        {
+            "id": 0,
+            "start": 0.0,
+            "end": 0.6,
+            "text": "觉得你",
+            "words": [
+                {"text": "觉得", "start": 0.0, "end": 0.4},
+                {"text": "你", "start": 0.4, "end": 0.6},
+            ],
+            "asrWords": [
+                {"text": "觉", "start": 0.0, "end": 0.2},
+                {"text": "得你", "start": 0.2, "end": 0.6},
+            ],
+        }
+    ]
+    retained_de_ni = app_module.build_retained_transcript(
+        de_ni_segments,
+        [{"start": 0.0, "end": 0.4}],
+        0.2,
+        timeline_delete_ranges=[{"start": 0.0, "end": 0.4}],
+    )
+
+    assert retained_de_ni["text"] == "你"
+    assert retained_de_ni["segments"][0]["words"] == [
+        {"text": "你", "start": 0.0, "end": 0.2}
+    ]
+    assert retained_de_ni["segments"][0]["asrWords"] == [
+        {"text": "你", "start": 0.0, "end": 0.2}
+    ]
+
+
 def test_quiet_range_is_trimmed_to_the_gap_between_recognized_words():
     segments = [
         {
@@ -3937,6 +4940,717 @@ def test_quiet_range_is_trimmed_to_the_gap_between_recognized_words():
     )
 
     assert protected == [{"start": 101.795, "end": 103.08}]
+
+
+def test_quiet_ranges_partially_or_fully_covering_text_never_delete_it():
+    segments = [
+        {
+            "start": 1.0,
+            "end": 2.0,
+            "text": "保留文案",
+            "words": [{"text": "保留文案", "start": 1.0, "end": 2.0}],
+        }
+    ]
+
+    protected = app_module.protect_recognized_speech_from_quiet_ranges(
+        [
+            {"start": 0.5, "end": 2.5},
+            {"start": 1.1, "end": 1.9},
+        ],
+        segments,
+    )
+
+    assert protected == [
+        {"start": 0.5, "end": 1.0},
+        {"start": 2.0, "end": 2.5},
+    ]
+
+
+def test_automatic_ranges_do_not_merge_across_a_short_retained_word():
+    segments = [
+        {
+            "start": 0.0,
+            "end": 2.0,
+            "text": "保留删除短删除保留",
+            "words": [
+                {"text": "保留", "start": 0.0, "end": 0.4},
+                {"text": "删除", "start": 0.4, "end": 0.9},
+                {"text": "短", "start": 0.95, "end": 1.03},
+                {"text": "删除", "start": 1.08, "end": 1.5},
+                {"text": "保留", "start": 1.5, "end": 2.0},
+            ],
+        }
+    ]
+    draft = {
+        "textRanges": [
+            {
+                "start": 0.4,
+                "end": 0.95,
+                "originalStart": 0.4,
+                "originalEnd": 0.9,
+            },
+            {
+                "start": 1.03,
+                "end": 1.5,
+                "originalStart": 1.08,
+                "originalEnd": 1.5,
+            },
+        ],
+        "noSpeechRanges": [],
+        "timelineRanges": [],
+    }
+
+    resolved = app_module.resolve_cut_draft_delete_ranges(
+        draft,
+        [],
+        segments,
+        2.0,
+    )
+
+    assert resolved == [
+        {"start": 0.4, "end": 0.95},
+        {"start": 1.03, "end": 1.5},
+    ]
+    draft["timelineRanges"] = [{"start": 0.95, "end": 1.03}]
+    explicitly_deleted = app_module.resolve_cut_draft_delete_ranges(
+        draft,
+        [],
+        segments,
+        2.0,
+    )
+    assert explicitly_deleted == [{"start": 0.4, "end": 1.5}]
+
+
+def test_partial_manual_word_delete_does_not_expand_adjacent_automatic_cuts():
+    segments = [
+        {
+            "start": 0.8,
+            "end": 1.28,
+            "text": "删除短词删除",
+            "words": [
+                {"text": "删除", "start": 0.8, "end": 1.0},
+                {"text": "短词", "start": 1.0, "end": 1.08},
+                {"text": "删除", "start": 1.08, "end": 1.28},
+            ],
+        }
+    ]
+    draft = {
+        "textRanges": [
+            {
+                "start": 0.8,
+                "end": 1.0,
+                "originalStart": 0.8,
+                "originalEnd": 1.0,
+            },
+            {
+                "start": 1.08,
+                "end": 1.28,
+                "originalStart": 1.08,
+                "originalEnd": 1.28,
+            },
+        ],
+        "noSpeechRanges": [],
+        "timelineRanges": [{"start": 1.0, "end": 1.04}],
+    }
+
+    resolved = app_module.resolve_cut_draft_delete_ranges(
+        draft,
+        [],
+        segments,
+        2.0,
+    )
+
+    assert resolved == [
+        {"start": 0.8, "end": 1.04},
+        {"start": 1.08, "end": 1.28},
+    ]
+    retained = app_module.build_retained_transcript(
+        segments,
+        resolved,
+        1.56,
+        timeline_delete_ranges=resolved,
+    )
+    assert retained["text"] == "词"
+
+
+def test_cut_draft_alignment_without_asr_words_falls_back_to_semantic_range(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    media_path = tmp_path / "source.mp4"
+    media_path.write_bytes(b"source")
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    samples = array("h", [6_000]) * (sample_rate * 5)
+    for valley in (1.6, 3.5):
+        start = round((valley - 0.03) * sample_rate)
+        end = round((valley + 0.03) * sample_rate)
+        samples[start:end] = array("h", [0]) * (end - start)
+    monkeypatch.setattr(
+        app_module,
+        "decode_cut_audio_samples",
+        lambda _path: samples,
+    )
+    segments = [
+        {
+            "start": 0.5,
+            "end": 4.0,
+            "text": "前文删除后文",
+            "words": [
+                {"text": "前文", "start": 0.5, "end": 1.8},
+                {"text": "删除", "start": 2.0, "end": 3.0},
+                {"text": "后文", "start": 3.1, "end": 4.0},
+            ],
+        }
+    ]
+
+    aligned = app_module.align_cut_draft_text_ranges_to_audio(
+        media_path,
+        [
+            {
+                "key": "2.000-3.000",
+                "start": 1.4,
+                "end": 3.8,
+                "originalStart": 2.0,
+                "originalEnd": 3.0,
+            }
+        ],
+        segments,
+        5.0,
+    )[0]
+
+    assert aligned["start"] == 2.0
+    assert aligned["end"] == 3.0
+    assert aligned["originalStart"] == 2.0
+    assert aligned["originalEnd"] == 3.0
+
+
+def test_shared_acoustic_boundary_removes_tail_inside_raw_ge_yi_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    media_path = tmp_path / "source.mp4"
+    media_path.write_bytes(b"source")
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    samples = array("h", [6_000]) * (sample_rate * 2)
+    valley_start = round(0.64 * sample_rate)
+    valley_end = round(0.68 * sample_rate)
+    samples[valley_start:valley_end] = array("h", [0]) * (
+        valley_end - valley_start
+    )
+    monkeypatch.setattr(
+        app_module,
+        "decode_cut_audio_samples",
+        lambda _path: samples,
+    )
+    segments = [
+        {
+            "id": 0,
+            "start": 0.0,
+            "end": 1.2,
+            "text": "一起给一起给",
+            "words": [
+                {"text": "一起", "start": 0.0, "end": 0.4},
+                {"text": "给", "start": 0.4, "end": 0.6},
+                {"text": "一起", "start": 0.6, "end": 1.0},
+                {"text": "给", "start": 1.0, "end": 1.2},
+            ],
+            "asrWords": [
+                {"text": "一起", "start": 0.0, "end": 0.4},
+                {"text": "给一", "start": 0.4, "end": 0.8},
+                {"text": "起给", "start": 0.8, "end": 1.2},
+            ],
+        }
+    ]
+
+    aligned = app_module.align_cut_draft_text_ranges_to_audio(
+        media_path,
+        [
+            {
+                "key": "0.000-0.600",
+                "start": 0.0,
+                "end": 0.6,
+                "originalStart": 0.0,
+                "originalEnd": 0.6,
+            }
+        ],
+        segments,
+        2.0,
+    )[0]
+
+    assert aligned["start"] == 0.0
+    assert 0.64 <= aligned["end"] <= 0.68
+    assert aligned["end"] < 0.7
+    assert aligned["originalEnd"] == 0.6
+    assert aligned["adjacentSilenceAfter"] == pytest.approx(
+        aligned["end"] - 0.6,
+        abs=0.001,
+    )
+
+
+def test_shared_acoustic_boundary_removes_tail_inside_raw_de_ni_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    media_path = tmp_path / "source.mp4"
+    media_path.write_bytes(b"source")
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    samples = array("h", [5_000]) * sample_rate
+    valley_start = round(0.42 * sample_rate)
+    valley_end = round(0.46 * sample_rate)
+    samples[valley_start:valley_end] = array("h", [0]) * (
+        valley_end - valley_start
+    )
+    monkeypatch.setattr(
+        app_module,
+        "decode_cut_audio_samples",
+        lambda _path: samples,
+    )
+    segments = [
+        {
+            "id": 0,
+            "start": 0.0,
+            "end": 0.6,
+            "text": "觉得你",
+            "words": [
+                {"text": "觉得", "start": 0.0, "end": 0.4},
+                {"text": "你", "start": 0.4, "end": 0.6},
+            ],
+            "asrWords": [
+                {"text": "觉", "start": 0.0, "end": 0.18},
+                {"text": "得你", "start": 0.18, "end": 0.6},
+            ],
+        }
+    ]
+
+    aligned = app_module.align_cut_draft_text_ranges_to_audio(
+        media_path,
+        [
+            {
+                "key": "0.000-0.400",
+                "start": 0.0,
+                "end": 0.4,
+                "originalStart": 0.0,
+                "originalEnd": 0.4,
+            }
+        ],
+        segments,
+        1.0,
+    )[0]
+
+    assert 0.42 <= aligned["end"] <= 0.46
+    assert aligned["end"] < 0.495
+    assert aligned["originalEnd"] == 0.4
+
+
+@pytest.mark.parametrize("amplitude", [0, 4_000])
+def test_shared_acoustic_boundary_requires_a_meaningful_valley(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    amplitude: int,
+):
+    media_path = tmp_path / "source.mp4"
+    media_path.write_bytes(b"source")
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    samples = array("h", [amplitude]) * sample_rate
+    monkeypatch.setattr(
+        app_module,
+        "decode_cut_audio_samples",
+        lambda _path: samples,
+    )
+    segments = [
+        {
+            "start": 0.0,
+            "end": 0.6,
+            "text": "觉得你",
+            "words": [
+                {"text": "觉得", "start": 0.0, "end": 0.4},
+                {"text": "你", "start": 0.4, "end": 0.6},
+            ],
+            "asrWords": [
+                {"text": "觉", "start": 0.0, "end": 0.18},
+                {"text": "得你", "start": 0.18, "end": 0.6},
+            ],
+        }
+    ]
+
+    aligned = app_module.align_cut_draft_text_ranges_to_audio(
+        media_path,
+        [
+            {
+                "start": 0.0,
+                "end": 0.4,
+                "originalStart": 0.0,
+                "originalEnd": 0.4,
+            }
+        ],
+        segments,
+        1.0,
+    )[0]
+
+    assert aligned["start"] == 0.0
+    assert aligned["end"] == 0.4
+    assert aligned["adjacentSilenceAfter"] == 0.0
+
+
+def test_shared_acoustic_boundary_rejects_mismatched_asr_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    media_path = tmp_path / "source.mp4"
+    media_path.write_bytes(b"source")
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    samples = array("h", [5_000]) * sample_rate
+    valley_start = round(0.42 * sample_rate)
+    valley_end = round(0.46 * sample_rate)
+    samples[valley_start:valley_end] = array("h", [0]) * (
+        valley_end - valley_start
+    )
+    monkeypatch.setattr(
+        app_module,
+        "decode_cut_audio_samples",
+        lambda _path: samples,
+    )
+    segments = [
+        {
+            "start": 0.0,
+            "end": 0.6,
+            "text": "觉得你",
+            "words": [
+                {"text": "觉得", "start": 0.0, "end": 0.4},
+                {"text": "你", "start": 0.4, "end": 0.6},
+            ],
+            "asrWords": [
+                {"text": "觉", "start": 0.0, "end": 0.18},
+                {"text": "得他", "start": 0.18, "end": 0.6},
+            ],
+        }
+    ]
+
+    aligned = app_module.align_cut_draft_text_ranges_to_audio(
+        media_path,
+        [
+            {
+                "start": 0.0,
+                "end": 0.4,
+                "originalStart": 0.0,
+                "originalEnd": 0.4,
+            }
+        ],
+        segments,
+        1.0,
+    )[0]
+
+    assert aligned["start"] == 0.0
+    assert aligned["end"] == 0.4
+
+
+def test_shared_acoustic_boundary_only_moves_in_the_deletion_direction():
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    segments = [
+        {
+            "start": 0.0,
+            "end": 0.8,
+            "text": "删留",
+            "words": [
+                {"text": "删", "start": 0.0, "end": 0.4},
+                {"text": "留", "start": 0.4, "end": 0.8},
+            ],
+            "asrWords": [{"text": "删留", "start": 0.0, "end": 0.8}],
+        }
+    ]
+
+    end_samples = array("h", [6_000]) * sample_rate
+    for valley_start, valley_end, amplitude in (
+        (0.27, 0.33, 0),
+        (0.47, 0.53, 700),
+    ):
+        first = round(valley_start * sample_rate)
+        last = round(valley_end * sample_rate)
+        end_samples[first:last] = array("h", [amplitude]) * (last - first)
+    end_target = app_module.build_shared_acoustic_delete_boundaries(
+        segments,
+        [{"start": 0.0, "end": 0.4}],
+        1.0,
+        end_samples,
+        sample_rate,
+    )[0]
+
+    start_samples = array("h", [6_000]) * sample_rate
+    for valley_start, valley_end, amplitude in (
+        (0.27, 0.33, 700),
+        (0.47, 0.53, 0),
+    ):
+        first = round(valley_start * sample_rate)
+        last = round(valley_end * sample_rate)
+        start_samples[first:last] = array("h", [amplitude]) * (last - first)
+    start_target = app_module.build_shared_acoustic_delete_boundaries(
+        segments,
+        [{"start": 0.4, "end": 0.8}],
+        1.0,
+        start_samples,
+        sample_rate,
+    )[0]
+
+    assert 0.47 <= end_target["end"] <= 0.53
+    assert end_target["end"] >= 0.4
+    assert 0.27 <= start_target["start"] <= 0.33
+    assert start_target["start"] <= 0.4
+
+
+def test_shared_acoustic_boundary_rejects_character_center_on_monotonic_slope():
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    segments = [
+        {
+            "start": 0.0,
+            "end": 0.8,
+            "text": "删留",
+            "words": [
+                {"text": "删", "start": 0.0, "end": 0.4},
+                {"text": "留", "start": 0.4, "end": 0.8},
+            ],
+            "asrWords": [{"text": "删留", "start": 0.0, "end": 0.8}],
+        }
+    ]
+
+    end_samples = array("h", [6_000]) * sample_rate
+    first = round(0.4 * sample_rate)
+    last = round(0.6 * sample_rate)
+    end_samples[first:last] = array(
+        "h",
+        (
+            round(6_000 - 5_500 * index / (last - first - 1))
+            for index in range(last - first)
+        ),
+    )
+    end_target = app_module.build_shared_acoustic_delete_boundaries(
+        segments,
+        [{"start": 0.0, "end": 0.4}],
+        1.0,
+        end_samples,
+        sample_rate,
+    )[0]
+
+    start_samples = array("h", [6_000]) * sample_rate
+    first = round(0.2 * sample_rate)
+    last = round(0.4 * sample_rate)
+    start_samples[first:last] = array(
+        "h",
+        (
+            round(500 + 5_500 * index / (last - first - 1))
+            for index in range(last - first)
+        ),
+    )
+    start_target = app_module.build_shared_acoustic_delete_boundaries(
+        segments,
+        [{"start": 0.4, "end": 0.8}],
+        1.0,
+        start_samples,
+        sample_rate,
+    )[0]
+
+    assert end_target["end"] == 0.4
+    assert start_target["start"] == 0.4
+
+
+def test_shared_acoustic_boundary_accepts_only_a_quiet_directional_endpoint():
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    segments = [
+        {
+            "start": 0.0,
+            "end": 0.8,
+            "text": "删留",
+            "words": [
+                {"text": "删", "start": 0.0, "end": 0.4},
+                {"text": "留", "start": 0.4, "end": 0.8},
+            ],
+            "asrWords": [{"text": "删留", "start": 0.0, "end": 0.8}],
+        }
+    ]
+
+    end_samples = array("h", [6_000]) * sample_rate
+    first = round(0.54 * sample_rate)
+    last = round(0.66 * sample_rate)
+    end_samples[first:last] = array("h", [0]) * (last - first)
+    end_target = app_module.build_shared_acoustic_delete_boundaries(
+        segments,
+        [{"start": 0.0, "end": 0.4}],
+        1.0,
+        end_samples,
+        sample_rate,
+    )[0]
+
+    start_samples = array("h", [6_000]) * sample_rate
+    first = round(0.14 * sample_rate)
+    last = round(0.26 * sample_rate)
+    start_samples[first:last] = array("h", [0]) * (last - first)
+    start_target = app_module.build_shared_acoustic_delete_boundaries(
+        segments,
+        [{"start": 0.4, "end": 0.8}],
+        1.0,
+        start_samples,
+        sample_rate,
+    )[0]
+
+    assert end_target["end"] == 0.6
+    assert start_target["start"] == 0.2
+
+
+def test_shared_acoustic_boundary_reaches_true_pause_inside_adjacent_token():
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    samples = array("h", [6_000]) * sample_rate
+    quiet_start = round(0.28 * sample_rate)
+    quiet_end = round(0.40 * sample_rate)
+    samples[quiet_start:quiet_end] = array("h", [0]) * (
+        quiet_end - quiet_start
+    )
+    relative_valley_start = round(0.48 * sample_rate)
+    relative_valley_end = round(0.54 * sample_rate)
+    samples[relative_valley_start:relative_valley_end] = array("h", [1_200]) * (
+        relative_valley_end - relative_valley_start
+    )
+    segments = [
+        {
+            "start": 0.2,
+            "end": 0.9,
+            "text": "尾在",
+            "words": [
+                {"text": "尾", "start": 0.2, "end": 0.6},
+                {"text": "在", "start": 0.6, "end": 0.9},
+            ],
+            "asrWords": [
+                {"text": "尾", "start": 0.2, "end": 0.6},
+                {"text": "在", "start": 0.6, "end": 0.9},
+            ],
+        }
+    ]
+
+    target = app_module.build_shared_acoustic_delete_boundaries(
+        segments,
+        [{"start": 0.6, "end": 0.9}],
+        1.0,
+        samples,
+        sample_rate,
+    )[0]
+
+    assert 0.32 <= target["start"] <= 0.40
+    assert target["start"] > 0.2
+    assert target["end"] == 0.9
+
+
+def test_shared_acoustic_token_extension_requires_quiet_inside_token():
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    samples = array("h", [6_000]) * sample_rate
+    quiet_start = round(0.08 * sample_rate)
+    quiet_end = round(0.18 * sample_rate)
+    samples[quiet_start:quiet_end] = array("h", [0]) * (
+        quiet_end - quiet_start
+    )
+    segments = [
+        {
+            "start": 0.2,
+            "end": 0.9,
+            "text": "尾在",
+            "words": [
+                {"text": "尾", "start": 0.2, "end": 0.6},
+                {"text": "在", "start": 0.6, "end": 0.9},
+            ],
+            "asrWords": [
+                {"text": "尾", "start": 0.2, "end": 0.6},
+                {"text": "在", "start": 0.6, "end": 0.9},
+            ],
+        }
+    ]
+
+    target = app_module.build_shared_acoustic_delete_boundaries(
+        segments,
+        [{"start": 0.6, "end": 0.9}],
+        1.0,
+        samples,
+        sample_rate,
+    )[0]
+
+    assert target["start"] == 0.6
+    assert target["end"] == 0.9
+
+
+def test_shared_acoustic_delete_end_cannot_reach_pause_after_retained_character():
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    samples = array("h", [6_000]) * sample_rate
+    quiet_start = round(0.72 * sample_rate)
+    quiet_end = round(0.78 * sample_rate)
+    samples[quiet_start:quiet_end] = array("h", [0]) * (
+        quiet_end - quiet_start
+    )
+    segments = [
+        {
+            "start": 0.0,
+            "end": 0.8,
+            "text": "删保",
+            "words": [
+                {"text": "删", "start": 0.0, "end": 0.4},
+                {"text": "保", "start": 0.4, "end": 0.8},
+            ],
+            "asrWords": [
+                {"text": "删保", "start": 0.0, "end": 0.8},
+            ],
+        }
+    ]
+
+    target = app_module.build_shared_acoustic_delete_boundaries(
+        segments,
+        [{"start": 0.0, "end": 0.4}],
+        1.0,
+        samples,
+        sample_rate,
+    )[0]
+
+    assert target["start"] == 0.0
+    assert target["end"] == 0.4
+
+
+def test_resolved_draft_preserves_saved_shared_physical_boundary():
+    segments = [
+        {
+            "start": 0.0,
+            "end": 0.6,
+            "text": "觉得你",
+            "words": [
+                {"text": "觉得", "start": 0.0, "end": 0.4},
+                {"text": "你", "start": 0.4, "end": 0.6},
+            ],
+            "asrWords": [
+                {"text": "觉", "start": 0.0, "end": 0.18},
+                {"text": "得你", "start": 0.18, "end": 0.6},
+            ],
+        }
+    ]
+    draft = {
+        "textRanges": [
+            {
+                "key": "0.000-0.400",
+                "start": 0.0,
+                "end": 0.44,
+                "originalStart": 0.0,
+                "originalEnd": 0.4,
+            }
+        ],
+        "noSpeechRanges": [{"key": "quiet", "start": 0.5, "end": 0.58}],
+        "timelineRanges": [],
+    }
+
+    assert app_module.resolve_cut_draft_delete_ranges(
+        draft,
+        [],
+        segments,
+        1.0,
+    ) == [{"start": 0.0, "end": 0.44}]
+    assert app_module.resolve_cut_draft_delete_ranges(
+        draft,
+        [],
+        segments,
+        1.0,
+        use_text_semantic_boundaries=True,
+    ) == [{"start": 0.0, "end": 0.4}]
 
 
 def test_media_cut_boundaries_snap_to_waveform_valleys_without_changing_text():
@@ -4166,6 +5880,166 @@ def test_ai_suggestion_ranges_do_not_extend_into_next_retained_word():
     assert unchanged == suggestions
 
 
+def test_suggestion_snapping_does_not_follow_raw_de_ni_token_into_ni():
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    samples = array("h", [6_000]) * (sample_rate * 2)
+    valley_start = round(0.53 * sample_rate)
+    valley_end = round(0.57 * sample_rate)
+    samples[valley_start:valley_end] = array("h", [0]) * (
+        valley_end - valley_start
+    )
+    segments = [
+        {
+            "id": 0,
+            "start": 0.0,
+            "end": 0.6,
+            "text": "觉得你",
+            "words": [
+                {"text": "觉得", "start": 0.0, "end": 0.4},
+                {"text": "你", "start": 0.4, "end": 0.6},
+            ],
+            "asrWords": [
+                {"text": "觉", "start": 0.0, "end": 0.2},
+                {"text": "得你", "start": 0.2, "end": 0.6},
+            ],
+        }
+    ]
+    suggestions = [
+        {
+            "id": "delete-jue-de",
+            "type": "口误",
+            "text": "觉得",
+            "start": 0.0,
+            "end": 0.4,
+            "ranges": [{"start": 0.0, "end": 0.4}],
+        }
+    ]
+
+    limits = app_module.build_transcript_delete_boundary_limits(
+        segments,
+        suggestions[0]["ranges"],
+        2.0,
+    )
+    snapped = app_module.snap_suggestion_ranges_to_audio(
+        segments,
+        suggestions,
+        2.0,
+        samples,
+    )
+
+    assert limits == [{"start": 0.0, "end": 0.4}]
+    assert snapped[0]["ranges"] == [
+        {
+            "start": 0.0,
+            "end": 0.4,
+            "originalStart": 0.0,
+            "originalEnd": 0.4,
+        }
+    ]
+    assert snapped[0]["end"] == 0.4
+
+
+def test_suggestion_snapping_does_not_merge_across_short_retained_character():
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    samples = array("h", [6_000]) * sample_rate
+    segments = [
+        {
+            "id": 0,
+            "start": 0.0,
+            "end": 0.8,
+            "text": "删短删",
+            "words": [
+                {"text": "删", "start": 0.0, "end": 0.4},
+                {"text": "短", "start": 0.4, "end": 0.48},
+                {"text": "删", "start": 0.48, "end": 0.8},
+            ],
+            "asrWords": [{"text": "删短删", "start": 0.0, "end": 0.8}],
+        }
+    ]
+    suggestions = [
+        {
+            "id": "delete-around-short-character",
+            "type": "重复",
+            "text": "删删",
+            "start": 0.0,
+            "end": 0.8,
+            "ranges": [
+                {"start": 0.0, "end": 0.4},
+                {"start": 0.48, "end": 0.8},
+            ],
+        }
+    ]
+
+    snapped = app_module.snap_suggestion_ranges_to_audio(
+        segments,
+        suggestions,
+        1.0,
+        samples,
+    )
+
+    assert snapped[0]["ranges"] == [
+        {
+            "start": 0.0,
+            "end": 0.4,
+            "originalStart": 0.0,
+            "originalEnd": 0.4,
+        },
+        {
+            "start": 0.48,
+            "end": 0.8,
+            "originalStart": 0.48,
+            "originalEnd": 0.8,
+        },
+    ]
+
+
+def test_shared_acoustic_boundaries_preserve_short_retained_character_core():
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    samples = array("h", [6_000]) * sample_rate
+    for valley_start, valley_end in ((0.33, 0.37), (0.50, 0.54)):
+        first = round(valley_start * sample_rate)
+        last = round(valley_end * sample_rate)
+        samples[first:last] = array("h", [0]) * (last - first)
+    segments = [
+        {
+            "id": 0,
+            "start": 0.0,
+            "end": 0.8,
+            "text": "删短删",
+            "words": [
+                {"text": "删", "start": 0.0, "end": 0.4},
+                {"text": "短", "start": 0.4, "end": 0.48},
+                {"text": "删", "start": 0.48, "end": 0.8},
+            ],
+            "asrWords": [{"text": "删短删", "start": 0.0, "end": 0.8}],
+        }
+    ]
+    suggestions = [
+        {
+            "id": "delete-around-short-character-with-valleys",
+            "type": "重复",
+            "text": "删删",
+            "start": 0.0,
+            "end": 0.8,
+            "ranges": [
+                {"start": 0.0, "end": 0.4},
+                {"start": 0.48, "end": 0.8},
+            ],
+        }
+    ]
+
+    snapped = app_module.snap_suggestion_ranges_to_audio(
+        segments,
+        suggestions,
+        1.0,
+        samples,
+    )[0]["ranges"]
+
+    assert snapped[0]["end"] == 0.4
+    assert snapped[1]["start"] == 0.48
+    assert snapped[0]["end"] < snapped[1]["start"]
+
+
 def test_ai_suggestion_ranges_remove_gap_tail_without_crossing_next_word():
     sample_rate = 16_000
     samples = array("h", [4_000]) * (sample_rate * 3)
@@ -4181,6 +6055,11 @@ def test_ai_suggestion_ranges_remove_gap_tail_without_crossing_next_word():
             "end": 2.8,
             "text": "保留删除保留",
             "words": [
+                {"text": "保留", "start": 0.0, "end": 0.9},
+                {"text": "删除", "start": 1.0, "end": 1.5},
+                {"text": "保留", "start": 1.8, "end": 2.8},
+            ],
+            "asrWords": [
                 {"text": "保留", "start": 0.0, "end": 0.9},
                 {"text": "删除", "start": 1.0, "end": 1.5},
                 {"text": "保留", "start": 1.8, "end": 2.8},
@@ -4563,7 +6442,7 @@ def test_cut_endpoint_renders_preview_video(
     assert 0.5 < app_module.probe_video(art_output_path) < 0.9
 
 
-def test_cut_endpoint_uses_semantic_draft_ranges_for_retained_transcript(
+def test_cut_endpoint_uses_saved_shared_media_range_and_semantic_transcript(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -4641,6 +6520,90 @@ def test_cut_endpoint_uses_semantic_draft_ranges_for_retained_transcript(
     assert job["edit"]["requestedRanges"] == [{"start": 0.82, "end": 2.14}]
     assert job["edit"]["transcriptRanges"] == [{"start": 1.0, "end": 2.0}]
     assert job["edit"]["transcript"]["text"] == "保留保留"
+
+
+def test_cut_endpoint_keeps_ni_when_raw_asr_token_crosses_text_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    job_id = "48484848-4848-4848-8848-484848484848"
+    job_dir = app_module.jobs_directory() / job_id
+    job_dir.mkdir(parents=True)
+    video_path = job_dir / "source.mp4"
+    video_path.write_bytes(b"source")
+    segments = [
+        {
+            "id": 0,
+            "start": 0.0,
+            "end": 0.6,
+            "text": "觉得你",
+            "words": [
+                {"text": "觉得", "start": 0.0, "end": 0.4},
+                {"text": "你", "start": 0.4, "end": 0.6},
+            ],
+            "asrWords": [
+                {"text": "觉", "start": 0.0, "end": 0.2},
+                {"text": "得你", "start": 0.2, "end": 0.6},
+            ],
+        }
+    ]
+    draft = {
+        "schemaVersion": 1,
+        "revision": 1,
+        "automaticNoSpeechInitialized": True,
+        "textRanges": [
+            {
+                "key": "0.000-0.400",
+                "start": 0.0,
+                "end": 0.44,
+                "originalStart": 0.0,
+                "originalEnd": 0.4,
+            }
+        ],
+        "noSpeechRanges": [],
+        "timelineRanges": [],
+    }
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "filename": "source.mp4",
+            "status": "completed",
+            "duration": 1.0,
+            "result": {"segments": segments, "suggestions": []},
+            "cutDraft": draft,
+            "edit": None,
+        }
+        app_module.JOB_FILES[job_id] = video_path
+
+    def fake_render_cut_video(
+        _input_path: Path,
+        output_path: Path,
+        ranges: list[dict[str, float]],
+        _duration: float,
+    ) -> None:
+        assert ranges == [{"start": 0.0, "end": 0.44}]
+        output_path.write_bytes(b"edited")
+
+    monkeypatch.setattr(app_module, "render_cut_video", fake_render_cut_video)
+    monkeypatch.setattr(
+        app_module,
+        "decode_cut_audio_samples",
+        lambda _path: (_ for _ in ()).throw(RuntimeError("no decoded audio")),
+    )
+
+    with TestClient(app_module.app) as client:
+        response = client.post(
+            f"/api/transcriptions/{job_id}/cuts",
+            json={"ranges": [{"start": 0.0, "end": 0.44}]},
+        )
+        job = client.get(f"/api/transcriptions/{job_id}").json()
+
+    assert response.status_code == 202, response.text
+    assert job["edit"]["ranges"] == [{"start": 0.0, "end": 0.44}]
+    assert job["edit"]["transcriptRanges"] == [{"start": 0.0, "end": 0.4}]
+    assert job["edit"]["transcript"]["text"] == "你"
+    assert job["edit"]["transcript"]["segments"][0]["asrWords"] == [
+        {"text": "你", "start": 0.0, "end": 0.16}
+    ]
 
 
 def test_art_text_can_use_original_video_without_cut(sample_video: Path):
@@ -5444,10 +7407,26 @@ def test_preview_composition_renders_cut_art_and_pip_in_one_request(
                         "text": "删除保留字幕",
                         "words": [
                             {"text": "删除", "start": 0.2, "end": 0.4},
-                            {"text": "保留字幕", "start": 0.6, "end": 0.9},
+                            {"text": "保留字幕", "start": 0.4, "end": 0.9},
                         ],
                     }
                 ],
+            },
+            "cutDraft": {
+                "schemaVersion": 1,
+                "revision": 1,
+                "automaticNoSpeechInitialized": True,
+                "textRanges": [
+                    {
+                        "key": "0.200-0.400",
+                        "start": 0.2,
+                        "end": 0.44,
+                        "originalStart": 0.2,
+                        "originalEnd": 0.4,
+                    }
+                ],
+                "noSpeechRanges": [],
+                "timelineRanges": [],
             },
             "edit": None,
             "art": None,
@@ -5473,7 +7452,7 @@ def test_preview_composition_renders_cut_art_and_pip_in_one_request(
             f"/api/transcriptions/{job_id}/compose",
             json={
                 "target": "all",
-                "ranges": [{"start": 0.2, "end": 0.4}],
+                "ranges": [{"start": 0.2, "end": 0.44}],
                 "artSource": "original",
                 "artOverlays": [
                     {
@@ -5514,14 +7493,14 @@ def test_preview_composition_renders_cut_art_and_pip_in_one_request(
     assert [call[0] for call in calls] == ["cut", "art", "pip"]
     assert calls[1][1] == job_dir / "edited.mp4"
     assert calls[2][1] == job_dir / "art-text.mp4"
-    assert calls[0][3] == [{"start": 0.2, "end": 0.4}]
+    assert calls[0][3] == [{"start": 0.2, "end": 0.44}]
     assert calls[1][3][0]["start"] == 0.4
     assert calls[1][3][0]["end"] == 0.7
     assert calls[2][3][0]["start"] == 0.4
     assert calls[2][3][0]["end"] == 0.7
     payload = job_response.json()
     assert payload["edit"]["status"] == "completed"
-    assert payload["edit"]["outputDuration"] == 0.8
+    assert payload["edit"]["outputDuration"] == 0.76
     assert payload["art"]["status"] == "completed"
     assert payload["pictureInPicture"]["status"] == "completed"
     assert payload["pictureInPicture"]["stage"] == "当前预览已生成视频"

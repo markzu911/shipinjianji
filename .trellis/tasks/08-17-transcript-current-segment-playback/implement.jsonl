@@ -1,0 +1,4 @@
+{"file":".trellis/spec/frontend/index.md","reason":"加载原生前端入口、共享脚本和修改前检查要求。"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"遵守文字行播放、事件委托、媒体状态反馈和无障碍契约。"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"保持媒体源、源时间与剪后时间映射以及公共预览语义不变。"}
+{"file":".trellis/spec/testing/index.md","reason":"按现有前端契约测试和浏览器验证要求覆盖播放边界行为。"}

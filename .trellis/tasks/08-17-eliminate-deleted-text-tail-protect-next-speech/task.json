@@ -1,0 +1,31 @@
+{
+  "id": "eliminate-deleted-text-tail-protect-next-speech",
+  "name": "eliminate-deleted-text-tail-protect-next-speech",
+  "title": "消除文字删除后的残音并保护相邻语音",
+  "description": "使用相邻字符共享的受约束声学边界消除被删文案残音，同时保留下一段首字音频。",
+  "status": "in_progress",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "541",
+  "assignee": "541",
+  "createdAt": "2026-08-17",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": "08-13-project-optimization-audit",
+  "relatedFiles": [
+    "server/app.py",
+    "tests/test_app.py",
+    "web/app.js",
+    ".trellis/spec/backend/media-and-timeline.md"
+  ],
+  "notes": "附件和 data/jobs/data/history 仅用于只读分析与真实媒体验收。",
+  "meta": {}
+}

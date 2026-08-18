@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/index.md","reason":"后端开发前检查和规范导航入口"}
+{"file":".trellis/spec/backend/media-and-timeline.md","reason":"文字语义、物理媒体边界、asrWords 和保留语音契约"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"时间区间不变量、失败回退和媒体测试要求"}
+{"file":".trellis/spec/testing/index.md","reason":"单元、API、真实媒体与回归测试分层"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"复用现有边界和草稿解析所有者，避免平行实现"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"检查草稿、预览、生成和 retained transcript 的完整时间轴数据流"}

@@ -278,6 +278,9 @@ CUT_LOW_ENERGY_RMS_THRESHOLD = 500.0
 CUT_EXTENDED_VALLEY_IMPROVEMENT = 0.65
 CUT_TAIL_VALLEY_IMPROVEMENT = 0.65
 CUT_VALLEY_TOLERANCE = 1.10
+CUT_CHARACTER_BOUNDARY_WINDOWS_SECONDS = (0.020, 0.040, 0.080)
+CUT_CHARACTER_BOUNDARY_MIN_IMPROVEMENT = 0.82
+CUT_CHARACTER_BOUNDARY_DISTANCE_PENALTY = 0.12
 CUT_AUDIO_FADE_SECONDS = 0.008
 CUT_AUDIO_LOUDNESS_FILTER = "loudnorm=I=-16:LRA=7:TP=-1.5"
 NO_SPEECH_MIN_GAP_SECONDS = 1.5
@@ -1941,6 +1944,7 @@ def extract_audio(video_path: Path, audio_path: Path) -> None:
 def normalize_delete_ranges(
     ranges: list[DeleteRange],
     duration: float,
+    protected_ranges: list[dict[str, float]] | None = None,
 ) -> list[dict[str, float]]:
     if not ranges:
         raise ValueError("请先选择要删除的文字。")
@@ -1960,12 +1964,33 @@ def normalize_delete_ranges(
         cleaned.append((start, end))
 
     cleaned.sort()
+    protected = sorted(
+        (
+            float(item["start"]),
+            float(item["end"]),
+        )
+        for item in (protected_ranges or [])
+        if float(item["end"]) > float(item["start"])
+    )
     merged: list[list[float]] = []
     for start, end in cleaned:
         # ASR word timestamps can leave a short non-speech gap between two
         # consecutive selected words. Keeping that gap creates tiny audio/video
         # fragments that sound like a clipped syllable after concatenation.
-        if merged and start <= merged[-1][1] + 0.12:
+        crosses_protected_range = bool(
+            merged
+            and start > merged[-1][1]
+            and any(
+                protected_start < start
+                and protected_end > merged[-1][1]
+                for protected_start, protected_end in protected
+            )
+        )
+        if (
+            merged
+            and start <= merged[-1][1] + 0.12
+            and not crosses_protected_range
+        ):
             merged[-1][1] = max(merged[-1][1], end)
         else:
             merged.append([start, end])
@@ -2010,53 +2035,186 @@ def normalize_cut_draft_delete_ranges(
     )
 
 
+def recognized_text_ranges(
+    segments: list[dict[str, Any]],
+) -> list[dict[str, float]]:
+    return [
+        {"start": float(item["start"]), "end": float(item["end"])}
+        for item in transcript_character_units(segments)
+    ]
+
+
+def transcript_segment_timed_items(
+    segment: dict[str, Any],
+    *,
+    require_text: bool,
+) -> list[dict[str, Any]]:
+    for candidates in (
+        segment.get("words"),
+        segment.get("asrWords"),
+        [segment],
+    ):
+        if not isinstance(candidates, list):
+            continue
+        valid_items: list[dict[str, Any]] = []
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            try:
+                start = float(item.get("start") or 0)
+                end = float(item.get("end") or 0)
+            except (TypeError, ValueError):
+                continue
+            if (
+                (not require_text or str(item.get("text") or "").strip())
+                and math.isfinite(start)
+                and math.isfinite(end)
+                and end > start
+            ):
+                valid_items.append(item)
+        if valid_items:
+            return valid_items
+    return []
+
+
+def transcript_segment_character_units(
+    segment: dict[str, Any],
+) -> list[dict[str, Any]]:
+    units: list[dict[str, Any]] = []
+    for item in transcript_segment_timed_items(segment, require_text=True):
+        units.extend(
+            split_timed_text_units(
+                str(item.get("text") or ""),
+                float(item["start"]),
+                float(item["end"]),
+            )
+        )
+    return units
+
+
+def transcript_character_units(
+    segments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build safe text units from natural words with per-segment fallbacks."""
+    units: list[dict[str, Any]] = []
+    seen: set[tuple[float, float, str]] = set()
+    for segment in segments:
+        for unit in transcript_segment_character_units(segment):
+            key = (
+                float(unit["start"]),
+                float(unit["end"]),
+                str(unit.get("text") or ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            units.append(unit)
+    units.sort(key=lambda item: (float(item["start"]), float(item["end"])))
+    return units
+
+
+def canonicalize_transcript_semantic_ranges(
+    ranges: list[dict[str, Any]],
+    segments: list[dict[str, Any]],
+    duration: float,
+) -> list[dict[str, float]]:
+    """Expand text deletion semantics to intersecting safe character units."""
+    character_units = transcript_character_units(segments)
+    canonical_ranges: list[dict[str, float]] = []
+    for item in ranges:
+        start = max(0.0, min(float(item["start"]), duration))
+        end = max(start, min(float(item["end"]), duration))
+        while True:
+            intersecting_units = [
+                unit
+                for unit in character_units
+                if float(unit["start"]) < end
+                and float(unit["end"]) > start
+            ]
+            if not intersecting_units:
+                break
+            expanded_start = min(
+                start,
+                *(float(unit["start"]) for unit in intersecting_units),
+            )
+            expanded_end = max(
+                end,
+                *(float(unit["end"]) for unit in intersecting_units),
+            )
+            if expanded_start == start and expanded_end == end:
+                break
+            start = expanded_start
+            end = expanded_end
+        canonical_ranges.append(
+            {
+                "start": round(max(0.0, min(start, duration)), 3),
+                "end": round(max(0.0, min(end, duration)), 3),
+            }
+        )
+    return canonical_ranges
+
+
+def subtract_protected_ranges(
+    ranges: list[dict[str, Any]],
+    protected_ranges: list[dict[str, float]],
+    *,
+    minimum_duration: float = 0.0,
+) -> list[dict[str, float]]:
+    protected = sorted(
+        protected_ranges,
+        key=lambda item: (float(item["start"]), float(item["end"])),
+    )
+
+    safe_ranges: list[dict[str, float]] = []
+    for item in ranges:
+        fragments = [
+            (
+                float(item["start"]),
+                float(item["end"]),
+            )
+        ]
+        for protected_range in protected:
+            if not fragments or protected_range["start"] >= fragments[-1][1]:
+                break
+            next_fragments: list[tuple[float, float]] = []
+            for start, end in fragments:
+                if (
+                    protected_range["end"] <= start
+                    or protected_range["start"] >= end
+                ):
+                    next_fragments.append((start, end))
+                    continue
+                if protected_range["start"] > start:
+                    next_fragments.append((start, protected_range["start"]))
+                if protected_range["end"] < end:
+                    next_fragments.append((protected_range["end"], end))
+            fragments = next_fragments
+        for start, end in fragments:
+            fragment_duration = end - start
+            if minimum_duration > 0:
+                if fragment_duration < minimum_duration:
+                    continue
+            elif fragment_duration <= 0.001:
+                continue
+            rounded_start = round(start, 3)
+            rounded_end = round(end, 3)
+            if rounded_end > rounded_start:
+                safe_ranges.append(
+                    {"start": rounded_start, "end": rounded_end}
+                )
+    return safe_ranges
+
+
 def protect_recognized_speech_from_quiet_ranges(
     quiet_ranges: list[dict[str, Any]],
     segments: list[dict[str, Any]],
 ) -> list[dict[str, float]]:
     """Keep automatic quiet cuts strictly outside recognized speech."""
-    speech_ranges = [
-        {
-            "start": float(word["start"]),
-            "end": float(word["end"]),
-        }
-        for segment in segments
-        for word in segment.get("words") or []
-        if str(word.get("text") or "").strip()
-        and float(word.get("end") or 0) > float(word.get("start") or 0)
-    ]
-    speech_ranges.sort(key=lambda item: (item["start"], item["end"]))
-
-    safe_ranges: list[dict[str, float]] = []
-    for quiet_range in quiet_ranges:
-        fragments = [
-            (
-                float(quiet_range["start"]),
-                float(quiet_range["end"]),
-            )
-        ]
-        for speech_range in speech_ranges:
-            if not fragments or speech_range["start"] >= fragments[-1][1]:
-                break
-            next_fragments: list[tuple[float, float]] = []
-            for start, end in fragments:
-                if speech_range["end"] <= start or speech_range["start"] >= end:
-                    next_fragments.append((start, end))
-                    continue
-                if speech_range["start"] > start:
-                    next_fragments.append((start, speech_range["start"]))
-                if speech_range["end"] < end:
-                    next_fragments.append((speech_range["end"], end))
-            fragments = next_fragments
-        safe_ranges.extend(
-            {
-                "start": round(start, 3),
-                "end": round(end, 3),
-            }
-            for start, end in fragments
-            if end - start >= AUDIO_TIMING_QUIET_MIN_SECONDS
-        )
-    return safe_ranges
+    return subtract_protected_ranges(
+        quiet_ranges,
+        recognized_text_ranges(segments),
+        minimum_duration=AUDIO_TIMING_QUIET_MIN_SECONDS,
+    )
 
 
 def resolve_cut_draft_delete_ranges(
@@ -2071,30 +2229,65 @@ def resolve_cut_draft_delete_ranges(
     if not draft:
         return []
     text_ranges = list(draft.get("textRanges") or [])
+    timeline_ranges = list(draft.get("timelineRanges") or [])
+    requested_semantic_ranges = [
+        {
+            "start": float(item.get("originalStart", item["start"])),
+            "end": float(item.get("originalEnd", item["end"])),
+        }
+        for item in text_ranges
+    ]
+    semantic_text_ranges = canonicalize_transcript_semantic_ranges(
+        requested_semantic_ranges,
+        segments,
+        duration,
+    )
+    explicit_text_delete_ranges = [
+        *semantic_text_ranges,
+        *(
+            {
+                "start": float(item["start"]),
+                "end": float(item["end"]),
+            }
+            for item in timeline_ranges
+        ),
+    ]
+    retained_text_ranges = subtract_protected_ranges(
+        recognized_text_ranges(segments),
+        explicit_text_delete_ranges,
+    )
     quiet_ranges = protect_recognized_speech_from_quiet_ranges(
         list(draft.get("noSpeechRanges") or []),
         segments,
     )
-    timeline_ranges = list(draft.get("timelineRanges") or [])
 
-    values = [
-        {
-            "start": float(
-                item.get("originalStart", item["start"])
-                if use_text_semantic_boundaries
-                else item["start"]
-            ),
-            "end": float(
-                item.get("originalEnd", item["end"])
-                if use_text_semantic_boundaries
-                else item["end"]
-            ),
-        }
-        for item in text_ranges
-    ]
-    values.extend(
+    physical_text_ranges = []
+    for item, semantic_range in zip(
+        text_ranges,
+        semantic_text_ranges,
+        strict=True,
+    ):
+        if use_text_semantic_boundaries:
+            physical_text_ranges.append(copy.deepcopy(semantic_range))
+            continue
+        physical_text_ranges.append(
+            {
+                "start": float(item["start"]),
+                "end": float(item["end"]),
+            }
+        )
+    retained_media_ranges = subtract_protected_ranges(
+        retained_text_ranges,
+        physical_text_ranges,
+    )
+    automatic_ranges = copy.deepcopy(physical_text_ranges)
+    automatic_ranges.extend(
         {"start": float(item["start"]), "end": float(item["end"])}
         for item in quiet_ranges
+    )
+    values = subtract_protected_ranges(
+        automatic_ranges,
+        retained_media_ranges,
     )
     values.extend(
         {"start": float(item["start"]), "end": float(item["end"])}
@@ -2105,6 +2298,7 @@ def resolve_cut_draft_delete_ranges(
     return normalize_delete_ranges(
         [DeleteRange(**value) for value in values],
         duration,
+        protected_ranges=retained_media_ranges,
     )
 
 
@@ -2150,13 +2344,12 @@ def collect_speech_intervals(
 ) -> list[tuple[float, float]]:
     intervals: list[tuple[float, float]] = []
     for segment in segments:
-        timed_items = segment.get("words") or [segment]
-        for item in timed_items:
-            try:
-                start = max(0.0, min(float(item.get("start", 0)), duration))
-                end = max(0.0, min(float(item.get("end", 0)), duration))
-            except (TypeError, ValueError):
-                continue
+        for item in transcript_segment_timed_items(
+            segment,
+            require_text=False,
+        ):
+            start = max(0.0, min(float(item["start"]), duration))
+            end = max(0.0, min(float(item["end"]), duration))
             if end > start:
                 intervals.append((start, end))
 
@@ -2400,6 +2593,7 @@ def snap_delete_ranges_to_samples(
     boundary_limits: list[dict[str, float]] | None = None,
 ) -> list[dict[str, float]]:
     snapped: list[list[float]] = []
+    snapped_limit_ends: list[float | None] = []
     for range_index, item in enumerate(delete_ranges):
         original_start = float(item["start"])
         original_end = float(item["end"])
@@ -2469,29 +2663,48 @@ def snap_delete_ranges_to_samples(
 
         start = max(0.0, min(start, duration))
         end = max(0.0, min(end, duration))
-        if has_boundary_limits:
-            # A waveform valley may expand a deletion into a real pause, but it
-            # must never shrink the selected semantic range.  Shrinking here
-            # leaves syllable tails from AI-selected words in the final video.
-            # Extend a word ending only when the nearby valley is meaningfully
-            # quieter relative to that recording; fixed RMS thresholds miss
-            # tails in softly recorded speech.
-            limits = boundary_limits[range_index]
-            start = max(float(limits["start"]), min(start, original_start))
-            if (
-                end <= original_end
-                or original_end_rms <= end_rms * CUT_VALLEY_TOLERANCE
-                or end_rms
-                > original_end_rms * CUT_TAIL_VALLEY_IMPROVEMENT
-            ):
-                end = original_end
-            end = min(float(limits["end"]), max(end, original_end))
+        limits = boundary_limits[range_index] if has_boundary_limits else None
+        if limits is not None:
+            if "sharedStart" in limits and "sharedEnd" in limits:
+                start = float(limits["sharedStart"])
+                end = float(limits["sharedEnd"])
+            else:
+                # A waveform valley may expand a deletion into a real pause,
+                # but it must never shrink the selected semantic range.
+                start = max(float(limits["start"]), min(start, original_start))
+                if (
+                    end <= original_end
+                    or original_end_rms <= end_rms * CUT_VALLEY_TOLERANCE
+                    or end_rms
+                    > original_end_rms * CUT_TAIL_VALLEY_IMPROVEMENT
+                ):
+                    end = original_end
+                end = min(float(limits["end"]), max(end, original_end))
         if end <= start + 0.01:
             start, end = original_start, original_end
-        if snapped and start <= snapped[-1][1] + 0.12:
+        crosses_retained_boundary = bool(
+            snapped
+            and start > snapped[-1][1]
+            and snapped_limit_ends[-1] is not None
+            and limits is not None
+            and float(snapped_limit_ends[-1]) < float(limits["start"]) - 0.001
+        )
+        if (
+            snapped
+            and start <= snapped[-1][1] + 0.12
+            and not crosses_retained_boundary
+        ):
             snapped[-1][1] = max(snapped[-1][1], end)
+            snapped_limit_ends[-1] = (
+                float(limits["end"])
+                if limits is not None
+                else snapped_limit_ends[-1]
+            )
         else:
             snapped.append([start, end])
+            snapped_limit_ends.append(
+                float(limits["end"]) if limits is not None else None
+            )
 
     deleted_duration = sum(end - start for start, end in snapped)
     if deleted_duration >= duration - 0.05:
@@ -2531,15 +2744,15 @@ def snap_suggestion_ranges_to_audio(
 ) -> list[dict[str, Any]]:
     """Snap AI-suggestion delete ranges to nearby low-energy valleys.
 
-    ASR word-end timestamps can stop mid-syllable, so a deletion that cuts
-    exactly at ``word["end"]`` leaves the deleted word's acoustic tail in the
+    Transcript timestamps can stop mid-syllable, so a deletion that cuts
+    exactly at a character boundary can leave the deleted phrase's acoustic tail in the
     final video. Extending each suggestion's delete ranges to a quiet valley
     once here, at suggestion time, means the range the user previews and
     confirms is exactly the range the cut job later uses — the preview does not
     change again when the video is generated.
 
     The boundary limits use no head/tail guard on purpose: a suggestion must
-    never extend past the previous or next *retained* word, or the cut would
+    never extend past the previous or next *retained* character, or the cut would
     swallow a kept character (e.g. turning "你身边..." into "身边..."). Only the
     gap between the deleted words and their retained neighbours is snapped away.
     """
@@ -2548,18 +2761,37 @@ def snap_suggestion_ranges_to_audio(
         public_suggestion = copy.deepcopy(suggestion)
         ranges = public_suggestion.get("ranges") or []
         if samples and ranges:
+            semantic_ranges = canonicalize_transcript_semantic_ranges(
+                ranges,
+                segments,
+                duration,
+            )
             boundary_limits = build_transcript_delete_boundary_limits(
                 segments,
-                ranges,
+                semantic_ranges,
                 duration,
+                samples=samples,
             )
-            snapped_ranges = snap_delete_ranges_to_samples(
-                ranges,
-                duration,
-                samples,
-                sample_rate=CUT_BOUNDARY_SAMPLE_RATE,
-                boundary_limits=boundary_limits,
-            )
+            snapped_ranges = []
+            for semantic_range, limits in zip(
+                semantic_ranges,
+                boundary_limits,
+                strict=True,
+            ):
+                snapped = snap_delete_ranges_to_samples(
+                    [semantic_range],
+                    duration,
+                    samples,
+                    sample_rate=CUT_BOUNDARY_SAMPLE_RATE,
+                    boundary_limits=[limits],
+                )[0]
+                snapped_ranges.append(
+                    {
+                        **snapped,
+                        "originalStart": semantic_range["start"],
+                        "originalEnd": semantic_range["end"],
+                    }
+                )
             if snapped_ranges:
                 public_suggestion["ranges"] = snapped_ranges
                 public_suggestion["start"] = float(snapped_ranges[0]["start"])
@@ -2598,6 +2830,15 @@ def timeline_after_deletions(
     return round(max(0.0, time_value - removed_duration), 3)
 
 
+def spoken_text_characters(text: str) -> list[str]:
+    return [
+        character
+        for character in str(text or "")
+        if not character.isspace()
+        and not unicodedata.category(character).startswith("P")
+    ]
+
+
 def split_timed_text_units(
     text: str,
     start: float,
@@ -2605,12 +2846,7 @@ def split_timed_text_units(
 ) -> list[dict[str, Any]]:
     """Split timed ASR text into selectable characters while retaining punctuation."""
     value = str(text or "")
-    spoken_characters = [
-        character
-        for character in value
-        if not character.isspace()
-        and not unicodedata.category(character).startswith("P")
-    ]
+    spoken_characters = spoken_text_characters(value)
     if not spoken_characters:
         return (
             [{"text": value, "start": round(start, 3), "end": round(end, 3)}]
@@ -2652,33 +2888,479 @@ def split_timed_text_units(
     return units
 
 
+def transcript_acoustic_character_units(
+    segments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Map natural character units to raw ASR tokens without changing semantics."""
+    units: list[dict[str, Any]] = []
+    seen: set[tuple[float, float, str]] = set()
+    for segment_index, segment in enumerate(segments):
+        semantic_units = transcript_segment_character_units(segment)
+        semantic_characters = [
+            spoken_text_characters(str(unit.get("text") or ""))
+            for unit in semantic_units
+        ]
+        raw_character_units: list[dict[str, Any]] = []
+        raw_items = segment.get("asrWords")
+        mapping_valid = bool(semantic_units and isinstance(raw_items, list) and raw_items)
+        previous_token_start = -1.0
+        if mapping_valid:
+            for token_index, item in enumerate(raw_items):
+                if not isinstance(item, dict):
+                    mapping_valid = False
+                    break
+                try:
+                    token_start = float(item.get("start"))
+                    token_end = float(item.get("end"))
+                except (TypeError, ValueError):
+                    mapping_valid = False
+                    break
+                token_characters = spoken_text_characters(str(item.get("text") or ""))
+                if not token_characters:
+                    continue
+                if (
+                    not math.isfinite(token_start)
+                    or not math.isfinite(token_end)
+                    or token_end <= token_start
+                    or token_start < previous_token_start - 0.001
+                ):
+                    mapping_valid = False
+                    break
+                previous_token_start = token_start
+                token_duration = token_end - token_start
+                for character_index, character in enumerate(token_characters):
+                    raw_start = token_start + (
+                        token_duration * character_index / len(token_characters)
+                    )
+                    raw_end = token_start + (
+                        token_duration * (character_index + 1) / len(token_characters)
+                    )
+                    raw_character_units.append(
+                        {
+                            "text": character,
+                            "start": raw_start,
+                            "end": raw_end,
+                            "tokenStart": token_start,
+                            "tokenEnd": token_end,
+                            "tokenIndex": token_index,
+                        }
+                    )
+
+        semantic_text = [
+            characters[0]
+            for characters in semantic_characters
+            if len(characters) == 1
+        ]
+        mapping_valid = bool(
+            mapping_valid
+            and len(semantic_text) == len(semantic_units)
+            and semantic_text
+            == [str(item["text"]) for item in raw_character_units]
+        )
+
+        for character_index, unit in enumerate(semantic_units):
+            key = (
+                float(unit["start"]),
+                float(unit["end"]),
+                str(unit.get("text") or ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            enriched = {
+                **copy.deepcopy(unit),
+                "_segmentIndex": segment_index,
+                "_characterIndex": character_index,
+            }
+            if mapping_valid:
+                raw_unit = raw_character_units[character_index]
+                enriched.update(
+                    {
+                        "_acousticStart": float(raw_unit["start"]),
+                        "_acousticEnd": float(raw_unit["end"]),
+                        "_tokenStart": float(raw_unit["tokenStart"]),
+                        "_tokenEnd": float(raw_unit["tokenEnd"]),
+                        "_tokenIndex": int(raw_unit["tokenIndex"]),
+                    }
+                )
+            units.append(enriched)
+    units.sort(key=lambda item: (float(item["start"]), float(item["end"])))
+    return units
+
+
+def multiscale_boundary_rms(
+    samples: array,
+    sample_rate: int,
+    boundary: float,
+) -> float:
+    if not samples or sample_rate <= 0:
+        return float("inf")
+    center = round(boundary * sample_rate)
+    values: list[float] = []
+    for window_seconds in CUT_CHARACTER_BOUNDARY_WINDOWS_SECONDS:
+        half_window = max(1, round(window_seconds * sample_rate / 2))
+        start = max(0, center - half_window)
+        end = min(len(samples), center + half_window)
+        if end <= start:
+            continue
+        energy = sum(int(sample) * int(sample) for sample in samples[start:end])
+        values.append(math.sqrt(energy / (end - start)))
+    return sum(values) / len(values) if values else float("inf")
+
+
+def snap_to_low_amplitude_sample(
+    samples: array,
+    sample_rate: int,
+    boundary: float,
+    corridor_start: float,
+    corridor_end: float,
+) -> float:
+    center = round(boundary * sample_rate)
+    radius = max(1, round(0.003 * sample_rate))
+    first = max(round(corridor_start * sample_rate), center - radius, 0)
+    last = min(round(corridor_end * sample_rate), center + radius, len(samples) - 1)
+    if last < first:
+        return boundary
+    best = min(
+        range(first, last + 1),
+        key=lambda index: (abs(int(samples[index])), abs(index - center)),
+    )
+    return best / sample_rate
+
+
+def find_quiet_token_extension_boundary(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    fallback: float,
+    samples: array,
+    sample_rate: int,
+    *,
+    deletion_on_left: bool,
+    enabled: bool,
+) -> float:
+    """Move a delete start into absolute quiet inside the previous raw token."""
+    if not enabled or deletion_on_left:
+        return fallback
+    reference_rms = multiscale_boundary_rms(
+        samples,
+        sample_rate,
+        fallback,
+    )
+    if (
+        not math.isfinite(reference_rms)
+        or reference_rms <= CUT_LOW_ENERGY_RMS_THRESHOLD
+    ):
+        return fallback
+
+    left_center = (
+        float(left["_acousticStart"]) + float(left["_acousticEnd"])
+    ) / 2
+    corridor_start = max(0.0, float(left["_tokenStart"]))
+    corridor_end = min(fallback, left_center)
+    if corridor_end <= corridor_start + CUT_BOUNDARY_STEP_SECONDS:
+        return fallback
+
+    step = max(1, round(CUT_BOUNDARY_STEP_SECONDS * sample_rate))
+    first = math.ceil(corridor_start * sample_rate / step) * step
+    last = math.floor(corridor_end * sample_rate / step) * step
+    candidates: list[tuple[float, float, float]] = []
+    for position in {
+        round(corridor_start * sample_rate),
+        round(corridor_end * sample_rate),
+        *range(first, last + 1, step),
+    }:
+        candidate = position / sample_rate
+        rms = multiscale_boundary_rms(samples, sample_rate, candidate)
+        if (
+            math.isfinite(rms)
+            and rms <= CUT_LOW_ENERGY_RMS_THRESHOLD
+            and rms < reference_rms * CUT_CHARACTER_BOUNDARY_MIN_IMPROVEMENT
+        ):
+            candidates.append((abs(candidate - fallback), rms, candidate))
+    if not candidates:
+        return fallback
+    _, _, best = min(candidates)
+    best = snap_to_low_amplitude_sample(
+        samples,
+        sample_rate,
+        best,
+        corridor_start,
+        corridor_end,
+    )
+    return round(max(corridor_start, min(best, corridor_end)), 3)
+
+
+def refine_shared_character_boundary(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    fallback: float,
+    samples: array,
+    sample_rate: int,
+    *,
+    deletion_on_left: bool,
+    allow_token_extension: bool = True,
+) -> float:
+    required_keys = {
+        "_acousticStart",
+        "_acousticEnd",
+        "_tokenStart",
+        "_tokenEnd",
+        "_tokenIndex",
+    }
+    if (
+        int(left.get("_segmentIndex", -1)) != int(right.get("_segmentIndex", -2))
+        or int(right.get("_characterIndex", -1))
+        != int(left.get("_characterIndex", -1)) + 1
+        or not required_keys.issubset(left)
+        or not required_keys.issubset(right)
+    ):
+        return fallback
+
+    left_center = (
+        float(left["_acousticStart"]) + float(left["_acousticEnd"])
+    ) / 2
+    right_center = (
+        float(right["_acousticStart"]) + float(right["_acousticEnd"])
+    ) / 2
+    corridor_start = max(0.0, left_center)
+    corridor_end = min(len(samples) / sample_rate, right_center)
+    if deletion_on_left:
+        corridor_start = max(corridor_start, fallback)
+    else:
+        corridor_end = min(corridor_end, fallback)
+    if corridor_end <= corridor_start + CUT_BOUNDARY_STEP_SECONDS:
+        return find_quiet_token_extension_boundary(
+            left,
+            right,
+            fallback,
+            samples,
+            sample_rate,
+            deletion_on_left=deletion_on_left,
+            enabled=allow_token_extension,
+        )
+
+    acoustic_prior = (
+        float(left["_acousticEnd"]) + float(right["_acousticStart"])
+    ) / 2
+    acoustic_prior = max(corridor_start, min(acoustic_prior, corridor_end))
+    reference = max(corridor_start, min(fallback, corridor_end))
+    reference_rms = multiscale_boundary_rms(samples, sample_rate, reference)
+    if (
+        not math.isfinite(reference_rms)
+        or reference_rms <= CUT_LOW_ENERGY_RMS_THRESHOLD
+    ):
+        return fallback
+
+    step = max(1, round(CUT_BOUNDARY_STEP_SECONDS * sample_rate))
+    first = math.ceil(corridor_start * sample_rate / step) * step
+    last = math.floor(corridor_end * sample_rate / step) * step
+    sample_positions = {
+        round(corridor_start * sample_rate),
+        round(corridor_end * sample_rate),
+        *range(first, last + 1, step),
+    }
+    energy_curve = [
+        (position, multiscale_boundary_rms(samples, sample_rate, position / sample_rate))
+        for position in sorted(sample_positions)
+    ]
+    corridor_width = max(CUT_BOUNDARY_STEP_SECONDS, corridor_end - corridor_start)
+    endpoint_guard = min(
+        max(CUT_CHARACTER_BOUNDARY_WINDOWS_SECONDS) / 2,
+        corridor_width / 4,
+    )
+    candidates: list[tuple[float, float, float]] = []
+    directional_endpoint = corridor_end if deletion_on_left else corridor_start
+    endpoint_rms = multiscale_boundary_rms(
+        samples,
+        sample_rate,
+        directional_endpoint,
+    )
+    if (
+        math.isfinite(endpoint_rms)
+        and endpoint_rms <= CUT_LOW_ENERGY_RMS_THRESHOLD
+        and endpoint_rms
+        < reference_rms * CUT_CHARACTER_BOUNDARY_MIN_IMPROVEMENT
+    ):
+        endpoint_distance = abs(directional_endpoint - acoustic_prior)
+        candidates.append(
+            (
+                endpoint_rms / max(reference_rms, 1.0)
+                + endpoint_distance
+                / corridor_width
+                * CUT_CHARACTER_BOUNDARY_DISTANCE_PENALTY,
+                endpoint_distance,
+                directional_endpoint,
+            )
+        )
+    for index in range(1, len(energy_curve) - 1):
+        center, rms = energy_curve[index]
+        candidate = center / sample_rate
+        if (
+            candidate <= corridor_start + endpoint_guard
+            or candidate >= corridor_end - endpoint_guard
+        ):
+            continue
+        if not math.isfinite(rms):
+            continue
+        previous_rms = energy_curve[index - 1][1]
+        next_rms = energy_curve[index + 1][1]
+        if (
+            not math.isfinite(previous_rms)
+            or not math.isfinite(next_rms)
+            or rms > previous_rms
+            or rms > next_rms
+        ):
+            continue
+        distance_penalty = (
+            abs(candidate - acoustic_prior)
+            / corridor_width
+            * CUT_CHARACTER_BOUNDARY_DISTANCE_PENALTY
+        )
+        score = rms / max(reference_rms, 1.0) + distance_penalty
+        candidates.append((score, abs(candidate - acoustic_prior), candidate))
+    if not candidates:
+        return find_quiet_token_extension_boundary(
+            left,
+            right,
+            fallback,
+            samples,
+            sample_rate,
+            deletion_on_left=deletion_on_left,
+            enabled=allow_token_extension,
+        )
+
+    _, _, best = min(candidates)
+    best_rms = multiscale_boundary_rms(samples, sample_rate, best)
+    if best_rms >= reference_rms * CUT_CHARACTER_BOUNDARY_MIN_IMPROVEMENT:
+        return find_quiet_token_extension_boundary(
+            left,
+            right,
+            fallback,
+            samples,
+            sample_rate,
+            deletion_on_left=deletion_on_left,
+            enabled=allow_token_extension,
+        )
+    if best_rms > CUT_LOW_ENERGY_RMS_THRESHOLD:
+        extended = find_quiet_token_extension_boundary(
+            left,
+            right,
+            fallback,
+            samples,
+            sample_rate,
+            deletion_on_left=deletion_on_left,
+            enabled=allow_token_extension,
+        )
+        if extended != fallback:
+            return extended
+    best = snap_to_low_amplitude_sample(
+        samples,
+        sample_rate,
+        best,
+        corridor_start,
+        corridor_end,
+    )
+    return round(max(corridor_start, min(best, corridor_end)), 3)
+
+
+def build_shared_acoustic_delete_boundaries(
+    segments: list[dict[str, Any]],
+    delete_ranges: list[dict[str, float]],
+    duration: float,
+    samples: array,
+    sample_rate: int,
+) -> list[dict[str, float]]:
+    units = transcript_acoustic_character_units(segments)
+
+    def unit_is_deleted(unit: dict[str, Any]) -> bool:
+        start = float(unit["start"])
+        end = float(unit["end"])
+        return any(
+            start < item["end"] - 0.001 and end > item["start"] + 0.001
+            for item in delete_ranges
+        )
+
+    deleted = [unit_is_deleted(unit) for unit in units]
+    boundary_cache: dict[int, float] = {}
+
+    def transition_boundary(left_index: int) -> float:
+        cached = boundary_cache.get(left_index)
+        if cached is not None:
+            return cached
+        left = units[left_index]
+        right = units[left_index + 1]
+        fallback = (
+            float(left["end"])
+            if deleted[left_index]
+            else float(right["start"])
+        )
+        deletion_on_left = deleted[left_index]
+        if deletion_on_left:
+            allow_token_extension = bool(
+                left_index + 2 >= len(deleted) or not deleted[left_index + 2]
+            )
+        else:
+            allow_token_extension = bool(
+                left_index == 0 or not deleted[left_index - 1]
+            )
+        boundary_cache[left_index] = refine_shared_character_boundary(
+            left,
+            right,
+            fallback,
+            samples,
+            sample_rate,
+            deletion_on_left=deletion_on_left,
+            allow_token_extension=allow_token_extension,
+        )
+        return boundary_cache[left_index]
+
+    targets: list[dict[str, float]] = []
+    for item in delete_ranges:
+        item_start = float(item["start"])
+        item_end = float(item["end"])
+        matching_indices = [
+            index
+            for index, unit in enumerate(units)
+            if float(unit["start"]) < item_end - 0.001
+            and float(unit["end"]) > item_start + 0.001
+        ]
+        target_start = item_start
+        target_end = item_end
+        if matching_indices:
+            first_index = matching_indices[0]
+            last_index = matching_indices[-1]
+            if (
+                first_index > 0
+                and deleted[first_index]
+                and not deleted[first_index - 1]
+            ):
+                target_start = transition_boundary(first_index - 1)
+            if (
+                last_index + 1 < len(units)
+                and deleted[last_index]
+                and not deleted[last_index + 1]
+            ):
+                target_end = transition_boundary(last_index)
+        target_start = max(0.0, min(target_start, duration))
+        target_end = max(0.0, min(target_end, duration))
+        if target_end <= target_start + 0.01:
+            target_start, target_end = item_start, item_end
+        targets.append(
+            {"start": round(target_start, 3), "end": round(target_end, 3)}
+        )
+    return targets
+
+
 def build_transcript_delete_boundary_limits(
     segments: list[dict[str, Any]],
     delete_ranges: list[dict[str, float]],
     duration: float,
     start_head_guard_seconds: float = 0.0,
     end_tail_guard_seconds: float = 0.0,
+    samples: array | None = None,
+    sample_rate: int = CUT_BOUNDARY_SAMPLE_RATE,
 ) -> list[dict[str, float]]:
-    timed_units: list[dict[str, Any]] = []
-    for segment in segments:
-        source_words = segment.get("words") or []
-        if source_words:
-            for word in source_words:
-                timed_units.extend(
-                    split_timed_text_units(
-                        str(word.get("text") or ""),
-                        float(word.get("start") or 0),
-                        float(word.get("end") or 0),
-                    )
-                )
-            continue
-        timed_units.extend(
-            split_timed_text_units(
-                str(segment.get("text") or ""),
-                float(segment.get("start") or 0),
-                float(segment.get("end") or 0),
-            )
-        )
+    timed_units = transcript_character_units(segments)
 
     def is_deleted(unit: dict[str, Any]) -> bool:
         start = float(unit["start"])
@@ -2726,6 +3408,19 @@ def build_transcript_delete_boundary_limits(
                 ),
             }
         )
+    if samples:
+        shared_boundaries = build_shared_acoustic_delete_boundaries(
+            segments,
+            delete_ranges,
+            duration,
+            samples,
+            sample_rate,
+        )
+        for limits_item, shared in zip(limits, shared_boundaries):
+            limits_item["start"] = shared["start"]
+            limits_item["end"] = shared["end"]
+            limits_item["sharedStart"] = shared["start"]
+            limits_item["sharedEnd"] = shared["end"]
     return limits
 
 
@@ -2736,10 +3431,10 @@ def align_cut_draft_text_ranges_to_audio(
     duration: float,
 ) -> list[dict[str, Any]]:
     """Align draft media cuts while preserving their exact text semantics."""
-    if not text_ranges or media_path is None or not media_path.is_file():
-        return copy.deepcopy(text_ranges)
+    if not text_ranges:
+        return []
 
-    semantic_ranges: list[dict[str, float]] = []
+    requested_semantic_ranges: list[dict[str, float]] = []
     for item in text_ranges:
         physical_start = float(item["start"])
         physical_end = float(item["end"])
@@ -2753,24 +3448,42 @@ def align_cut_draft_text_ranges_to_audio(
         )
         if semantic_end <= semantic_start:
             semantic_start, semantic_end = physical_start, physical_end
-        semantic_ranges.append(
+        requested_semantic_ranges.append(
             {
                 "start": round(semantic_start, 3),
                 "end": round(semantic_end, 3),
             }
         )
+    semantic_ranges = canonicalize_transcript_semantic_ranges(
+        requested_semantic_ranges,
+        segments,
+        duration,
+    )
 
+    safe_fallback_ranges = [
+        {
+            **copy.deepcopy(item),
+            "start": semantic_range["start"],
+            "end": semantic_range["end"],
+            "originalStart": semantic_range["start"],
+            "originalEnd": semantic_range["end"],
+            "adjacentSilenceBefore": 0.0,
+            "adjacentSilenceAfter": 0.0,
+        }
+        for item, semantic_range in zip(text_ranges, semantic_ranges)
+    ]
+    if media_path is None or not media_path.is_file():
+        return safe_fallback_ranges
+    try:
+        samples = decode_cut_audio_samples(media_path)
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return safe_fallback_ranges
     boundary_limits = build_transcript_delete_boundary_limits(
         segments,
         semantic_ranges,
         duration,
-        start_head_guard_seconds=CUT_START_HEAD_GUARD_SECONDS,
-        end_tail_guard_seconds=CUT_END_TAIL_GUARD_SECONDS,
+        samples=samples,
     )
-    try:
-        samples = decode_cut_audio_samples(media_path)
-    except (OSError, RuntimeError, subprocess.SubprocessError):
-        return copy.deepcopy(text_ranges)
 
     aligned_ranges: list[dict[str, Any]] = []
     for item, semantic_range, limits in zip(
@@ -2779,7 +3492,7 @@ def align_cut_draft_text_ranges_to_audio(
         boundary_limits,
     ):
         snapped = snap_delete_ranges_to_samples(
-            [{"start": float(item["start"]), "end": float(item["end"])}],
+            [semantic_range],
             duration,
             samples,
             boundary_limits=[limits],
@@ -2820,13 +3533,14 @@ def build_retained_transcript(
             for item in delete_ranges
         )
 
-    for source_segment in segments:
-        source_words = source_segment.get("words") or []
-        retained_words: list[dict[str, Any]] = []
-        for word in source_words:
-            start = float(word["start"])
-            end = float(word["end"])
-            units = split_timed_text_units(str(word["text"]), start, end)
+    def map_retained_timed_items(
+        source_items: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        retained_items: list[dict[str, Any]] = []
+        for item in source_items:
+            start = float(item["start"])
+            end = float(item["end"])
+            units = split_timed_text_units(str(item["text"]), start, end)
             retained_units = [
                 unit
                 for unit in units
@@ -2839,9 +3553,14 @@ def build_retained_transcript(
                 mapped_end = timeline_after_deletions(end, timeline_ranges)
                 if mapped_end <= mapped_start:
                     continue
-                retained_words.append(
+                retained_items.append(
                     {
-                        "text": str(word["text"]),
+                        **{
+                            key: copy.deepcopy(value)
+                            for key, value in item.items()
+                            if key not in {"start", "end"}
+                        },
+                        "text": str(item["text"]),
                         "start": mapped_start,
                         "end": mapped_end,
                     }
@@ -2856,24 +3575,36 @@ def build_retained_transcript(
                 )
                 if mapped_end <= mapped_start:
                     continue
-                retained_words.append(
+                retained_items.append(
                     {
                         "text": unit["text"],
                         "start": mapped_start,
                         "end": mapped_end,
                     }
                 )
+        return retained_items
+
+    for source_segment in segments:
+        source_words = source_segment.get("words") or []
+        retained_words = map_retained_timed_items(source_words)
+        source_asr_words = source_segment.get("asrWords")
+        retained_asr_words = (
+            map_retained_timed_items(source_asr_words)
+            if isinstance(source_asr_words, list)
+            else None
+        )
 
         if retained_words:
-            retained_segments.append(
-                {
-                    "id": len(retained_segments),
-                    "start": retained_words[0]["start"],
-                    "end": retained_words[-1]["end"],
-                    "text": "".join(word["text"] for word in retained_words),
-                    "words": retained_words,
-                }
-            )
+            retained_segment = {
+                "id": len(retained_segments),
+                "start": retained_words[0]["start"],
+                "end": retained_words[-1]["end"],
+                "text": "".join(word["text"] for word in retained_words),
+                "words": retained_words,
+            }
+            if retained_asr_words is not None:
+                retained_segment["asrWords"] = retained_asr_words
+            retained_segments.append(retained_segment)
             continue
 
         if source_words:
@@ -7223,6 +7954,7 @@ def retokenize_words(
 
 def build_sentence_segments(
     words: list[dict[str, Any]],
+    asr_words: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     segments: list[dict[str, Any]] = []
     current_words: list[dict[str, Any]] = []
@@ -7248,6 +7980,38 @@ def build_sentence_segments(
         if text_without_closing_marks.endswith(("。", "！", "？", "!", "?")):
             flush_segment()
     flush_segment()
+
+    if asr_words is not None and segments:
+        for segment in segments:
+            segment["asrWords"] = []
+        for word in asr_words:
+            word_start = float(word.get("start") or 0)
+            word_end = max(word_start, float(word.get("end") or word_start))
+            midpoint = word_start + (word_end - word_start) / 2
+            target_index = next(
+                (
+                    index
+                    for index, segment in enumerate(segments)
+                    if float(segment["start"]) <= midpoint
+                    and (
+                        midpoint < float(segment["end"])
+                        or (
+                            index == len(segments) - 1
+                            and midpoint <= float(segment["end"])
+                        )
+                    )
+                ),
+                None,
+            )
+            if target_index is None:
+                target_index = min(
+                    range(len(segments)),
+                    key=lambda index: min(
+                        abs(midpoint - float(segments[index]["start"])),
+                        abs(midpoint - float(segments[index]["end"])),
+                    ),
+                )
+            segments[target_index]["asrWords"].append(copy.deepcopy(word))
     return segments
 
 
@@ -8446,7 +9210,10 @@ def transcribe_audio(
     )
     timed_words = polished_words or all_words
     segments = (
-        build_sentence_segments(retokenize_words(timed_words))
+        build_sentence_segments(
+            retokenize_words(timed_words),
+            asr_words=timed_words,
+        )
         if timed_words
         else fallback_segments
     )

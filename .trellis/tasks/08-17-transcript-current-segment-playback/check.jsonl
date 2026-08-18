@@ -1,0 +1,4 @@
+{"file":".trellis/spec/frontend/index.md","reason":"复核原生前端改动是否符合整体质量门槛。"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"检查单段播放边界、已删除文字试听、反馈和无障碍语义。"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"检查临时试听结束后是否恢复公共媒体预览和删除区间跳过行为。"}
+{"file":".trellis/spec/testing/index.md","reason":"核对自动化覆盖、浏览器验证和回归范围。"}

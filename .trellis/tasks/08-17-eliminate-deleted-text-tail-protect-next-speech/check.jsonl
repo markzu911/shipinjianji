@@ -1,0 +1,4 @@
+{"file":".trellis/spec/backend/media-and-timeline.md","reason":"验证共享声学边界不残留被删语音且不覆盖保留字符"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"验证边界单调、回退、幂等和全量测试"}
+{"file":".trellis/spec/testing/index.md","reason":"验证合成 PCM、API、生成和真实媒体证据完整"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"验证语义范围与物理范围所有权、预览和最终生成一致"}

@@ -73,6 +73,7 @@ composition.element.style.transform =
 - pointer session 在 move 中预览，在 finish 时 commit；不要每个 pointermove 都发网络请求。
 - 同一时间轴控件同时承担“点击确认”和“拖动调整”时，必须用明确的位移阈值区分两种语义；只有主体在阈值内完成的点击可以确认，手柄点击和超过阈值的拖动结束都不能确认。
 - 待确认时间轴选区打开确认弹窗后，弹窗“取消”只关闭弹窗并保留选区；删除选区应由 Delete/Backspace 或独立的取消选区动作负责，不能混用两种取消语义。
+- 手动时间轴拖拽只将范围 clamp 到媒体时长，不吸附或扩大到文字字符边界；它与文案点击删除的字符级语义相互独立，并继续使用二次确认。
 - 播放、seek、selection、drag/resize 后同步顶层和嵌入工具，但避免反馈循环。
 - 撤销/重做记录语义操作，但文字剪辑检查器不提供“操作记录”页签、历史列表或可见的撤销/重做按钮。历史栈与本地持久化属于内部能力，只通过 `Ctrl/Cmd+Z`、`Ctrl/Cmd+Shift+Z` 和 `Ctrl/Cmd+Y` 访问。
 - 全局剪辑快捷键处理器必须忽略 `input`、`textarea`、`select` 和 `contenteditable` 目标，保留浏览器原生编辑撤销；快捷键执行后仍要刷新预览、时间轴、统计和草稿保存状态。
@@ -112,7 +113,18 @@ if (document.activeElement !== positionXPercent) {
 
 每条文字展示行必须提供独立的播放按钮，按钮与删除圆圈、恢复按钮和文字编辑按钮是兄弟节点，事件委托先处理播放按钮并立即返回。播放使用行上的源时间 `data-display-start/end` 调用公共 `seekCutPreview`，然后播放原视频；它不能打开文字编辑弹窗，也不能改变 `selectedRanges`、草稿或撤销历史。纯图标按钮使用播放图标、说明性 `aria-label`/title 和至少 `44px` 点击区。
 
-已删除文字同样必须能试听。点击其播放按钮时，只在该展示行的源时间范围内临时绕过剪辑预览的“跳过已删除区间”逻辑；播放越过行末或用户执行其他 seek 后立即清除临时范围，后续播放恢复正常跳过删除内容。当前行高亮优先命中该临时范围，因此已删除行试听时也显示 `aria-current` 和“播放中”。
+已删除文字同样必须能试听。点击其播放按钮时，只在该展示行的源时间范围内临时绕过剪辑预览的“跳过已删除区间”逻辑；播放到展示行末时必须保存终点、暂停、清除临时范围，再把播放头校准到行末，避免校准产生的新 `timeupdate` 再次命中旧范围。用户执行其他 seek 时也立即清除临时范围，后续公共播放恢复正常跳过删除内容。当前行高亮优先命中该临时范围，因此已删除行试听时也显示 `aria-current` 和“播放中”。
+
+播放跟随滚动以文字面板为 scroll container，并读取当前 sticky `.cut-toolbar` 的实际位置和高度，把活动行顶部对齐到工具栏下方固定间距。锚点必须直接使用 `toolbar.getBoundingClientRect().bottom + 8`；不能用 `panelRect.top + toolbarHeight` 推算，因为面板 padding、边框或 sticky 偏移会让活动行被工具栏遮挡。目标 `scrollTop` 必须 clamp 到 `0..scrollHeight-clientHeight`：中段行保持顶部锚点，接近尾部时面板停在最大滚动量，活动行随剩余内容自然下移。同一 `data-display-key` 只调度一次滚动；`prefers-reduced-motion: reduce` 使用即时滚动，其他情况可使用平滑滚动。
+
+```javascript
+const anchorTop = (toolbarRect?.bottom ?? panelRect.top) + 8;
+const targetScrollTop = clamp(
+  panel.scrollTop + itemRect.top - anchorTop,
+  0,
+  panel.scrollHeight - panel.clientHeight,
+);
+```
 
 ```javascript
 function previewTextSegment(item) {
@@ -136,9 +148,20 @@ if (
 ) {
   return null;
 }
+
+// 到达当前展示行末时结束单段试听，并恢复公共播放语义。
+if (
+  transcriptPreviewRange &&
+  current >= transcriptPreviewRange.end - SPEECH_BOUNDARY_EPSILON
+) {
+  const previewEnd = transcriptPreviewRange.end;
+  previewVideo.pause();
+  transcriptPreviewRange = null;
+  previewVideo.currentTime = previewEnd;
+}
 ```
 
-浏览器回归必须检查：文字行数与播放按钮数一致；普通和已删除文字均按源时间开始播放；点击不打开编辑弹窗、不改变删除状态；桌面与 375px 无横向溢出，375px 下时间置于文案上方并保留 `44px` 播放目标。
+浏览器回归必须检查：文字行数与播放按钮数一致；普通和已删除文字均按源时间开始播放并在各自行末自动暂停；单段结束或主动 seek 后公共播放恢复正常跳过删除内容；点击不打开编辑弹窗、不改变删除状态；活动行中段对齐 sticky 工具栏下方、尾部不被工具栏遮挡且不发生重复滚动；桌面与 375px 无横向溢出，375px 下时间置于文案上方并保留 `44px` 播放目标。
 
 时间轴点击/拖动复用的实现应保持类似以下分支，并覆盖主体、手柄和取消弹窗三条测试路径：
 

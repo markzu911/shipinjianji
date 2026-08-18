@@ -20,7 +20,10 @@
   "subtasks": [],
   "children": [
     "08-13-timeline-selection-second-confirm",
-    "08-13-ai-auto-delete"
+    "08-13-ai-auto-delete",
+    "08-17-transcript-current-segment-playback",
+    "08-17-prevent-cut-boundary-eating-kept-word",
+    "08-17-eliminate-deleted-text-tail-protect-next-speech"
   ],
   "parent": null,
   "relatedFiles": [],
