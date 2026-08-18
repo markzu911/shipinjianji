@@ -68,3 +68,24 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 4: 拆分后端请求模型
+
+**Date**: 2026-08-18
+**Task**: 拆分后端请求模型
+**Branch**: `develop`
+
+### Summary
+
+将 server/app.py 中 29 个 Pydantic 模型迁移到 server/schemas.py，保留旧导入路径和 OpenAPI 全量兼容，完整回归 177 passed。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `c0a890e` | (see git log) |
+
+### Status
+
+[OK] **Completed**
