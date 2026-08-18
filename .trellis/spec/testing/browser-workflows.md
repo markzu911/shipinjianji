@@ -93,3 +93,83 @@ with page.expect_response(compose_url) as response_info:
     generate_button.click()
 assert response_info.value.status == 202
 ```
+
+## Scenario：B1 单页统一媒体、预览与时间轴
+
+### 1. Scope / Trigger
+
+修改 `EditorProjectStore.selectEditorFrame`、MediaController、PreviewCompositor、TimelineController、art/pip 语义消息或 compose 映射时，除 Node/静态测试外必须运行本场景。测试必须从用户可见的顶层编辑器操作，不得把 iframe 私有 DOM 或 payload 当作正确结果。
+
+### 2. Signatures
+
+```javascript
+window.EditorSuite.projectSnapshot() -> snapshot
+window.EditorProjectStore.selectEditorFrame(snapshot) -> frame
+
+// Public DOM observability
+#cutPreviewVideo[data-project-revision][data-timing-revision]
+#editorSuitePreviewOverlay[data-project-revision][data-timing-revision]
+#editorSuiteTimelineLayer[data-project-revision][data-timing-revision]
+```
+
+实际 selector 以页面当前 DOM id 为准，但必须同时定位唯一公共视频、公共 overlay 根和公共时间轴根，并比较三者 revision。
+
+### 3. Contracts
+
+- 在非零播放时间分别覆盖 paused/playing：依次切换 cut/art/pip、修改文案和保存版本，断言顶层 document、video node、`src/currentSrc`、`currentTime` 和播放状态按操作语义保持，并监控期间没有 `load()`。
+- 通过公共预览和公共时间轴执行选择、拖动、两端 resize、键盘微调、pointercancel、undo/redo；不能直接调用 Store action 代替关键用户交互。
+- pointercancel 前后 revision/timingRevision/history 与权威范围一致；pointerup 只增加一个 project revision，时间变化只增加一个 timingRevision。
+- 在真实 iframe 发送迟到 revision 和等价回声，断言迟到状态被拒绝、等价回声/ACK 为 no-op、inactive 工具不改变全局 selection。
+- 拦截真实 compose 请求，比较请求体与同一时刻原子 frame；cut ranges、art overlays、pip overlays 及 source 字段必须相同，且三个公共 DOM 根 revision 等于 frame revision。
+- 375px 下只能有一个可交互公共时间轴，不横向溢出；art/pip iframe identity 和独立页面 URL 保持兼容。
+
+### 4. Validation & Error Matrix
+
+| 观察结果 | 测试结果 |
+| --- | --- |
+| 保存/切换触发 `src` setter 或 `load()` | 失败并报告触发操作、调用计数和媒体状态 |
+| 三个公共 DOM revision 不一致 | 失败并输出 Store/frame/DOM revision |
+| pointercancel 增加 revision/history 或残留临时范围 | 失败 |
+| pointerup 增加超过一个 revision 或 echo 再增加 revision | 失败 |
+| compose 字段与 frame 不一致 | 失败并输出字段级差异 |
+| 375px 出现第二个可交互时间轴或 `scrollWidth > clientWidth` | 失败 |
+| 浏览器/页面错误或非本地请求 | 按基础场景失败，不得降级为 xfail |
+
+### 5. Good / Base / Bad Cases
+
+- Good：art clip 拖动后 Store 从 revision 20 到 21，child 应用 `set-range` 后 `commit`，回声/ACK 仍为 21；preview、timeline 和 compose 都读取 21 的相同范围。
+- Base：pointercancel 后视觉范围恢复，revision/history 不变；随后正常拖动仍能提交一次且 undo/redo 可逆。
+- Bad：只比较最终像素位置、不核对 revision/请求体，或通过固定等待猜测 iframe 已同步；这种测试不能发现双提交和混合快照。
+
+### 6. Tests Required
+
+- `test_tool_switch_keeps_selection_preview_and_playback_position`：覆盖页面/video/iframe identity、非零时间、paused/playing、无 reload。
+- B1 原子时间轴工作流：覆盖未选 pointercancel、art drag commit、iframe 回声、undo/redo、三个公共 DOM revision 和 375px。
+- compose 工作流：用 `expect_response` 捕获真实请求，并与调用前最新 `selectEditorFrame(projectSnapshot())` 字段比较。
+- revision floor 工作流：真实 child 连续本地编辑两次，每次单 revision，timingRevision 对非时间编辑不变，ACK 后下一次仍可提交。
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+page.locator(".timeline-segment").drag_to(target)
+page.wait_for_timeout(500)
+assert page.locator(".timeline-segment").is_visible()
+```
+
+#### Correct
+
+```python
+before = page.evaluate("window.EditorSuite.projectSnapshot().revision")
+dispatch_drag("pointerup")
+after = page.evaluate("window.EditorSuite.projectSnapshot().revision")
+assert after == before + 1
+
+frame_state = page.evaluate("""() => {
+  const snapshot = window.EditorSuite.projectSnapshot();
+  const frame = window.EditorProjectStore.selectEditorFrame(snapshot);
+  return { revision: frame.revision, composition: frame.composition };
+}""")
+assert captured_compose == frame_state["composition"]
+```

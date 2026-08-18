@@ -1,0 +1,9 @@
+{"file":".trellis/spec/guides/project-overview.md","reason":"确认原生脚本、开发运行和工作区边界。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"遵守 iframe 消息、source/edited 时间和预览/导出一致性。"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"复用 EditorTimeline、媒体和 overlay 现有所有者。"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"遵守 B0 Store、revision/ACK、播放帧热路径和页面职责契约。"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"保持媒体源、播放和 compose API 行为。"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"保持拖动、键盘、响应式和可访问交互。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"实现真实 Chromium 工作流及网络隔离。"}
+{"file":".trellis/tasks/08-18-single-page-editor-media-preview-timeline/research/b1-current-runtime.md","reason":"提供 B1 当前多运行时证据、文件锚点和迁移限制。"}
+{"file":".trellis/tasks/08-13-project-optimization-audit/research/single-page-editor-architecture.md","reason":"保持已批准的 B 阶段目标架构和迁移顺序。"}

@@ -1,0 +1,7 @@
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"检查 Store、iframe、媒体时间和 compose 全链路。"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"检查唯一 authority、revision/ACK、帧时钟和兼容桥。"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"检查 src/load、播放生命周期和 API payload 不变。"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"检查 pointer/keyboard/cancel/响应式和无障碍。"}
+{"file":".trellis/spec/testing/index.md","reason":"执行前端、Node、浏览器和完整应用质量门槛。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"检查真实浏览器隔离、诊断和核心工作流。"}
+{"file":".trellis/tasks/08-18-single-page-editor-media-preview-timeline/research/b1-current-runtime.md","reason":"核对现状风险、已知副本和明确不迁移范围。"}

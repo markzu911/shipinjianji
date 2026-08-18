@@ -261,6 +261,87 @@ return Boolean(
 
 静态测试必须断言能力检测不包含已移除 selector，并锁定三个页面的 `editor-suite.js` 资源版本。浏览器回归必须从文字剪辑依次点击 art、pip、cut，检查 `document.title` 不变、URL 参数、激活 panel、公共预览可见以及 375px 无横向溢出。
 
+### 单页编辑器原子 Frame 与统一运行时契约
+
+#### 1. Scope / Trigger
+
+修改顶层基础视频、播放帧时钟、公共艺术字/画中画预览、公共效果时间轴、compose 派生或 iframe 时间范围同步时，必须遵守本契约。`EditorProjectStore` 是项目语义状态的唯一权威；顶层 view/controller 和内嵌工具只能消费同一个已选出的 editor frame 或发送语义 command，不能建立第二套项目状态。
+
+#### 2. Signatures
+
+```javascript
+selectEditorFrame(snapshot) -> {
+  revision,
+  timingRevision,
+  media: { jobId, sourceUrl, sourceDuration, cutRanges },
+  preview: { art, pip },
+  timeline,
+  composition,
+}
+
+EditorMedia.createController(video).applyFrame(frame) -> boolean
+EditorPreview.createCompositor(options).render(frame) -> boolean
+EditorTimelineController.createController(options).render(frame) -> timelineDocument
+```
+
+顶层 Store subscriber 必须先执行一次 `selectEditorFrame(snapshot)`，再把同一对象传给三个消费者。compose 点击可以从当时最新 snapshot 重新选择一次原子 frame，但不得分别读取 preview、timeline 或 iframe 私有缓存拼装请求。
+
+#### 3. Contracts
+
+- 页面只创建一个绑定 `#cutPreviewVideo` 的 `MediaController`；它唯一拥有基础视频 `src/load()`、source/edited 时间转换和播放帧时钟。普通 revision、保存、工具切换和 ACK 只调用 `applyFrame` 的同源 no-op 路径，不得替换媒体节点或重新加载。
+- `PreviewCompositor`、`TimelineController` 和 compose 只消费同一 frame 的 `preview`、`timeline`、`composition`；三个公共 DOM 根必须暴露一致的 `data-project-revision` 和 `data-timing-revision`。
+- source mutation 只允许新 job 首次加载、显式清空或显式选择另一媒体。`setCutRanges()` 只更新时间映射，不修改 `src/currentTime/playback`。
+- 时间轴 `pointermove` 只更新 controller 内的临时 document；`pointerup` 从当前权威 `frame.timeline` 生成并提交一次语义事务；`pointercancel` 丢弃临时 document，不增加 revision/history，未选 clip 的 cancel 也不得为了 selection 单独提交。
+- art/pip range 写回先向子页发送 `set-range`，再发送 `commit`；子页的等价语义回声必须归一化为 Store no-op，ACK 不得形成第二次 revision。非当前工具的 timeline projection 不得抢占全局 selection。
+- `asrWords`、iframe 的 `overlayHtml`/`timelineHtml`/`generationPayload` 和 DOM 均不是公共预览、时间轴或 compose 的权威输入。PiP 素材通过 Store asset registry 查找；完整 UI 模型由 selector 显式裁剪为公开 compose DTO。
+- 同一媒体帧只触发一次 compositor 时间同步；热路径不得重新运行 selector、重建整条时间轴、全量查询 DOM 或建立额外 rAF/rVFC 循环。
+
+#### 4. Validation & Error Matrix
+
+| 条件 | 处理 |
+| --- | --- |
+| frame 缺少 `media` | `MediaController.applyFrame` 返回 `false`，不改媒体源 |
+| `jobId + sourceUrl` 与当前 source key 相同 | 更新 revision/时间映射；不写 `src`、不调用 `load()` |
+| 新 job 或显式 source change | 写入新 source 并只加载一次；TimelineController 清空 pointer/history |
+| pointerup 前 Store 收到新 frame | 临时预览仍非权威；提交时以最新 `frame.timeline` 为基线 |
+| `pointercancel` | 恢复权威 frame；revision、timingRevision、history 不变 |
+| iframe 等价回声或 ACK | no-op；不得重复提交、改 selection 或增加 revision |
+| 非当前工具投影携带 selection | 接收其语义轨道，但保留当前全局 selection |
+| PiP asset 不存在或尚未完成 | 跳过该预览媒体并保留语义 layer；禁止回退解析 HTML/job-state |
+
+#### 5. Good / Base / Bad Cases
+
+- Good：revision 18 的 frame 同时渲染 preview/timeline 并产生 compose；art 拖动在 pointerup 提交为 revision 19，iframe 回声/ACK 保持 19，三个 DOM 根和 compose 都显示 19。
+- Base：重复切换 cut/art/pip 或保存版本时 frame revision 可以变化，但 `#cutPreviewVideo` 节点、source key、currentTime 和播放状态保持，`load()` 计数不变。
+- Bad：subscriber 分别调用多个 selector，时间轴在 pointermove 直接 dispatch，或父页从 `generationPayload`/HTML 重建公共状态；这些做法会产生混合 revision、双历史或预览与导出漂移。
+
+#### 6. Tests Required
+
+- Node MediaController：同源 no-op、显式 clear/change、source/edited 映射、rVFC/RAF/timeupdate 降级、重复 play 单 pending callback，以及迟到 callback generation guard。
+- Node Store/selector：一次 snapshot 派生同 revision 的 preview/timeline/composition，稳定 art/pip id、asset registry、显式 compose DTO、跨 kind 轨道顺序、inactive projection selection 所有权和等价回声 no-op。
+- Node TimelineController：move/start/end、键盘微调、pointercancel 回滚、单次 commit、跨轨道 undo/redo、redo 分支截断、job change 清空 history。
+- 静态契约：顶层只创建一个 MediaController/TimelineController，不消费 `overlayHtml`、`timelineHtml`、`generationPayload`，脚本顺序和 no-cache 资源完整。
+- 真实浏览器：暂停和播放状态下切换/保存时媒体 identity 不变；pointercancel 无 revision，pointerup 单 revision；iframe 回声 no-op；preview/timeline/compose revision 相同；375px 无重复交互轨道或横向溢出。
+
+#### 7. Wrong vs Correct
+
+```javascript
+// Wrong: independently derive consumers and commit transient pointer state.
+preview.render(selectPreviewLayers(store.getState()));
+timeline.render(selectTimelineDocument(store.getState()));
+compose(selectCompositionRequest(store.getState()));
+store.dispatch(pointerMoveAction);
+
+// Correct: select one immutable frame and keep pointer preview local.
+const frame = EditorProjectStore.selectEditorFrame(snapshot);
+mediaController.applyFrame(frame);
+previewCompositor.render(frame);
+timelineController.render(frame);
+
+// On pointerup, the controller submits one transaction based on frame.timeline.
+onCommit(transaction);
+```
+
 ## 禁止事项
 
 - 不引入框架或构建系统来完成局部修改。
