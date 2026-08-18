@@ -2,116 +2,122 @@
 
 ## 1. 审计结论
 
-项目需要重构，但不需要重写。当前功能、测试速度和最近三次独立拆分说明系统仍具备良好的渐进演进能力；真正需要处理的是权威状态不持久、跨 iframe 契约包含 DOM/私有载荷，以及单文件同时拥有过多高风险职责。
+项目当前功能覆盖已经较完整，133 个测试均通过，因此不建议重写技术栈。主要风险来自状态和职责分散，而不是缺少功能。
 
-“文件很大”是维护成本信号，不是首要故障。优先级必须由用户成果是否可能丢失、预览与导出是否可能漂移、以及现有测试能否捕获回归决定。
+### 证据摘要
 
-### 当前证据
+| 证据 | 影响 |
+| --- | --- |
+| `server/app.py:290-292` 以 `JOBS`、`JOB_FILES` 进程内字典保存任务主体 | 服务重启后无法完整恢复编辑任务 |
+| `server/app.py:9735-9739` 等大量接口明确返回“任务不存在或服务已重启” | 用户刷新或重启服务后可能失去继续编辑上下文 |
+| `server/app.py:636` 仅剪辑草稿独立原子持久化 | 艺术字、画中画、当前选择和生成请求没有同等级持久化契约 |
+| `web/editor-suite.js:356-364` 从子页面 `generationPayload` 拼装最终生成载荷 | 顶层不是所有编辑状态的唯一所有者 |
+| `web/art-text.js:2893`、`web/picture-in-picture.js:1168` 各自发布图层快照 | 刷新、异步回填或消息顺序变化容易覆盖新状态 |
+| `web/art-text.js:2880`、`web/picture-in-picture.js:1155` 发布时间轴 HTML，顶层在 `web/editor-suite.js:899-920` 再解析 | DOM 被当作数据契约，难以验证且容易漂移 |
+| `tests/test_app.py:678` 起存在大量源码字符串断言 | 能证明代码文本存在，不能证明真实页面交互和状态回放正确 |
+| `tests/test_app.py:4914` 已覆盖统一合成后端 | 后端合成基线较好，缺口主要在浏览器工作流和重启恢复 |
+| `server/app.py` 约 10,302 行，`web/styles.css` 约 12,181 行 | 改动影响面难判断，局部修复容易触发跨功能回归 |
+| `data/jobs` 当前约 0.452 GB，历史约 0.081 GB | 媒体资源需要明确的生命周期、空间提示和恢复策略 |
 
-| 维度 | 当前证据 | 判断 |
-| --- | --- | --- |
-| 自动化基线 | 完整测试 `178 passed, 1 warning in 8.18s`；所有 JS 通过语法检查 | 后端与纯逻辑重构有较好底座 |
-| 浏览器保护 | `test_frontend_contracts.py` 主要是静态契约，只有 5 组 Node 脚本；没有真实浏览器工具 | 不能先做跨 iframe 大迁移 |
-| 后端集中度 | `server/app.py` 11,734 行、60 路由、261 函数；25 个函数跨度超过 100 行 | 路由、状态、I/O 与媒体领域耦合 |
-| 持久化 | `server/app.py:329-330` 的 `JOBS`/`JOB_FILES` 是权威状态；`app_lifespan` 只清理、不恢复 | 服务重启后项目不可继续编辑 |
-| 草稿可达性 | `server/app.py:10313-10322` 读取磁盘草稿前先要求内存 job 存在 | 已落盘数据仍受进程状态阻断 |
-| 合成边界 | `create_preview_composition` 同时读取全局状态、校验时间轴、归一化 overlay、构造四类子状态并调度任务 | 适合拆成用例服务与路由适配器 |
-| 前端状态 | 四个页面各自创建 timeline store；共 19 类 `editor-suite:*` 消息 | 同一编辑工程存在多份状态投影 |
-| DOM 契约 | `art-text.js:2917`、`picture-in-picture.js:1155` 发布 `timelineHtml`，`editor-suite.js:900-920` 再解析 | DOM 结构变化可能破坏数据流 |
-| 生成载荷 | `art-text.js:2930`、`picture-in-picture.js:1168` 发布私有载荷，顶层在 `editor-suite.js:354-364` 拼装 | 预览与导出缺少单一派生源 |
-| 存储规模 | `data/jobs` 约 3.09 GB，`data/history` 约 0.239 GB | 需要项目生命周期和空间策略 |
-
-## 2. 当前数据流与所有权
+## 2. 当前数据流
 
 ```text
 上传视频
-  -> FastAPI 写 data/jobs/<job_id>
-  -> JOBS/JOB_FILES（服务端权威，但只在内存）
-  -> ASR 结果 + cut-draft.json（局部持久化）
-  -> app.js cutTimelineStore + 页面状态
-  -> editor-suite.js 顶层 timelineStore/toolStates
-      <- art-text.js artTimelineStore + sessionStorage + HTML/payload 快照
-      <- picture-in-picture.js pipTimelineStore + sessionStorage + HTML/payload 快照
-  -> /compose 路由再次归一化并写回 JOBS 子状态
-  -> 后台 FFmpeg 分阶段生成
-  -> composition.mp4 + data/history manifest
+  -> FastAPI JOBS/JOB_FILES
+  -> 识别结果与剪辑草稿
+  -> app.js 文字剪辑状态
+  -> EditorSuite 顶层聚合
+      <- art-text iframe 图层/时间轴 HTML/生成载荷
+      <- picture-in-picture iframe 图层/时间轴 HTML/生成载荷
+  -> /compose 统一请求
+  -> FFmpeg 分阶段渲染
+  -> composition.mp4 + history manifest
 ```
 
-当前没有一个对象同时满足“跨重启可恢复、包含全部编辑轨道、可作为预览和导出的同一输入”。这就是结构性重构的核心理由。
+问题不在 `/compose` 是否统一，而在统一请求之前存在多个状态所有者，且完整项目状态没有稳定持久化。
 
 ## 3. 目标边界
 
-### 3.1 ProjectRepository 与版本化 ProjectDocument
+### 3.1 ProjectDocument 成为唯一持久化项目状态
 
-先给现有 job 字典建立仓库接口和原子 JSON 快照，保持字段形状与 API 不变；验证恢复流程后，再收敛为明确的 `ProjectDocument v1`。不要在第一步同时重新设计所有状态。
+新增版本化项目文档，最小字段包括：
 
-最小持久字段：
+- `schemaVersion`、`projectId`、`revision`、`updatedAt`
+- 源视频标识、时长和识别结果版本
+- 剪辑删除区间与文本修改
+- 艺术字轨道和每个 clip 的完整参数
+- 画中画轨道、素材引用和每个 clip 的完整参数
+- 当前选择、播放位置等可选工作区状态
+- 最近一次统一生成请求和输出历史引用
 
-- `schemaVersion`、`projectId/jobId`、`revision`、`updatedAt`；
-- 源视频相对引用、时长、转写结果和可编辑分段；
-- 剪辑草稿、艺术字轨道、画中画轨道及资源稳定 ID；
-- 最近一次生成请求、各子任务终态和历史版本引用。
+单机 MVP 推荐先使用原子 JSON 文档加 revision 并发控制，沿用现有 cut draft 的临时文件替换模式；不引入数据库和分布式队列。媒体文件仍按目录保存，项目文档只保存稳定 ID 和相对引用。
 
-运行中任务在重启后统一恢复为 `interrupted`，已完成/失败状态保持可解释；媒体继续保存在现有目录，不引入数据库。
+### 3.2 EditorProjectStore 成为前端唯一状态源
 
-### 3.2 EditorProjectStore 与结构化消息
+扩展现有 `timeline-model.js` 的 store 思路，由顶层持有剪辑、艺术字、画中画和选择状态。子页面短期可保留 iframe，但只接收 state projection 并发送语义 action，例如：
 
-复用 `timeline-model.js`，让顶层 store 逐步拥有项目轨道、选择和播放状态。iframe 暂时保留，但只交换结构化 projection 和语义 action。
+- `clip/add`
+- `clip/move`
+- `clip/resize`
+- `clip/update-style`
+- `selection/change`
+- `playback/seek`
 
-迁移顺序：
+不再把 `innerHTML` 或整份私有 generation payload 作为跨页面数据契约。预览和 `/compose` 载荷都由同一 store 派生。
 
-1. 先用已有 `timeline` 数据替换 `timelineHtml`；
-2. 再把私有 `generationPayload` 替换为由顶层 selector 派生的 compose payload；
-3. 最后统一 selection、playback 和 persistence adapter。
+### 3.3 后端按职责拆分但保持单体部署
 
-每种工具独立切换，保留旧消息适配器；不一次性替换四个 store。
+保持 FastAPI 和本地部署，不做微服务化。逐步提取：
 
-### 3.3 后端领域模块
+- `project_repository`：项目文档、revision、迁移和原子保存
+- `timeline_service`：源时间与剪后时间映射、clip 归一化
+- `composition_service`：统一渲染计划和输出状态
+- `media_service`：FFmpeg 执行、取消、超时和资源清理
+- `api/routes`：请求校验与响应映射
 
-保持 FastAPI 单体和当前部署方式。按被测试覆盖的领域逐个提取：
+迁移期旧函数保留薄适配层，每次只移动一个领域并运行现有测试。
 
-- `project_repository.py`：job/project 快照、revision、恢复和迁移；
-- `timeline_service.py`：删除区间、源时间/剪后时间和 transcript 映射；
-- `composition_service.py`：compose 用例、渲染计划和状态转换；
-- `media_service.py`：FFmpeg 进程、取消、超时和临时输出；
-- 后续再拆资源库与 API routes。
+## 4. 优先级路线
 
-`server.app` 保留兼容导入或薄适配函数；每次只迁移一个领域，不同时修改 API 和用户行为。
+### P0 可靠性底座
 
-## 4. 优先级
-
-### P0 变更安全与成果可靠性
-
-1. 建立真实浏览器行为基线：刷新恢复、文字剪辑后跨艺术字/画中画切换、统一生成与下载。
-2. 引入 ProjectRepository/ProjectDocument 的最小持久化与启动恢复，消除“磁盘有数据但 API 不可达”。
-3. 用结构化 timeline projection 替换 HTML 快照，保证预览和 compose 使用同一数据模型。
+1. 完整 ProjectDocument 持久化和服务启动恢复。
+2. 顶层 EditorProjectStore 与 action 协议，消除 HTML 快照作为状态契约。
+3. 三条真实浏览器回归：刷新恢复、跨工具编辑、统一生成与下载。
 
 ### P1 可维护性与运行质量
 
-1. 继续按 project/timeline/composition/media 拆分 `server/app.py`。
-2. 统一任务状态机、并发上限、取消和超时；避免路由直接散改 `JOBS` 嵌套字段。
-3. 增加结构化日志、磁盘空间预检、项目占用统计和安全清理入口。
-4. 将前端页面内部状态逐步收敛到 store、selectors、views 和 effects 边界。
+1. 按项目仓库、时间轴、合成、媒体和 API 逐步拆分 `server/app.py`。
+2. 按基础 tokens、编辑工作台、艺术字、画中画和响应式拆分 `styles.css` 与前端脚本。
+3. 建立本地渲染队列和并发上限，统一 queued/running/cancelled/failed/completed 状态机。
+4. 增加结构化日志：projectId、jobId、阶段、耗时、FFmpeg 返回码和可恢复建议。
+5. 增加磁盘空间预检、项目占用统计和可理解的清理界面。
 
-### P2 整洁度、体验与性能
+### P2 产品化体验
 
-1. 在有浏览器回归和稳定加载顺序后拆分 `styles.css`；不以行数为单独验收指标。
-2. 加入保存状态、失败重试、离开保护和可恢复错误反馈。
-3. 先采集长时间轴帧耗时、DOM 数与内存，再决定虚拟化、缓存和节流范围。
-4. 补齐拖动的键盘替代、焦点顺序和点击目标尺寸。
+1. 去掉首页 `MVP · 文字粗剪`，统一定位为完整视频编辑工作台。
+2. 在工作台持续显示“已保存/保存中/保存失败”，离开前处理未保存修改。
+3. 把图层、时间轴、生成错误改成包含原因和恢复动作的就地反馈。
+4. 补齐拖动操作的键盘替代、焦点顺序和不小于 44px 的点击区域。
+5. 对长时间轴缩略图和图层列表做缓存、节流和按需渲染，性能指标确认后再优化。
 
-## 5. 明确不做
+## 5. 兼容与迁移
 
-- 不更换前端框架或引入构建系统来掩盖状态边界问题。
-- 不拆微服务，不引入云数据库、分布式队列或多人协作模型。
-- 不先做全量目录重排、批量重命名或通用基类抽象。
-- 不把 CSS/JS 拆文件与功能改动放在同一提交。
-- 不重写已经独立且有契约测试的 `schemas.py` 和 `history_repository.py`。
+- 首次打开旧任务时，从现有 job、cut draft、art 和 picture-in-picture 字段构造 `schemaVersion: 1` 项目文档。
+- 每次迁移先备份原文档，迁移失败继续使用旧读取路径并给出可恢复错误。
+- `/compose` 保持现有 API 兼容，内部逐步改为只消费 ProjectDocument 的确定 revision。
+- 历史成品保持只读，不随项目状态迁移而重写。
 
-## 6. 兼容与回滚
+## 6. 回滚策略
 
-- 每个新仓库写入先保留旧读取路径，使用临时文件替换、revision 和最近一版备份。
-- 旧 job 首次打开时惰性生成版本化文档；迁移失败继续只读旧数据并给出明确恢复动作。
-- 前端每个工具单独 feature flag，旧 `timelineHtml`/`generationPayload` 适配器在对应行为测试通过前不删除。
-- `/compose` 的公开 API 保持兼容，内部逐步改为消费指定 project revision。
-- 每项模块提取均要求完整测试和 OpenAPI 契约不变；发生行为差异时立即回滚该单项，不连带撤销其他已验证拆分。
+- 每一阶段都通过 feature flag 或旧适配器保留原读取路径。
+- ProjectDocument 写入使用 revision 和原子替换，保存前保留最近一版备份。
+- 前端 store 迁移按剪辑、艺术字、画中画依次切换，禁止一次性替换三条链路。
+- 文件拆分只在对应领域行为测试齐全后进行，不与功能改动混在同一提交。
+
+## 7. 暂缓项
+
+- 不更换前端框架。
+- 不拆微服务。
+- 不引入云端数据库或多人协作。
+- 不在可靠性底座完成前继续扩展更多预览平台或 AI 编辑功能。
