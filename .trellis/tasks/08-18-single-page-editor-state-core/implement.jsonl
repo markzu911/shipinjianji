@@ -1,0 +1,5 @@
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"遵守原生脚本加载、顶层状态所有权、EditorTimeline 复用及 iframe 消息安全契约。"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"保证文字保存、媒体源与播放状态、API 错误处理和刷新行为符合现有媒体契约。"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"复用 EditorTimeline 和现有消息适配边界，避免建立重复状态模型。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"检查 PUT+GET、服务端 cue 文本更新、客户端状态和 compose 的跨层数据流。"}
+{"file":".trellis/tasks/08-18-single-page-editor-state-core/research/state-core-current-architecture.md","reason":"使用已确认的当前所有权、根因、最小 B0 边界、受影响文件和回滚点。"}

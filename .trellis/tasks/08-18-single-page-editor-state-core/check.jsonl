@@ -1,0 +1,5 @@
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"复核唯一 authority、脚本顺序、语义消息、origin/source 校验和禁止 HTML 持久状态。"}
+{"file":".trellis/spec/testing/index.md","reason":"执行与风险相称的单元、静态契约、浏览器及全量回归检查。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"验证真实浏览器中的 document/video/iframe identity、播放位置和 compose 请求。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"复核文字 PUT、后续 GET、revision guard、art/pip 投影及 compose 的完整数据链。"}
+{"file":".trellis/tasks/08-18-single-page-editor-state-core/research/state-core-current-architecture.md","reason":"逐项对照根因、受影响文件、必须测试的时间不变量及明确的 B0/B1 边界。"}

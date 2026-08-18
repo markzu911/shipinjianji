@@ -140,6 +140,100 @@ const mediaRanges = mergeCutRanges(
 - 发送可序列化数据，不发送 DOM 节点、函数或整份 `innerHTML`。
 - 新增跨页状态前优先扩展语义 action/state projection，不增加私有 generation payload 副本。
 
+### 顶层项目 Store 兼容桥契约
+
+#### 1. Scope / Trigger
+
+顶层文字剪辑页启用 `EditorProjectStore`，同时仍用 art/pip iframe 作为临时编辑器时，所有项目状态跨页消息都适用本契约。独立 art/pip 页面和 `window.__EDITOR_PROJECT_STORE_ENABLED__ === false` 的 legacy authority 路径保留旧消息兼容，但不能与 Store authority 同时写项目状态或 compose。
+
+#### 2. Signatures
+
+Store effect 与选择器签名：
+
+```javascript
+store.beginEffect(scope) -> { scope, requestId, baseRevision, baseTimingRevision, jobId }
+store.applyEffect(token, action) -> { accepted, revision, timingRevision }
+selectCompositionRequest(snapshot) -> {
+  target, ranges, artOverlays, artSource,
+  pictureInPictureOverlays, pictureInPictureSource, historyName
+}
+```
+
+版本化 iframe 消息至少包含：
+
+```javascript
+// parent -> child
+{ type: "editor-suite:cut-draft", revision, timingRevision, changeKind, ...cut }
+{ type: "editor-suite:transcript-text", kind, transcript, art,
+  revision, timingRevision, changeKind: "transcript-text" }
+{ type: "editor-suite:project-ack", kind,
+  revision, timingRevision, changeKind: "tool-state-ack" }
+
+// child -> parent
+{ type: "editor-suite:tool-state", kind, revision, timingRevision,
+  changeKind, generationPayload, timeline, overlayHtml, timelineHtml }
+{ type: "editor-suite:job-state", kind, revision, timingRevision, changeKind, job }
+```
+
+#### 3. Contracts
+
+- 父页发送 cut/text/ack 前，必须先用消息 `revision` 抬高该 iframe 的接收下限；Store authority 只接受 `message.revision >= floor` 的 `tool-state`/`job-state`。
+- 子页本地状态被 Store 接受后，父页必须发送 `project-ack`。ACK 只推进子页 `lastAppliedRevision`，不得渲染、改时或再次发布 `tool-state`；后续本地编辑基于新 revision 回传。
+- `tool-state` 的 HTML 字段只进入 legacy mirror cache；Store 只接收规范化 `source`、`overlays` 和 timeline 投影，compose 只从一个 Store snapshot 派生。
+- Store authority 收到 child `job-state` 时只更新 legacy UI/status mirror，不得 hydrate Store，也不得广播给旧 cut job-state listener。完整 job 回流不能成为第二条项目状态写路径。
+- `changeKind: "transcript-text"` 只改文字。向子页投影时优先使用 `project.cut.transcript`，不存在时才回退 `project.transcript`，避免 source/edited 时间坐标漂移。
+- Art 只更新 transcript cue 文本与文案列表；PiP 只更新 transcript/item 标签。两者复用现有 timeline snapshot，不调用 timeline rebuild、retime 或 segment rematch，不写 overlay/item 时间字段。
+- 所有父消息继续校验精确 iframe `contentWindow`，所有子消息继续校验 `event.origin === location.origin` 且 `event.source === window.parent`。
+
+#### 4. Validation & Error Matrix
+
+| 条件 | 处理 |
+| --- | --- |
+| Store 模式消息缺少有效 `revision` | 拒绝，不得降级成 legacy 写入 |
+| child `revision < iframe floor` | 拒绝，Store、mirror 和 compose 都不变 |
+| child `revision >= floor` 且来源正确 | 规范化语义字段后 dispatch；成功后回 ACK |
+| origin 或 `contentWindow` 不匹配 | 静默拒绝，不更新任何状态 |
+| text effect 的 jobId 不同或 timing revision 已变化 | `accepted: false`；以当前 timing revision 重新读取文字投影 |
+| `transcript-text` 缺少剪后 transcript | 回退原始 transcript；不得修改现有时间字段 |
+| legacy feature flag 关闭 Store | 允许无 revision 旧消息，但不得同时运行 guarded Store action |
+
+#### 5. Good / Base / Bad Cases
+
+- Good：父页发 revision 12 的 text projection，先把 art floor 设为 12；迟到 revision 11 的 `tool-state` 被拒绝，art 回传 revision 12 后 Store dispatch 并 ACK 13，下一次本地样式编辑继续用 13 提交。
+- Base：iframe 尚未创建时不发送投影；frame load 后发送当前 Store cut snapshot，子页以当前 revision 建立基线。
+- Bad：只在收到 child message 时记录 revision，或把 child `job-state` 整体 hydrate 到 Store；前者允许迟到状态覆盖，后者恢复双 authority。
+
+#### 6. Tests Required
+
+- Node：不可变快照、revision/timingRevision 矩阵、同 scope 迟到 effect、跨 job effect、timing 冲突、同 job hydrate 保留本地工具状态、单快照 compose。
+- 静态契约：脚本顺序/版本、无文字保存 reload、版本字段、origin/source 校验、ACK 不触发 render/notify、PiP 零时长路径不引用未定义参数。
+- 真实浏览器：暂停/播放状态分别编辑文字；document/video/src/currentTime/play state/iframe identity 保持；art/pip 时间与 `timingRevision` 精确不变；compose 使用新文字。
+- 真实浏览器竞态：发送低于 floor 的 `tool-state` 后 Store/compose 不变；连续两次 child 本地非时间编辑均成功，每次只增加一个 revision，`timingRevision` 不变。
+- 统一生成：PiP UI 显示的剪后时间与 compose payload 相同，禁止 source-time transcript 覆盖 edited-time projection。
+
+#### 7. Wrong vs Correct
+
+```javascript
+// Wrong: post first and only remember revisions received from the child.
+frame.contentWindow.postMessage(message, location.origin);
+toolBridgeRevisions.set(kind, childMessage.revision);
+
+// Correct: advance the floor before post; ACK the accepted Store revision.
+advanceToolBridgeRevision(kind, message.revision);
+frame.contentWindow.postMessage(message, location.origin);
+
+const result = projectStore.dispatch(toolAction);
+if (result.accepted) {
+  postProjectProjection(kind, {
+    type: "editor-suite:project-ack",
+    kind,
+    revision: result.revision,
+    timingRevision: result.timingRevision,
+    changeKind: "tool-state-ack",
+  });
+}
+```
+
 ### 内嵌工具能力检测契约
 
 文字剪辑结果页是艺术字和画中画的顶层工作台。`supportsInlineWorkspace()` 只能依赖完成切换所必需且稳定存在的节点：

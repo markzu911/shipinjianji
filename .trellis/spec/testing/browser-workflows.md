@@ -60,6 +60,7 @@ seeded_editor_job(sample_video) -> SeededEditorJob
 - 刷新恢复：从可见删除按钮执行操作，等待“剪辑草稿已保存”，刷新后核对 UI 与 cut draft JSON 的文字范围和时间映射。
 - 工具切换：在文字/艺术字/画中画之间切换，核对页面未导航、选中项、公共预览图层和基础视频时间保持。
 - 统一生成：通过 `expect_response` 等待实际 compose 响应，断言 cut ranges、art overlays、pip overlays 及来源字段来自当前 UI。
+- Store/iframe revision：从真实 iframe 发送低于父页接收下限的 `tool-state`，确认 Store 与 compose 不变；随后连续执行两次子页本地非时间编辑，确认每次只增加一个 revision、ACK 后下一次仍可提交且 `timingRevision` 不变。
 - 重启恢复：先访问 job API；只在精确已知 404 时 xfail，否则继续验证同一 URL 可编辑。
 - 清理：每次运行后浏览器 context、Uvicorn 线程、socket 和临时媒体全部释放；连续运行两次结果一致。
 
