@@ -110,3 +110,24 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 6: 拆分历史版本仓库
+
+**Date**: 2026-08-18
+**Task**: 拆分历史版本仓库
+**Branch**: `develop`
+
+### Summary
+
+将历史版本持久化从 server.app 提取为独立 HistoryRepository，保留 14 个动态配置兼容入口；新增聚焦测试并通过 178 项完整回归与 OpenAPI 基线检查。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ca0dded` | (see git log) |
+
+### Status
+
+[OK] **Completed**

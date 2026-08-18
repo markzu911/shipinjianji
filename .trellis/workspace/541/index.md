@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 5
+- **Total Sessions**: 6
 - **Last Active**: 2026-08-18
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~112 | Active |
+| `journal-1.md` | ~133 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 6 | 2026-08-18 | 拆分历史版本仓库 | `ca0dded` | `develop` |
 | 5 | 2026-08-18 | 拆分并修复文案播放跟随动画 | `f1f943c` | `develop` |
 | 4 | 2026-08-18 | 拆分后端请求模型 | `c0a890e` | `develop` |
 | 3 | 2026-08-18 | 拆分应用测试边界 | `10dea5b` | `develop` |
