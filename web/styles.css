@@ -11765,6 +11765,24 @@ input[type="range"] {
   pointer-events: none;
 }
 
+.editor-suite-preview-overlay > .editor-preview-art-layer,
+.editor-suite-preview-overlay > .editor-preview-pip-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.editor-suite-preview-overlay .preview-overlay,
+.editor-suite-preview-overlay .pip-preview-item {
+  pointer-events: auto;
+}
+
+.editor-suite-preview-overlay .pip-preview-item video {
+  pointer-events: none;
+}
+
 .editor-suite-preview-canvas {
   position: absolute;
   top: 0;
@@ -11979,7 +11997,8 @@ input[type="range"] {
 }
 
 .editor-suite-timeline-layer .frame-timeline-segment,
-.editor-suite-timeline-layer .pip-timeline-segment {
+.editor-suite-timeline-layer .pip-timeline-segment,
+.editor-suite-timeline-layer .cut-timeline-delete-range {
   position: absolute;
   top: 2px;
   bottom: auto;
@@ -11998,6 +12017,15 @@ input[type="range"] {
   font-weight: 700;
   line-height: 11px;
   pointer-events: none;
+}
+
+.editor-suite-timeline-layer [data-timeline-clip-id] {
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.editor-suite-timeline-layer [data-timeline-resize] {
+  pointer-events: auto;
 }
 
 .editor-suite-timeline-layer

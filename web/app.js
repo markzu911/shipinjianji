@@ -226,10 +226,11 @@ const selectedNoSpeechRanges = new Map();
 let cutHistoryBaseline = null;
 let cutHistoryEntries = [];
 let cutHistoryIndex = 0;
-const cutTimelineStore = window.EditorTimeline.createStore(
-  { duration: 0, tracks: [] },
-  { onCommit: () => scheduleCutDraftSave() },
-);
+let cutTimelineDocument = window.EditorTimeline.normalizeDocument({
+  duration: 0,
+  tracks: [],
+});
+let suppressEditorSuiteCutSync = false;
 let cutHistoryLastState = null;
 let cutHistoryPendingMeta = null;
 let cutHistoryReplaying = false;
@@ -2082,7 +2083,11 @@ function buildLiveCutDraftState() {
 }
 
 function syncEditorSuiteCutDraftState(state = buildLiveCutDraftState()) {
-  window.EditorSuite?.setCutDraft(state);
+  if (suppressEditorSuiteCutSync) return;
+  window.EditorSuite?.setCutDraft({
+    ...state,
+    timeline: syncCutTimelineModel(),
+  });
 }
 
 function acceptEditorSuiteJobState(event) {
@@ -2779,6 +2784,7 @@ function isNativeUndoTarget(target) {
 
 function handleGlobalCutHistoryShortcut(event) {
   if (
+    event.defaultPrevented ||
     (!event.ctrlKey && !event.metaKey) ||
     event.altKey ||
     isNativeUndoTarget(event.target)
@@ -3041,13 +3047,31 @@ function updateCutTimelinePlayhead(
   }
 }
 
+function cutMediaController() {
+  return window.EditorSuite?.mediaController?.() || null;
+}
+
+function pauseCutPreview() {
+  const controller = cutMediaController();
+  if (controller) controller.pause();
+  else cutPreviewVideo.pause();
+}
+
+function playCutPreview() {
+  const controller = cutMediaController();
+  return controller ? controller.play() : cutPreviewVideo.play();
+}
+
 function seekCutPreview(seconds) {
   const total = cutTimelineDuration();
   noSpeechPreviewEnd = null;
   cutSelectionPreviewEnd = null;
   transcriptPreviewRange = null;
   resetCutPlaybackCursors();
-  cutPreviewVideo.currentTime = clamp(Number(seconds) || 0, 0, total);
+  const nextTime = clamp(Number(seconds) || 0, 0, total);
+  const controller = cutMediaController();
+  if (controller) controller.seekSource(nextTime);
+  else cutPreviewVideo.currentTime = nextTime;
   updateCutTimelinePlayhead({ followTranscript: true });
 }
 
@@ -3056,7 +3080,7 @@ function previewSelectedCutRange(range) {
   const start = clamp(Number(range?.start) || 0, 0, total);
   const end = clamp(Number(range?.end) || start, start, total);
   if (total <= 0 || end <= start) return;
-  cutPreviewVideo.pause();
+  pauseCutPreview();
   seekCutPreview(Math.max(0, start - 0.6));
   cutSelectionPreviewEnd = Math.min(total, end + 0.8);
   const adjacentSilence =
@@ -3070,7 +3094,7 @@ function previewSelectedCutRange(range) {
     "neutral",
     "preview",
   );
-  cutPreviewVideo.play().catch(() => {});
+  playCutPreview()?.catch?.(() => {});
 }
 
 function previewNoSpeechSuggestion(suggestion) {
@@ -3086,7 +3110,7 @@ function previewNoSpeechSuggestion(suggestion) {
     "neutral",
     "no-speech",
   );
-  cutPreviewVideo.play().catch(() => {});
+  playCutPreview()?.catch?.(() => {});
 }
 
 function previewTextSegment(item) {
@@ -3094,7 +3118,7 @@ function previewTextSegment(item) {
   const start = clamp(Number(item?.dataset.displayStart) || 0, 0, total);
   const end = clamp(Number(item?.dataset.displayEnd) || start, start, total);
   if (total <= 0 || end <= start) return;
-  cutPreviewVideo.pause();
+  pauseCutPreview();
   seekCutPreview(start);
   transcriptPreviewRange = {
     start,
@@ -3107,7 +3131,7 @@ function previewTextSegment(item) {
     "neutral",
     "transcript",
   );
-  cutPreviewVideo.play().catch(() => {});
+  playCutPreview()?.catch?.(() => {});
 }
 
 function cutTimelineSecondsFromClientX(clientX) {
@@ -3167,10 +3191,9 @@ function cutTimelineClipId(rangeId) {
 
 function syncCutTimelineModel() {
   const total = Math.max(currentVideoDuration, cutTimelineDuration());
-  cutTimelineStore.setDuration(total, { silent: true });
-  const timeline = cutTimelineStore.replaceKind(
-    "cut",
-    [
+  cutTimelineDocument = window.EditorTimeline.normalizeDocument({
+    duration: total,
+    tracks: [
       {
         id: "cut:deletions",
         kind: "cut",
@@ -3191,19 +3214,59 @@ function syncCutTimelineModel() {
         })),
       },
     ],
-    {
-      selection:
-        selectedTimelineRangeId === null
-          ? null
-          : cutTimelineClipId(selectedTimelineRangeId),
-      silent: true,
-    },
-  );
-  window.EditorSuite?.setTimelineTracks("cut", timeline.tracks, {
-    duration: timeline.duration,
-    selection: timeline.selection?.clipId || null,
+    selection:
+      selectedTimelineRangeId === null
+        ? null
+        : { clipId: cutTimelineClipId(selectedTimelineRangeId) },
   });
-  return timeline;
+  return cutTimelineDocument;
+}
+
+function applySharedTimelineRange(transaction) {
+  const range = timelineDeleteRanges.find(
+    (item) => String(item.id) === String(transaction?.sourceId),
+  );
+  if (!range) return false;
+  const start = Math.max(0, Number(transaction.start) || 0);
+  const end = Math.max(start, Number(transaction.end) || start);
+  if (end <= start) return false;
+  const previousReplaying = cutHistoryReplaying;
+  suppressEditorSuiteCutSync = true;
+  cutHistoryReplaying = true;
+  try {
+    range.start = start;
+    range.end = end;
+    selectedTimelineRangeId = range.id;
+    updateSelectionSummary();
+  } finally {
+    cutHistoryReplaying = previousReplaying;
+    suppressEditorSuiteCutSync = false;
+  }
+  return {
+    cut: buildLiveCutDraftState(),
+    timeline: syncCutTimelineModel(),
+  };
+}
+
+function deleteSharedTimelineRange(sourceId) {
+  const previousLength = timelineDeleteRanges.length;
+  const previousReplaying = cutHistoryReplaying;
+  suppressEditorSuiteCutSync = true;
+  cutHistoryReplaying = true;
+  try {
+    timelineDeleteRanges = timelineDeleteRanges.filter(
+      (item) => String(item.id) !== String(sourceId),
+    );
+    if (timelineDeleteRanges.length === previousLength) return false;
+    selectedTimelineRangeId = null;
+    timelineRangeInProgress = false;
+    updateSelectionSummary();
+  } finally {
+    cutHistoryReplaying = previousReplaying;
+    suppressEditorSuiteCutSync = false;
+  }
+  syncEditorSuiteCutDraftState();
+  return true;
 }
 
 function renderCutTimelineRanges() {
@@ -3507,7 +3570,7 @@ function beginCutTimelineSelection(event) {
     return;
   }
   event.preventDefault();
-  cutPreviewVideo.pause();
+  pauseCutPreview();
   const anchorSeconds = cutTimelineSecondsFromClientX(event.clientX);
   const startClientX = event.clientX;
   let draftRange = null;
@@ -3553,10 +3616,22 @@ function beginCutTimelineSelection(event) {
     );
   };
 
-  const finish = () => {
+  const finish = (finishEvent) => {
     window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", finish);
     window.removeEventListener("pointercancel", finish);
+    if (finishEvent.type === "pointercancel") {
+      if (draftRange) {
+        timelineDeleteRanges = timelineDeleteRanges.filter(
+          ({ id }) => id !== draftRange.id,
+        );
+        timelineRangeInProgress = false;
+        selectedTimelineRangeId = null;
+        renderCutTimelineRanges();
+        updateCutTimelineStatus("");
+      }
+      return;
+    }
     if (!draftRange) return;
     const safeRange = alignManualRangeToTranscript({
       ...draftRange,
@@ -3603,18 +3678,22 @@ function beginTimelineRangeAdjustment(event) {
   const rangeId = Number(rangeElement.dataset.rangeId);
   const range = timelineDeleteRanges.find(({ id }) => id === rangeId);
   if (!range) return;
+  const originalRange = { start: range.start, end: range.end };
+  const previousSelectedRangeId = selectedTimelineRangeId;
   event.preventDefault();
   event.stopPropagation();
-  cutPreviewVideo.pause();
+  pauseCutPreview();
   selectedTimelineRangeId = rangeId;
   const mode = control.dataset.dragMode;
   const startClientX = event.clientX;
   let hasDragged = false;
   const total = cutTimelineDuration();
-  syncCutTimelineModel();
-  cutTimelineStore.selectClip(cutTimelineClipId(range.id), { silent: true });
+  const transientTimelineStore = window.EditorTimeline.createStore(
+    syncCutTimelineModel(),
+  );
+  transientTimelineStore.selectClip(cutTimelineClipId(range.id), { silent: true });
   const pointerSession = window.EditorTimeline.createPointerSession(
-    cutTimelineStore,
+    transientTimelineStore,
     {
       clipId: cutTimelineClipId(range.id),
       mode,
@@ -3652,6 +3731,14 @@ function beginTimelineRangeAdjustment(event) {
     window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", finish);
     window.removeEventListener("pointercancel", finish);
+    if (finishEvent.type === "pointercancel") {
+      pointerSession.finish({ commit: false });
+      Object.assign(range, originalRange);
+      selectedTimelineRangeId = previousSelectedRangeId;
+      renderCutTimelineRanges();
+      updateCutTimelineStatus("");
+      return;
+    }
     if (!hasDragged) {
       pointerSession.finish({ commit: false });
       if (
@@ -3667,7 +3754,6 @@ function beginTimelineRangeAdjustment(event) {
     if (safeRange) Object.assign(range, safeRange);
     pointerSession.finish({ commit: false });
     syncCutTimelineModel();
-    cutTimelineStore.commit("cut-range");
     stageCutHistoryOperation("调整时间轴删除区间");
     updateCutTimelineStatus(
       `已调整待确认区间 ${formatCutRange(range.start, range.end)}，再次点击选区确认删除。`,
@@ -3825,146 +3911,37 @@ function resetCutPlaybackCursors() {
   cutTimelineTextPlaybackLastTime = Number.NEGATIVE_INFINITY;
 }
 
-function createPlaybackFrameClock(video, onFrame, options = {}) {
-  const requestFrame = options.requestAnimationFrame ||
-    window.requestAnimationFrame?.bind(window);
-  const cancelFrame = options.cancelAnimationFrame ||
-    window.cancelAnimationFrame?.bind(window);
-  const hasVideoFrameCallback =
-    typeof video.requestVideoFrameCallback === "function";
-  const mode = hasVideoFrameCallback
-    ? "video-frame"
-    : typeof requestFrame === "function"
-      ? "animation-frame"
-      : "timeupdate";
-  let callbackId = null;
-  let callbackGeneration = 0;
-  let destroyed = false;
-
-  function emitFrame(metadata = {}) {
-    const mediaTime = Number(metadata.mediaTime);
-    onFrame(
-      Number.isFinite(mediaTime) ? mediaTime : Number(video.currentTime) || 0,
-      metadata,
-    );
-  }
-
-  function schedule() {
-    if (
-      destroyed ||
-      callbackId !== null ||
-      video.paused ||
-      video.ended
-    ) {
-      return false;
-    }
-    const scheduledGeneration = callbackGeneration;
-    const handleFrame = (timestamp, metadata) => {
-      handleScheduledFrame(scheduledGeneration, timestamp, metadata);
-    };
-    if (mode === "video-frame") {
-      callbackId = video.requestVideoFrameCallback(handleFrame);
-    } else if (mode === "animation-frame") {
-      callbackId = requestFrame(handleFrame);
-    }
-    return callbackId !== null;
-  }
-
-  function handleScheduledFrame(generation, _timestamp, metadata = {}) {
-    if (generation !== callbackGeneration) return;
-    callbackId = null;
-    if (destroyed || video.paused || video.ended) return;
-    emitFrame(metadata);
-    if (generation !== callbackGeneration) return;
-    schedule();
-  }
-
-  function stop({ reset = false } = {}) {
-    callbackGeneration += 1;
-    const pendingCallbackId = callbackId;
-    callbackId = null;
-    if (pendingCallbackId !== null) {
-      if (mode === "video-frame") {
-        video.cancelVideoFrameCallback?.(pendingCallbackId);
-      } else if (mode === "animation-frame") {
-        cancelFrame?.(pendingCallbackId);
-      }
-    }
-    if (reset) options.onReset?.();
-  }
-
-  function sync({ reset = false } = {}) {
-    if (destroyed) return;
-    if (reset) options.onReset?.();
-    emitFrame({ mediaTime: Number(video.currentTime) || 0, reason: "sync" });
-  }
-
-  function handlePlay() {
-    schedule();
-  }
-
-  function handlePause() {
-    stop();
-  }
-
-  function handleEnded() {
-    stop({ reset: true });
-  }
-
-  function handleEmptied() {
-    stop({ reset: true });
-  }
-
-  function handleSeeking() {
-    stop({ reset: true });
-  }
-
-  function handleSeeked() {
-    sync({ reset: true });
-    schedule();
-  }
-
-  function handleTimeupdateFallback() {
-    if (mode === "timeupdate" && !video.paused && !video.ended) emitFrame();
-  }
-
-  video.addEventListener("play", handlePlay);
-  video.addEventListener("pause", handlePause);
-  video.addEventListener("ended", handleEnded);
-  video.addEventListener("emptied", handleEmptied);
-  video.addEventListener("seeking", handleSeeking);
-  video.addEventListener("seeked", handleSeeked);
-  if (mode === "timeupdate") {
-    video.addEventListener("timeupdate", handleTimeupdateFallback);
-  }
-
-  function destroy() {
-    if (destroyed) return;
-    stop({ reset: true });
-    destroyed = true;
-    video.removeEventListener("play", handlePlay);
-    video.removeEventListener("pause", handlePause);
-    video.removeEventListener("ended", handleEnded);
-    video.removeEventListener("emptied", handleEmptied);
-    video.removeEventListener("seeking", handleSeeking);
-    video.removeEventListener("seeked", handleSeeked);
-    video.removeEventListener("timeupdate", handleTimeupdateFallback);
-  }
-
-  return { destroy, mode, schedule, stop, sync };
-}
-
 function setupCutPreviewControls() {
   let lastAudibleVolume = 1;
   const safeDuration = () => cutTimelineDuration();
   cutPlaybackFrameClock?.destroy();
-  cutPlaybackFrameClock = createPlaybackFrameClock(
-    cutPreviewVideo,
-    (mediaTime) => {
-      updateCutPlaybackVisualFrame(mediaTime, { followTranscript: true });
-    },
-    { onReset: resetCutPlaybackCursors },
-  );
+  const sharedMedia = cutMediaController();
+  if (sharedMedia) {
+    const unsubscribeFrame = sharedMedia.subscribeFrame(({ sourceTime }) => {
+      updateCutPlaybackVisualFrame(sourceTime, { followTranscript: true });
+    });
+    const unsubscribeState = sharedMedia.subscribeState(({ reason }) => {
+      if (["seeking", "seeked", "ended", "emptied"].includes(reason)) {
+        resetCutPlaybackCursors();
+      }
+    });
+    cutPlaybackFrameClock = {
+      destroy() {
+        unsubscribeFrame();
+        unsubscribeState();
+      },
+      stop({ reset = false } = {}) {
+        if (reset) resetCutPlaybackCursors();
+      },
+    };
+  } else {
+    cutPlaybackFrameClock = {
+      destroy() {},
+      stop({ reset = false } = {}) {
+        if (reset) resetCutPlaybackCursors();
+      },
+    };
+  }
   const skipSelectedRangeDuringPlayback = () => {
     if (cutPreviewVideo.paused) return null;
     const current = cutPreviewVideo.currentTime || 0;
@@ -3981,7 +3958,7 @@ function setupCutPreviewControls() {
     if (!range) return null;
     const nextTime = clamp(range.end, 0, safeDuration());
     if (nextTime <= current) return null;
-    cutPreviewVideo.currentTime = nextTime;
+    cutMediaController()?.seekSource(nextTime) ?? (cutPreviewVideo.currentTime = nextTime);
     updateCutTimelineStatus(
       `剪辑预览已跳过 ${formatCutRange(range.start, range.end)}。`,
       "success",
@@ -4002,9 +3979,9 @@ function setupCutPreviewControls() {
         transcriptPreviewRange.end - CUT_SPEECH_BOUNDARY_EPSILON
     ) {
       const previewEnd = transcriptPreviewRange.end;
-      cutPreviewVideo.pause();
+      pauseCutPreview();
       transcriptPreviewRange = null;
-      cutPreviewVideo.currentTime = previewEnd;
+      cutMediaController()?.seekSource(previewEnd) ?? (cutPreviewVideo.currentTime = previewEnd);
       current = previewEnd;
       updateCutTimelineStatus(
         "当前段落播放结束。",
@@ -4016,7 +3993,7 @@ function setupCutPreviewControls() {
       noSpeechPreviewEnd !== null &&
       current >= noSpeechPreviewEnd - CUT_TIMELINE_STEP
     ) {
-      cutPreviewVideo.pause();
+      pauseCutPreview();
       noSpeechPreviewEnd = null;
       updateCutTimelineStatus(
         "试听结束，请确认是否删除。",
@@ -4029,7 +4006,7 @@ function setupCutPreviewControls() {
         cutSelectionPreviewEnd !== null &&
         current >= cutSelectionPreviewEnd - CUT_TIMELINE_STEP
       ) {
-        cutPreviewVideo.pause();
+        pauseCutPreview();
         cutSelectionPreviewEnd = null;
         updateCutTimelineStatus(
           "左侧裁剪衔接预览结束，时间轴已自动拼接。",
@@ -4080,9 +4057,9 @@ function setupCutPreviewControls() {
   };
   const togglePlayback = () => {
     if (cutPreviewVideo.paused || cutPreviewVideo.ended) {
-      cutPreviewVideo.play().catch(() => {});
+      playCutPreview()?.catch?.(() => {});
     } else {
-      cutPreviewVideo.pause();
+      pauseCutPreview();
     }
   };
   const toggleFullscreen = async () => {
@@ -4556,9 +4533,11 @@ function resetToUpload() {
   cutError.hidden = true;
   editedVideo.removeAttribute("src");
   editedVideo.load();
-  cutPreviewVideo.pause();
-  cutPreviewVideo.removeAttribute("src");
-  cutPreviewVideo.load();
+  if (!window.EditorSuite?.clearMediaSource?.({ reason: "project-reset" })) {
+    cutPreviewVideo.pause();
+    cutPreviewVideo.removeAttribute("src");
+    cutPreviewVideo.load();
+  }
   cutFrameTimeline.hidden = true;
   cutFrameTimelineScroll.scrollLeft = 0;
   cutFrameTimelineTrack.style.removeProperty("width");
@@ -4753,9 +4732,11 @@ function renderResult(job) {
     `/art-text?job=${encodeURIComponent(currentJobId)}&source=original`;
   directPipButton.href =
     `/picture-in-picture?job=${encodeURIComponent(currentJobId)}&source=original`;
-  cutPreviewVideo.src =
-    `/api/transcriptions/${encodeURIComponent(currentJobId)}/original-video`;
-  cutPreviewVideo.load();
+  if (!cutMediaController()) {
+    cutPreviewVideo.src =
+      `/api/transcriptions/${encodeURIComponent(currentJobId)}/original-video`;
+    cutPreviewVideo.load();
+  }
 
   renderCutSegments();
   updateSelectionSummary();
@@ -5374,6 +5355,10 @@ retryButton.addEventListener("click", resetToUpload);
 restartProjectButton.addEventListener("click", confirmAndResetProject);
 document.addEventListener("keydown", handleGlobalCutHistoryShortcut);
 window.addEventListener("editor-suite:job-state", acceptEditorSuiteJobState);
+window.EditorSuite?.registerCutTimelineAdapter?.({
+  applyRange: applySharedTimelineRange,
+  deleteRange: deleteSharedTimelineRange,
+});
 setupCutPreviewControls();
 window.addEventListener("resize", scheduleCutTimelineResize);
 loadHistoryVersions();

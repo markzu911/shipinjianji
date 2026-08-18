@@ -14,6 +14,8 @@
       CUT_TIMING_CHANGED: "cutTimingChanged",
       ART_STATE_CHANGED: "artStateChanged",
       PIP_STATE_CHANGED: "pipStateChanged",
+      TIMELINE_KIND_CHANGED: "timelineKindChanged",
+      TIMELINE_CLIP_RANGE_CHANGED: "timelineClipRangeChanged",
       ACTIVE_TOOL_CHANGED: "activeToolChanged",
       SELECTION_CHANGED: "selectionChanged",
     });
@@ -66,10 +68,61 @@
       };
     }
 
-    function normalizeTool(value = {}, fallbackSource = "original") {
+    function semanticOverlayId(kind, overlay, index) {
+      if (overlay?.id !== undefined && overlay?.id !== null && overlay.id !== "") {
+        return overlay.id;
+      }
+      if (kind === "pip" && (overlay?.assetId || overlay?.imageId)) {
+        return String(overlay.assetId || overlay.imageId);
+      }
+      if (overlay?.trackId) {
+        return `${kind}:${overlay.trackId}:${timingValue(overlay.sourceStart) ?? index}`;
+      }
+      return `${kind}:overlay:${index}`;
+    }
+
+    function normalizeAssets(assets) {
+      const records = Array.isArray(assets)
+        ? assets
+        : isObject(assets)
+          ? Object.values(assets)
+          : [];
+      const byId = new Map();
+      for (const record of records) {
+        const id = String(record?.id || record?.assetId || record?.imageId || "");
+        if (!id) continue;
+        byId.set(id, {
+          ...clone(record),
+          id,
+          type: record.type === "video" || record.assetType === "video"
+            ? "video"
+            : "image",
+          assetUrl: String(record.assetUrl || record.imageUrl || ""),
+        });
+      }
+      return [...byId.values()];
+    }
+
+    function normalizeTool(
+      value = {},
+      fallbackSource = "original",
+      kind = "art",
+      fallbackAssets = [],
+    ) {
+      const overlays = (Array.isArray(value.overlays) ? value.overlays : []).map(
+        (overlay, index) => ({
+          ...clone(overlay),
+          id: semanticOverlayId(kind, overlay, index),
+        }),
+      );
       return {
         source: String(value.source || fallbackSource),
-        overlays: Array.isArray(value.overlays) ? clone(value.overlays) : [],
+        overlays,
+        assets: normalizeAssets(
+          value.assets === undefined
+            ? fallbackAssets
+            : [...normalizeAssets(fallbackAssets), ...normalizeAssets(value.assets)],
+        ),
       };
     }
 
@@ -156,10 +209,23 @@
         transcript: transcriptFromJob(normalizedJob),
         editableSegments: editableSegmentsFromJob(normalizedJob),
         cut,
-        art: normalizeTool(normalizedJob?.art || {}, "original"),
+        art: normalizeTool(normalizedJob?.art || {}, "original", "art"),
         pip: normalizeTool(
-          normalizedJob?.pictureInPicture || {},
+          {
+            ...(normalizedJob?.pictureInPicture || {}),
+            assets: [
+              ...(normalizedJob?.pictureInPictureImages || []).map((asset) => ({
+                ...asset,
+                type: "image",
+              })),
+              ...(normalizedJob?.pictureInPictureVideos || []).map((asset) => ({
+                ...asset,
+                type: "video",
+              })),
+            ],
+          },
           normalizedJob?.art?.status === "completed" ? "art" : "original",
+          "pip",
         ),
         timeline: normalizeTimeline(
           {
@@ -197,10 +263,10 @@
             ? normalizeCut(inputProject.cut)
             : baseProject.cut,
           art: inputProject.art
-            ? normalizeTool(inputProject.art, "original")
+            ? normalizeTool(inputProject.art, "original", "art")
             : baseProject.art,
           pip: inputProject.pip
-            ? normalizeTool(inputProject.pip, "original")
+            ? normalizeTool(inputProject.pip, "original", "pip")
             : baseProject.pip,
           timeline: normalizeTimeline(
             inputProject.timeline || baseProject.timeline,
@@ -270,6 +336,21 @@
         cut: cutTimingSignature(project?.cut),
         art: toolTimingSignature(project?.art),
         pip: toolTimingSignature(project?.pip),
+        timeline: (project?.timeline?.tracks || [])
+          .map((track) => ({
+            id: String(track?.id || ""),
+            kind: String(track?.kind || ""),
+            clips: (track?.clips || [])
+              .map((clip) => ({
+                id: String(clip?.id || ""),
+                start: timingValue(clip?.start),
+                end: timingValue(clip?.end),
+              }))
+              .sort((left, right) => left.id.localeCompare(right.id)),
+          }))
+          .sort((left, right) =>
+            `${left.kind}:${left.id}`.localeCompare(`${right.kind}:${right.id}`),
+          ),
       });
     }
 
@@ -375,20 +456,92 @@
       return next;
     }
 
-    function replaceTimelineKind(timeline, kind, incoming, timelineApi) {
+    function replaceTimelineKind(
+      timeline,
+      kind,
+      incoming,
+      timelineApi,
+      options = {},
+    ) {
       const existing = normalizeTimeline(timeline, timelineApi);
       const incomingDocument = normalizeTimeline(incoming || {}, timelineApi);
+      const incomingTracks = incomingDocument.tracks.filter(
+        (track) => track.kind === kind,
+      );
+      const firstExistingIndex = existing.tracks.findIndex(
+        (track) => track.kind === kind,
+      );
+      const retainedTracks = existing.tracks.filter(
+        (track) => track.kind !== kind,
+      );
+      const kindOrder = { cut: 0, art: 1, pip: 2 };
+      let insertionIndex = firstExistingIndex;
+      if (insertionIndex < 0) {
+        const rank = kindOrder[kind] ?? Number.POSITIVE_INFINITY;
+        insertionIndex = retainedTracks.findIndex(
+          (track) => (kindOrder[track.kind] ?? Number.POSITIVE_INFINITY) > rank,
+        );
+        if (insertionIndex < 0) insertionIndex = retainedTracks.length;
+      }
+      retainedTracks.splice(insertionIndex, 0, ...incomingTracks);
       return normalizeTimeline(
         {
           duration: Math.max(existing.duration, incomingDocument.duration),
-          tracks: [
-            ...existing.tracks.filter((track) => track.kind !== kind),
-            ...incomingDocument.tracks.filter((track) => track.kind === kind),
-          ],
-          selection: incomingDocument.selection || existing.selection,
+          tracks: retainedTracks,
+          selection: options.acceptIncomingSelection
+            ? incomingDocument.selection
+            : existing.selection,
         },
         timelineApi,
       );
+    }
+
+    function updateTimelineClipRange(timeline, payload, timelineApi) {
+      const store = timelineApi?.createStore?.(timeline || {});
+      const clipId = String(payload.clipId || "");
+      if (!store || !clipId) return null;
+      const clip = store.setClipRange(clipId, payload.start, payload.end, {
+        silent: true,
+      });
+      if (!clip) return null;
+      if (payload.selection !== false) store.selectClip(clipId, { silent: true });
+      return { clip, timeline: store.snapshot() };
+    }
+
+    function updateToolOverlayRange(
+      tool,
+      clip,
+      start,
+      end,
+      sourceStart,
+      sourceEnd,
+    ) {
+      let matched = false;
+      const hasSourceRange =
+        Number.isFinite(Number(sourceStart)) &&
+        Number.isFinite(Number(sourceEnd)) &&
+        Number(sourceEnd) > Number(sourceStart);
+      const overlays = tool.overlays.map((overlay) => {
+        const overlayId = String(
+          overlay.id ?? overlay.assetId ?? overlay.imageId ?? "",
+        );
+        if (
+          overlayId !== String(clip.sourceId) &&
+          overlayId !== String(clip.id).replace(/^(art|pip):/, "")
+        ) {
+          return overlay;
+        }
+        matched = true;
+        return {
+          ...overlay,
+          start,
+          end,
+          ...(hasSourceRange
+            ? { sourceStart: Number(sourceStart), sourceEnd: Number(sourceEnd) }
+            : {}),
+        };
+      });
+      return matched ? { ...tool, overlays } : tool;
     }
 
     function reduceState(state, action, timelineApi) {
@@ -432,21 +585,39 @@
         );
       } else if (action.type === ACTIONS.CUT_TIMING_CHANGED) {
         project.cut = normalizeCut(payload.cut || payload);
+        const incomingCutTimeline = payload.timeline
+          ? normalizeTimeline(payload.timeline, timelineApi)
+          : { duration: project.cut.duration, tracks: [] };
         project.timeline = replaceTimelineKind(
           project.timeline,
           "cut",
           {
-            duration: project.cut.duration,
-            tracks: cutTimelineTracks(project.cut),
+            duration: Math.max(
+              project.cut.duration,
+              Number(incomingCutTimeline.duration) || 0,
+            ),
+            tracks: [
+              ...cutTimelineTracks(project.cut),
+              ...incomingCutTimeline.tracks.filter(
+                (track) => track.kind === "cut" && track.id !== "cut:transcript",
+              ),
+            ],
+            selection: incomingCutTimeline.selection,
           },
           timelineApi,
+          { acceptIncomingSelection: ui.activeTool === "cut" },
         );
       } else if (
         action.type === ACTIONS.ART_STATE_CHANGED ||
         action.type === ACTIONS.PIP_STATE_CHANGED
       ) {
         const kind = action.type === ACTIONS.ART_STATE_CHANGED ? "art" : "pip";
-        const nextTool = normalizeTool(payload[kind] || payload, project[kind].source);
+        const nextTool = normalizeTool(
+          payload[kind] || payload,
+          project[kind].source,
+          kind,
+          project[kind].assets,
+        );
         project[kind] = nextTool;
         if (payload.timeline) {
           project.timeline = replaceTimelineKind(
@@ -454,6 +625,36 @@
             kind,
             payload.timeline,
             timelineApi,
+            { acceptIncomingSelection: ui.activeTool === kind },
+          );
+        }
+      } else if (action.type === ACTIONS.TIMELINE_KIND_CHANGED) {
+        const kind = String(payload.kind || "");
+        if (!["cut", "art", "pip"].includes(kind) || !payload.timeline) return null;
+        project.timeline = replaceTimelineKind(
+          project.timeline,
+          kind,
+          payload.timeline,
+          timelineApi,
+          { acceptIncomingSelection: ui.activeTool === kind },
+        );
+      } else if (action.type === ACTIONS.TIMELINE_CLIP_RANGE_CHANGED) {
+        const rangeUpdate = updateTimelineClipRange(
+          project.timeline,
+          payload,
+          timelineApi,
+        );
+        if (!rangeUpdate) return null;
+        project.timeline = rangeUpdate.timeline;
+        const kind = String(rangeUpdate.clip.kind || payload.kind || "");
+        if (["art", "pip"].includes(kind)) {
+          project[kind] = updateToolOverlayRange(
+            project[kind],
+            rangeUpdate.clip,
+            rangeUpdate.clip.start,
+            rangeUpdate.clip.end,
+            payload.sourceStart,
+            payload.sourceEnd,
           );
         }
       } else if (action.type === ACTIONS.ACTIVE_TOOL_CHANGED) {
@@ -600,7 +801,28 @@
         timingRevision: state.timingRevision,
         art: state.project.art,
         pip: state.project.pip,
+        selection: state.project.timeline.selection,
       });
+    }
+
+    const ART_COMPOSITION_FIELDS = [
+      "text", "font", "fontSize", "color", "strokeColor", "strokeWidth",
+      "shadow", "x", "y", "start", "end", "direction", "textAlign",
+      "charsPerLine", "letterSpacing", "lineSpacing", "artStyle",
+      "textColorMode", "secondaryColor", "animation", "characterLayout",
+      "characterTimings", "trackId", "trackType", "sourceStart", "sourceEnd",
+    ];
+    const PIP_COMPOSITION_FIELDS = [
+      "assetId", "imageId", "start", "end", "sourceStart", "sourceEnd",
+      "x", "y", "width",
+    ];
+
+    function projectFields(value, fields) {
+      const projected = {};
+      for (const field of fields) {
+        if (value?.[field] !== undefined) projected[field] = clone(value[field]);
+      }
+      return projected;
     }
 
     function selectCompositionRequest(state) {
@@ -613,11 +835,32 @@
       return clone({
         target: "all",
         ranges,
-        artOverlays: state.project.art.overlays,
+        artOverlays: state.project.art.overlays.map((overlay) =>
+          projectFields(overlay, ART_COMPOSITION_FIELDS)),
         artSource: state.project.art.source || "original",
-        pictureInPictureOverlays: state.project.pip.overlays,
+        pictureInPictureOverlays: state.project.pip.overlays.map((overlay) =>
+          projectFields(overlay, PIP_COMPOSITION_FIELDS)),
         pictureInPictureSource: state.project.pip.source || "original",
         historyName: null,
+      });
+    }
+
+    function selectEditorFrame(state, timelineApi = root.EditorTimeline) {
+      const composition = selectCompositionRequest(state);
+      return clone({
+        revision: state.revision,
+        timingRevision: state.timingRevision,
+        media: {
+          jobId: state.jobId,
+          sourceUrl: state.jobId
+            ? `/api/transcriptions/${encodeURIComponent(state.jobId)}/original-video`
+            : "",
+          sourceDuration: state.project.cut.sourceDuration,
+          cutRanges: composition.ranges,
+        },
+        preview: selectPreviewLayers(state),
+        timeline: selectTimelineDocument(state, timelineApi),
+        composition,
       });
     }
 
@@ -646,6 +889,7 @@
       selectTimelineDocument,
       selectPreviewLayers,
       selectCompositionRequest,
+      selectEditorFrame,
       selectIframeProjection,
     };
   },

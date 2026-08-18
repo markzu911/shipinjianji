@@ -113,10 +113,6 @@
   const desiredToolUrls = new Map();
   let activeTool = stage;
   let refreshToken = 0;
-  let overlayResizeObserver = null;
-  let renderedPreviewState = null;
-  let renderedTimelineState = null;
-  let frameSyncRequest = 0;
   let currentJob = null;
   let previousJobId = null;
   let douyinPreviewEnabled = false;
@@ -130,7 +126,7 @@
     duration: 0,
     transcript: null,
   };
-  const timelineStore = window.EditorTimeline.createStore({
+  let legacyTimelineDocument = window.EditorTimeline.normalizeDocument({
     duration: 0,
     tracks: [],
   });
@@ -145,17 +141,40 @@
         { timeline: window.EditorTimeline },
       )
     : null;
+  const mediaController = previewVideo && window.EditorMedia
+    ? window.EditorMedia.createController(previewVideo)
+    : null;
+  let currentEditorFrame = null;
+  let cutTimelineAdapter = null;
+  const previewCompositor = previewOverlay && mediaController && window.EditorPreview
+    ? window.EditorPreview.createCompositor({
+        root: previewOverlay,
+        mediaController,
+        onSelect: selectSemanticClip,
+        onMove: commitPreviewMove,
+        onResize: commitPreviewResize,
+      })
+    : null;
+  const timelineController = timelineLayer && window.EditorTimelineController
+    ? window.EditorTimelineController.createController({
+        root: timelineLayer,
+        track: timelineTrack,
+        timeline: window.EditorTimeline,
+        mediaController,
+        onSelect: selectSemanticClip,
+        onCommit: commitTimelineRange,
+        onSeek: (seconds) => mediaController?.seekEdited(seconds),
+        onDelete: deleteSemanticClip,
+      })
+    : null;
 
   function projectSnapshot() {
     return projectStore?.getState() || null;
   }
 
   function syncProjectTimeline() {
-    if (!projectStoreEnabled) return timelineStore.snapshot();
-    const documentState = projectStore.select(
-      window.EditorProjectStore.selectTimelineDocument,
-    );
-    return timelineStore.replace(documentState, { silent: true });
+    if (!projectStoreEnabled) return legacyTimelineDocument;
+    return projectStore.select(window.EditorProjectStore.selectTimelineDocument);
   }
 
   function bridgeRevision(value) {
@@ -210,34 +229,42 @@
     );
   }
 
-  projectStore?.subscribe((next, previous, action) => {
-    syncProjectTimeline();
+  const unsubscribeProjectStore = projectStore?.subscribe((next, previous, action) => {
+    renderEditorFrame(next);
     if (action.type === window.EditorProjectStore.ACTIONS.TRANSCRIPT_TEXT_CHANGED) {
       for (const name of ["art", "pip"]) postTranscriptTextProjection(name, next);
     }
     if (next.ui.activeTool !== previous.ui.activeTool) {
       activeTool = next.ui.activeTool;
     }
-  });
+  }) || (() => {});
 
   function syncToolTimeline(kind, timeline, options = {}) {
     if (!timeline || !Array.isArray(timeline.tracks)) return;
     const duration = Math.max(
-      timelineStore.snapshot().duration,
+      legacyTimelineDocument.duration,
       Number(timeline.duration) || 0,
     );
-    timelineStore.setDuration(duration, { silent: true });
     const selection =
       options.selection !== undefined
         ? options.selection
         : kind === activeTool
           ? timeline.selection?.clipId || null
           : undefined;
-    timelineStore.replaceKind(
-      kind,
-      timeline.tracks.filter((track) => track.kind === kind),
-      { selection, silent: true },
-    );
+    legacyTimelineDocument = window.EditorTimeline.normalizeDocument({
+      ...legacyTimelineDocument,
+      duration,
+      tracks: [
+        ...legacyTimelineDocument.tracks.filter((track) => track.kind !== kind),
+        ...timeline.tracks.filter((track) => track.kind === kind),
+      ],
+      selection: selection === undefined
+        ? legacyTimelineDocument.selection
+        : selection
+          ? { clipId: String(selection) }
+          : null,
+    });
+    renderEditorFrame();
   }
 
   function supportsInlineWorkspace() {
@@ -346,7 +373,11 @@
     }
     updateDouyinBaseVideo();
     window.dispatchEvent(new Event("resize"));
-    renderMirroredPreview();
+    if (projectStoreEnabled) {
+      if (currentEditorFrame) previewCompositor?.render(currentEditorFrame);
+    } else {
+      renderMirroredPreview();
+    }
     syncMirroredPlayback();
   }
 
@@ -453,7 +484,7 @@
       : currentJob?.edit?.status === "completed"
         ? currentJob.edit.requestedRanges || currentJob.edit.ranges || []
         : [];
-    const art = toolStates.get("art")?.generationPayload || (
+    const art = toolStates.get("art") || (
       currentJob?.art?.overlays
         ? {
             source: currentJob.art.source || "original",
@@ -461,7 +492,7 @@
           }
         : { overlays: [] }
     );
-    const pictureInPicture = toolStates.get("pip")?.generationPayload || (
+    const pictureInPicture = toolStates.get("pip") || (
       currentJob?.pictureInPicture?.overlays
         ? {
             source: currentJob.pictureInPicture.source || "original",
@@ -476,12 +507,17 @@
     };
   }
 
+  function selectCurrentProjectFrame(state = projectSnapshot()) {
+    if (!projectStoreEnabled || !state) return null;
+    return window.EditorProjectStore.selectEditorFrame(
+      state,
+      window.EditorTimeline,
+    );
+  }
+
   function compositionRequest() {
-    if (projectStoreEnabled) {
-      return projectStore.select(
-        window.EditorProjectStore.selectCompositionRequest,
-      );
-    }
+    const frame = selectCurrentProjectFrame();
+    if (frame) return frame.composition;
     const composition = previewCompositionState();
     return {
       target: "all",
@@ -646,7 +682,8 @@
     if (!compositionReady()) return;
     const jobId = currentJobId();
     if (!jobId) return;
-    const request = compositionRequest();
+    const frame = selectCurrentProjectFrame();
+    const request = frame?.composition || compositionRequest();
     generateButton.disabled = true;
     generateButton.classList.add("is-busy");
     status.textContent = "正在创建当前预览合成任务…";
@@ -792,43 +829,11 @@
   }
 
   function workspaceCurrentTime() {
-    const sourceTime = Number(previewVideo?.currentTime) || 0;
-    const ranges = cutDraftState.ranges.length
-      ? cutDraftState.ranges
-      : currentJob?.edit?.status === "completed"
-        ? currentJob.edit.requestedRanges || currentJob.edit.ranges || []
-        : [];
-    let removedBefore = 0;
-    for (const range of ranges) {
-      const start = Number(range.start) || 0;
-      const end = Math.max(start, Number(range.end) || start);
-      if (sourceTime >= end) {
-        removedBefore += end - start;
-        continue;
-      }
-      if (sourceTime > start) return Math.max(0, start - removedBefore);
-      break;
-    }
-    return Math.max(0, sourceTime - removedBefore);
+    return mediaController?.currentEditedTime() || 0;
   }
 
   function workspaceSourceTime(editedTime) {
-    let sourceTime = Math.max(0, Number(editedTime) || 0);
-    let removedBefore = 0;
-    const ranges = cutDraftState.ranges.length
-      ? cutDraftState.ranges
-      : currentJob?.edit?.status === "completed"
-        ? currentJob.edit.requestedRanges || currentJob.edit.ranges || []
-        : [];
-    for (const range of ranges) {
-      const start = Number(range.start) || 0;
-      const end = Math.max(start, Number(range.end) || start);
-      const editedRangeStart = Math.max(0, start - removedBefore);
-      if (sourceTime < editedRangeStart) break;
-      sourceTime += end - start;
-      removedBefore += end - start;
-    }
-    return sourceTime;
+    return mediaController?.editedToSource(editedTime) || 0;
   }
 
   function syncFrameCutDraft(name) {
@@ -843,12 +848,12 @@
 
   function syncFrameTime(name = activeTool) {
     const entry = frameEntries.get(name);
-    if (!entry?.frame?.contentWindow || !previewVideo) return;
+    if (!entry?.frame?.contentWindow || !mediaController) return;
     entry.frame.contentWindow.postMessage(
       {
         type: "editor-suite:sync-time",
         currentTime: workspaceCurrentTime(),
-        playing: !previewVideo.paused,
+        playing: !mediaController.video().paused,
       },
       window.location.origin,
     );
@@ -908,166 +913,211 @@
 
   function syncMirroredPlayback() {
     syncDouyinBasePlayback();
-    const canvas = previewOverlay?.querySelector(".editor-suite-preview-canvas");
-    if (!canvas || !previewVideo) return;
-    const current = Number(previewVideo.currentTime) || 0;
-    const playing = !previewVideo.paused && !previewVideo.ended;
-    for (const media of canvas.querySelectorAll("video")) {
-      media.muted = true;
-      media.loop = true;
-      media.playsInline = true;
-      const start = Number(media.closest("[data-effect-start]")?.dataset.effectStart) || 0;
-      const syncMedia = () => {
-        if (!Number.isFinite(media.duration) || media.duration <= 0) return;
-        const localTime = Math.max(0, current - start) % media.duration;
-        if (Math.abs((Number(media.currentTime) || 0) - localTime) > 0.35) {
-          media.currentTime = localTime;
-        }
-        if (playing) media.play().catch(() => {});
-        else media.pause();
-      };
-      if (media.readyState >= 1) syncMedia();
-      else media.addEventListener("loadedmetadata", syncMedia, { once: true });
+  }
+
+  function fallbackEditorFrame() {
+    const composition = compositionRequest();
+    return {
+      revision: 0,
+      timingRevision: 0,
+      media: {
+        jobId: String(currentJob?.id || ""),
+        sourceUrl: currentJob?.id
+          ? `/api/transcriptions/${encodeURIComponent(currentJob.id)}/original-video`
+          : "",
+        sourceDuration: Math.max(
+          0,
+          Number(cutDraftState.sourceDuration || currentJob?.duration) || 0,
+        ),
+        cutRanges: composition.ranges,
+      },
+      preview: {
+        art: toolStates.get("art") || { source: "original", overlays: [], assets: [] },
+        pip: toolStates.get("pip") || { source: "original", overlays: [], assets: [] },
+        selection: legacyTimelineDocument.selection,
+      },
+      timeline: legacyTimelineDocument,
+      composition,
+    };
+  }
+
+  function renderEditorFrame(state = projectSnapshot()) {
+    if (!mediaController) return null;
+    const nextFrame = selectCurrentProjectFrame(state) || fallbackEditorFrame();
+    currentEditorFrame = nextFrame;
+    mediaController.applyFrame(nextFrame);
+    previewCompositor?.render(nextFrame);
+    timelineController?.render(nextFrame);
+    if (previewOverlay) {
+      previewOverlay.hidden = !(
+        nextFrame.preview.art.overlays.length ||
+        nextFrame.preview.pip.overlays.length
+      );
     }
+    syncDouyinBasePlayback();
+    return nextFrame;
   }
 
   function renderMirroredPreview() {
-    if (!previewOverlay) return;
-    const layers = ["art", "pip"]
-      .map((kind) => ({ kind, state: toolStates.get(kind) }))
-      .filter((layer) => layer.state?.overlayHtml)
-      .map(({ kind, state }) => ({
-        kind,
-        html: state.overlayHtml,
-        width: Math.max(1, Number(state.overlayWidth) || 1),
-        height: Math.max(1, Number(state.overlayHeight) || 1),
-      }));
-    if (!layers.length) {
-      if (renderedPreviewState?.signature || previewOverlay.children.length) {
-        previewOverlay.replaceChildren();
-      }
-      renderedPreviewState = { signature: "" };
-      overlayResizeObserver?.disconnect();
-      previewOverlay.hidden = true;
-      return;
-    }
-
-    const nextState = {
-      signature: JSON.stringify({ layers, douyinPreviewEnabled }),
-    };
-    if (renderedPreviewState?.signature === nextState.signature) {
-      previewOverlay.hidden = false;
-      syncMirroredPlayback();
-      return;
-    }
-
-    previewOverlay.replaceChildren();
-
-    const canvases = layers.map((layer) => {
-      const canvas = document.createElement("div");
-      canvas.className = `editor-suite-preview-canvas is-${layer.kind}`;
-      canvas.dataset.effectKind = layer.kind;
-      canvas.style.width = `${layer.width}px`;
-      canvas.style.height = `${layer.height}px`;
-      canvas.innerHTML = layer.html;
-      previewOverlay.append(canvas);
-      return { canvas, layer };
-    });
-    previewOverlay.hidden = false;
-    renderedPreviewState = nextState;
-
-    const resize = () => {
-      for (const { canvas, layer } of canvases) {
-        const fitScale = douyinPreviewEnabled ? Math.max : Math.min;
-        const scale = fitScale(
-          previewOverlay.clientWidth / layer.width,
-          previewOverlay.clientHeight / layer.height,
-        );
-        const left = (previewOverlay.clientWidth - layer.width * scale) / 2;
-        const top = (previewOverlay.clientHeight - layer.height * scale) / 2;
-        canvas.style.transform =
-          `translate(${left}px, ${top}px) scale(${scale})`;
-      }
-    };
-    resize();
-    overlayResizeObserver?.disconnect();
-    overlayResizeObserver = new ResizeObserver(resize);
-    overlayResizeObserver.observe(previewOverlay);
-    syncMirroredPlayback();
+    return renderEditorFrame();
   }
 
   function renderMirroredTimeline() {
-    if (!timelineLayer) return;
-    const timelineStates = [
-      ["art", toolStates.get("art")],
-      ["pip", toolStates.get("pip")],
-    ].filter(([, state]) => state?.timelineHtml);
-    let timelineTrackOffset = 0;
-    const timelineHtml = timelineStates.map(([kind, state]) => {
-      const container = document.createElement("div");
-      container.innerHTML = state.timelineHtml;
-      for (const segment of container.children) {
-        segment.dataset.effectKind = kind;
-        const localTrackIndex = Number(segment.dataset.timelineTrackIndex) || 0;
-        segment.dataset.timelineTrackIndex = String(
-          timelineTrackOffset + localTrackIndex,
-        );
-        segment.style.top = `${(
-          timelineTrackOffset + localTrackIndex
-        ) * 30 + 2}px`;
-      }
-      timelineTrackOffset += Math.max(1, Number(state.timelineTrackCount) || 1);
-      return container.innerHTML;
-    }).join("");
-    const showEffectTrack = Boolean(timelineHtml);
-    const nextState = {
-      kind: "shared",
-      html: showEffectTrack ? timelineHtml : "",
-      visible: showEffectTrack,
-      trackCount: showEffectTrack ? timelineTrackOffset : 0,
-    };
-    if (
-      renderedTimelineState?.kind === nextState.kind &&
-      renderedTimelineState.html === nextState.html &&
-      renderedTimelineState.visible === nextState.visible &&
-      renderedTimelineState.trackCount === nextState.trackCount
-    ) {
-      return;
-    }
-    timelineLayer.replaceChildren();
-    if (nextState.visible && nextState.html) {
-      timelineLayer.innerHTML = nextState.html;
-    }
-    timelineLayer.hidden = !nextState.visible;
-    timelineTrack?.classList.toggle("has-effect-track", nextState.visible);
-    if (timelineTrack) {
-      if (nextState.visible) {
-        const trackAreaHeight = nextState.trackCount * 30;
-        timelineTrack.style.setProperty(
-          "--editor-layer-timeline-height",
-          `${trackAreaHeight}px`,
-        );
-        timelineTrack.style.setProperty(
-          "--editor-timeline-track-height",
-          `${74 + trackAreaHeight}px`,
-        );
-        timelineLayer.style.height = `${trackAreaHeight}px`;
-      } else {
-        timelineTrack.style.removeProperty("--editor-layer-timeline-height");
-        timelineTrack.style.removeProperty("--editor-timeline-track-height");
-        timelineLayer.style.removeProperty("height");
-      }
-    }
-    renderedTimelineState = nextState;
+    return renderEditorFrame();
   }
 
-  function scheduleFrameSync() {
-    if (frameSyncRequest) return;
-    frameSyncRequest = window.requestAnimationFrame(() => {
-      frameSyncRequest = 0;
-      for (const name of frameEntries.keys()) syncFrameTime(name);
-      syncMirroredPlayback();
+  function semanticClipDetails(value = {}) {
+    const clip = value.clip || null;
+    const kind = String(value.kind || clip?.kind || value.track?.kind || "");
+    const clipId = String(value.clipId || clip?.id || "");
+    const sourceId = String(value.id || clip?.sourceId || "");
+    return { kind, clipId, sourceId, clip };
+  }
+
+  function selectSemanticClip(value = {}) {
+    const details = semanticClipDetails(value);
+    if (!details.clipId || !["cut", "art", "pip"].includes(details.kind)) {
+      return false;
+    }
+    const result = projectStore?.dispatch({
+      type: window.EditorProjectStore.ACTIONS.SELECTION_CHANGED,
+      payload: { selection: { clipId: details.clipId } },
+    }) || { accepted: true };
+    if (["art", "pip"].includes(details.kind)) {
+      openTool(details.kind, desiredToolUrls.get(details.kind));
+      acknowledgeToolProjection(details.kind);
+      postProjectProjection(details.kind, {
+        type: "editor-suite:timeline-action",
+        action: "select",
+        kind: details.kind,
+        clipId: details.clipId,
+        sourceId: details.sourceId,
+        currentTime: details.clip?.start ?? workspaceCurrentTime(),
+        revision: projectSnapshot()?.revision,
+      });
+    }
+    return result;
+  }
+
+  function commitTimelineRange(transaction) {
+    let cutProjection = null;
+    if (transaction.kind === "cut" && cutTimelineAdapter?.applyRange) {
+      cutProjection = cutTimelineAdapter.applyRange(transaction);
+      if (!cutProjection) return false;
+    }
+    const committedTransaction = transaction.kind === "art" && mediaController
+      ? {
+          ...transaction,
+          sourceStart: mediaController.editedToSource(transaction.start, "start"),
+          sourceEnd: mediaController.editedToSource(transaction.end, "end"),
+        }
+      : transaction;
+    const result = projectStore?.dispatch(
+      transaction.kind === "cut" && cutProjection
+        ? {
+            type: window.EditorProjectStore.ACTIONS.CUT_TIMING_CHANGED,
+            payload: cutProjection,
+          }
+        : {
+            type: window.EditorProjectStore.ACTIONS.TIMELINE_CLIP_RANGE_CHANGED,
+            payload: committedTransaction,
+          },
+    ) || { accepted: true };
+    if (result.accepted && ["art", "pip"].includes(transaction.kind)) {
+      acknowledgeToolProjection(transaction.kind);
+      postProjectProjection(transaction.kind, {
+        type: "editor-suite:timeline-action",
+        action: "set-range",
+        kind: transaction.kind,
+        clipId: transaction.clipId,
+        sourceId: transaction.sourceId,
+        start: transaction.start,
+        end: transaction.end,
+        currentTime: transaction.start,
+        revision: result.revision,
+      });
+      postProjectProjection(transaction.kind, {
+        type: "editor-suite:timeline-action",
+        action: "commit",
+        kind: transaction.kind,
+        clipId: transaction.clipId,
+        sourceId: transaction.sourceId,
+        start: transaction.start,
+        end: transaction.end,
+        currentTime: transaction.start,
+        revision: result.revision,
+      });
+    }
+    return result;
+  }
+
+  function deleteSemanticClip(value = {}) {
+    const details = semanticClipDetails(value);
+    if (details.kind === "cut") {
+      return cutTimelineAdapter?.deleteRange?.(details.sourceId) ?? false;
+    }
+    return false;
+  }
+
+  function commitPreviewPatch(value, patch, messageType) {
+    const kind = String(value?.kind || "");
+    const id = String(value?.id || "");
+    if (!projectStore || !["art", "pip"].includes(kind) || !id) return false;
+    const state = projectSnapshot();
+    const tool = state.project[kind];
+    const selected = tool.overlays.find(
+      (overlay) => String(overlay.id) === id,
+    );
+    if (!selected) return false;
+    const overlays = tool.overlays.map((overlay) => {
+      if (
+        kind === "art" &&
+        selected.trackType === "transcript" &&
+        selected.trackId &&
+        overlay.trackId === selected.trackId
+      ) {
+        return { ...overlay, ...patch };
+      }
+      return String(overlay.id) === id ? { ...overlay, ...patch } : overlay;
     });
+    const result = projectStore.dispatch({
+      type: kind === "art"
+        ? window.EditorProjectStore.ACTIONS.ART_STATE_CHANGED
+        : window.EditorProjectStore.ACTIONS.PIP_STATE_CHANGED,
+      payload: { ...tool, overlays },
+    });
+    if (!result.accepted) return result;
+    acknowledgeToolProjection(kind);
+    postProjectProjection(kind, {
+      type: messageType,
+      kind,
+      id,
+      ...patch,
+      revision: result.revision,
+    });
+    postProjectProjection(kind, {
+      type: "editor-suite:move-finish",
+      kind,
+      id,
+      revision: result.revision,
+    });
+    return result;
+  }
+
+  function commitPreviewMove(value) {
+    return commitPreviewPatch(
+      value,
+      { x: Number(value.x), y: Number(value.y) },
+      "editor-suite:move-effect",
+    );
+  }
+
+  function commitPreviewResize(value) {
+    return commitPreviewPatch(
+      value,
+      { width: Math.max(0.2, Number(value.width) || 0.2) },
+      "editor-suite:resize-effect",
+    );
   }
 
   function renderActiveTool() {
@@ -1089,8 +1139,10 @@
       entry.panel.setAttribute("aria-hidden", String(!selected));
       entry.panel.toggleAttribute("inert", !selected);
     }
-    renderMirroredPreview();
-    renderMirroredTimeline();
+    if (!projectStoreEnabled) {
+      renderMirroredPreview();
+      renderMirroredTimeline();
+    }
     updateActiveTool();
     syncGenerationButton();
     syncSaveButton();
@@ -1148,11 +1200,11 @@
     }
     const jobChanged = job.id !== previousJobId;
     previousJobId = job.id;
-    if (jobChanged) {
-      timelineStore.replace(
-        { duration: Number(job.duration) || 0, tracks: [] },
-        { silent: true },
-      );
+    if (jobChanged && !projectStoreEnabled) {
+      legacyTimelineDocument = window.EditorTimeline.normalizeDocument({
+        duration: Number(job.duration) || 0,
+        tracks: [],
+      });
     }
     if (jobChanged && stage === "cut") {
       // A fresh video task lands on the cut tool. Clear a stale ?tool=art
@@ -1341,7 +1393,10 @@
     const previousTimingRevision = projectSnapshot()?.timingRevision ?? -1;
     const dispatchResult = projectStore?.dispatch({
       type: window.EditorProjectStore.ACTIONS.CUT_TIMING_CHANGED,
-      payload: nextCutDraftState,
+      payload: {
+        cut: nextCutDraftState,
+        timeline: payload.timeline || null,
+      },
     });
     cutDraftState = projectStoreEnabled
       ? projectSnapshot().project.cut
@@ -1361,7 +1416,22 @@
 
   function setTimelineTracks(kind, tracks, options = {}) {
     if (projectStoreEnabled) {
-      if (["art", "pip"].includes(kind)) {
+      const timeline = {
+        duration: Math.max(0, Number(options.duration) || 0),
+        tracks: Array.isArray(tracks) ? tracks : [],
+        selection: options.selection
+          ? { clipId: String(options.selection) }
+          : null,
+      };
+      if (kind === "cut") {
+        projectStore.dispatch({
+          type: window.EditorProjectStore.ACTIONS.CUT_TIMING_CHANGED,
+          payload: {
+            cut: projectSnapshot().project.cut,
+            timeline,
+          },
+        });
+      } else if (["art", "pip"].includes(kind)) {
         const currentTool = projectSnapshot().project[kind];
         projectStore.dispatch({
           type:
@@ -1370,23 +1440,7 @@
               : window.EditorProjectStore.ACTIONS.PIP_STATE_CHANGED,
           payload: {
             ...currentTool,
-            timeline: {
-              duration: Math.max(0, Number(options.duration) || 0),
-              tracks: Array.isArray(tracks) ? tracks : [],
-              selection: options.selection
-                ? { clipId: String(options.selection) }
-                : null,
-            },
-          },
-        });
-      }
-      if (options.selection !== undefined) {
-        projectStore.dispatch({
-          type: window.EditorProjectStore.ACTIONS.SELECTION_CHANGED,
-          payload: {
-            selection: options.selection
-              ? { clipId: String(options.selection) }
-              : null,
+            timeline,
           },
         });
       }
@@ -1403,7 +1457,7 @@
       },
       { selection: options.selection || null },
     );
-    return timelineStore.snapshot();
+    return legacyTimelineDocument;
   }
 
   douyinPreviewToggle?.addEventListener("click", () => {
@@ -1501,7 +1555,7 @@
         Number.isFinite(nextTime) &&
         Math.abs(nextTime - workspaceCurrentTime()) > 0.05
       ) {
-        previewVideo.currentTime = workspaceSourceTime(nextTime);
+        mediaController?.seekEdited(nextTime);
       }
       return;
     }
@@ -1529,46 +1583,41 @@
     }
     advanceToolBridgeRevision(data.kind, messageRevision);
     const bridgeState = {
-      overlayHtml: String(data.overlayHtml || ""),
-      overlayWidth: Number(data.overlayWidth) || 1,
-      overlayHeight: Number(data.overlayHeight) || 1,
-      timelineHtml: String(data.timelineHtml || ""),
-      timelineTrackCount: Math.max(1, Number(data.timelineTrackCount) || 1),
+      source: String(data.source || projectSnapshot()?.project[data.kind]?.source || "original"),
+      overlays: Array.isArray(data.overlays) ? data.overlays : [],
+      assets: Array.isArray(data.assets) ? data.assets : [],
       timeline: data.timeline || null,
       generationDisabled: data.generationDisabled !== false,
       generationLabel: String(data.generationLabel || ""),
       generationBusy: Boolean(data.generationBusy),
       generationError: String(data.generationError || ""),
-      generationPayload:
-        data.generationPayload && typeof data.generationPayload === "object"
-          ? data.generationPayload
-          : null,
       revision: messageRevision,
       timingRevision: bridgeRevision(data.timingRevision),
       changeKind: String(data.changeKind || "tool-state"),
     };
     toolStates.set(data.kind, bridgeState);
     if (projectStoreEnabled) {
-      const semantic = bridgeState.generationPayload || {};
       projectStore.dispatch({
         type:
           data.kind === "art"
             ? window.EditorProjectStore.ACTIONS.ART_STATE_CHANGED
             : window.EditorProjectStore.ACTIONS.PIP_STATE_CHANGED,
         payload: {
-          source: semantic.source || projectSnapshot().project[data.kind].source,
-          overlays: Array.isArray(semantic.overlays) ? semantic.overlays : [],
-          timeline: data.timeline || null,
+          source: bridgeState.source,
+          overlays: bridgeState.overlays,
+          assets: bridgeState.assets,
+          timeline: bridgeState.timeline,
         },
       });
       acknowledgeToolProjection(data.kind);
-      syncProjectTimeline();
     } else {
       syncToolTimeline(data.kind, data.timeline);
     }
     syncGenerationButton();
-    renderMirroredPreview();
-    renderMirroredTimeline();
+    if (!projectStoreEnabled) {
+      renderMirroredPreview();
+      renderMirroredTimeline();
+    }
     if (data.kind === activeTool) {
       const childTime = Number(data.currentTime);
       if (
@@ -1585,30 +1634,36 @@
     if (!['art', 'pip'].includes(data.kind)) return;
     toolStates.set(data.kind, data);
     if (projectStoreEnabled) {
-      const semantic = data.generationPayload || {};
       projectStore.dispatch({
         type:
           data.kind === "art"
             ? window.EditorProjectStore.ACTIONS.ART_STATE_CHANGED
             : window.EditorProjectStore.ACTIONS.PIP_STATE_CHANGED,
         payload: {
-          source: semantic.source || projectSnapshot().project[data.kind].source,
-          overlays: Array.isArray(semantic.overlays) ? semantic.overlays : [],
+          source: data.source || projectSnapshot().project[data.kind].source,
+          overlays: Array.isArray(data.overlays) ? data.overlays : [],
+          assets: Array.isArray(data.assets) ? data.assets : [],
           timeline: data.timeline || null,
         },
       });
-      syncProjectTimeline();
     } else {
       syncToolTimeline(data.kind, data.timeline);
     }
     syncGenerationButton();
-    renderMirroredPreview();
-    renderMirroredTimeline();
+    if (!projectStoreEnabled) {
+      renderMirroredPreview();
+      renderMirroredTimeline();
+    }
   });
 
-  for (const eventName of ["timeupdate", "seeking", "loadedmetadata", "play", "pause"]) {
-    previewVideo?.addEventListener(eventName, scheduleFrameSync);
-  }
+  mediaController?.subscribeFrame(() => {
+    for (const name of frameEntries.keys()) syncFrameTime(name);
+    syncMirroredPlayback();
+  });
+  mediaController?.subscribeState(() => {
+    for (const name of frameEntries.keys()) syncFrameTime(name);
+    syncMirroredPlayback();
+  });
 
   function beginMirroredPipResize(event, target, canvas, id, direction) {
     const canvasRect = canvas?.getBoundingClientRect();
@@ -1718,7 +1773,7 @@
     window.addEventListener("pointercancel", finish, { once: true });
   }
 
-  previewOverlay?.addEventListener("pointerdown", (event) => {
+  if (!previewCompositor) previewOverlay?.addEventListener("pointerdown", (event) => {
     if (activeTool === "cut" || event.button !== 0) return;
     const target = event.target.closest("[data-overlay-id], [data-picture-id]");
     if (!target) return;
@@ -1821,7 +1876,7 @@
     window.addEventListener("pointercancel", finish, { once: true });
   });
 
-  timelineLayer?.addEventListener(
+  if (!timelineController) timelineLayer?.addEventListener(
     "pointerdown",
     (event) => {
       const unifiedSegment = event.target.closest(
@@ -1832,11 +1887,14 @@
         event.stopPropagation();
         const kind = unifiedSegment.dataset.effectKind;
         const clipId = unifiedSegment.dataset.timelineClipId;
-        const clip = timelineStore.findClip(clipId);
+        const transientTimelineStore = window.EditorTimeline.createStore(
+          syncProjectTimeline(),
+        );
+        const clip = transientTimelineStore.findClip(clipId);
         const frame = frameEntries.get(kind)?.frame;
         if (!clip || !frame?.contentWindow) return;
         openTool(kind, desiredToolUrls.get(kind));
-        timelineStore.selectClip(clipId, { silent: true });
+        transientTimelineStore.selectClip(clipId, { silent: true });
         projectStore?.dispatch({
           type: window.EditorProjectStore.ACTIONS.SELECTION_CHANGED,
           payload: { selection: { clipId } },
@@ -1848,7 +1906,7 @@
           candidate.classList.toggle("is-selected", selected);
           candidate.setAttribute("aria-pressed", String(selected));
         }
-        previewVideo.currentTime = workspaceSourceTime(clip.start);
+        mediaController?.seekEdited(clip.start);
         frame.contentWindow.postMessage(
           {
             type: "editor-suite:timeline-action",
@@ -1868,12 +1926,12 @@
           event.target.closest("[data-art-time-drag]")?.dataset.artTimeDrag ||
           "move";
         const total = Math.max(
-          timelineStore.snapshot().duration,
+          transientTimelineStore.snapshot().duration,
           Number(previewVideo.duration) || 0,
           Number(document.querySelector("#cutFrameTimelineSeek")?.max) || 0,
         );
         const pointerSession = window.EditorTimeline.createPointerSession(
-          timelineStore,
+          transientTimelineStore,
           {
             clipId,
             mode,
@@ -1909,7 +1967,7 @@
             ((nextClip.end - nextClip.start) / total) * 100,
           )}%`;
           const currentTime = mode === "end" ? nextClip.end : nextClip.start;
-          previewVideo.currentTime = workspaceSourceTime(currentTime);
+          mediaController?.seekEdited(currentTime);
           frame.contentWindow.postMessage(
             {
               type: "editor-suite:timeline-action",
@@ -1960,7 +2018,7 @@
         const pipFrame = frameEntries.get("pip")?.frame;
         if (!pipFrame?.contentWindow) return;
         openTool("pip", desiredToolUrls.get("pip"));
-        previewVideo.currentTime = workspaceSourceTime(start);
+        mediaController?.seekEdited(start);
         pipFrame.contentWindow.postMessage(
           {
             type: "editor-suite:select-pip-timeline",
@@ -2049,7 +2107,7 @@
           ((end - start) / total) * 100,
         )}%`;
         const currentTime = mode === "end" ? end : start;
-        previewVideo.currentTime = workspaceSourceTime(currentTime);
+        mediaController?.seekEdited(currentTime);
         artFrame.contentWindow.postMessage(
           {
             type: "editor-suite:adjust-art-timeline",
@@ -2098,7 +2156,7 @@
         const bounds = timelineTrack.getBoundingClientRect();
         const ratio = Math.min(1, Math.max(0, (moveEvent.clientX - bounds.left) / bounds.width));
         const total = Number(previewVideo.duration) || Number(document.querySelector("#cutFrameTimelineSeek")?.max) || 0;
-        if (total > 0) previewVideo.currentTime = ratio * total;
+        if (total > 0) mediaController?.seekEdited(ratio * total);
       };
       const finish = () => {
         window.removeEventListener("pointermove", seek, true);
@@ -2132,9 +2190,21 @@
     isDouyinPreview: () => douyinPreviewEnabled,
     setCutDraft,
     setTimelineTracks,
-    timelineSnapshot: () => timelineStore.snapshot(),
+    timelineSnapshot: () => syncProjectTimeline(),
+    mediaController: () => mediaController,
+    clearMediaSource: (options = {}) => mediaController?.clearSource(options) || false,
+    setMediaSource: (url, options = {}) => mediaController?.setSource(url, options) || false,
+    seekSource: (seconds) => mediaController?.seekSource(seconds),
+    seekEdited: (seconds) => mediaController?.seekEdited(seconds),
+    registerCutTimelineAdapter: (adapter) => {
+      cutTimelineAdapter = adapter && typeof adapter === "object" ? adapter : null;
+      return () => {
+        if (cutTimelineAdapter === adapter) cutTimelineAdapter = null;
+      };
+    },
     projectStoreEnabled: () => projectStoreEnabled,
     projectSnapshot,
+    subscribeProject: (listener) => projectStore?.subscribe(listener) || (() => {}),
     beginProjectEffect: (scope) => projectStore?.beginEffect(scope) || null,
     isCurrentProjectEffect: (token) =>
       projectStore?.isCurrentEffect(token) || false,
@@ -2165,6 +2235,14 @@
     compositionRequest: () => compositionRequest(),
     generateCurrentPreview,
   };
+  renderEditorFrame(projectSnapshot());
+  window.addEventListener("beforeunload", () => {
+    unsubscribeProjectStore();
+    previewCompositor?.destroy();
+    timelineController?.destroy();
+    mediaController?.destroy();
+    projectStore?.destroy();
+  });
   document.addEventListener("editor-suite:refresh", () => refresh());
   document.addEventListener("editor-suite:transcript-updated", (event) => {
     if (projectStoreEnabled) return;

@@ -85,7 +85,7 @@ const PIP_TIMELINE_TEXT_LINES = 2;
 const PIP_TIMELINE_TRACK_HEIGHT = 30;
 const PIP_TIMELINE_BASE_HEIGHT = 44;
 const PIP_MIN_WIDTH = 0.2;
-const PIP_MAX_WIDTH = 0.55;
+const PIP_MAX_WIDTH = Number.POSITIVE_INFINITY;
 
 const query = new URLSearchParams(window.location.search);
 const embeddedEditor = query.get("embedded") === "1";
@@ -1167,6 +1167,29 @@ function notifyEditorHost(options = {}) {
       ),
     ),
     timeline,
+    source: requestedSource,
+    overlays: pictureItems
+      .filter((item) => item.enabled && isReadyAsset(item))
+      .map((item) => ({
+        id: item.id,
+        assetId: item.id,
+        start: item.start,
+        end: item.end,
+        sourceStart: item.sourceStart ?? null,
+        sourceEnd: item.sourceEnd ?? null,
+        x: item.x,
+        y: item.y,
+        width: item.width,
+        enabled: true,
+      })),
+    assets: pictureItems.map((item) => ({
+      id: item.id,
+      type: item.type || "image",
+      assetUrl: item.assetUrl || item.imageUrl || "",
+      status: item.status || (item.type === "video" ? "queued" : "completed"),
+      text: item.text || "",
+      aspectRatio: item.aspectRatio || "",
+    })),
     generationDisabled: generatePipVideo.disabled,
     generationLabel: generatePipVideo.textContent.trim(),
     generationBusy: !outputProgress.hidden,
