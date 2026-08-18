@@ -26,7 +26,10 @@
     "08-17-eliminate-deleted-text-tail-protect-next-speech",
     "08-18-split-test-boundaries",
     "08-18-split-backend-schemas",
-    "08-18-split-history-repository"
+    "08-18-split-history-repository",
+    "08-18-refactor-transcript-follow-animation",
+    "08-18-single-page-editor-browser-baseline",
+    "08-18-single-page-editor-state-core"
   ],
   "parent": null,
   "relatedFiles": [],

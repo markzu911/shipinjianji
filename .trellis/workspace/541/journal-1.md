@@ -174,3 +174,26 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 9: 完成单页编辑器状态核心 B0
+
+**Date**: 2026-08-18
+**Task**: 完成单页编辑器状态核心 B0
+**Branch**: `develop`
+
+### Summary
+
+建立唯一 EditorProjectStore、revision guard、无刷新文字同步及 iframe 兼容桥，并通过完整浏览器和应用回归。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `fa36fa0` | (see git log) |
+| `671a712` | (see git log) |
+| `4a83df8` | (see git log) |
+
+### Status
+
+[OK] **Completed**
