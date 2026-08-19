@@ -3,9 +3,9 @@
 ## 页面职责
 
 - `web/index.html` + `app.js`：上传、转写、文字编辑、剪辑选择、历史和主工作流。
-- `web/editor-suite.js`：顶层编辑工作台、工具 iframe、统一预览、轨道协调和生成/保存。
-- `web/art-text.html/js`：艺术字工具，可独立页面运行，也可嵌入工作台。
-- `web/picture-in-picture.html/js`：画中画工具，可独立或嵌入。
+- `web/editor-suite.js`：顶层编辑工作台、Store 协调、工具切换、统一预览、轨道和生成/保存。
+- `web/editor-art-tool.js`：只挂载到 `#editorArtPanelRoot` 的艺术字 inspector，不拥有页面、视频或时间线。
+- `web/editor-pip-tool.js`：只挂载到 `#editorPipPanelRoot` 的画中画 inspector，不拥有页面、视频或时间线。
 - `web/timeline-model.js`：版本化轨道文档、clip 归一化、选择、拖动/缩放和 localStorage 草稿。
 - `web/transcript-follow-scroll.js`：文字播放跟随滚动的目标计算、真实行 reparent、列表 FLIP/WAAPI 动画、去重、中断和临时样式清理。
 - `web/ui-feedback.js`：对话框、生成进度和通用播放器反馈。
@@ -39,8 +39,8 @@
 ## 状态所有权
 
 - 轨道结构优先经 `EditorTimeline.createStore` 归一化和修改，不直接散改复制对象。
-- 顶层工作台负责跨工具选择、播放时间、源选择、统一预览和 iframe 生命周期。
-- 子工具只维护本领域编辑状态，并通过明确消息/事件投影给顶层。
+- 顶层工作台负责跨工具选择、播放时间、源选择、统一预览、公共时间线和工具生命周期。
+- 子工具只维护本领域瞬时 UI 状态，并通过注入的语义 command 读写同一个顶层 Store。
 - job 权威状态来自 API；localStorage 只用于可恢复草稿和 UI 历史，不能冒充服务端成功状态。
 
 ### 剪辑草稿判空与空白迁移契约
@@ -133,110 +133,9 @@ const mediaRanges = mergeCutRanges(
 
 具体字段、回退矩阵和跨层测试见后端规格 `media-and-timeline.md` 的“ASR 原始 word 与展示分词使用双层时间契约”。
 
-## iframe/事件契约
+## 单页工具与历史入口契约
 
-- 所有消息都有明确 `type`，父子两侧同步定义。
-- 校验同源；子页校验 `event.source === window.parent`，父页校验来源 iframe。
-- 发送可序列化数据，不发送 DOM 节点、函数或整份 `innerHTML`。
-- 新增跨页状态前优先扩展语义 action/state projection，不增加私有 generation payload 副本。
-
-### 顶层项目 Store 兼容桥契约
-
-#### 1. Scope / Trigger
-
-顶层文字剪辑页启用 `EditorProjectStore`，同时仍用 art/pip iframe 作为临时编辑器时，所有项目状态跨页消息都适用本契约。独立 art/pip 页面和 `window.__EDITOR_PROJECT_STORE_ENABLED__ === false` 的 legacy authority 路径保留旧消息兼容，但不能与 Store authority 同时写项目状态或 compose。
-
-#### 2. Signatures
-
-Store effect 与选择器签名：
-
-```javascript
-store.beginEffect(scope) -> { scope, requestId, baseRevision, baseTimingRevision, jobId }
-store.applyEffect(token, action) -> { accepted, revision, timingRevision }
-selectCompositionRequest(snapshot) -> {
-  target, ranges, artOverlays, artSource,
-  pictureInPictureOverlays, pictureInPictureSource, historyName
-}
-```
-
-版本化 iframe 消息至少包含：
-
-```javascript
-// parent -> child
-{ type: "editor-suite:cut-draft", revision, timingRevision, changeKind, ...cut }
-{ type: "editor-suite:transcript-text", kind, transcript, art,
-  revision, timingRevision, changeKind: "transcript-text" }
-{ type: "editor-suite:project-ack", kind,
-  revision, timingRevision, changeKind: "tool-state-ack" }
-
-// child -> parent
-{ type: "editor-suite:tool-state", kind, revision, timingRevision,
-  changeKind, generationPayload, timeline, overlayHtml, timelineHtml }
-{ type: "editor-suite:job-state", kind, revision, timingRevision, changeKind, job }
-```
-
-#### 3. Contracts
-
-- 父页发送 cut/text/ack 前，必须先用消息 `revision` 抬高该 iframe 的接收下限；Store authority 只接受 `message.revision >= floor` 的 `tool-state`/`job-state`。
-- 子页本地状态被 Store 接受后，父页必须发送 `project-ack`。ACK 只推进子页 `lastAppliedRevision`，不得渲染、改时或再次发布 `tool-state`；后续本地编辑基于新 revision 回传。
-- `tool-state` 的 HTML 字段只进入 legacy mirror cache；Store 只接收规范化 `source`、`overlays` 和 timeline 投影，compose 只从一个 Store snapshot 派生。
-- Store authority 收到 child `job-state` 时只更新 legacy UI/status mirror，不得 hydrate Store，也不得广播给旧 cut job-state listener。完整 job 回流不能成为第二条项目状态写路径。
-- `changeKind: "transcript-text"` 只改文字。向子页投影时优先使用 `project.cut.transcript`，不存在时才回退 `project.transcript`，避免 source/edited 时间坐标漂移。
-- Art 只更新 transcript cue 文本与文案列表；PiP 只更新 transcript/item 标签。两者复用现有 timeline snapshot，不调用 timeline rebuild、retime 或 segment rematch，不写 overlay/item 时间字段。
-- 所有父消息继续校验精确 iframe `contentWindow`，所有子消息继续校验 `event.origin === location.origin` 且 `event.source === window.parent`。
-
-#### 4. Validation & Error Matrix
-
-| 条件 | 处理 |
-| --- | --- |
-| Store 模式消息缺少有效 `revision` | 拒绝，不得降级成 legacy 写入 |
-| child `revision < iframe floor` | 拒绝，Store、mirror 和 compose 都不变 |
-| child `revision >= floor` 且来源正确 | 规范化语义字段后 dispatch；成功后回 ACK |
-| origin 或 `contentWindow` 不匹配 | 静默拒绝，不更新任何状态 |
-| text effect 的 jobId 不同或 timing revision 已变化 | `accepted: false`；以当前 timing revision 重新读取文字投影 |
-| `transcript-text` 缺少剪后 transcript | 回退原始 transcript；不得修改现有时间字段 |
-| legacy feature flag 关闭 Store | 允许无 revision 旧消息，但不得同时运行 guarded Store action |
-
-#### 5. Good / Base / Bad Cases
-
-- Good：父页发 revision 12 的 text projection，先把 art floor 设为 12；迟到 revision 11 的 `tool-state` 被拒绝，art 回传 revision 12 后 Store dispatch 并 ACK 13，下一次本地样式编辑继续用 13 提交。
-- Base：iframe 尚未创建时不发送投影；frame load 后发送当前 Store cut snapshot，子页以当前 revision 建立基线。
-- Bad：只在收到 child message 时记录 revision，或把 child `job-state` 整体 hydrate 到 Store；前者允许迟到状态覆盖，后者恢复双 authority。
-
-#### 6. Tests Required
-
-- Node：不可变快照、revision/timingRevision 矩阵、同 scope 迟到 effect、跨 job effect、timing 冲突、同 job hydrate 保留本地工具状态、单快照 compose。
-- 静态契约：脚本顺序/版本、无文字保存 reload、版本字段、origin/source 校验、ACK 不触发 render/notify、PiP 零时长路径不引用未定义参数。
-- 真实浏览器：暂停/播放状态分别编辑文字；document/video/src/currentTime/play state/iframe identity 保持；art/pip 时间与 `timingRevision` 精确不变；compose 使用新文字。
-- 真实浏览器竞态：发送低于 floor 的 `tool-state` 后 Store/compose 不变；连续两次 child 本地非时间编辑均成功，每次只增加一个 revision，`timingRevision` 不变。
-- 统一生成：PiP UI 显示的剪后时间与 compose payload 相同，禁止 source-time transcript 覆盖 edited-time projection。
-
-#### 7. Wrong vs Correct
-
-```javascript
-// Wrong: post first and only remember revisions received from the child.
-frame.contentWindow.postMessage(message, location.origin);
-toolBridgeRevisions.set(kind, childMessage.revision);
-
-// Correct: advance the floor before post; ACK the accepted Store revision.
-advanceToolBridgeRevision(kind, message.revision);
-frame.contentWindow.postMessage(message, location.origin);
-
-const result = projectStore.dispatch(toolAction);
-if (result.accepted) {
-  postProjectProjection(kind, {
-    type: "editor-suite:project-ack",
-    kind,
-    revision: result.revision,
-    timingRevision: result.timingRevision,
-    changeKind: "tool-state-ack",
-  });
-}
-```
-
-### 内嵌工具能力检测契约
-
-文字剪辑结果页是艺术字和画中画的顶层工作台。`supportsInlineWorkspace()` 只能依赖完成切换所必需且稳定存在的节点：
+文字剪辑结果页是艺术字和画中画的唯一编辑器文档。`supportsInlineWorkspace()` 只能依赖完成切换所必需且稳定存在的节点：
 
 ```javascript
 return Boolean(
@@ -250,22 +149,27 @@ return Boolean(
 );
 ```
 
-不要把 `.text-editor-tabbar`、某个历史面板或其他可选工具 UI 加入能力检测。删除这些节点后若仍保留依赖，`openTool()` 会退化为 `window.location.href = href`，用户将离开公共预览和时间轴。
+不要把 `.text-editor-tabbar`、某个历史面板或其他可选工具 UI 加入能力检测。主编辑器不得提供跳出当前文档的工具 fallback。
 
 切换契约：
 
-- `cut`：显示 `.text-editor-panel-stack`，所有 tool iframe panel 非激活，URL 无 `tool`；
-- `art`：隐藏文字面板栈，激活 art iframe panel，URL 为 `tool=art`；
-- `pip`：隐藏文字面板栈，激活 pip iframe panel，URL 为 `tool=pip`；
-- 三种状态都保留公共预览和时间轴 DOM，不重载顶层文档；独立工具 URL 仍可直接访问。
+- `cut`：显示 `.text-editor-panel-stack`，art/pip root 隐藏且 inert，URL 无 `tool`；
+- `art`：文字面板隐藏且 inert，只激活 `#editorArtPanelRoot`，URL 为 `tool=art`；
+- `pip`：文字面板隐藏且 inert，只激活 `#editorPipPanelRoot`，URL 为 `tool=pip`；
+- 三种状态都保留同一个 document、`#cutPreviewVideo`、公共预览和公共时间线，不调用基础视频 `load()`。
+- `/art-text` 与 `/picture-in-picture` 只返回 307 到 `/?tool=art|pip`：保留 query、覆盖冲突 `tool`、删除 `embedded`；同名 `/api/transcriptions/...` 路由不受影响。
+- `art-text.html/js` 与 `picture-in-picture.html/js` 不存在；源码和运行 DOM 都不得重新引入工具 iframe、跨页 `postMessage`、revision floor/ACK、mirrored preview/timeline 或 feature flag authority。
+- `EditorProjectStore` 只导出顶层语义状态和 frame/composition/timeline/preview selectors；不得保留 `selectCutDraftMessage`、`selectToolState`、`selectIframeProjection` 等只服务于旧 bridge 的投影。
+- 模板库进入 `/?job=<id>&tool=art`。EditorSuite 只解析一次模板 query 并注入 `initialTemplateSelection`；ArtTool 等 catalog 完成后校验并消费，不直接读取 `window.location`。
+- 有选中 manual overlay 时只更新该项；选中 transcript cue 时按 `trackId` 一次更新全轨；无 selection 时保存为会话首选，供新 manual 和全文轨道使用。模板应用最多增加一个 revision，不能改变 range 或 `timingRevision`。
 
-静态测试必须断言能力检测不包含已移除 selector，并锁定三个页面的 `editor-suite.js` 资源版本。浏览器回归必须从文字剪辑依次点击 art、pip、cut，检查 `document.title` 不变、URL 参数、激活 panel、公共预览可见以及 375px 无横向溢出。
+静态测试必须断言旧资源缺失、内部链接都指向顶层 URL，且 EditorSuite 与 EditorProjectStore 均无 legacy bridge marker。浏览器回归必须覆盖三工具切换、两个历史 URL、模板 handoff、隐藏 panel inert、运行 DOM iframe 数量为 0，以及桌面/375px 无横向溢出。
 
 ### 单页编辑器原子 Frame 与统一运行时契约
 
 #### 1. Scope / Trigger
 
-修改顶层基础视频、播放帧时钟、公共艺术字/画中画预览、公共效果时间轴、compose 派生或 iframe 时间范围同步时，必须遵守本契约。`EditorProjectStore` 是项目语义状态的唯一权威；顶层 view/controller 和内嵌工具只能消费同一个已选出的 editor frame 或发送语义 command，不能建立第二套项目状态。
+修改顶层基础视频、播放帧时钟、公共艺术字/画中画预览、公共效果时间轴、compose 派生或工具时间范围命令时，必须遵守本契约。`EditorProjectStore` 是项目语义状态的唯一权威；顶层 view/controller 和 ArtTool/PipTool 只能消费同一个已选出的 editor frame 或发送语义 command，不能建立第二套项目状态。
 
 #### 2. Signatures
 
@@ -284,16 +188,16 @@ EditorPreview.createCompositor(options).render(frame) -> boolean
 EditorTimelineController.createController(options).render(frame) -> timelineDocument
 ```
 
-顶层 Store subscriber 必须先执行一次 `selectEditorFrame(snapshot)`，再把同一对象传给三个消费者。compose 点击可以从当时最新 snapshot 重新选择一次原子 frame，但不得分别读取 preview、timeline 或 iframe 私有缓存拼装请求。
+顶层 Store subscriber 必须先执行一次 `selectEditorFrame(snapshot)`，再把同一对象传给媒体、预览、时间线和两个工具。compose 点击可以从当时最新 snapshot 重新选择一次原子 frame，但不得分别读取 preview、timeline 或工具私有缓存拼装请求。
 
 #### 3. Contracts
 
-- 页面只创建一个绑定 `#cutPreviewVideo` 的 `MediaController`；它唯一拥有基础视频 `src/load()`、source/edited 时间转换和播放帧时钟。普通 revision、保存、工具切换和 ACK 只调用 `applyFrame` 的同源 no-op 路径，不得替换媒体节点或重新加载。
+- 页面只创建一个绑定 `#cutPreviewVideo` 的 `MediaController`；它唯一拥有基础视频 `src/load()`、source/edited 时间转换和播放帧时钟。普通 revision、保存和工具切换只调用 `applyFrame` 的同源 no-op 路径，不得替换媒体节点或重新加载。
 - `PreviewCompositor`、`TimelineController` 和 compose 只消费同一 frame 的 `preview`、`timeline`、`composition`；三个公共 DOM 根必须暴露一致的 `data-project-revision` 和 `data-timing-revision`。
 - source mutation 只允许新 job 首次加载、显式清空或显式选择另一媒体。`setCutRanges()` 只更新时间映射，不修改 `src/currentTime/playback`。
 - 时间轴 `pointermove` 只更新 controller 内的临时 document；`pointerup` 从当前权威 `frame.timeline` 生成并提交一次语义事务；`pointercancel` 丢弃临时 document，不增加 revision/history，未选 clip 的 cancel 也不得为了 selection 单独提交。
-- art/pip range 写回先向子页发送 `set-range`，再发送 `commit`；子页的等价语义回声必须归一化为 Store no-op，ACK 不得形成第二次 revision。非当前工具的 timeline projection 不得抢占全局 selection。
-- `asrWords`、iframe 的 `overlayHtml`/`timelineHtml`/`generationPayload` 和 DOM 均不是公共预览、时间轴或 compose 的权威输入。PiP 素材通过 Store asset registry 查找；完整 UI 模型由 selector 显式裁剪为公开 compose DTO。
+- art/pip range 由 TimelineController 在 pointerup 直接提交一个顶层语义事务；pointermove 只保留瞬时预览，不形成第二次 revision。非当前工具的 command 不得抢占全局 selection。
+- `asrWords`、工具 DOM 和私有 UI 状态均不是公共预览、时间轴或 compose 的权威输入。PiP 素材通过 Store asset registry 查找；完整 UI 模型由 selector 显式裁剪为公开 compose DTO。
 - 同一媒体帧只触发一次 compositor 时间同步；热路径不得重新运行 selector、重建整条时间轴、全量查询 DOM 或建立额外 rAF/rVFC 循环。
 
 #### 4. Validation & Error Matrix
@@ -305,23 +209,23 @@ EditorTimelineController.createController(options).render(frame) -> timelineDocu
 | 新 job 或显式 source change | 写入新 source 并只加载一次；TimelineController 清空 pointer/history |
 | pointerup 前 Store 收到新 frame | 临时预览仍非权威；提交时以最新 `frame.timeline` 为基线 |
 | `pointercancel` | 恢复权威 frame；revision、timingRevision、history 不变 |
-| iframe 等价回声或 ACK | no-op；不得重复提交、改 selection 或增加 revision |
+| 等价语义 command | Store no-op；不得重复提交、改 selection 或增加 revision |
 | 非当前工具投影携带 selection | 接收其语义轨道，但保留当前全局 selection |
 | PiP asset 不存在或尚未完成 | 跳过该预览媒体并保留语义 layer；禁止回退解析 HTML/job-state |
 
 #### 5. Good / Base / Bad Cases
 
-- Good：revision 18 的 frame 同时渲染 preview/timeline 并产生 compose；art 拖动在 pointerup 提交为 revision 19，iframe 回声/ACK 保持 19，三个 DOM 根和 compose 都显示 19。
+- Good：revision 18 的 frame 同时渲染 preview/timeline 并产生 compose；art 拖动在 pointerup 提交为 revision 19，三个 DOM 根、ArtTool 和 compose 都显示 19。
 - Base：重复切换 cut/art/pip 或保存版本时 frame revision 可以变化，但 `#cutPreviewVideo` 节点、source key、currentTime 和播放状态保持，`load()` 计数不变。
 - Bad：subscriber 分别调用多个 selector，时间轴在 pointermove 直接 dispatch，或父页从 `generationPayload`/HTML 重建公共状态；这些做法会产生混合 revision、双历史或预览与导出漂移。
 
 #### 6. Tests Required
 
 - Node MediaController：同源 no-op、显式 clear/change、source/edited 映射、rVFC/RAF/timeupdate 降级、重复 play 单 pending callback，以及迟到 callback generation guard。
-- Node Store/selector：一次 snapshot 派生同 revision 的 preview/timeline/composition，稳定 art/pip id、asset registry、显式 compose DTO、跨 kind 轨道顺序、inactive projection selection 所有权和等价回声 no-op。
+- Node Store/selector：一次 snapshot 派生同 revision 的 preview/timeline/composition，稳定 art/pip id、asset registry、显式 compose DTO、跨 kind 轨道顺序、inactive selection 所有权和等价 command no-op。
 - Node TimelineController：move/start/end、键盘微调、pointercancel 回滚、单次 commit、跨轨道 undo/redo、redo 分支截断、job change 清空 history。
 - 静态契约：顶层只创建一个 MediaController/TimelineController，不消费 `overlayHtml`、`timelineHtml`、`generationPayload`，脚本顺序和 no-cache 资源完整。
-- 真实浏览器：暂停和播放状态下切换/保存时媒体 identity 不变；pointercancel 无 revision，pointerup 单 revision；iframe 回声 no-op；preview/timeline/compose revision 相同；375px 无重复交互轨道或横向溢出。
+- 真实浏览器：暂停和播放状态下切换/保存时 document、video、ArtTool、PipTool identity 不变且 iframe 为 0；pointercancel 无 revision，pointerup 单 revision；preview/timeline/compose revision 相同；375px 无重复交互轨道或横向溢出。
 
 #### 7. Wrong vs Correct
 
@@ -346,7 +250,7 @@ onCommit(transaction);
 
 ### 1. Scope / Trigger
 
-修改顶层艺术字 inspector、艺术字 effect、工具 URL 恢复或本地项目草稿时适用。顶层默认路径必须使用可挂载 `ArtTool` 和唯一 `EditorProjectStore`；旧 `/art-text` 页面与 feature flag iframe 仅作为互斥兼容路径。
+修改顶层艺术字 inspector、艺术字 effect、工具 URL/模板 handoff 或本地项目草稿时适用。唯一产品路径必须使用可挂载 `ArtTool` 和同一个 `EditorProjectStore`；历史 `/art-text` 只负责重定向到该路径。
 
 ### 2. Signatures
 
@@ -374,6 +278,7 @@ sessionStorage[`editor-suite:project-draft:${jobId}`] = {
 - 只有完整 `status=completed` 且包含 `result` 的 job 才能完成草稿判定。`restoredJobs` 标记必须在成功恢复，或对完整基线明确判定 schema/job/version/shape 无效后写入；不完整首轮 hydrate 不得消耗恢复机会。
 - Store 原子 `PROJECT_DRAFT_RESTORED` 仍用当前 Store `serverVersion` 防止 dispatch 期间 job 漂移；EditorSuite 在 dispatch 前校验 envelope 的领域指纹。
 - 带 `?job=<same>&tool=art` 的首次页面载入必须保留 art 工具；只有同一 document 真正切换到另一个 job 时才清除旧 `tool` 参数。
+- 模板 query 由 EditorSuite 解析后通过 services 注入；缺少/空 `templateSize` 必须保持 `null`，不得因 `Number(null)` 变成 20。无效 template 整体忽略，无效 font/color/size 按 catalog 和当前选中项安全回退。
 - 全文轨道、文案保存、位置预设和 AI 请求都必须带 AbortController 与 job/revision guard。旧请求只能清理自己的 request/busy 状态，不得取消或解锁同 scope 的新请求。
 - 时间范围命令必须在同一次 Store 提交中按旧/新区间等比重映射 `characterTimings`；不能只改 overlay/clip 的 `start/end`，否则草稿恢复与 compose 校验会把逐字时间判为越界。
 - 手动从文案段添加艺术字时，即使同一段被重复添加，confirmed overlay id 也必须保持唯一；待确认 AI 草稿只通过 PreviewCompositor 的瞬时预览层显示，切换工具、取消、确认和销毁都要清除，且不得进入 Store revision 或 compose DTO。
@@ -400,7 +305,7 @@ sessionStorage[`editor-suite:project-draft:${jobId}`] = {
 - Node/静态：ArtTool 不包含 storage/message/video/timeline store；重复 mount/destroy 可撤销；Store 原子恢复覆盖错误 job/version 和等价 no-op。
 - 真实浏览器：text/style 一次 revision 且 timing 不变，range 一次 revision/timing；cutDraft 自动保存后 reload 仍恢复 art；`tool=art` 保留；媒体同页不发生 `src/load()`。
 - effect 竞态：让旧全文轨道请求忽略 abort 并迟到返回，断言旧响应 0 revision、0 overlay，新请求仍恰好提交 1 revision。
-- fallback/兼容：feature flag 关闭时只有 art iframe authority，独立 `/art-text` 与 PiP iframe 继续可用。
+- 历史 URL/模板兼容：307 后顶层 art root 可用，manual/全文轨道/无 selection/无效参数均按单次 handoff 契约运行，DOM 中 iframe 数量始终为 0。
 
 ### 7. Wrong vs Correct
 
@@ -425,7 +330,7 @@ restoredJobs.add(job.id);
 
 - 不引入框架或构建系统来完成局部修改。
 - 不在多个页面复制新的时间轴转换函数；先扩展共享模型或确定适配所有者。
-- 不让 iframe 直接修改父页面 DOM。
-- 不用完整 HTML 快照作为持久状态或跨页协议。
+- 不重新引入工具 iframe、跨页消息桥或 feature flag 第二 authority。
+- 不用完整 HTML 快照作为持久状态或工具协议。
 
-参考：`web/timeline-model.js`、`web/editor-suite.js` 的 message handler、`web/art-text.js` 和 `web/picture-in-picture.js` 的嵌入模式。
+参考：`web/editor-project-store.js`、`web/editor-suite.js`、`web/editor-art-tool.js`、`web/editor-pip-tool.js`。

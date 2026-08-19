@@ -8,13 +8,13 @@
 - 区间：`normalize_delete_ranges`、`normalizeOverlayRange`、`normalize_picture_in_picture_overlays`；
 - 状态更新：后端 `update_*_job`，前端 `EditorTimeline.createStore` 和 `editor-suite:*` 事件；
 - UI 反馈：`web/ui-feedback.js`；
-- 播放器、时间线缩略图、拖动/缩放：`app.js`、`art-text.js`、`picture-in-picture.js` 中已有实现。
+- 播放器和源时间映射：`editor-media-controller.js`；时间线拖动/缩放：`editor-timeline-controller.js`；艺术字/画中画 inspector：`editor-art-tool.js`、`editor-pip-tool.js`。
 
 ## 必须复用或提取的情况
 
 - 同一时间转换或 payload 归一化已出现两处，准备出现第三处；
 - 预览和导出必须产生一致结果；
-- 顶层页面和 iframe 都读取同一消息字段；
+- 顶层 Store、工具、预览和 compose 都读取同一领域字段；
 - Python 与 JavaScript 各自实现同一契约且一方发生字段变更。
 
 这时应给契约确定一个所有者：浏览器时间线优先放 `web/timeline-model.js`，顶层协调放 `web/editor-suite.js`，服务端权威校验放 `server/app.py` 或提取后的领域模块。
@@ -32,4 +32,4 @@
 3. 更新契约所有者，再更新适配器。
 4. 为两个以上消费者增加一致性测试。
 
-特别警惕：`timelineHtml`、iframe 私有 generation payload、重复 source/edited 时间映射。这些是当前优化规划中的已知漂移点，不应继续扩散。
+特别警惕：重新引入 HTML 快照、工具私有 generation payload、重复 source/edited 时间映射或第二个媒体/时间线 owner。这些路径已在 B4 删除，不得恢复。

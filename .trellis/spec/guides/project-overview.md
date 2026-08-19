@@ -15,7 +15,7 @@
 ## 目录
 
 - `server/app.py`：API、后台任务、持久化、AI 和媒体处理。
-- `web/`：主页面、编辑器协调层、艺术字/画中画 iframe、设置和素材库。
+- `web/`：主页面、单页编辑器协调层、顶层艺术字/画中画工具、设置和素材库。
 - `tests/app/`：按功能拆分的主要行为回归；`tests/test_build_mac_package.py`：打包数据隔离。
 - `tools/build_mac_package.py`：Mac 可分发压缩包和启动脚本。
 - `data/jobs/`：临时任务；`data/history/`：最终历史；其他 `data/*`：字体、模板和预设 manifest。

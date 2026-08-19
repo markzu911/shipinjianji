@@ -8,7 +8,7 @@
   -> 后台线程提取音频/调用 ASR
   -> JOBS 中的 transcript + word timestamps
   -> app.js 文字编辑和删除草稿
-  -> editor-suite.js 协调 art/pip iframe 与统一时间线
+  -> editor-suite.js 协调顶层 ArtTool/PipTool、统一预览与时间线
   -> FastAPI 归一化 overlay 和 source anchor
   -> FFmpeg 预览/最终合成
   -> data/history 持久成片
@@ -16,7 +16,7 @@
 
 ## 每次跨层修改必须回答
 
-1. 权威状态在哪里：内存 job、cut draft、localStorage、`EditorTimeline` store、iframe 私有状态还是 history manifest？
+1. 权威状态在哪里：内存 job、cut draft、顶层 `EditorProjectStore`、sessionStorage 草稿还是 history manifest？
 2. 时间字段属于源视频还是剪后视频？转换在哪一层发生？
 3. 浏览器发送的字段由哪个 Pydantic 模型和哪个 normalize 函数校验？
 4. 刷新、服务重启、取消、失败后还剩什么状态？
@@ -25,12 +25,10 @@
 
 ## 浏览器边界
 
-- `postMessage` 必须验证 `event.origin === window.location.origin`。
-- 子页面还要验证 `event.source === window.parent`；顶层应验证来源 iframe 与声明的 `kind` 匹配。
-- 消息使用显式 `type`，新增字段需要父子两侧同步更新并保留兼容默认值。
-- `editor-suite:job-state`、`editor-suite:tool-state`、`editor-suite:transcript-updated` 是同页面事件契约；不要私自复制 payload 解析。
+- 主编辑器只有一个 document、基础 video、Store、公共预览和公共时间线；ArtTool/PipTool 通过注入的 services/commands 工作，不建立跨页消息协议。
+- `editor-suite:refresh`、`editor-suite:transcript-updated`、`editor-suite:job-state` 是保留的同文档事件；不要因为旧 bridge 使用相同前缀而批量删除。
 - 删除或重命名 DOM 节点前，用 `rg` 检查所有页面脚本、共享协调器和静态契约中的 selector 依赖；能力检测只能依赖完成该能力所需的稳定容器，不能依赖可选页签或状态面板。
-- 修改顶层/iframe 布局后，真实浏览器必须从文字剪辑依次切换艺术字、画中画并返回，确认顶层文档未导航、公共预览未卸载、URL 参数与激活面板一致。
+- 修改工具布局后，真实浏览器必须从文字剪辑依次切换艺术字、画中画并返回，确认 document/video identity、公共预览、URL 参数、激活/隐藏 panel 的 inert 状态一致且 iframe 数量为 0。
 
 ## API 边界
 
@@ -43,7 +41,7 @@
 
 - `JOBS` 在重启后消失，但 cut draft/history 部分持久化。
 - 时间映射逻辑分布在 Python、`app.js`、`editor-suite.js` 和子工具页面。
-- 顶层编辑器与两个 iframe 仍各自持有部分轨道状态。
+- 服务端 job、顶层 Store 与可恢复草稿仍需严格区分权威层和持久化层。
 
 这些风险属于后续优化目标。新改动应减少状态副本，不应增加新的私有 payload 或 HTML 快照协议。
 
