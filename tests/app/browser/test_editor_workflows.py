@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 
 import pytest
@@ -145,14 +146,15 @@ def test_tool_switch_keeps_selection_preview_and_playback_position(
     page.locator("#editorSuitePreviewOverlay .is-art").wait_for(state="visible")
 
     page.locator('[data-editor-tool="pip"]').click()
-    pip_frame = page.frame_locator('iframe[title="画中画设置"]')
-    pip_frame.locator("#pipWorkspace").wait_for(state="visible")
-    preview_button = pip_frame.get_by_role(
+    pip_panel = page.locator("#editorPipPanelRoot")
+    pip_panel.wait_for(state="visible")
+    assert page.locator('iframe[title="画中画设置"]').count() == 0
+    preview_button = pip_panel.get_by_role(
         "button",
-        name="在视频中预览：保留内容",
+        name="选择画中画素材：保留内容",
     )
     preview_button.click()
-    selected_card = pip_frame.locator(
+    selected_card = pip_panel.locator(
         f'.pip-generated-card[data-picture-id="{seeded_editor_job.pip_asset_id}"]'
     )
     assert "is-selected" in (selected_card.get_attribute("class") or "")
@@ -161,6 +163,7 @@ def test_tool_switch_keeps_selection_preview_and_playback_position(
     ) == "false"
     page.locator("#editorSuitePreviewOverlay .is-pip").wait_for(state="visible")
     assert art_panel.evaluate("panel => panel.inert") is True
+    assert pip_panel.evaluate("panel => panel.inert") is False
     assert page.evaluate(
         "() => document.querySelector('#editorArtPanelRoot').contains(document.activeElement)"
     ) is False
@@ -174,11 +177,12 @@ def test_tool_switch_keeps_selection_preview_and_playback_position(
     page.locator('[data-editor-tool="art"]').click()
     wait_for_preview_time(page, selected_time)
     assert art_panel.evaluate("panel => panel.inert") is False
+    assert pip_panel.evaluate("panel => panel.inert") is True
     page.locator('[data-editor-tool="pip"]').click()
     wait_for_preview_time(page, selected_time)
 
     assert page.title() == original_title
-    assert "is-selected" in (selected_art.get_attribute("class") or "")
+    assert selected_art.count() == 0
     assert "is-selected" in (selected_card.get_attribute("class") or "")
     current_time = page.locator("#cutPreviewVideo").evaluate(
         "video => video.currentTime"
@@ -259,9 +263,12 @@ def test_top_level_art_panel_edits_once_and_recovers_versioned_draft(
     )
     assert after_range["revision"] == after_text["revision"] + 1
     assert after_range["timingRevision"] == after_text["timingRevision"] + 1
-    assert after_range["draft"]["schemaVersion"] == 1
+    assert after_range["draft"]["schemaVersion"] == 2
     assert after_range["draft"]["jobId"] == seeded_editor_job.job_id
     assert after_range["draft"]["art"]["overlays"][0]["id"] == before["id"]
+    assert after_range["draft"]["pip"]["overlays"][0]["assetId"] == (
+        seeded_editor_job.pip_asset_id
+    )
 
     x_field = panel.locator('[data-art-coordinate="x"]')
     x_field.fill("105")
@@ -629,7 +636,7 @@ def test_top_level_art_deactivation_aborts_transcript_save(
     panel.locator("[data-art-transcript-save]").click()
     page.wait_for_function("window.__b2TranscriptSave.requested === true")
 
-    page.locator('[data-editor-tool="pip"]').click()
+    page.locator('[data-editor-tool="cut"]').click()
     page.wait_for_function("window.__b2TranscriptSave.aborted === true")
     after = page.evaluate(
         """() => ({
@@ -643,6 +650,592 @@ def test_top_level_art_deactivation_aborts_transcript_save(
     )
     assert after["actions"] == ["activeToolChanged"]
     assert panel.evaluate("panel => panel.inert") is True
+
+
+def test_top_level_pip_prompt_image_controls_and_schema_v2_recovery(
+    browser_session,
+    seeded_editor_job,
+):
+    page = open_editor(browser_session, seeded_editor_job)
+    job_url = (
+        f"{browser_session.base_url}/api/transcriptions/"
+        f"{seeded_editor_job.job_id}"
+    )
+    job_payload = page.request.get(job_url).json()
+    prompt_requests: list[dict[str, object]] = []
+    image_requests: list[dict[str, object]] = []
+    generated_id = "browser-generated-image"
+    asset_url = (
+        f"/api/transcriptions/{seeded_editor_job.job_id}/"
+        f"picture-in-picture/images/{seeded_editor_job.pip_asset_id}"
+    )
+    generated_asset = {
+        "id": generated_id,
+        "type": "image",
+        "text": "保留内容",
+        "prompt": "金色城市天际线",
+        "source": "art",
+        "start": 0.35,
+        "end": 0.95,
+        "sourceStart": 0.35,
+        "sourceEnd": 0.95,
+        "aspectRatio": "16:9",
+        "status": "completed",
+        "imageUrl": asset_url,
+        "assetUrl": asset_url,
+    }
+
+    def fulfill_prompt(route) -> None:
+        prompt_requests.append(json.loads(route.request.post_data or "{}"))
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {"prompt": "AI 生成的金色城市天际线", "model": "browser-mock"},
+                ensure_ascii=False,
+            ),
+        )
+
+    def fulfill_image(route) -> None:
+        image_requests.append(json.loads(route.request.post_data or "{}"))
+        route.fulfill(
+            status=201,
+            content_type="application/json",
+            body=json.dumps(generated_asset, ensure_ascii=False),
+        )
+
+    page.route(
+        re.compile(
+            rf".*/api/transcriptions/{seeded_editor_job.job_id}/"
+            r"picture-in-picture/prompt$"
+        ),
+        fulfill_prompt,
+    )
+    page.route(
+        re.compile(
+            rf".*/api/transcriptions/{seeded_editor_job.job_id}/"
+            r"picture-in-picture/images$"
+        ),
+        fulfill_image,
+    )
+
+    page.locator('[data-editor-tool="pip"]').click()
+    panel = page.locator("#editorPipPanelRoot")
+    panel.wait_for(state="visible")
+    panel.locator("[data-pip-segments] label", has_text="保留内容").locator(
+        "input"
+    ).check()
+    panel.locator("[data-pip-write-prompt]").click()
+    page.wait_for_function(
+        """() => document.querySelector('#editorPipPanelRoot [data-pip-prompt]')
+          ?.value === 'AI 生成的金色城市天际线'"""
+    )
+    assert prompt_requests[0]["text"] == "保留内容"
+    assert prompt_requests[0]["assetType"] == "image"
+    assert prompt_requests[0]["source"] == "art"
+
+    panel.locator("[data-pip-prompt]").fill("金色城市天际线")
+    panel.locator("[data-pip-generate]").click()
+    generated_card = panel.locator(
+        f'.pip-generated-card[data-picture-id="{generated_id}"]'
+    )
+    generated_card.wait_for(state="visible")
+    page.wait_for_function(
+        """id => window.EditorSuite.projectSnapshot().project.pip.overlays
+          .some(item => String(item.assetId) === id)""",
+        arg=generated_id,
+    )
+    assert image_requests[0]["mode"] == "custom"
+    assert image_requests[0]["prompt"] == "金色城市天际线"
+
+    enabled = generated_card.get_by_role(
+        "checkbox", name=re.compile(r"使用画中画：保留内容")
+    )
+    enabled.set_checked(False)
+    page.wait_for_function(
+        """id => !window.EditorSuite.projectSnapshot().project.pip.overlays
+          .some(item => String(item.assetId) === id)""",
+        arg=generated_id,
+    )
+    generated_card.get_by_role(
+        "checkbox", name=re.compile(r"使用画中画：保留内容")
+    ).set_checked(True)
+    page.wait_for_function(
+        """id => window.EditorSuite.projectSnapshot().project.pip.overlays
+          .some(item => String(item.assetId) === id)""",
+        arg=generated_id,
+    )
+
+    generated_card = panel.locator(
+        f'.pip-generated-card[data-picture-id="{generated_id}"]'
+    )
+    generated_card.locator("select").select_option("center")
+    width_input = generated_card.locator(f'[data-pip-width="{generated_id}"]')
+    assert width_input.get_attribute("max") is None
+    width_input.fill("175")
+    width_input.press("Tab")
+    panel.locator('[data-pip-range="start"]').fill("0.38")
+    panel.locator('[data-pip-range="start"]').press("Tab")
+    panel.locator('[data-pip-range="end"]').fill("0.90")
+    panel.locator('[data-pip-range="end"]').press("Tab")
+    page.wait_for_function(
+        """id => {
+          const item = window.EditorSuite.projectSnapshot().project.pip.overlays
+            .find(overlay => String(overlay.assetId) === id);
+          return item && Math.abs(item.width - 1.75) < 0.0001 &&
+            Math.abs(item.x - 0.5) < 0.0001 &&
+            Math.abs(item.y - 0.5) < 0.0001 &&
+            Math.abs(item.start - 0.38) < 0.0001 &&
+            Math.abs(item.end - 0.9) < 0.0001;
+        }""",
+        arg=generated_id,
+    )
+    stored = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          const draft = JSON.parse(sessionStorage.getItem(
+            `editor-suite:project-draft:${snapshot.jobId}`
+          ));
+          return { snapshot, draft, composition: window.EditorSuite.compositionRequest() };
+        }"""
+    )
+    draft_overlay = next(
+        item
+        for item in stored["draft"]["pip"]["overlays"]
+        if item["assetId"] == generated_id
+    )
+    compose_overlay = next(
+        item
+        for item in stored["composition"]["pictureInPictureOverlays"]
+        if item["assetId"] == generated_id
+    )
+    assert stored["draft"]["schemaVersion"] == 2
+    assert "assets" not in stored["draft"]["pip"]
+    assert stored["draft"]["selection"] == {"clipId": f"pip:{generated_id}"}
+    assert draft_overlay["width"] == pytest.approx(1.75)
+    assert compose_overlay["width"] == pytest.approx(1.75)
+
+    job_payload["pictureInPictureImages"].append(generated_asset)
+    page.route(
+        re.compile(
+            rf".*/api/transcriptions/{seeded_editor_job.job_id}$"
+        ),
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(job_payload, ensure_ascii=False),
+        ),
+    )
+    page.reload()
+    page.locator("#editorPipPanelRoot").wait_for(state="visible")
+    page.wait_for_function(
+        """id => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          const item = snapshot.project.pip.overlays
+            .find(overlay => String(overlay.assetId) === id);
+          return item && Math.abs(item.width - 1.75) < 0.0001 &&
+            snapshot.project.timeline.selection?.clipId === `pip:${id}`;
+        }""",
+        arg=generated_id,
+    )
+
+    page.evaluate(
+        """id => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          const key = `editor-suite:project-draft:${snapshot.jobId}`;
+          const draft = JSON.parse(sessionStorage.getItem(key));
+          draft.selection = { clipId: 'pip:missing-asset' };
+          draft.pip.overlays.find(item => item.assetId === id).width = 2.25;
+          sessionStorage.setItem(key, JSON.stringify(draft));
+        }""",
+        generated_id,
+    )
+    page.reload()
+    page.locator("#editorPipPanelRoot").wait_for(state="visible")
+    rejected = page.evaluate(
+        """id => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          return {
+            generatedEnabled: snapshot.project.pip.overlays
+              .some(item => String(item.assetId) === id),
+            baselineWidth: snapshot.project.pip.overlays
+              .find(item => String(item.assetId) === 'browser-baseline-image')?.width,
+            selection: snapshot.project.timeline.selection?.clipId || null,
+          };
+        }""",
+        generated_id,
+    )
+    assert rejected["generatedEnabled"] is False
+    assert rejected["baselineWidth"] == pytest.approx(0.3)
+    assert rejected["selection"] != "pip:missing-asset"
+
+    page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          const key = `editor-suite:project-draft:${snapshot.jobId}`;
+          const draft = JSON.parse(sessionStorage.getItem(key));
+          draft.selection = {};
+          draft.pip.overlays.find(
+            item => item.assetId === 'browser-baseline-image'
+          ).width = 2.25;
+          sessionStorage.setItem(key, JSON.stringify(draft));
+        }"""
+    )
+    page.reload()
+    page.locator("#editorPipPanelRoot").wait_for(state="visible")
+    malformed_selection = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          return snapshot.project.pip.overlays.find(
+            item => item.assetId === 'browser-baseline-image'
+          )?.width;
+        }"""
+    )
+    assert malformed_selection == pytest.approx(0.3)
+
+
+def test_top_level_pip_video_polling_completes_and_preserves_failed_asset(
+    browser_session,
+    seeded_editor_job,
+):
+    page = open_editor(browser_session, seeded_editor_job)
+    job_url = (
+        f"{browser_session.base_url}/api/transcriptions/"
+        f"{seeded_editor_job.job_id}"
+    )
+    base_job = page.request.get(job_url).json()
+    created_ids: list[str] = []
+    create_requests: list[dict[str, object]] = []
+    completed_id = "browser-video-completed"
+    failed_id = "browser-video-failed"
+
+    def fulfill_video_create(route) -> None:
+        request = json.loads(route.request.post_data or "{}")
+        create_requests.append(request)
+        asset_id = completed_id if not created_ids else failed_id
+        created_ids.append(asset_id)
+        route.fulfill(
+            status=202,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "id": asset_id,
+                    "type": "video",
+                    "text": request["text"],
+                    "prompt": request["prompt"],
+                    "source": request["source"],
+                    "start": request["start"],
+                    "end": request["end"],
+                    "aspectRatio": request["aspectRatio"],
+                    "status": "queued",
+                    "progress": 5,
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+    def fulfill_video_poll(route) -> None:
+        payload = json.loads(json.dumps(base_job))
+        videos = []
+        if completed_id in created_ids:
+            videos.append(
+                {
+                    "id": completed_id,
+                    "type": "video",
+                    "text": "删除片段",
+                    "prompt": "动态城市镜头",
+                    "source": "art",
+                    "start": 0.05,
+                    "end": 0.3,
+                    "sourceStart": 0.05,
+                    "sourceEnd": 0.3,
+                    "aspectRatio": "16:9",
+                    "status": "completed",
+                    "progress": 100,
+                    "assetUrl": (
+                        f"/api/transcriptions/{seeded_editor_job.job_id}/original-video"
+                    ),
+                }
+            )
+        if failed_id in created_ids:
+            videos.append(
+                {
+                    "id": failed_id,
+                    "type": "video",
+                    "text": "删除片段",
+                    "prompt": "失败的动态镜头",
+                    "source": "art",
+                    "start": 0.05,
+                    "end": 0.3,
+                    "aspectRatio": "16:9",
+                    "status": "failed",
+                    "progress": 100,
+                    "error": "浏览器 mock 视频生成失败",
+                }
+            )
+        payload["pictureInPictureVideos"] = videos
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(payload, ensure_ascii=False),
+        )
+
+    page.locator('[data-editor-tool="pip"]').click()
+    panel = page.locator("#editorPipPanelRoot")
+    panel.wait_for(state="visible")
+    page.route(
+        re.compile(
+            rf".*/api/transcriptions/{seeded_editor_job.job_id}/"
+            r"picture-in-picture/videos$"
+        ),
+        fulfill_video_create,
+    )
+    page.route(
+        re.compile(rf".*/api/transcriptions/{seeded_editor_job.job_id}$"),
+        fulfill_video_poll,
+    )
+    panel.locator('[data-pip-asset-type][value="video"]').check()
+    panel.locator("[data-pip-prompt]").fill("动态城市镜头")
+    before = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          return { revision: snapshot.revision, timingRevision: snapshot.timingRevision };
+        }"""
+    )
+    panel.locator("[data-pip-generate]").click()
+    completed_card = panel.locator(
+        f'.pip-generated-card[data-picture-id="{completed_id}"]'
+    )
+    completed_card.wait_for(state="visible")
+    page.wait_for_function(
+        """id => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          const asset = snapshot.project.pip.assets.find(item => item.id === id);
+          return asset?.status === 'completed' && snapshot.project.pip.overlays
+            .some(item => item.assetId === id);
+        }""",
+        arg=completed_id,
+    )
+    completed = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          return { revision: snapshot.revision, timingRevision: snapshot.timingRevision };
+        }"""
+    )
+    assert completed["revision"] >= before["revision"] + 2
+    assert completed["timingRevision"] == before["timingRevision"] + 1
+    assert create_requests[0]["mode"] == "custom"
+
+    panel.locator("[data-pip-prompt]").fill("失败的动态镜头")
+    panel.locator("[data-pip-generate]").click()
+    failed_card = panel.locator(
+        f'.pip-generated-card[data-picture-id="{failed_id}"]'
+    )
+    page.wait_for_function(
+        """id => window.EditorSuite.projectSnapshot().project.pip.assets
+          .find(item => item.id === id)?.status === 'failed'""",
+        arg=failed_id,
+    )
+    assert "is-failed" in (failed_card.get_attribute("class") or "")
+    assert "浏览器 mock 视频生成失败" in failed_card.inner_text()
+    assert failed_card.get_by_role("checkbox").is_disabled()
+    failed = page.evaluate(
+        """id => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          return {
+            timingRevision: snapshot.timingRevision,
+            enabled: snapshot.project.pip.overlays.some(item => item.assetId === id),
+          };
+        }""",
+        failed_id,
+    )
+    assert failed["timingRevision"] == completed["timingRevision"]
+    assert failed["enabled"] is False
+
+
+def test_top_level_pip_deactivation_rejects_late_asset_response(
+    browser_session,
+    seeded_editor_job,
+):
+    page = open_editor(browser_session, seeded_editor_job)
+    page.locator('[data-editor-tool="pip"]').click()
+    panel = page.locator("#editorPipPanelRoot")
+    panel.wait_for(state="visible")
+    before_revision = page.evaluate("window.EditorSuite.projectSnapshot().revision")
+    page.evaluate(
+        """() => {
+          const originalFetch = window.fetch.bind(window);
+          window.__b3LatePipCreate = {
+            requested: false,
+            aborted: false,
+            resolve: null,
+          };
+          window.fetch = (input, options = {}) => {
+            const url = String(input?.url || input || '');
+            if (url.endsWith('/picture-in-picture/images') && options.method === 'POST') {
+              window.__b3LatePipCreate.requested = true;
+              options.signal?.addEventListener('abort', () => {
+                window.__b3LatePipCreate.aborted = true;
+              }, { once: true });
+              return new Promise(resolve => {
+                window.__b3LatePipCreate.resolve = () => resolve(new Response(
+                  JSON.stringify({
+                    id: 'browser-late-image',
+                    type: 'image',
+                    text: '迟到素材',
+                    source: 'art',
+                    start: 0.05,
+                    end: 0.3,
+                    status: 'completed',
+                    assetUrl: '/late-image.png',
+                  }),
+                  { status: 201, headers: { 'Content-Type': 'application/json' } },
+                ));
+              });
+            }
+            return originalFetch(input, options);
+          };
+        }"""
+    )
+    panel.locator("[data-pip-prompt]").fill("迟到素材")
+    panel.locator("[data-pip-generate]").click()
+    page.wait_for_function("window.__b3LatePipCreate.requested === true")
+    page.locator('[data-editor-tool="cut"]').click()
+    page.wait_for_function("window.__b3LatePipCreate.aborted === true")
+    assert panel.locator("[data-pip-prompt]").input_value() == ""
+    page.evaluate(
+        """async () => {
+          window.__b3LatePipCreate.resolve();
+          await Promise.resolve();
+          await new Promise(resolve => requestAnimationFrame(
+            () => requestAnimationFrame(resolve)
+          ));
+        }"""
+    )
+    after = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          return {
+            revision: snapshot.revision,
+            hasLateAsset: snapshot.project.pip.assets
+              .some(item => item.id === 'browser-late-image'),
+          };
+        }"""
+    )
+    assert after == {
+        "revision": before_revision + 1,
+        "hasLateAsset": False,
+    }
+
+
+def test_schema_v1_art_draft_remains_compatible(
+    browser_session,
+    seeded_editor_job,
+):
+    page = open_editor(browser_session, seeded_editor_job)
+    page.locator('[data-editor-tool="art"]').click()
+    panel = page.locator("#editorArtPanelRoot")
+    panel.wait_for(state="visible")
+    panel.locator('[data-art-field="text"]').fill("schema v1 仍可恢复")
+    panel.locator('[data-art-field="text"]').press("Tab")
+    page.wait_for_function(
+        """() => window.EditorSuite.projectSnapshot().project.art.overlays[0]
+          ?.text === 'schema v1 仍可恢复'"""
+    )
+    page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          const key = `editor-suite:project-draft:${snapshot.jobId}`;
+          const draft = JSON.parse(sessionStorage.getItem(key));
+          draft.schemaVersion = 1;
+          delete draft.pip;
+          sessionStorage.setItem(key, JSON.stringify(draft));
+        }"""
+    )
+    page.reload()
+    page.locator("#editorArtPanelRoot").wait_for(state="visible")
+    page.wait_for_function(
+        """() => window.EditorSuite.projectSnapshot().project.art.overlays[0]
+          ?.text === 'schema v1 仍可恢复'"""
+    )
+    restored = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          return {
+            artText: snapshot.project.art.overlays[0]?.text,
+            pipIds: snapshot.project.pip.overlays.map(item => item.assetId),
+          };
+        }"""
+    )
+    assert restored["artText"] == "schema v1 仍可恢复"
+    assert restored["pipIds"] == [seeded_editor_job.pip_asset_id]
+
+
+def test_pip_iframe_fallback_and_standalone_page_remain_usable(
+    browser_session,
+    seeded_editor_job,
+):
+    browser_session.page.add_init_script(
+        "window.__EDITOR_PIP_PANEL_ENABLED__ = false;"
+    )
+    page = open_editor(browser_session, seeded_editor_job)
+    page.locator('[data-editor-tool="pip"]').click()
+    pip_frame = page.frame_locator('iframe[title="画中画设置"]')
+    pip_frame.locator("#pipWorkspace").wait_for(state="visible")
+    assert page.locator('iframe[title="画中画设置"]').count() == 1
+    assert page.locator("#editorPipPanelRoot").evaluate("root => root.inert") is True
+    fallback_size = pip_frame.locator(
+        f'.pip-generated-card[data-picture-id="{seeded_editor_job.pip_asset_id}"] '
+        'input[type="number"]'
+    )
+    assert fallback_size.get_attribute("max") is None
+    fallback_size.fill("175")
+    page.wait_for_function(
+        """id => Math.abs(
+          window.EditorSuite.projectSnapshot().project.pip.overlays
+            .find(item => item.assetId === id)?.width - 1.75
+        ) < 0.0001""",
+        arg=seeded_editor_job.pip_asset_id,
+    )
+
+    page.goto(
+        f"{browser_session.base_url}/picture-in-picture"
+        f"?job={seeded_editor_job.job_id}&source=art"
+    )
+    page.locator("#pipWorkspace").wait_for(state="visible")
+    standalone = page.evaluate(
+        """() => ({
+          model: Boolean(window.EditorPipModel),
+          topLevelPanel: Boolean(document.querySelector('#editorPipPanelRoot')),
+          videoCount: document.querySelectorAll('#pipVideo').length,
+          segmentListCount: document.querySelectorAll('#segmentList').length,
+        })"""
+    )
+    assert standalone == {
+        "model": True,
+        "topLevelPanel": False,
+        "videoCount": 1,
+        "segmentListCount": 1,
+    }
+    standalone_size = page.locator(
+        f'.pip-generated-card[data-picture-id="{seeded_editor_job.pip_asset_id}"] '
+        'input[type="number"]'
+    )
+    assert standalone_size.get_attribute("max") is None
+    standalone_size.fill("175")
+    page.wait_for_function(
+        """id => Math.abs(
+          pictureItems.find(item => item.id === id)?.width - 1.75
+        ) < 0.0001""",
+        arg=seeded_editor_job.pip_asset_id,
+    )
+    standalone_size.fill("10")
+    standalone_size.press("Tab")
+    assert float(standalone_size.input_value()) == pytest.approx(175)
+    assert page.evaluate(
+        "id => pictureItems.find(item => item.id === id)?.width",
+        seeded_editor_job.pip_asset_id,
+    ) == pytest.approx(1.75)
 
 
 @pytest.mark.parametrize("playing", [False, True], ids=["paused", "playing"])
@@ -722,11 +1315,11 @@ def test_unified_generate_posts_current_cut_art_and_pip_state(
     art_panel.wait_for(state="visible")
     page.locator("#editorSuitePreviewOverlay .is-art").wait_for(state="visible")
     page.locator('[data-editor-tool="pip"]').click()
-    pip_frame = page.frame_locator('iframe[title="画中画设置"]')
-    pip_frame.locator("#pipWorkspace").wait_for(state="visible")
-    pip_frame.get_by_role(
+    pip_panel = page.locator("#editorPipPanelRoot")
+    pip_panel.wait_for(state="visible")
+    pip_panel.get_by_role(
         "button",
-        name="在视频中预览：保留内容",
+        name="选择画中画素材：保留内容",
     ).click()
     page.locator("#editorSuitePreviewOverlay .is-art").wait_for(state="visible")
     page.locator("#editorSuitePreviewOverlay .is-pip").wait_for(state="visible")
@@ -758,8 +1351,8 @@ def test_unified_generate_posts_current_cut_art_and_pip_state(
     expected_art_end = float(
         art_panel.locator('[data-art-range="end"]').input_value()
     )
-    expected_pip_start = float(pip_frame.locator("#pipStartTime").input_value())
-    expected_pip_end = float(pip_frame.locator("#pipEndTime").input_value())
+    expected_pip_start = float(pip_panel.locator("#pipStartTime").input_value())
+    expected_pip_end = float(pip_panel.locator("#pipEndTime").input_value())
     assert payload["target"] == "all"
     assert payload["ranges"] == [
         {
@@ -827,8 +1420,7 @@ def test_text_edit_preserves_media_iframes_and_effect_timing(
     page.locator("#editorArtPanelRoot").wait_for(state="visible")
     page.locator("#editorSuitePreviewOverlay .is-art").wait_for(state="visible")
     page.locator('[data-editor-tool="pip"]').click()
-    pip_frame = page.frame_locator('iframe[title="画中画设置"]')
-    pip_frame.locator("#pipWorkspace").wait_for(state="visible")
+    page.locator("#editorPipPanelRoot").wait_for(state="visible")
     page.locator('[data-editor-tool="cut"]').click()
     install_base_media_mutation_probe(page)
     page.locator("#cutPreviewVideo").evaluate(
@@ -861,7 +1453,7 @@ def test_text_edit_preserves_media_iframes_and_effect_timing(
               window.__b0TextEditIdentity = {
             video,
             artPanel: document.querySelector('#editorArtPanelRoot'),
-                pipFrame: document.querySelector('iframe[title="画中画设置"]'),
+                pipPanel: document.querySelector('#editorPipPanelRoot'),
               };
           return {
             src: video.currentSrc || video.src,
@@ -898,8 +1490,10 @@ def test_text_edit_preserves_media_iframes_and_effect_timing(
             sameVideo: identity?.video === video,
             sameArtPanel:
               identity?.artPanel === document.querySelector('#editorArtPanelRoot'),
-            samePipFrame:
-              identity?.pipFrame === document.querySelector('iframe[title="画中画设置"]'),
+            samePipPanel:
+              identity?.pipPanel === document.querySelector('#editorPipPanelRoot'),
+            pipFrameCount:
+              document.querySelectorAll('iframe[title="画中画设置"]').length,
             src: video.currentSrc || video.src,
             currentTime: video.currentTime,
             paused: video.paused,
@@ -916,7 +1510,8 @@ def test_text_edit_preserves_media_iframes_and_effect_timing(
     assert after["identitySurvived"] is True
     assert after["sameVideo"] is True
     assert after["sameArtPanel"] is True
-    assert after["samePipFrame"] is True
+    assert after["samePipPanel"] is True
+    assert after["pipFrameCount"] == 0
     assert after["src"] == before["src"]
     assert after["timingRevision"] == before["timingRevision"]
     assert after["revision"] > before["revision"]
@@ -944,9 +1539,7 @@ def test_b1_atomic_timeline_transaction_and_narrow_workspace(
     page.locator("#editorArtPanelRoot").wait_for(state="visible")
     page.locator("#editorSuitePreviewOverlay .is-art").wait_for(state="visible")
     page.locator('[data-editor-tool="pip"]').click()
-    page.frame_locator('iframe[title="画中画设置"]').locator(
-        "#pipWorkspace"
-    ).wait_for(state="visible")
+    page.locator("#editorPipPanelRoot").wait_for(state="visible")
     page.locator('[data-editor-tool="cut"]').click()
     install_base_media_mutation_probe(page)
 

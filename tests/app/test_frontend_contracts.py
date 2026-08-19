@@ -23,6 +23,7 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
         "/transcript-follow-scroll.js",
         "/ui-feedback.js",
         "/timeline-model.js",
+        "/editor-pip-model.js",
         "/editor-project-store.js",
         "/editor-media-controller.js",
         "/editor-art-model.js",
@@ -30,6 +31,7 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
         "/editor-preview-compositor.js",
         "/editor-timeline-controller.js",
         "/editor-art-tool.js",
+        "/editor-pip-tool.js",
         "/art-text.js",
         "/picture-in-picture.js",
     )
@@ -39,6 +41,7 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     follow_scroll_response = responses["/transcript-follow-scroll.js"]
     feedback_script_response = responses["/ui-feedback.js"]
     timeline_script_response = responses["/timeline-model.js"]
+    pip_model_response = responses["/editor-pip-model.js"]
     project_store_script_response = responses["/editor-project-store.js"]
     media_controller_response = responses["/editor-media-controller.js"]
     art_model_response = responses["/editor-art-model.js"]
@@ -46,24 +49,27 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     preview_compositor_response = responses["/editor-preview-compositor.js"]
     timeline_controller_response = responses["/editor-timeline-controller.js"]
     art_tool_response = responses["/editor-art-tool.js"]
+    pip_tool_response = responses["/editor-pip-tool.js"]
     art_script_response = responses["/art-text.js"]
     pip_script_response = responses["/picture-in-picture.js"]
 
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
     assert "/app.js?v=20260818-05" in page_response.text
-    assert "/styles.css?v=20260819-01" in page_response.text
+    assert "/styles.css?v=20260819-02" in page_response.text
     assert "/transcript-follow-scroll.js?v=20260818-03" in page_response.text
     assert "/ui-feedback.js?v=20260807-03" in page_response.text
     assert "/timeline-model.js?v=20260810-01" in page_response.text
-    assert "/editor-project-store.js?v=20260819-01" in page_response.text
+    assert "/editor-pip-model.js?v=20260819-01" in page_response.text
+    assert "/editor-project-store.js?v=20260819-02" in page_response.text
     assert "/editor-media-controller.js?v=20260818-01" in page_response.text
     assert "/editor-art-model.js?v=20260819-01" in page_response.text
     assert "/editor-art-renderer.js?v=20260819-01" in page_response.text
-    assert "/editor-preview-compositor.js?v=20260819-01" in page_response.text
+    assert "/editor-preview-compositor.js?v=20260819-02" in page_response.text
     assert "/editor-timeline-controller.js?v=20260818-01" in page_response.text
     assert "/editor-art-tool.js?v=20260819-01" in page_response.text
-    assert "/editor-suite.js?v=20260819-01" in page_response.text
+    assert "/editor-pip-tool.js?v=20260819-01" in page_response.text
+    assert "/editor-suite.js?v=20260819-02" in page_response.text
     assert timeline_script_response.status_code == 200
     assert timeline_script_response.headers["cache-control"] == "no-store, max-age=0"
     assert "function createStore" in timeline_script_response.text
@@ -78,6 +84,8 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
         preview_compositor_response,
         timeline_controller_response,
         art_tool_response,
+        pip_model_response,
+        pip_tool_response,
     ):
         assert response.status_code == 200
         assert response.headers["cache-control"] == "no-store, max-age=0"
@@ -87,6 +95,8 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     assert "root.EditorPreview = api" in preview_compositor_response.text
     assert "root.EditorTimelineController = api" in timeline_controller_response.text
     assert "root.ArtTool = api" in art_tool_response.text
+    assert "root.EditorPipModel = api" in pip_model_response.text
+    assert "root.PipTool = api" in pip_tool_response.text
     assert 'if (keyboardTarget) {\n      keyboardTarget.addEventListener?.("keydown", keyDown);' in (
         timeline_controller_response.text
     )
@@ -94,6 +104,9 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
         timeline_controller_response.text
     )
     assert page_response.text.index("/timeline-model.js") < page_response.text.index(
+        "/editor-pip-model.js"
+    )
+    assert page_response.text.index("/editor-pip-model.js") < page_response.text.index(
         "/editor-project-store.js"
     )
     assert page_response.text.index("/editor-project-store.js") < page_response.text.index(
@@ -115,6 +128,9 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
         "/editor-art-tool.js"
     )
     assert page_response.text.index("/editor-art-tool.js") < page_response.text.index(
+        "/editor-pip-tool.js"
+    )
+    assert page_response.text.index("/editor-pip-tool.js") < page_response.text.index(
         "/editor-suite.js"
     )
     assert page_response.text.index("/transcript-follow-scroll.js") < (
@@ -742,27 +758,36 @@ def test_cut_range_and_segment_frontend_contracts():
     )
 
 
-def test_top_level_art_tool_has_single_authority_and_legacy_fallback():
+def test_top_level_art_and_pip_tools_have_single_authority_and_legacy_fallback():
     root = Path(__file__).resolve().parents[2]
     page = (root / "web" / "index.html").read_text(encoding="utf-8")
     art_page = (root / "web" / "art-text.html").read_text(encoding="utf-8")
     suite = (root / "web" / "editor-suite.js").read_text(encoding="utf-8")
     tool = (root / "web" / "editor-art-tool.js").read_text(encoding="utf-8")
+    pip_tool = (root / "web" / "editor-pip-tool.js").read_text(encoding="utf-8")
     compositor = (root / "web" / "editor-preview-compositor.js").read_text(
         encoding="utf-8"
     )
     legacy = (root / "web" / "art-text.js").read_text(encoding="utf-8")
+    pip_legacy = (root / "web" / "picture-in-picture.js").read_text(
+        encoding="utf-8"
+    )
 
     assert 'id="editorArtPanelRoot"' in page
     assert 'title="艺术字设置"' not in page
     assert "window.__EDITOR_ART_PANEL_ENABLED__ !== false" in suite
     assert "window.ArtTool.mount(artPanelRoot, createArtToolServices())" in suite
-    assert 'name !== "art" || !topLevelArtEnabled' in suite
-    assert "topLevelArtEnabled ? [\"pip\"] : [\"art\", \"pip\"]" in suite
+    assert 'id="editorPipPanelRoot"' in page
+    assert 'title="画中画设置"' not in page
+    assert "window.__EDITOR_PIP_PANEL_ENABLED__ !== false" in suite
+    assert "window.PipTool.mount(pipPanelRoot, createPipToolServices())" in suite
+    assert "!topLevelToolEnabled(name)" in suite
+    assert "legacyToolNames()" in suite
     assert "restoreEditorDraft(projectSnapshot())" in suite
     assert "PROJECT_DRAFT_RESTORED" in suite
     assert "editor-suite:project-draft:" in suite
-    assert "schemaVersion: 1" in suite
+    assert "schemaVersion: 2" in suite
+    assert "pip: {" in suite
 
     assert "root.ArtTool = api" in tool
     assert "function mount(host, services)" in tool
@@ -777,6 +802,19 @@ def test_top_level_art_tool_has_single_authority_and_legacy_fallback():
     assert "data-art-full-track" in tool
     assert "data-art-ai-request" in tool
     assert "data-art-transcript-save" in tool
+
+    assert "root.PipTool = api" in pip_tool
+    assert "function mount(host, services)" in pip_tool
+    assert "sessionStorage" not in pip_tool
+    assert "localStorage" not in pip_tool
+    assert "postMessage" not in pip_tool
+    assert "EditorTimeline.createStore" not in pip_tool
+    assert 'size.type = "number"' in pip_tool
+    assert "size.max" not in pip_tool
+    assert "root.EditorPipModel?.MIN_WIDTH || 0.15" in compositor
+    assert "window.EditorPipModel?.MIN_WIDTH || 0.15" in suite
+    assert "window.EditorPipModel?.MIN_WIDTH || 0.15" in pip_legacy
+    assert "if (!Number.isFinite(width) || width < PIP_MIN_WIDTH) return;" in pip_legacy
 
     assert "root.EditorArtRenderer?.sanitizeOverlay" in compositor
     assert "root.EditorArtRenderer?.renderCharacters" in compositor
@@ -807,7 +845,7 @@ def test_art_text_frontend_contracts():
     assert ".art-generation-progress" in styles_response.text
     assert "@keyframes art-particle-float" in styles_response.text
     assert "@keyframes art-panel-scan" in styles_response.text
-    assert "/styles.css?v=20260819-01" in art_page_response.text
+    assert "/styles.css?v=20260819-02" in art_page_response.text
     assert "/ui-feedback.js?v=20260807-03" in art_page_response.text
     assert 'id="overlayCoordinateReadout"' in art_page_response.text
     assert 'id="positionPresetGrid"' in art_page_response.text
@@ -819,7 +857,7 @@ def test_art_text_frontend_contracts():
     assert "/timeline-model.js?v=20260810-01" in art_page_response.text
     assert "/editor-art-model.js?v=20260819-01" in art_page_response.text
     assert "/editor-art-renderer.js?v=20260819-01" in art_page_response.text
-    assert "/editor-suite.js?v=20260819-01" in art_page_response.text
+    assert "/editor-suite.js?v=20260819-02" in art_page_response.text
     assert 'class="preview-grid"' in art_page_response.text
     assert 'data-preview-grid-toggle' in art_page_response.text
     assert "从保留文案中选择一句" not in art_page_response.text
@@ -1089,11 +1127,12 @@ def test_picture_in_picture_frontend_contracts():
     art_script_response = responses["/art-text.js"]
 
     assert pip_page_response.status_code == 200
-    assert "/picture-in-picture.js?v=20260818-03" in pip_page_response.text
+    assert "/picture-in-picture.js?v=20260819-01" in pip_page_response.text
     assert "/ui-feedback.js?v=20260807-03" in pip_page_response.text
-    assert "/styles.css?v=20260812-02" in pip_page_response.text
+    assert "/styles.css?v=20260819-02" in pip_page_response.text
     assert "/timeline-model.js?v=20260810-01" in pip_page_response.text
-    assert "/editor-suite.js?v=20260818-06" in pip_page_response.text
+    assert "/editor-pip-model.js?v=20260819-01" in pip_page_response.text
+    assert "/editor-suite.js?v=20260819-02" in pip_page_response.text
     assert 'class="preview-grid"' in pip_page_response.text
     assert 'data-preview-grid-toggle' in pip_page_response.text
     assert 'data-editor-suite-nav data-stage="pip"' in pip_page_response.text
@@ -1229,7 +1268,7 @@ def test_art_template_library_frontend_contracts():
     art_script_response = responses["/art-text.js"]
 
     assert template_page_response.status_code == 200
-    assert "/styles.css?v=20260812-02" in template_page_response.text
+    assert "/styles.css?v=20260819-02" in template_page_response.text
     assert "/art-template-library.js?v=20260812-02" in template_page_response.text
     assert "当前模板主色" in template_page_response.text
     assert 'id="templateCardGrid"' in template_page_response.text
@@ -1288,7 +1327,7 @@ def test_font_manager_frontend_contracts():
     font_script_response = responses["/font-manager.js"]
 
     assert font_page_response.status_code == 200
-    assert "/styles.css?v=20260812-02" in font_page_response.text
+    assert "/styles.css?v=20260819-02" in font_page_response.text
     assert "/font-manager.js?v=" in font_page_response.text
     assert 'id="fontUploadForm"' in font_page_response.text
     assert 'id="fontCardGrid"' in font_page_response.text

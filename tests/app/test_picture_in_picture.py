@@ -637,3 +637,110 @@ def test_picture_in_picture_overlay_accepts_live_retimed_range(tmp_path: Path):
 
     assert normalized[0]["start"] == 0.4
     assert normalized[0]["end"] == 0.9
+
+
+def test_picture_in_picture_overlay_accepts_unlimited_finite_width(tmp_path: Path):
+    asset_id = "oversized-asset"
+    (tmp_path / f"picture-in-picture-{asset_id}.png").write_bytes(b"png")
+    record = {
+        "id": asset_id,
+        "type": "image",
+        "source": "art",
+        "start": 0.1,
+        "end": 0.9,
+        "assetUrl": "/oversized.png",
+    }
+
+    normalized = app_module.normalize_picture_in_picture_overlays(
+        [
+            app_module.PictureInPictureOverlay(
+                assetId=asset_id,
+                start=0.1,
+                end=0.9,
+                x=0.5,
+                y=0.5,
+                width=1.75,
+            )
+        ],
+        1.0,
+        [record],
+        tmp_path,
+        "art",
+    )
+
+    assert normalized[0]["width"] == 1.75
+    with pytest.raises(ValueError, match="无效数值"):
+        app_module.normalize_picture_in_picture_overlays(
+            [
+                app_module.PictureInPictureOverlay(
+                    assetId=asset_id,
+                    start=0.1,
+                    end=0.9,
+                    x=0.5,
+                    y=0.5,
+                    width=float("inf"),
+                )
+            ],
+            1.0,
+            [record],
+            tmp_path,
+            "art",
+        )
+
+
+def test_oversized_picture_in_picture_uses_center_position_for_crop(
+    sample_video: Path,
+    tmp_path: Path,
+):
+    asset_path = tmp_path / "oversized-center.png"
+    image = Image.new("RGB", (320, 180), "#ff0000")
+    for x in range(160, 320):
+        for y in range(180):
+            image.putpixel((x, y), (0, 0, 255))
+    image.save(asset_path, "PNG")
+
+    center_colors: list[tuple[int, int, int]] = []
+    for name, center_x in (("left", 0.25), ("right", 0.75)):
+        output_path = tmp_path / f"oversized-{name}.mp4"
+        frame_path = tmp_path / f"oversized-{name}.png"
+        app_module.render_picture_in_picture_video(
+            sample_video,
+            output_path,
+            [
+                {
+                    "assetId": "oversized-center",
+                    "assetType": "image",
+                    "assetPath": str(asset_path),
+                    "start": 0.0,
+                    "end": 0.9,
+                    "x": center_x,
+                    "y": 0.5,
+                    "width": 2.0,
+                }
+            ],
+        )
+        completed = app_module.run_ffmpeg(
+            [
+                app_module.get_ffmpeg_binary("ffmpeg"),
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-ss",
+                "0.4",
+                "-i",
+                str(output_path),
+                "-frames:v",
+                "1",
+                str(frame_path),
+            ],
+            timeout=60,
+        )
+        assert completed.returncode == 0, completed.stderr
+        with Image.open(frame_path).convert("RGB") as frame:
+            center_colors.append(frame.getpixel((frame.width // 2, frame.height // 2)))
+
+    left_center, right_center = center_colors
+    assert left_center[2] > left_center[0]
+    assert right_center[0] > right_center[2]

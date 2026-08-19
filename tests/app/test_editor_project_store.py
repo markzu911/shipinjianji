@@ -200,12 +200,17 @@ console.log(JSON.stringify({
 def test_editor_project_store_preserves_local_tools_and_selects_compose_atomically() -> None:
     result = run_store_script(
         r"""
+global.EditorPipModel = require('./web/editor-pip-model.js');
 const store = projectStore.createStore({}, { timeline });
 const baseJob = {
   id: 'job-one', status: 'completed', duration: 10, updatedAt: 'v1',
   result: { text: '原文', segments: [] },
   art: { source: 'original', overlays: [{ text: '服务端', start: 1, end: 2 }] },
   pictureInPicture: { source: 'art', overlays: [{ assetId: 'asset-1', start: 2, end: 3 }] },
+  pictureInPictureImages: [{
+    id: 'asset-1', type: 'image', source: 'art', status: 'completed',
+    assetUrl: '/asset-1.png', start: 2, end: 3,
+  }],
 };
 store.dispatch({ type: 'projectHydrated', payload: { job: baseJob } });
 store.dispatch({ type: 'artStateChanged', payload: {
@@ -223,6 +228,13 @@ store.dispatch({ type: 'projectHydrated', payload: { job: {
   updatedAt: 'v2',
   art: { source: 'original', overlays: [{ text: '迟到服务端', start: 7, end: 8 }] },
   pictureInPicture: { source: 'art', overlays: [{ assetId: 'asset-1', start: 7, end: 8 }] },
+  pictureInPictureImages: [
+    ...baseJob.pictureInPictureImages,
+    {
+      id: 'asset-after-cancel', type: 'image', source: 'art', status: 'completed',
+      assetUrl: '/asset-after-cancel.png', start: 4, end: 6,
+    },
+  ],
 } } });
 const snapshot = store.getState();
 const request = projectStore.selectCompositionRequest(snapshot);
@@ -234,6 +246,7 @@ console.log(JSON.stringify({
   request,
   localArt: snapshot.project.art.overlays[0],
   localPip: snapshot.project.pip.overlays[0],
+  pipAssetIds: snapshot.project.pip.assets.map(asset => asset.id),
   timelineKinds: timelineDocument.tracks.map(track => track.kind),
 }));
 """
@@ -245,6 +258,7 @@ console.log(JSON.stringify({
     assert result["request"]["pictureInPictureOverlays"][0]["width"] == 0.5
     assert result["localArt"]["start"] == 1
     assert result["localPip"]["start"] == 2
+    assert result["pipAssetIds"] == ["asset-1", "asset-after-cancel"]
     assert result["timelineKinds"] == ["cut", "art", "pip"]
 
 
@@ -404,6 +418,67 @@ console.log(JSON.stringify({
     assert result["clip"]["start"] == 2
     assert result["clip"]["end"] == 5
     assert result["selection"]["clipId"] == "art:overlay-one"
+
+
+def test_editor_project_store_restores_art_and_pip_draft_atomically() -> None:
+    result = run_store_script(
+        r"""
+global.EditorPipModel = require('./web/editor-pip-model.js');
+const store = projectStore.createStore({}, { timeline });
+store.dispatch({ type: 'projectHydrated', payload: { job: {
+  id: 'job-draft-v2', duration: 8, createdAt: 'base-v1',
+  status: 'completed', result: { text: '', segments: [] },
+  pictureInPictureImages: [{
+    id: 'wide-asset', type: 'image', source: 'art', status: 'completed',
+    assetUrl: '/wide.png', start: 1, end: 4,
+  }],
+  art: { status: 'completed', source: 'original', overlays: [] },
+} } });
+const before = store.getState();
+const restored = store.dispatch({ type: 'projectDraftRestored', payload: {
+  jobId: before.jobId,
+  serverVersion: before.serverVersion,
+  art: { source: 'original', overlays: [{
+    id: 'headline', text: '标题', start: 1, end: 3, x: 0.5, y: 0.8,
+  }] },
+  pip: { source: 'art', assets: before.project.pip.assets, overlays: [{
+    assetId: 'wide-asset', start: 1, end: 4, x: 0.5, y: 0.5, width: 1.75,
+  }] },
+  timeline: { duration: 8, tracks: [
+    { id: 'art:overlay:headline', kind: 'art', clips: [{
+      id: 'art:headline', sourceId: 'headline', kind: 'art', start: 1, end: 3,
+    }] },
+    { id: 'pip:overlay:wide-asset', kind: 'pip', clips: [{
+      id: 'pip:wide-asset', sourceId: 'wide-asset', kind: 'pip', start: 1, end: 4,
+    }] },
+  ], selection: { clipId: 'pip:wide-asset' } },
+} });
+const after = store.getState();
+const frame = projectStore.selectEditorFrame(after, timeline);
+console.log(JSON.stringify({
+  restored,
+  revisionDelta: after.revision - before.revision,
+  timingDelta: after.timingRevision - before.timingRevision,
+  artIds: after.project.art.overlays.map(item => item.id),
+  pipWidth: after.project.pip.overlays[0].width,
+  selection: after.project.timeline.selection,
+  composeWidth: frame.composition.pictureInPictureOverlays[0].width,
+  timelineKinds: frame.timeline.tracks.map(track => track.kind),
+}));
+"""
+    )
+
+    assert result["restored"]["accepted"] is True
+    assert result["revisionDelta"] == 1
+    assert result["timingDelta"] == 1
+    assert result["artIds"] == ["headline"]
+    assert result["pipWidth"] == 1.75
+    assert result["composeWidth"] == 1.75
+    assert result["selection"] == {
+        "clipId": "pip:wide-asset",
+        "trackId": "pip:overlay:wide-asset",
+    }
+    assert result["timelineKinds"] == ["art", "pip"]
 
 
 def test_editor_project_store_tool_echo_preserves_cross_kind_track_order() -> None:
