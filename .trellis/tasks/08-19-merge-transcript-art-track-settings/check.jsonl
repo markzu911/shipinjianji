@@ -1,0 +1,6 @@
+{"file":".trellis/spec/frontend/index.md","reason":"核对前端层 Quality Check、脚本加载和缓存版本契约。"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"检查没有引入第二套 Store/selection/frame，且整轨样式不改变 cue 时间。"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"检查轨道入口、控件状态、可访问性与窄屏布局。"}
+{"file":".trellis/spec/testing/index.md","reason":"执行任务风险对应的 Node、静态、浏览器和完整测试。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"核对浏览器隔离、错误捕获、revision 一致性与 375px 验收。"}
+{"file":".trellis/tasks/08-19-merge-transcript-art-track-settings/research/current-art-track-contract.md","reason":"以源代码证据检查实现范围和既有模型复用是否一致。"}

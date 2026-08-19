@@ -1,0 +1,6 @@
+{"file":".trellis/spec/frontend/index.md","reason":"加载原生单页编辑器的前端规范入口和资源版本要求。"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"遵守 ArtTool、Store、selection、统一 frame 和全文艺术字轨道的所有权契约。"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"实现可访问、响应式且与现有 inspector 一致的轨道列表与动态控件。"}
+{"file":".trellis/spec/testing/index.md","reason":"选择前端静态、Node 与完整回归的测试层级。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"验证真实 Chromium 中的单页、revision、全文轨道和 375px 契约。"}
+{"file":".trellis/tasks/08-19-merge-transcript-art-track-settings/research/current-art-track-contract.md","reason":"复用已确认的 ArtTool/model/timeline 现状与最小变更边界。"}

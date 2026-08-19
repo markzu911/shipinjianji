@@ -84,7 +84,7 @@ composition.element.style.transform =
 
 - `input` 中合法的 `5–95` 数值实时更新预览；回车或 `change` 再 clamp 越界值并回写格式化结果。
 - 渲染、拖动和套用预设后同步两个输入；当前正在编辑的输入不能被同步渲染覆盖，否则用户无法输入多位数或小数。
-- 全文艺术字轨道的 `x/y` 继续由 `TRANSCRIPT_TRACK_STYLE_KEYS` 批量应用到每个 cue。
+- 全文艺术字轨道的 `x/y` 继续由 `TRANSCRIPT_STYLE_FIELDS` 批量应用到每个 cue。
 - X/Y 使用可见标签、独立 `%` 单位、`0.1` 步长、焦点态和至少 44px 高度；375px 下两列不能产生卡片或页面横向溢出。
 
 ```javascript

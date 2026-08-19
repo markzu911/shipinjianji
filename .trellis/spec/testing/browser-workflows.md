@@ -86,6 +86,8 @@ window.EditorProjectStore.selectEditorFrame(snapshot) -> frame
 - 旧 `art-text.html/js`、`picture-in-picture.html/js` 必须物理缺失；内部链接直接进入顶层 URL，不先命中 307。
 - 模板 query 由 EditorSuite 结构化解析并注入 ArtTool；ArtTool 等 font/template catalog 完成后只消费一次。
 - manual selection 只更新目标；transcript selection 按 `trackId` 一次更新全轨；无 selection 保存为后续 manual/全文轨道首选。
+- ArtTool 中同 `trackId` 的 transcript cues 只显示一个带段数和整轨范围的“视频文案艺术字”入口，manual overlays 逐项显示。入口仍选择 `art:<cueId>`：优先当前同轨 cue，其次当前播放时间命中的 cue，最后最早 cue；render 和播放推进不能改写已有 selection。
+- transcript 入口只显示共享样式/坐标控件，隐藏文字、方向、分行、时间、匹配时间和 manual 批量按钮。共享样式交互最多增加一个 revision，并精确保留 cue ID、文字、编辑/源时间、`characterTimings` 和 `timingRevision`；删除入口移除同轨全部 cues。
 - 无效 template 整体忽略；无效 font/color/size 安全回退。缺失/空 `templateSize` 保持 null，不能被解析为 0 后 clamp 到 20。
 - 模板 handoff 最多增加一个 revision，`timingRevision`、start/end 和 source anchors 不变。
 
@@ -94,6 +96,7 @@ window.EditorProjectStore.selectEditorFrame(snapshot) -> frame
 - 历史 art/pip URL 307 后打开正确顶层 panel，保留 job/source、移除 embedded、iframe 为 0。
 - 顶层 deep link 在桌面和 375px 都无额外导航、无横向溢出；hidden cut/art/pip panel inert 且不可 Tab 聚焦。
 - manual 与两 cue transcript track 模板应用只增加一个 revision，整轨样式一致，range/timingRevision 不变。
+- 真实 ArtTool 列表覆盖同轨多 cue 归并、manual 分项、播放时间代表 cue、同轨 selection 重绘稳定、整轨/manual 控件往返、完整字段快照、删除整轨后的 frame 一致性，以及仅有整轨时删除后的空选择文案复位。
 - 无 selection 后新增 manual 和全文轨道使用首选模板；无效 template/font/color/size 覆盖安全回退。
 - 文字保存与三工具切换保持 document/video/tool root identity，基础媒体 probe 的 `srcWrites/loadCalls` 都为 0。
 - pointercancel 无 revision，pointerup 单 revision；undo/redo、preview/timeline/compose revision 保持一致。

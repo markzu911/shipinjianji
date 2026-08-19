@@ -281,6 +281,9 @@ sessionStorage[`editor-suite:project-draft:${jobId}`] = {
 - Store 原子 `PROJECT_DRAFT_RESTORED` 仍用当前 Store `serverVersion` 防止 dispatch 期间 job 漂移；EditorSuite 在 dispatch 前校验 envelope 的领域指纹。
 - 带 `?job=<same>&tool=art` 的首次页面载入必须保留 art 工具；只有同一 document 真正切换到另一个 job 时才清除旧 `tool` 参数。
 - 模板 query 由 EditorSuite 解析后通过 services 注入；缺少/空 `templateSize` 必须保持 `null`，不得因 `Number(null)` 变成 20。无效 template 整体忽略，无效 font/color/size 按 catalog 和当前选中项安全回退。
+- ArtTool 列表只做语义投影：同一 `trackId` 的 transcript cues 显示为一个“视频文案艺术字”入口并汇总段数与整轨范围，manual overlays 继续逐项显示；底层 `project.art.overlays`、公共预览、时间轴 clips 和 compose 仍保留每个 cue，禁止为了 UI 合并而压平数据。
+- 点击 transcript 入口时继续提交现有 `art:<cueId>` selection。代表 cue 依次复用当前同轨 selection、命中当前剪后播放时间的 cue、按 start/end 排序后的首 cue；普通 render 和播放帧不得主动改 selection。
+- transcript 入口选中后只显示整轨共享样式、坐标和位置预设；文字、方向、每行字数、start/end、匹配文案时间和应用到全部 manual 的控件必须隐藏。整轨样式仍经一次 `updateOverlay()`/Store command 按 `trackId` 更新，且精确保留每个 cue 的 `id`、`text`、`start/end`、`sourceStart/sourceEnd`、`characterTimings` 和 `timingRevision`。
 - 全文轨道、位置预设和 AI 请求都必须带 AbortController 与 job/revision guard。旧请求只能清理自己的 request/busy 状态，不得取消或解锁同 scope 的新请求。
 - 时间范围命令必须在同一次 Store 提交中按旧/新区间等比重映射 `characterTimings`；不能只改 overlay/clip 的 `start/end`，否则草稿恢复与 compose 校验会把逐字时间判为越界。
 - 手动从文案段添加艺术字时，即使同一段被重复添加，confirmed overlay id 也必须保持唯一；待确认 AI 草稿只通过 PreviewCompositor 的瞬时预览层显示，切换工具、取消、确认和销毁都要清除，且不得进入 Store revision 或 compose DTO。
@@ -310,8 +313,8 @@ sessionStorage[`editor-suite:project-draft:${jobId}`] = {
 
 ### 6. Tests Required
 
-- Node/静态：ArtTool 不包含 storage/message/video/timeline store；重复 mount/destroy 可撤销；Store 原子恢复覆盖错误 job/version、等价 no-op、cut-to-art 删减/撤销和陈旧草稿 reconcile。
-- 真实浏览器：text/style 一次 revision 且 timing 不变，range 一次 revision/timing；cutDraft 自动保存后 reload 仍恢复 art；`tool=art` 保留；媒体同页不发生 `src/load()`。
+- Node/静态：ArtTool 不包含 storage/message/video/timeline store；重复 mount/destroy 可撤销；Store 原子恢复覆盖错误 job/version、等价 no-op、cut-to-art 删减/撤销和陈旧草稿 reconcile；整轨 style-only 更新对 cue 身份、文字、编辑/源时间、字符 timing 和 timing revision 做前后快照。
+- 真实浏览器：同轨多 cue 只显示一个入口，manual 仍逐项显示；代表 cue 选择稳定，整轨/manual 控件往返恢复；style 一次 revision 且 timing 不变，删除整轨从 preview/timeline/compose 同时消失，仅有整轨时删除后恢复空选择文案；375px 无溢出且入口不少于 44px。另需覆盖 cutDraft 自动保存后 reload 仍恢复 art、`tool=art` 保留且媒体同页不发生 `src/load()`。
 - effect 竞态：让旧全文轨道请求忽略 abort 并迟到返回，断言旧响应 0 revision、0 overlay，新请求仍恰好提交 1 revision。
 - 历史 URL/模板兼容：307 后顶层 art root 可用，manual/全文轨道/无 selection/无效参数均按单次 handoff 契约运行，DOM 中 iframe 数量始终为 0。
 
@@ -332,6 +335,14 @@ if (envelope.serverVersion !== editorDraftServerVersion(job)) {
 }
 const accepted = store.dispatch(restoreAction).accepted;
 restoredJobs.add(job.id);
+```
+
+```javascript
+// Wrong: expose every transcript cue as an independently styled list row.
+for (const overlay of art.overlays) renderOverlayEntry(overlay);
+
+// Correct: group only the inspector view and keep cue data unchanged.
+for (const entry of overlayListEntries(art.overlays)) renderOverlayEntry(entry);
 ```
 
 ## 禁止事项
