@@ -701,12 +701,35 @@
           next.direction = "horizontal";
           next.charsPerLine = 0;
         }
-        return normalizeOverlay(next, {
+        const normalized = normalizeOverlay(next, {
           duration: options.duration,
           palettes: options.palettes,
           templateEffects: options.templateEffects,
           id: overlay.id,
         });
+        if (!transcriptSelected) return normalized;
+        const cueTextChanged =
+          String(overlay.id) === String(id) &&
+          Object.prototype.hasOwnProperty.call(cuePatch, "text") &&
+          String(cuePatch.text || "").trim() !== String(overlay.text || "");
+        for (const field of [
+          "id", "start", "end", "sourceStart", "sourceEnd", "timingRevision",
+        ]) {
+          if (Object.prototype.hasOwnProperty.call(overlay, field)) {
+            normalized[field] = clone(overlay[field]);
+          } else {
+            delete normalized[field];
+          }
+        }
+        if (!cueTextChanged) {
+          normalized.text = clone(overlay.text);
+          if (Object.prototype.hasOwnProperty.call(overlay, "characterTimings")) {
+            normalized.characterTimings = clone(overlay.characterTimings);
+          } else {
+            delete normalized.characterTimings;
+          }
+        }
+        return normalized;
       });
     }
 

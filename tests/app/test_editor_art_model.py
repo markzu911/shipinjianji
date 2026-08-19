@@ -95,17 +95,35 @@ const cues = model.buildTranscriptTrack({
     { text: '第二段', start: 1.2, end: 2.4, sourceStart: 2.2, sourceEnd: 3.4 },
   ],
 }, { artStyle: 'impact', color: '#FFD84D' }, [], { duration: 5 });
-const updated = model.updateOverlay(cues, cues[0].id, {
-  text: '第一段改', artStyle: 'neon', color: '#A9E7CF', fontSize: 66, start: 3,
+const cueEdited = model.updateOverlay(cues, cues[0].id, {
+  text: '第一段改',
 }, { duration: 5 });
+const updated = model.updateOverlay(cues, cues[0].id, {
+  artStyle: 'neon', color: '#A9E7CF', fontSize: 66, start: 3,
+}, { duration: 5 });
+const legacyCues = cues.map(({ characterTimings, ...cue }) => cue);
+const legacyUpdated = model.updateOverlay(legacyCues, legacyCues[0].id, {
+  fontSize: 62,
+}, { duration: 5 });
+const invariant = ({
+  id, text, start, end, sourceStart, sourceEnd, characterTimings, timingRevision,
+}) => ({
+  id, text, start, end, sourceStart, sourceEnd, characterTimings,
+  timingRevision: timingRevision ?? null,
+});
 const timeline = model.buildTimeline({ overlays: updated }, 5, {
   clipId: `art:${updated[0].id}`,
 });
 console.log(JSON.stringify({
-  before: cues.map(({ id, text, start, end, sourceStart, sourceEnd }) => ({ id, text, start, end, sourceStart, sourceEnd })),
-  after: updated.map(({ id, text, start, end, sourceStart, sourceEnd, artStyle, fontSize }) => ({ id, text, start, end, sourceStart, sourceEnd, artStyle, fontSize })),
+  before: cues.map(invariant),
+  after: updated.map((cue) => ({ ...invariant(cue), artStyle: cue.artStyle, fontSize: cue.fontSize })),
+  cueEditedTexts: cueEdited.map((cue) => cue.text),
+  legacyTimingPresence: legacyUpdated.map((cue) =>
+    Object.prototype.hasOwnProperty.call(cue, 'characterTimings')
+  ),
   tracks: timeline.tracks,
   selection: timeline.selection,
+  removed: model.removeOverlay(updated, updated[0].id),
   error: model.validateOverlays(updated, 5),
 }));
 """
@@ -114,18 +132,21 @@ console.log(JSON.stringify({
     assert [item["id"] for item in payload["before"]] == [
         item["id"] for item in payload["after"]
     ]
-    assert payload["after"][0]["text"] == "第一段改"
-    assert payload["after"][1]["text"] == payload["before"][1]["text"]
+    assert payload["cueEditedTexts"] == ["第一段改", "第二段"]
+    assert payload["legacyTimingPresence"] == [False, False]
     for before, after in zip(payload["before"], payload["after"], strict=True):
         assert after["start"] == before["start"]
         assert after["end"] == before["end"]
         assert after["sourceStart"] == before["sourceStart"]
         assert after["sourceEnd"] == before["sourceEnd"]
+        assert after["characterTimings"] == before["characterTimings"]
+        assert after["timingRevision"] == before["timingRevision"]
         assert after["artStyle"] == "neon"
         assert after["fontSize"] == 66
     assert len(payload["tracks"]) == 1
     assert len(payload["tracks"][0]["clips"]) == 2
     assert payload["selection"]["clipId"].startswith("art:art-full-")
+    assert payload["removed"] == []
     assert payload["error"] == ""
 
 

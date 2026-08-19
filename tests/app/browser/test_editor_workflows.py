@@ -2160,6 +2160,244 @@ def test_template_deep_link_updates_selected_transcript_track_once(
         assert overlay["fontSize"] == 66
 
 
+def test_art_panel_groups_transcript_track_and_updates_shared_settings(
+    browser_session,
+    seeded_two_cue_transcript_track_editor_job,
+):
+    job = seeded_two_cue_transcript_track_editor_job
+    page = open_editor(browser_session, job)
+    page.locator('[data-editor-tool="art"]').click()
+    panel = page.locator("#editorArtPanelRoot")
+    panel.wait_for(state="visible")
+
+    for text in ("手动标题一", "手动标题二"):
+        panel.locator("[data-art-add-text]").fill(text)
+        panel.locator("[data-art-add]").click()
+    page.wait_for_function(
+        """() => window.EditorSuite.projectSnapshot().project.art.overlays.length === 4"""
+    )
+
+    track_button = panel.locator(
+        '[data-art-track-select="browser-transcript-track"]'
+    )
+    assert track_button.count() == 1
+    assert "视频文案艺术字" in track_button.inner_text()
+    assert "2 段 · 0.05s - 0.85s" in track_button.inner_text()
+    assert panel.locator("[data-art-list] [data-art-select]").count() == 2
+    assert panel.locator("[data-art-list] .overlay-list-item").count() == 3
+
+    page.locator("#cutPreviewVideo").evaluate(
+        """video => {
+          video.currentTime = 0.1;
+          video.dispatchEvent(new Event('timeupdate'));
+        }"""
+    )
+    track_button.click()
+    page.wait_for_function(
+        """() => window.EditorSuite.projectSnapshot().project.timeline.selection?.clipId
+          === 'art:browser-transcript-cue-1'"""
+    )
+    assert panel.locator(
+        "[data-art-list] .overlay-list-item.is-selected"
+    ).count() == 1
+    assert track_button.get_attribute("aria-pressed") == "true"
+    assert panel.locator("[data-art-detail-title]").inner_text() == (
+        "视频文案艺术字整轨设置"
+    )
+    assert panel.locator("[data-art-detail-help]").inner_text() == (
+        "统一修改整轨文案艺术字"
+    )
+    assert panel.locator("[data-art-delete]").inner_text() == (
+        "删除视频文案艺术字"
+    )
+    assert panel.locator("[data-art-manual-only]:visible").count() == 0
+    assert panel.locator('[data-art-field="fontSize"]').is_visible()
+    assert panel.locator('[data-art-coordinate="x"]').is_visible()
+
+    page.locator("#cutPreviewVideo").evaluate(
+        """video => {
+          video.currentTime = 0.6;
+          video.dispatchEvent(new Event('timeupdate'));
+        }"""
+    )
+    assert page.evaluate(
+        """() => window.EditorSuite.projectSnapshot().project.timeline.selection?.clipId"""
+    ) == "art:browser-transcript-cue-1"
+
+    before = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          const invariant = item => ({
+            id: item.id,
+            text: item.text,
+            start: item.start,
+            end: item.end,
+            sourceStart: item.sourceStart ?? null,
+            sourceEnd: item.sourceEnd ?? null,
+            characterTimings: item.characterTimings,
+            timingRevision: item.timingRevision ?? null,
+          });
+          return {
+            revision: snapshot.revision,
+            timingRevision: snapshot.timingRevision,
+            transcript: snapshot.project.art.overlays
+              .filter(item => item.trackType === 'transcript')
+              .map(invariant),
+            manual: snapshot.project.art.overlays
+              .filter(item => item.trackType !== 'transcript')
+              .map(item => ({ id: item.id, fontSize: item.fontSize })),
+          };
+        }"""
+    )
+    font_size = panel.locator('[data-art-field="fontSize"]')
+    font_size.fill("68")
+    font_size.press("Tab")
+    page.wait_for_function(
+        """() => window.EditorSuite.projectSnapshot().project.art.overlays
+          .filter(item => item.trackType === 'transcript')
+          .every(item => item.fontSize === 68)"""
+    )
+    after = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          const frame = window.EditorProjectStore.selectEditorFrame(snapshot);
+          const invariant = item => ({
+            id: item.id,
+            text: item.text,
+            start: item.start,
+            end: item.end,
+            sourceStart: item.sourceStart ?? null,
+            sourceEnd: item.sourceEnd ?? null,
+            characterTimings: item.characterTimings,
+            timingRevision: item.timingRevision ?? null,
+          });
+          const transcript = snapshot.project.art.overlays
+            .filter(item => item.trackType === 'transcript');
+          return {
+            revision: snapshot.revision,
+            timingRevision: snapshot.timingRevision,
+            transcript: transcript.map(invariant),
+            manual: snapshot.project.art.overlays
+              .filter(item => item.trackType !== 'transcript')
+              .map(item => ({ id: item.id, fontSize: item.fontSize })),
+            selection: snapshot.project.timeline.selection?.clipId || null,
+            timelineTracks: frame.timeline.tracks
+              .filter(track => track.id === 'art:transcript:browser-transcript-track')
+              .map(track => track.clips.map(clip => clip.sourceId)),
+            previewIds: frame.preview.art.overlays
+              .filter(item => item.trackType === 'transcript')
+              .map(item => item.id),
+            previewCues: frame.preview.art.overlays
+              .filter(item => item.trackType === 'transcript')
+              .map(item => ({ text: item.text, start: item.start, end: item.end })),
+            compositionCues: frame.composition.artOverlays
+              .filter(item => item.trackId === 'browser-transcript-track')
+              .map(item => ({ text: item.text, start: item.start, end: item.end })),
+          };
+        }"""
+    )
+    assert after["revision"] == before["revision"] + 1
+    assert after["timingRevision"] == before["timingRevision"]
+    assert after["transcript"] == before["transcript"]
+    assert after["manual"] == before["manual"]
+    assert after["selection"] == "art:browser-transcript-cue-1"
+    assert after["timelineTracks"] == [
+        ["browser-transcript-cue-1", "browser-transcript-cue-2"]
+    ]
+    assert sorted(after["previewIds"]) == [
+        "browser-transcript-cue-1",
+        "browser-transcript-cue-2",
+    ]
+    assert after["previewCues"] == after["compositionCues"]
+    assert track_button.get_attribute("aria-pressed") == "true"
+
+    page.set_viewport_size({"width": 375, "height": 812})
+    layout = page.evaluate(
+        """() => {
+          const root = document.querySelector('#editorArtPanelRoot .editor-art-tool');
+          const track = document.querySelector('[data-art-track-select]');
+          return {
+            documentOverflow: document.documentElement.scrollWidth
+              - document.documentElement.clientWidth,
+            panelOverflow: root.scrollWidth - root.clientWidth,
+            trackHeight: track.getBoundingClientRect().height,
+          };
+        }"""
+    )
+    assert layout["documentOverflow"] <= 0
+    assert layout["panelOverflow"] <= 0
+    assert layout["trackHeight"] >= 44
+
+    manual_button = panel.locator("[data-art-list] [data-art-select]").first
+    manual_button.click()
+    assert panel.locator("[data-art-manual-only]:visible").count() == 7
+    assert panel.locator("[data-art-detail-title]").inner_text() == "详细设置"
+    assert panel.locator("[data-art-delete]").inner_text() == "删除当前艺术字"
+
+    track_button.click()
+    panel.locator("[data-art-delete]").click()
+    assert page.locator("#appDialogTitle").inner_text() == "删除视频文案艺术字？"
+    page.locator("#appDialogConfirm").click()
+    page.wait_for_function(
+        """() => window.EditorSuite.projectSnapshot().project.art.overlays
+          .every(item => item.trackType !== 'transcript')"""
+    )
+    removed = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          const frame = window.EditorProjectStore.selectEditorFrame(snapshot);
+          return {
+            overlayCount: snapshot.project.art.overlays.length,
+            trackButtons: document.querySelectorAll('[data-art-track-select]').length,
+            timeline: frame.timeline.tracks.filter(track =>
+              track.id === 'art:transcript:browser-transcript-track'
+            ).length,
+            preview: frame.preview.art.overlays.filter(item =>
+              item.trackType === 'transcript'
+            ).length,
+            composition: frame.composition.artOverlays.filter(item =>
+              item.trackType === 'transcript'
+            ).length,
+          };
+        }"""
+    )
+    assert removed == {
+        "overlayCount": 2,
+        "trackButtons": 0,
+        "timeline": 0,
+        "preview": 0,
+        "composition": 0,
+    }
+
+
+def test_deleting_only_transcript_track_resets_empty_selection_copy(
+    browser_session,
+    seeded_two_cue_transcript_track_editor_job,
+):
+    page = open_editor(browser_session, seeded_two_cue_transcript_track_editor_job)
+    page.locator('[data-editor-tool="art"]').click()
+    panel = page.locator("#editorArtPanelRoot")
+    panel.wait_for(state="visible")
+
+    panel.locator('[data-art-track-select="browser-transcript-track"]').click()
+    panel.locator("[data-art-delete]").click()
+    page.locator("#appDialogConfirm").click()
+    page.wait_for_function(
+        """() => window.EditorSuite.projectSnapshot().project.art.overlays.length === 0"""
+    )
+
+    assert panel.locator("[data-art-track-select]").count() == 0
+    assert panel.locator("[data-art-selection-empty]").is_visible()
+    assert panel.locator("[data-art-controls]").is_hidden()
+    assert panel.locator("[data-art-detail-title]").inner_text() == "详细设置"
+    assert panel.locator("[data-art-detail-help]").inner_text() == (
+        "修改当前选中的艺术字"
+    )
+    assert panel.locator("[data-art-controls-legend]").inner_text() == (
+        "当前艺术字设置"
+    )
+
+
 def test_template_preference_applies_to_new_manual_and_full_track_without_selection(
     browser_session,
     seeded_editor_job_without_art,

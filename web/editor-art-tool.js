@@ -66,30 +66,30 @@
               <p class="retained-bulk-message" data-art-transcript-status role="status" hidden></p>
             </div>
           </section>
-          <div class="art-detail-heading"><strong>详细设置</strong><span>修改当前选中的艺术字</span></div>
+          <div class="art-detail-heading"><strong data-art-detail-title>详细设置</strong><span data-art-detail-help>修改当前选中的艺术字</span></div>
           <div class="editor-art-selection-empty" data-art-selection-empty role="status">选择一条艺术字后可调整样式和时间。</div>
           <fieldset class="overlay-controls editor-art-controls" data-art-controls hidden disabled>
-            <legend class="sr-only">当前艺术字设置</legend>
+            <legend class="sr-only" data-art-controls-legend>当前艺术字设置</legend>
             <div class="art-style-picker full-field"><span class="field-label">艺术字模板</span><div class="art-style-grid" data-art-templates role="radiogroup"></div></div>
-            <label class="field full-field"><span>文字内容</span><textarea rows="2" maxlength="60" data-art-field="text"></textarea></label>
+            <label class="field full-field" data-art-manual-only><span>文字内容</span><textarea rows="2" maxlength="60" data-art-field="text"></textarea></label>
             <label class="field"><span>字体</span><select data-art-field="font"></select></label>
             <label class="field"><span>字号</span><input type="number" min="20" max="180" step="1" data-art-field="fontSize" /></label>
-            <label class="field"><span>文字方向</span><select data-art-field="direction"><option value="horizontal">横向排版</option><option value="vertical">竖向排版</option></select></label>
+            <label class="field" data-art-manual-only><span>文字方向</span><select data-art-field="direction"><option value="horizontal">横向排版</option><option value="vertical">竖向排版</option></select></label>
             <label class="field"><span>对齐方式</span><select data-art-field="textAlign"><option value="left">左对齐</option><option value="center">居中对齐</option><option value="right">右对齐</option></select></label>
-            <label class="field"><span>每行字数</span><input type="number" min="0" max="20" data-art-field="charsPerLine" /></label>
+            <label class="field" data-art-manual-only><span>每行字数</span><input type="number" min="0" max="20" data-art-field="charsPerLine" /></label>
             <label class="field"><span>字间距</span><input type="number" min="0" max="20" step="1" data-art-field="letterSpacing" /></label>
             <label class="field"><span>行间距</span><input type="number" min="0" max="40" data-art-field="lineSpacing" /></label>
             <label class="field color-field"><span>文字颜色</span><input type="color" data-art-field="color" /></label>
             <label class="field color-field"><span>描边颜色</span><input type="color" data-art-field="strokeColor" /></label>
             <label class="field"><span>描边</span><input type="number" min="0" max="12" step="1" data-art-field="strokeWidth" /></label>
             <label class="toggle-field"><span><strong>文字阴影</strong></span><input type="checkbox" data-art-field="shadow" /></label>
-            <label class="field"><span>开始时间（秒）</span><input type="number" min="0" step="0.01" data-art-range="start" /></label>
-            <label class="field"><span>结束时间（秒）</span><input type="number" min="0.02" step="0.01" data-art-range="end" /></label>
+            <label class="field" data-art-manual-only><span>开始时间（秒）</span><input type="number" min="0" step="0.01" data-art-range="start" /></label>
+            <label class="field" data-art-manual-only><span>结束时间（秒）</span><input type="number" min="0.02" step="0.01" data-art-range="end" /></label>
             <label class="field"><span>横向 X（%）</span><input type="number" min="5" max="95" step="0.1" data-art-coordinate="x" /></label>
             <label class="field"><span>纵向 Y（%）</span><input type="number" min="5" max="95" step="0.1" data-art-coordinate="y" /></label>
             <div class="position-presets full-field"><div class="position-presets-heading"><span><strong>位置预设</strong><small>保存当前坐标并复用</small></span></div><div class="position-preset-grid" data-art-presets></div><div class="position-preset-save"><input data-art-preset-name maxlength="40" placeholder="输入预设名称" /><button type="button" class="secondary-button compact-button" data-art-preset-save>保存坐标</button></div></div>
-            <button type="button" class="secondary-button full-field" data-art-fit>贴合匹配文案时间</button>
-            <button type="button" class="secondary-button full-field" data-art-apply-all>应用当前设置到全部自定义艺术字</button>
+            <button type="button" class="secondary-button full-field" data-art-fit data-art-manual-only>贴合匹配文案时间</button>
+            <button type="button" class="secondary-button full-field" data-art-apply-all data-art-manual-only>应用当前设置到全部自定义艺术字</button>
             <button type="button" class="text-danger-button full-field" data-art-delete>删除当前艺术字</button>
           </fieldset>
         </section>
@@ -155,6 +155,65 @@
         const clipId = String(snapshot()?.project?.timeline?.selection?.clipId || "");
         const sourceId = clipId.replace(/^art:/, "");
         return art().overlays.find((overlay) => String(overlay.id) === sourceId) || null;
+      }
+
+      function sortedTranscriptCues(cues) {
+        return [...cues].sort(
+          (left, right) =>
+            Number(left.start) - Number(right.start) ||
+            Number(left.end) - Number(right.end),
+        );
+      }
+
+      function overlayListEntries(overlays) {
+        const entries = [];
+        const transcriptEntries = new Map();
+        for (const overlay of overlays) {
+          if (!model.isTranscriptOverlay(overlay)) {
+            entries.push({ kind: "manual", overlay });
+            continue;
+          }
+          const trackId = String(overlay.trackId);
+          let entry = transcriptEntries.get(trackId);
+          if (!entry) {
+            entry = { kind: "transcript", trackId, cues: [] };
+            transcriptEntries.set(trackId, entry);
+            entries.push(entry);
+          }
+          entry.cues.push(overlay);
+        }
+        for (const entry of transcriptEntries.values()) {
+          entry.cues = sortedTranscriptCues(entry.cues);
+          entry.start = Math.min(...entry.cues.map((cue) => Number(cue.start)));
+          entry.end = Math.max(...entry.cues.map((cue) => Number(cue.end)));
+        }
+        return entries;
+      }
+
+      function transcriptRepresentative(trackId) {
+        const cues = sortedTranscriptCues(
+          art().overlays.filter(
+            (overlay) =>
+              model.isTranscriptOverlay(overlay) &&
+              String(overlay.trackId) === String(trackId),
+          ),
+        );
+        if (!cues.length) return null;
+        const selected = selectedOverlay();
+        if (
+          model.isTranscriptOverlay(selected) &&
+          String(selected.trackId) === String(trackId)
+        ) {
+          return selected;
+        }
+        const currentTime = Number(services.media.currentEditedTime());
+        if (Number.isFinite(currentTime)) {
+          const active = cues.find(
+            (cue) => Number(cue.start) <= currentTime && currentTime < Number(cue.end),
+          );
+          if (active) return active;
+        }
+        return cues[0];
       }
 
       function transcript() {
@@ -273,7 +332,11 @@
           const strong = host.ownerDocument.createElement("strong");
           strong.textContent = template.name || TEMPLATE_NAMES[template.id] || template.id;
           const small = host.ownerDocument.createElement("small");
-          small.textContent = template.description || "点击应用到当前艺术字";
+          small.textContent = template.description || (
+            model.isTranscriptOverlay(selected)
+              ? "点击应用到整轨文案艺术字"
+              : "点击应用到当前艺术字"
+          );
           copy.append(strong, small);
           button.append(sample, copy);
           container.append(button);
@@ -283,17 +346,31 @@
       function renderOverlayList(selected) {
         const list = query("[data-art-list]");
         list.replaceChildren();
-        for (const overlay of art().overlays) {
+        for (const entry of overlayListEntries(art().overlays)) {
           const item = host.ownerDocument.createElement("li");
           const button = host.ownerDocument.createElement("button");
           button.type = "button";
-          button.dataset.artSelect = String(overlay.id);
           button.className = "overlay-list-item";
-          button.classList.toggle("is-selected", String(selected?.id) === String(overlay.id));
           const title = host.ownerDocument.createElement("strong");
-          title.textContent = overlay.text || "未命名艺术字";
           const time = host.ownerDocument.createElement("small");
-          time.textContent = `${Number(overlay.start).toFixed(2)}s - ${Number(overlay.end).toFixed(2)}s`;
+          if (entry.kind === "transcript") {
+            const isSelected =
+              model.isTranscriptOverlay(selected) &&
+              String(selected.trackId) === entry.trackId;
+            button.dataset.artTrackSelect = entry.trackId;
+            button.classList.toggle("is-selected", isSelected);
+            button.setAttribute("aria-pressed", String(isSelected));
+            title.textContent = "视频文案艺术字";
+            time.textContent = `${entry.cues.length} 段 · ${entry.start.toFixed(2)}s - ${entry.end.toFixed(2)}s`;
+          } else {
+            const overlay = entry.overlay;
+            const isSelected = String(selected?.id) === String(overlay.id);
+            button.dataset.artSelect = String(overlay.id);
+            button.classList.toggle("is-selected", isSelected);
+            button.setAttribute("aria-pressed", String(isSelected));
+            title.textContent = overlay.text || "未命名艺术字";
+            time.textContent = `${Number(overlay.start).toFixed(2)}s - ${Number(overlay.end).toFixed(2)}s`;
+          }
           button.append(title, time);
           item.append(button);
           list.append(item);
@@ -310,16 +387,32 @@
 
       function renderControls(selected) {
         const controls = query("[data-art-controls]");
+        const transcriptTrack = Boolean(selected && model.isTranscriptOverlay(selected));
         query("[data-art-selection-empty]").hidden = Boolean(selected);
         controls.hidden = !selected;
         controls.disabled = !selected;
+        query("[data-art-detail-title]").textContent = transcriptTrack
+          ? "视频文案艺术字整轨设置"
+          : "详细设置";
+        query("[data-art-detail-help]").textContent = transcriptTrack
+          ? "统一修改整轨文案艺术字"
+          : "修改当前选中的艺术字";
+        query("[data-art-controls-legend]").textContent = transcriptTrack
+          ? "视频文案艺术字整轨设置"
+          : "当前艺术字设置";
+        for (const element of queryAll("[data-art-manual-only]")) {
+          element.hidden = transcriptTrack;
+        }
+        query("[data-art-delete]").textContent = transcriptTrack
+          ? "删除视频文案艺术字"
+          : "删除当前艺术字";
         if (!selected) return;
         for (const field of queryAll("[data-art-field]")) setField(`[data-art-field="${field.dataset.artField}"]`, selected[field.dataset.artField]);
         setField('[data-art-range="start"]', Number(selected.start).toFixed(2));
         setField('[data-art-range="end"]', Number(selected.end).toFixed(2));
         setField('[data-art-coordinate="x"]', (Number(selected.x) * 100).toFixed(1));
         setField('[data-art-coordinate="y"]', (Number(selected.y) * 100).toFixed(1));
-        query("[data-art-apply-all]").disabled = model.isTranscriptOverlay(selected) || art().overlays.filter((item) => !model.isTranscriptOverlay(item)).length < 2;
+        query("[data-art-apply-all]").disabled = transcriptTrack || art().overlays.filter((item) => !model.isTranscriptOverlay(item)).length < 2;
         renderTemplates(selected);
       }
 
@@ -790,9 +883,9 @@
         if (!selected) return;
         const track = model.isTranscriptOverlay(selected);
         const confirmed = await services.feedback.confirm({
-          eyebrow: track ? "全文艺术字轨道" : "删除艺术字",
-          title: track ? "删除整条全文轨道？" : "删除当前艺术字？",
-          message: track ? "轨道内所有词级同步片段都会删除。" : `将删除“${selected.text}”。`,
+          eyebrow: track ? "视频文案艺术字" : "删除艺术字",
+          title: track ? "删除视频文案艺术字？" : "删除当前艺术字？",
+          message: track ? "该轨道内所有文案艺术字片段都会删除。" : `将删除“${selected.text}”。`,
           confirmText: "删除", tone: "danger",
         });
         if (!confirmed) return;
@@ -818,6 +911,12 @@
         } else if (target.hasAttribute("data-art-add")) {
           const input = query("[data-art-add-text]");
           if (addManual(input.value)) input.value = "";
+        } else if (target.dataset.artTrackSelect) {
+          const representative = transcriptRepresentative(target.dataset.artTrackSelect);
+          if (representative) {
+            services.commands.selectArt(representative.id);
+            services.media.seekEdited(representative.start);
+          }
         } else if (target.dataset.artSelect) {
           services.commands.selectArt(target.dataset.artSelect);
           services.media.seekEdited(art().overlays.find((item) => String(item.id) === target.dataset.artSelect)?.start || 0);

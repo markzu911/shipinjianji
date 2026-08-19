@@ -59,11 +59,11 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     assert "/editor-pip-model.js?v=20260819-01" in page_response.text
     assert "/editor-project-store.js?v=20260819-05" in page_response.text
     assert "/editor-media-controller.js?v=20260819-01" in page_response.text
-    assert "/editor-art-model.js?v=20260819-03" in page_response.text
+    assert "/editor-art-model.js?v=20260819-04" in page_response.text
     assert "/editor-art-renderer.js?v=20260819-01" in page_response.text
     assert "/editor-preview-compositor.js?v=20260819-02" in page_response.text
     assert "/editor-timeline-controller.js?v=20260819-01" in page_response.text
-    assert "/editor-art-tool.js?v=20260819-06" in page_response.text
+    assert "/editor-art-tool.js?v=20260819-07" in page_response.text
     assert "/editor-pip-tool.js?v=20260819-02" in page_response.text
     assert "/editor-suite.js?v=20260819-05" in page_response.text
     assert timeline_script_response.status_code == 200
@@ -807,6 +807,10 @@ def test_top_level_art_and_pip_tools_are_the_only_editor_runtime():
         tool.index('data-art-panel="ai"')
     ]
     assert "data-art-full-track" in settings_panel
+    assert "data-art-detail-title" in settings_panel
+    assert "data-art-detail-help" in settings_panel
+    assert "data-art-controls-legend" in settings_panel
+    assert settings_panel.count("data-art-manual-only") == 7
     for duplicate_transcript_control in (
         "data-art-transcript-text",
         "data-art-transcript-save",
