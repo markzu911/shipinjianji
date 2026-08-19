@@ -25,8 +25,11 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
         "/timeline-model.js",
         "/editor-project-store.js",
         "/editor-media-controller.js",
+        "/editor-art-model.js",
+        "/editor-art-renderer.js",
         "/editor-preview-compositor.js",
         "/editor-timeline-controller.js",
+        "/editor-art-tool.js",
         "/art-text.js",
         "/picture-in-picture.js",
     )
@@ -38,23 +41,29 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     timeline_script_response = responses["/timeline-model.js"]
     project_store_script_response = responses["/editor-project-store.js"]
     media_controller_response = responses["/editor-media-controller.js"]
+    art_model_response = responses["/editor-art-model.js"]
+    art_renderer_response = responses["/editor-art-renderer.js"]
     preview_compositor_response = responses["/editor-preview-compositor.js"]
     timeline_controller_response = responses["/editor-timeline-controller.js"]
+    art_tool_response = responses["/editor-art-tool.js"]
     art_script_response = responses["/art-text.js"]
     pip_script_response = responses["/picture-in-picture.js"]
 
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
     assert "/app.js?v=20260818-05" in page_response.text
-    assert "/styles.css?v=20260818-04" in page_response.text
+    assert "/styles.css?v=20260819-01" in page_response.text
     assert "/transcript-follow-scroll.js?v=20260818-03" in page_response.text
     assert "/ui-feedback.js?v=20260807-03" in page_response.text
     assert "/timeline-model.js?v=20260810-01" in page_response.text
-    assert "/editor-project-store.js?v=20260818-03" in page_response.text
+    assert "/editor-project-store.js?v=20260819-01" in page_response.text
     assert "/editor-media-controller.js?v=20260818-01" in page_response.text
-    assert "/editor-preview-compositor.js?v=20260818-01" in page_response.text
+    assert "/editor-art-model.js?v=20260819-01" in page_response.text
+    assert "/editor-art-renderer.js?v=20260819-01" in page_response.text
+    assert "/editor-preview-compositor.js?v=20260819-01" in page_response.text
     assert "/editor-timeline-controller.js?v=20260818-01" in page_response.text
-    assert "/editor-suite.js?v=20260818-06" in page_response.text
+    assert "/editor-art-tool.js?v=20260819-01" in page_response.text
+    assert "/editor-suite.js?v=20260819-01" in page_response.text
     assert timeline_script_response.status_code == 200
     assert timeline_script_response.headers["cache-control"] == "no-store, max-age=0"
     assert "function createStore" in timeline_script_response.text
@@ -64,14 +73,20 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     assert "function createStore" in project_store_script_response.text
     for response in (
         media_controller_response,
+        art_model_response,
+        art_renderer_response,
         preview_compositor_response,
         timeline_controller_response,
+        art_tool_response,
     ):
         assert response.status_code == 200
         assert response.headers["cache-control"] == "no-store, max-age=0"
     assert "root.EditorMedia = api" in media_controller_response.text
+    assert "root.EditorArtModel = api" in art_model_response.text
+    assert "root.EditorArtRenderer = api" in art_renderer_response.text
     assert "root.EditorPreview = api" in preview_compositor_response.text
     assert "root.EditorTimelineController = api" in timeline_controller_response.text
+    assert "root.ArtTool = api" in art_tool_response.text
     assert 'if (keyboardTarget) {\n      keyboardTarget.addEventListener?.("keydown", keyDown);' in (
         timeline_controller_response.text
     )
@@ -85,12 +100,21 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
         "/editor-media-controller.js"
     )
     assert page_response.text.index("/editor-media-controller.js") < page_response.text.index(
+        "/editor-art-model.js"
+    )
+    assert page_response.text.index("/editor-art-model.js") < page_response.text.index(
+        "/editor-art-renderer.js"
+    )
+    assert page_response.text.index("/editor-art-renderer.js") < page_response.text.index(
         "/editor-preview-compositor.js"
     )
     assert page_response.text.index("/editor-preview-compositor.js") < page_response.text.index(
         "/editor-timeline-controller.js"
     )
     assert page_response.text.index("/editor-timeline-controller.js") < page_response.text.index(
+        "/editor-art-tool.js"
+    )
+    assert page_response.text.index("/editor-art-tool.js") < page_response.text.index(
         "/editor-suite.js"
     )
     assert page_response.text.index("/transcript-follow-scroll.js") < (
@@ -718,6 +742,51 @@ def test_cut_range_and_segment_frontend_contracts():
     )
 
 
+def test_top_level_art_tool_has_single_authority_and_legacy_fallback():
+    root = Path(__file__).resolve().parents[2]
+    page = (root / "web" / "index.html").read_text(encoding="utf-8")
+    art_page = (root / "web" / "art-text.html").read_text(encoding="utf-8")
+    suite = (root / "web" / "editor-suite.js").read_text(encoding="utf-8")
+    tool = (root / "web" / "editor-art-tool.js").read_text(encoding="utf-8")
+    compositor = (root / "web" / "editor-preview-compositor.js").read_text(
+        encoding="utf-8"
+    )
+    legacy = (root / "web" / "art-text.js").read_text(encoding="utf-8")
+
+    assert 'id="editorArtPanelRoot"' in page
+    assert 'title="艺术字设置"' not in page
+    assert "window.__EDITOR_ART_PANEL_ENABLED__ !== false" in suite
+    assert "window.ArtTool.mount(artPanelRoot, createArtToolServices())" in suite
+    assert 'name !== "art" || !topLevelArtEnabled' in suite
+    assert "topLevelArtEnabled ? [\"pip\"] : [\"art\", \"pip\"]" in suite
+    assert "restoreEditorDraft(projectSnapshot())" in suite
+    assert "PROJECT_DRAFT_RESTORED" in suite
+    assert "editor-suite:project-draft:" in suite
+    assert "schemaVersion: 1" in suite
+
+    assert "root.ArtTool = api" in tool
+    assert "function mount(host, services)" in tool
+    assert "activate, deactivate, destroy, render" in tool
+    assert "sessionStorage" not in tool
+    assert "localStorage" not in tool
+    assert "postMessage" not in tool
+    assert 'addEventListener("message"' not in tool
+    assert "createStore(" not in tool
+    assert "createElement(\"video\")" not in tool
+    assert "generateCurrentPreview" in tool
+    assert "data-art-full-track" in tool
+    assert "data-art-ai-request" in tool
+    assert "data-art-transcript-save" in tool
+
+    assert "root.EditorArtRenderer?.sanitizeOverlay" in compositor
+    assert "root.EditorArtRenderer?.renderCharacters" in compositor
+    assert "window.EditorArtRenderer?.renderCharacters" in legacy
+    assert "window.EditorArtRenderer?.formatText" in legacy
+    assert art_page.index("/editor-art-model.js") < art_page.index(
+        "/editor-art-renderer.js"
+    ) < art_page.index("/art-text.js")
+
+
 def test_art_text_frontend_contracts():
     responses = _fetch_frontend_assets(
         "/art-text",
@@ -731,14 +800,14 @@ def test_art_text_frontend_contracts():
     editor_suite_script_response = responses["/editor-suite.js"]
 
     assert art_page_response.status_code == 200
-    assert "/art-text.js?v=20260818-05" in art_page_response.text
+    assert "/art-text.js?v=20260819-01" in art_page_response.text
     assert 'class="cut-progress art-generation-progress full-row"' in art_page_response.text
     assert "art-particle art-particle-1" in art_page_response.text
     assert "解析时间轴" in art_page_response.text
     assert ".art-generation-progress" in styles_response.text
     assert "@keyframes art-particle-float" in styles_response.text
     assert "@keyframes art-panel-scan" in styles_response.text
-    assert "/styles.css?v=20260814-10" in art_page_response.text
+    assert "/styles.css?v=20260819-01" in art_page_response.text
     assert "/ui-feedback.js?v=20260807-03" in art_page_response.text
     assert 'id="overlayCoordinateReadout"' in art_page_response.text
     assert 'id="positionPresetGrid"' in art_page_response.text
@@ -748,7 +817,9 @@ def test_art_text_frontend_contracts():
     assert "commitPositionCoordinate" in art_script_response.text
     assert ".position-coordinate-fields {" in styles_response.text
     assert "/timeline-model.js?v=20260810-01" in art_page_response.text
-    assert "/editor-suite.js?v=20260818-06" in art_page_response.text
+    assert "/editor-art-model.js?v=20260819-01" in art_page_response.text
+    assert "/editor-art-renderer.js?v=20260819-01" in art_page_response.text
+    assert "/editor-suite.js?v=20260819-01" in art_page_response.text
     assert 'class="preview-grid"' in art_page_response.text
     assert 'data-preview-grid-toggle' in art_page_response.text
     assert "从保留文案中选择一句" not in art_page_response.text

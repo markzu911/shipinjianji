@@ -245,7 +245,7 @@ console.log(JSON.stringify({
     assert result["request"]["pictureInPictureOverlays"][0]["width"] == 0.5
     assert result["localArt"]["start"] == 1
     assert result["localPip"]["start"] == 2
-    assert result["timelineKinds"] == ["cut"]
+    assert result["timelineKinds"] == ["cut", "art", "pip"]
 
 
 def test_editor_project_store_selects_atomic_semantic_frame_and_explicit_compose_dto() -> None:
@@ -349,6 +349,10 @@ store.dispatch({ type: 'artStateChanged', payload: {
   overlays: [{
     id: 'overlay-one', text: '标题', start: 1, end: 3,
     sourceStart: 1, sourceEnd: 3,
+    characterTimings: [
+      { start: 1, end: 2 },
+      { start: 2, end: 3 },
+    ],
   }],
   timeline: { duration: 10, tracks: [{
     id: 'art:track', kind: 'art', clips: [{
@@ -393,6 +397,10 @@ console.log(JSON.stringify({
     assert result["overlay"]["end"] == 5
     assert result["overlay"]["sourceStart"] == 2.5
     assert result["overlay"]["sourceEnd"] == 5.5
+    assert result["overlay"]["characterTimings"] == [
+        {"start": 2, "end": 3.5},
+        {"start": 3.5, "end": 5},
+    ]
     assert result["clip"]["start"] == 2
     assert result["clip"]["end"] == 5
     assert result["selection"]["clipId"] == "art:overlay-one"
@@ -555,3 +563,62 @@ console.log(JSON.stringify({
     assert result["afterInactiveSelection"]["clipId"] == "pip:pip-one"
     assert result["inactiveAcceptedRevision"] == result["beforeInactiveRevision"]
     assert result["afterActiveDeleteSelection"] is None
+
+
+def test_editor_project_store_restores_versioned_art_draft_atomically() -> None:
+    result = run_store_script(
+        r"""
+const store = projectStore.createStore({}, { timeline });
+store.dispatch({ type: 'projectHydrated', payload: { job: {
+  id: 'job-draft', status: 'completed', duration: 10, updatedAt: 'server-v1',
+  result: { text: '文案', segments: [] },
+  edit: { status: 'completed', outputDuration: 8, transcript: { text: '文案', segments: [] } },
+} } });
+const before = store.getState();
+const art = { source: 'edited', overlays: [{
+  id: 'stable-one', text: '重点', start: 1, end: 3,
+  sourceStart: 1.5, sourceEnd: 3.5, color: '#FFD84D',
+}] };
+const artTimeline = { duration: 8, tracks: [{
+  id: 'art:overlay:stable-one', kind: 'art', clips: [{
+    id: 'art:stable-one', sourceId: 'stable-one', start: 1, end: 3,
+  }],
+}], selection: { clipId: 'art:stable-one' } };
+const wrongVersion = store.dispatch({
+  type: 'projectDraftRestored', payload: {
+    jobId: 'job-draft', serverVersion: 'server-v0', art, timeline: artTimeline,
+  },
+});
+const restored = store.dispatch({
+  type: 'projectDraftRestored', payload: {
+    jobId: 'job-draft', serverVersion: 'server-v1', art, timeline: artTimeline,
+  },
+});
+const after = store.getState();
+const echo = store.dispatch({
+  type: 'projectDraftRestored', payload: {
+    jobId: 'job-draft', serverVersion: 'server-v1', art, timeline: artTimeline,
+  },
+});
+console.log(JSON.stringify({
+  wrongVersion, restored, echo,
+  beforeRevision: before.revision,
+  beforeTimingRevision: before.timingRevision,
+  revision: after.revision,
+  timingRevision: after.timingRevision,
+  source: after.project.art.source,
+  overlay: after.project.art.overlays[0],
+  selection: after.project.timeline.selection,
+}));
+"""
+    )
+
+    assert result["wrongVersion"]["accepted"] is False
+    assert result["restored"]["accepted"] is True
+    assert result["revision"] == result["beforeRevision"] + 1
+    assert result["timingRevision"] == result["beforeTimingRevision"] + 1
+    assert result["source"] == "edited"
+    assert result["overlay"]["id"] == "stable-one"
+    assert result["selection"]["clipId"] == "art:stable-one"
+    assert result["selection"]["trackId"] == "art:overlay:stable-one"
+    assert result["echo"]["accepted"] is False
