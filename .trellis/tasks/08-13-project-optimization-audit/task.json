@@ -31,7 +31,8 @@
     "08-18-single-page-editor-browser-baseline",
     "08-18-single-page-editor-state-core",
     "08-18-single-page-editor-media-preview-timeline",
-    "08-19-single-page-editor-art-panel"
+    "08-19-single-page-editor-art-panel",
+    "08-19-single-page-editor-pip-panel"
   ],
   "parent": null,
   "relatedFiles": [],

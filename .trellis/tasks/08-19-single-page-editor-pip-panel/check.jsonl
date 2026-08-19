@@ -1,0 +1,11 @@
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"审查 Store/PipTool/API/FFmpeg/compose/恢复的完整读写流。"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"检查共享 Pip model、预览和时间线是否真正消除第三套逻辑。"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"核对唯一 Store/media/timeline、脚本资源、draft 和 feature flag authority。"}
+{"file":".trellis/spec/frontend/picture-in-picture-runtime.md","reason":"核对顶层 PipTool、素材状态、effect 取消、草稿恢复和无上限缩放领域契约。"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"检查 lifecycle、焦点、表单、无上限缩放、拖动和窄屏行为。"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"检查异步 effect 取消、迟到响应、素材轮询、source 与媒体不重载。"}
+{"file":".trellis/spec/backend/media-and-timeline.md","reason":"检查 oversized overlay 的 normalize、FFmpeg 中心裁切与预览一致性。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"检查后端有限数值/最小值/归属校验和公共 API 兼容。"}
+{"file":".trellis/spec/testing/index.md","reason":"执行 focused、browser、完整测试、语法和 diff 门禁。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"核对顶层画中画、mock 外部模型、compose、刷新、fallback、standalone 和 375px。"}
+{"file":".trellis/tasks/08-19-single-page-editor-pip-panel/research/b3-pip-runtime.md","reason":"按当前运行时证据和 B3/B4 边界检查实现漂移。"}

@@ -173,3 +173,69 @@ frame_state = page.evaluate("""() => {
 }""")
 assert captured_compose == frame_state["composition"]
 ```
+
+## Scenario：B3 顶层画中画素材与兼容回滚
+
+### 1. Scope / Trigger
+
+修改 `EditorPipModel`、`PipTool`、pip draft、素材轮询、公共 pip preview/timeline/compose 或 feature flag fallback 时，必须运行本场景。外部图片、视频和提示词模型请求必须全部 mock。
+
+### 2. Signatures
+
+```javascript
+#editorPipPanelRoot
+window.EditorSuite.topLevelPipEnabled() -> boolean
+window.EditorSuite.projectSnapshot().project.pip
+sessionStorage[`editor-suite:project-draft:${jobId}`]
+window.__EDITOR_PIP_PANEL_ENABLED__ = false // reload 后启用 iframe fallback
+```
+
+### 3. Contracts
+
+- 默认 `?tool=pip` 显示顶层 root 且 pip iframe 数量为 0；切换 cut/art/pip 保持 document、基础 video、src、currentTime 和播放状态。
+- route mock 必须捕获 prompt/image/video POST payload；job GET mock 驱动 queued -> completed/failed，不能依赖真实模型、固定长等待或费用凭证。
+- completed 素材自动启用，failed 素材保持可见但 checkbox 禁用且不进入 overlay；enable/disable、位置、时间和 width 都从可见控件执行。
+- 175% 必须同时出现在 Store、草稿和 compose，reload 时素材由 job registry 提供；v2 非空未知 selection 必须使整份草稿失效，v1 只恢复 art。
+- 迟到 create/poll response 即使忽略 AbortSignal 也不得增加 revision 或加入 asset。flag false 时验证 iframe 可编辑；独立 `/picture-in-picture` 仍有共享 Pip model、唯一 legacy video 和无 max 尺寸输入。
+
+### 4. Validation & Error Matrix
+
+| 观察结果 | 测试结果 |
+| --- | --- |
+| 默认顶层出现 pip iframe | 失败 |
+| browser mock 之外访问外部模型 origin | teardown 失败 |
+| failed video 出现在 overlays | 失败 |
+| 175% 在 reload/compose 中被 clamp | 失败 |
+| invalid v2 selection 只被置 null 但其他草稿仍恢复 | 失败 |
+| deactivate 后迟到响应写入 asset/revision | 失败 |
+| fallback 与顶层同时可交互 | 失败 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：mock video queued 后完成并只增加一次 timing revision；第二个 video failed 后 timing 不变且错误卡片可见。
+- Base：服务端只有原有素材，顶层面板直接选择、禁用、恢复并参与公共 compose。
+- Bad：直接调用 Store action 代替控件交互、用真实 API key、只断言卡片存在而不核对 overlays/timing/draft/compose。
+
+### 6. Tests Required
+
+- 顶层 prompt + image + enable/disable + center + range + 175% + schema v2 reload + invalid selection rejection。
+- video queued -> completed 和 queued -> failed，断言 asset/overlay/timingRevision。
+- create response 忽略 abort 并迟到返回，断言 no-op。
+- schema v1 art-only reload；pip 服务端 baseline 不变。
+- pip feature flag iframe fallback 和独立页；桌面/375px 无横向溢出。
+
+### 7. Wrong vs Correct
+
+```python
+# Wrong: 真实调用模型并用 sleep 猜测视频生成完成。
+page.get_by_role("button", name="生成画中画素材").click()
+page.wait_for_timeout(5000)
+
+# Correct: mock POST 和 job GET，并等待 Store 的可观察终态。
+page.route(video_create_url, fulfill_queued_video)
+page.route(job_url, fulfill_completed_job)
+page.wait_for_function(
+    "id => EditorSuite.projectSnapshot().project.pip.overlays.some(x => x.assetId === id)",
+    arg=asset_id,
+)
+```

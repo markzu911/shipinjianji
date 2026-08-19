@@ -27,6 +27,16 @@
 - `render_picture_in_picture_video` 使用已确认素材和标准化位置/尺寸。
 - `process_preview_composition_job` 是剪辑、艺术字、画中画统一预览链路；修改任一层时同时验证单功能和组合功能。
 
+画中画宽度只要求 finite 且不小于 `0.15`，不得添加任意产品最大值。`x/y` 始终表示素材中心；小于主画面时坐标限制在完整可见区，大于主画面时允许负 overlay 坐标并按中心裁切：
+
+```text
+min_x = min(0, main_w - overlay_w)
+max_x = max(0, main_w - overlay_w)
+x = clamp(main_w * center_x - overlay_w / 2, min_x, max_x)
+```
+
+`y` 使用同一公式。公共浏览器 compositor、草稿、compose DTO 和 FFmpeg 必须保留相同 width；禁止浏览器接受 175% 而后端截断，或浏览器居中裁切但 FFmpeg 固定从左上角裁切。
+
 ## 资源与安全
 
 - 临时图片、视频、字幕文本和 filter script 必须位于 job 工作目录。

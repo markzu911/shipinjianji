@@ -5,6 +5,7 @@
 | 文档 | 适用范围 |
 | --- | --- |
 | [架构与状态](./architecture-and-state.md) | 页面职责、EditorTimeline、iframe 和事件协议 |
+| [画中画运行时](./picture-in-picture-runtime.md) | 顶层 PipTool、素材状态、异步 effect、草稿恢复和无上限缩放 |
 | [UI 与交互](./ui-and-interactions.md) | DOM、可访问性、响应式、拖动和反馈 |
 | [API 与媒体](./api-and-media.md) | fetch/XHR、轮询、媒体源和时间轴 |
 
