@@ -266,3 +266,26 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 13: 完成单页编辑器旧运行时清理
+
+**Date**: 2026-08-19
+**Task**: 完成单页编辑器旧运行时清理
+**Branch**: `develop`
+
+### Summary
+
+完成 B4：统一文字剪辑、艺术字和画中画为唯一顶层运行时，删除 iframe/message bridge 与四个旧页面资源；保留历史 URL 307 重定向和模板库深链兼容，补齐桌面/375px、媒体 identity、文字同步、模板交接与 compose 回归。最终 tests/app 238 passed, 1 xfailed，browser 24 passed, 1 xfailed，唯一 xfail 为 Phase A 服务重启恢复。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `14ee2f0` | (see git log) |
+| `365640a` | (see git log) |
+| `0d68bdc` | (see git log) |
+
+### Status
+
+[OK] **Completed**
