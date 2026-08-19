@@ -32,8 +32,6 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
         "/editor-timeline-controller.js",
         "/editor-art-tool.js",
         "/editor-pip-tool.js",
-        "/art-text.js",
-        "/picture-in-picture.js",
     )
     page_response = responses["/"]
     styles_response = responses["/styles.css"]
@@ -50,26 +48,24 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     timeline_controller_response = responses["/editor-timeline-controller.js"]
     art_tool_response = responses["/editor-art-tool.js"]
     pip_tool_response = responses["/editor-pip-tool.js"]
-    art_script_response = responses["/art-text.js"]
-    pip_script_response = responses["/picture-in-picture.js"]
 
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
-    assert "/app.js?v=20260818-05" in page_response.text
+    assert "/app.js?v=20260819-01" in page_response.text
     assert "/styles.css?v=20260819-02" in page_response.text
     assert "/transcript-follow-scroll.js?v=20260818-03" in page_response.text
     assert "/ui-feedback.js?v=20260807-03" in page_response.text
     assert "/timeline-model.js?v=20260810-01" in page_response.text
     assert "/editor-pip-model.js?v=20260819-01" in page_response.text
-    assert "/editor-project-store.js?v=20260819-02" in page_response.text
+    assert "/editor-project-store.js?v=20260819-03" in page_response.text
     assert "/editor-media-controller.js?v=20260818-01" in page_response.text
     assert "/editor-art-model.js?v=20260819-01" in page_response.text
     assert "/editor-art-renderer.js?v=20260819-01" in page_response.text
     assert "/editor-preview-compositor.js?v=20260819-02" in page_response.text
     assert "/editor-timeline-controller.js?v=20260818-01" in page_response.text
-    assert "/editor-art-tool.js?v=20260819-01" in page_response.text
+    assert "/editor-art-tool.js?v=20260819-02" in page_response.text
     assert "/editor-pip-tool.js?v=20260819-01" in page_response.text
-    assert "/editor-suite.js?v=20260819-02" in page_response.text
+    assert "/editor-suite.js?v=20260819-03" in page_response.text
     assert timeline_script_response.status_code == 200
     assert timeline_script_response.headers["cache-control"] == "no-store, max-age=0"
     assert "function createStore" in timeline_script_response.text
@@ -150,9 +146,7 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     assert "window.appConfirm" in feedback_script_response.text
     assert "window.appGeneration" in feedback_script_response.text
     assert "generation-overlay" in styles_response.text
-    assert "window.appGeneration?.show" in art_script_response.text
     assert "window.appGeneration?.show" in script_response.text
-    assert "window.appGeneration?.show" in pip_script_response.text
     assert "window.confirm" not in script_response.text
 
     assert page_response.headers["cache-control"] == "no-store, max-age=0"
@@ -210,8 +204,8 @@ def test_editor_suite_frontend_contracts():
     header_actions_start = page_response.text.index('<div class="header-actions">')
     assert header_start < editor_suite_start < header_actions_start
     assert editor_suite_script_response.status_code == 200
-    assert "editor-suite:move-finish" in editor_suite_script_response.text
-    assert "editor-suite:timeline-action" in editor_suite_script_response.text
+    assert "editor-suite:move-finish" not in editor_suite_script_response.text
+    assert "editor-suite:timeline-action" not in editor_suite_script_response.text
     assert "setTimelineTracks" in editor_suite_script_response.text
     assert "job.pictureInPicture?.composition" in editor_suite_script_response.text
     assert "job.art?.composition" in editor_suite_script_response.text
@@ -234,11 +228,10 @@ def test_editor_suite_frontend_contracts():
     )
     assert 'id="cut-preview-title"' not in page_response.text
     assert 'id="editorSuiteTimelineTitle"' not in page_response.text
-    assert 'url.searchParams.set("embedded", "1")' in editor_suite_script_response.text
+    assert "embedded" not in editor_suite_script_response.text
     assert 'window.history[method]' in editor_suite_script_response.text
-    assert 'type: "editor-suite:sync-time"' in editor_suite_script_response.text
-    assert 'type: "editor-suite:open-tool"' in editor_suite_script_response.text
-    assert 'data.type === "editor-suite:job-state"' in editor_suite_script_response.text
+    assert "postMessage" not in editor_suite_script_response.text
+    assert 'addEventListener("message"' not in editor_suite_script_response.text
     assert "const cutTabbar" not in editor_suite_script_response.text
     assert "cutTabbar.hidden" not in editor_suite_script_response.text
     assert "cutPanelStack.hidden = !isCut" in editor_suite_script_response.text
@@ -255,25 +248,21 @@ def test_editor_suite_frontend_contracts():
     assert "cutPanelStack" in inline_support_contract
     assert "cutTabbar" not in inline_support_contract
     assert 'type: "editor-suite:generate-video"' not in editor_suite_script_response.text
-    assert 'target: "all"' in editor_suite_script_response.text
+    assert "return frame?.composition || null" in editor_suite_script_response.text
     assert '/compose`' in editor_suite_script_response.text
     assert "data-editor-suite-download" in editor_suite_script_response.text
     assert "syncGenerationButton" in editor_suite_script_response.text
-    assert "workspaceSourceTime" in editor_suite_script_response.text
+    assert "workspaceSourceTime" not in editor_suite_script_response.text
     assert "window.EditorMedia.createController(previewVideo)" in editor_suite_script_response.text
     assert "window.EditorPreview.createCompositor" in editor_suite_script_response.text
     assert "window.EditorTimelineController.createController" in editor_suite_script_response.text
     assert "function selectCurrentProjectFrame" in editor_suite_script_response.text
     assert "window.EditorProjectStore.selectEditorFrame(" in editor_suite_script_response.text
-    assert "select-art-timeline" in editor_suite_script_response.text
-    assert "adjust-art-timeline" in editor_suite_script_response.text
-    assert 'ensureToolFrame("art", artHref);' in editor_suite_script_response.text
-    assert "Math.abs(nextTime - workspaceCurrentTime()) > 0.05" in editor_suite_script_response.text
-    assert "Math.abs(childTime - workspaceCurrentTime()) > 0.05" in editor_suite_script_response.text
-    assert "function syncMirroredPlayback" in editor_suite_script_response.text
-    assert 'for (const name of frameEntries.keys()) syncFrameTime(name);' in (
-        editor_suite_script_response.text
-    )
+    assert "select-art-timeline" not in editor_suite_script_response.text
+    assert "adjust-art-timeline" not in editor_suite_script_response.text
+    assert "ensureToolFrame" not in editor_suite_script_response.text
+    assert "syncMirroredPlayback" not in editor_suite_script_response.text
+    assert "frameEntries" not in editor_suite_script_response.text
     assert "mediaController?.subscribeFrame" in editor_suite_script_response.text
     assert "previewCompositor?.syncTime();" not in editor_suite_script_response.text
     assert "function scheduleFrameSync" not in editor_suite_script_response.text
@@ -281,11 +270,7 @@ def test_editor_suite_frontend_contracts():
         editor_suite_script_response.text
     )
     assert "renderedPreviewState" not in editor_suite_script_response.text
-    assert "function normalizedToolHref" in editor_suite_script_response.text
-    assert 'url.searchParams.delete("embedded")' in editor_suite_script_response.text
-    assert "current.frame.dataset.toolHref !== toolHref" in (
-        editor_suite_script_response.text
-    )
+    assert "function normalizedToolHref" not in editor_suite_script_response.text
     assert '["art", "pip"]' in editor_suite_script_response.text
     assert "overlayHtml" not in editor_suite_script_response.text
     assert "timelineHtml" not in editor_suite_script_response.text
@@ -293,7 +278,7 @@ def test_editor_suite_frontend_contracts():
         editor_suite_script_response.text
     )
     assert 'previewVideo?.addEventListener(eventName, scheduleFrameSync)' not in editor_suite_script_response.text
-    assert "height: auto !important;" in styles_response.text
+    assert "editor-tool-embedded" not in styles_response.text
     assert ".editor-suite-inspector-host" in styles_response.text
     timeline_layer_start = styles_response.text.index(".editor-suite-timeline-layer {")
     timeline_layer_end = styles_response.text.index("}", timeline_layer_start)
@@ -317,9 +302,8 @@ def test_editor_suite_frontend_contracts():
     )
     assert "function generationTarget()" not in editor_suite_script_response.text
     assert "function generateCurrentPreview()" in editor_suite_script_response.text
-    assert 'target: "all"' in editor_suite_script_response.text
     assert "generationPayload" not in editor_suite_script_response.text
-    assert 'type: "editor-suite:cut-draft"' in editor_suite_script_response.text
+    assert 'type: "editor-suite:cut-draft"' not in editor_suite_script_response.text
     assert "workspaceCurrentTime" in editor_suite_script_response.text
     assert "setCutDraft," in editor_suite_script_response.text
 
@@ -468,7 +452,7 @@ def test_cut_timeline_and_draft_frontend_contracts():
     assert 'activateTextEditorPanel("output")' not in script_response.text
     assert "updateOriginalSourceActionsVisibility" in script_response.text
     assert "source=original" in script_response.text
-    assert "picture-in-picture?job=" in script_response.text
+    assert "source=original&tool=pip" in script_response.text
     assert "/original-video`" in script_response.text
     assert "buildCutTimelineThumbnails" in script_response.text
     assert "renderCutTimelineTextSegments" in script_response.text
@@ -758,36 +742,39 @@ def test_cut_range_and_segment_frontend_contracts():
     )
 
 
-def test_top_level_art_and_pip_tools_have_single_authority_and_legacy_fallback():
+def test_top_level_art_and_pip_tools_are_the_only_editor_runtime():
     root = Path(__file__).resolve().parents[2]
-    page = (root / "web" / "index.html").read_text(encoding="utf-8")
-    art_page = (root / "web" / "art-text.html").read_text(encoding="utf-8")
-    suite = (root / "web" / "editor-suite.js").read_text(encoding="utf-8")
-    tool = (root / "web" / "editor-art-tool.js").read_text(encoding="utf-8")
-    pip_tool = (root / "web" / "editor-pip-tool.js").read_text(encoding="utf-8")
+    web = root / "web"
+    page = (web / "index.html").read_text(encoding="utf-8")
+    suite = (web / "editor-suite.js").read_text(encoding="utf-8")
+    project_store = (web / "editor-project-store.js").read_text(encoding="utf-8")
+    tool = (web / "editor-art-tool.js").read_text(encoding="utf-8")
+    pip_tool = (web / "editor-pip-tool.js").read_text(encoding="utf-8")
     compositor = (root / "web" / "editor-preview-compositor.js").read_text(
         encoding="utf-8"
     )
-    legacy = (root / "web" / "art-text.js").read_text(encoding="utf-8")
-    pip_legacy = (root / "web" / "picture-in-picture.js").read_text(
-        encoding="utf-8"
-    )
+
+    for legacy_resource in (
+        "art-text.html",
+        "art-text.js",
+        "picture-in-picture.html",
+        "picture-in-picture.js",
+    ):
+        assert not (web / legacy_resource).exists()
 
     assert 'id="editorArtPanelRoot"' in page
     assert 'title="艺术字设置"' not in page
-    assert "window.__EDITOR_ART_PANEL_ENABLED__ !== false" in suite
     assert "window.ArtTool.mount(artPanelRoot, createArtToolServices())" in suite
     assert 'id="editorPipPanelRoot"' in page
     assert 'title="画中画设置"' not in page
-    assert "window.__EDITOR_PIP_PANEL_ENABLED__ !== false" in suite
     assert "window.PipTool.mount(pipPanelRoot, createPipToolServices())" in suite
-    assert "!topLevelToolEnabled(name)" in suite
-    assert "legacyToolNames()" in suite
     assert "restoreEditorDraft(projectSnapshot())" in suite
     assert "PROJECT_DRAFT_RESTORED" in suite
     assert "editor-suite:project-draft:" in suite
     assert "schemaVersion: 2" in suite
     assert "pip: {" in suite
+    assert "initialTemplateSelection: initialArtTemplateSelection" in suite
+    assert "function parseRequestedArtTemplate(search)" in suite
 
     assert "root.ArtTool = api" in tool
     assert "function mount(host, services)" in tool
@@ -802,6 +789,9 @@ def test_top_level_art_and_pip_tools_have_single_authority_and_legacy_fallback()
     assert "data-art-full-track" in tool
     assert "data-art-ai-request" in tool
     assert "data-art-transcript-save" in tool
+    assert "consumeInitialTemplateSelection();" in tool
+    assert "pendingTemplateSelection" in tool
+    assert "preferredTemplateSettings" in tool
 
     assert "root.PipTool = api" in pip_tool
     assert "function mount(host, services)" in pip_tool
@@ -813,463 +803,115 @@ def test_top_level_art_and_pip_tools_have_single_authority_and_legacy_fallback()
     assert "size.max" not in pip_tool
     assert "root.EditorPipModel?.MIN_WIDTH || 0.15" in compositor
     assert "window.EditorPipModel?.MIN_WIDTH || 0.15" in suite
-    assert "window.EditorPipModel?.MIN_WIDTH || 0.15" in pip_legacy
-    assert "if (!Number.isFinite(width) || width < PIP_MIN_WIDTH) return;" in pip_legacy
 
     assert "root.EditorArtRenderer?.sanitizeOverlay" in compositor
     assert "root.EditorArtRenderer?.renderCharacters" in compositor
-    assert "window.EditorArtRenderer?.renderCharacters" in legacy
-    assert "window.EditorArtRenderer?.formatText" in legacy
-    assert art_page.index("/editor-art-model.js") < art_page.index(
-        "/editor-art-renderer.js"
-    ) < art_page.index("/art-text.js")
-
-
-def test_art_text_frontend_contracts():
-    responses = _fetch_frontend_assets(
-        "/art-text",
-        "/art-text.js",
-        "/styles.css",
-        "/editor-suite.js",
-    )
-    art_page_response = responses["/art-text"]
-    art_script_response = responses["/art-text.js"]
-    styles_response = responses["/styles.css"]
-    editor_suite_script_response = responses["/editor-suite.js"]
-
-    assert art_page_response.status_code == 200
-    assert "/art-text.js?v=20260819-01" in art_page_response.text
-    assert 'class="cut-progress art-generation-progress full-row"' in art_page_response.text
-    assert "art-particle art-particle-1" in art_page_response.text
-    assert "解析时间轴" in art_page_response.text
-    assert ".art-generation-progress" in styles_response.text
-    assert "@keyframes art-particle-float" in styles_response.text
-    assert "@keyframes art-panel-scan" in styles_response.text
-    assert "/styles.css?v=20260819-02" in art_page_response.text
-    assert "/ui-feedback.js?v=20260807-03" in art_page_response.text
-    assert 'id="overlayCoordinateReadout"' in art_page_response.text
-    assert 'id="positionPresetGrid"' in art_page_response.text
-    assert 'id="positionXPercent"' in art_page_response.text
-    assert 'id="positionYPercent"' in art_page_response.text
-    assert 'aria-label="手动输入艺术字坐标"' in art_page_response.text
-    assert "commitPositionCoordinate" in art_script_response.text
-    assert ".position-coordinate-fields {" in styles_response.text
-    assert "/timeline-model.js?v=20260810-01" in art_page_response.text
-    assert "/editor-art-model.js?v=20260819-01" in art_page_response.text
-    assert "/editor-art-renderer.js?v=20260819-01" in art_page_response.text
-    assert "/editor-suite.js?v=20260819-02" in art_page_response.text
-    assert 'class="preview-grid"' in art_page_response.text
-    assert 'data-preview-grid-toggle' in art_page_response.text
-    assert "从保留文案中选择一句" not in art_page_response.text
-    assert "播放或拖动视频进度" not in art_page_response.text
-    assert "AI 会结合口播文案和低清关键帧拼图" not in art_page_response.text
-    assert "关键帧仅临时上传到阿里云百炼，用于本次分析" in art_page_response.text
-    assert "可修改文案、时间、位置和模板" not in art_page_response.text
-    assert "生成后仍可返回修改参数" not in art_page_response.text
-    assert 'data-editor-suite-nav data-stage="art"' in art_page_response.text
-    assert 'data-workbench-tab="transcript"' not in art_page_response.text
-    assert 'id="transcriptTab"' not in art_page_response.text
-    assert 'class="transcript-quick-action"' in art_page_response.text
-    assert "一键添加视频文案" in art_page_response.text
-    assert "默认使用“热血立体”" in art_page_response.text
-    assert "生成统一字号字幕" in art_script_response.text
-    assert "TRANSCRIPT_TRACK_MAX_CHARS_PER_CUE = 12" in art_script_response.text
-    assert "正在自动整理全文艺术字的内容和时间" in art_script_response.text
-    assert "normalizeTranscriptTrackTiming" not in art_script_response.text
-    assert "segments: retainedTranscriptSegments" in art_script_response.text
-    assert "payload.draftTranscript = cutTranscript;" in art_script_response.text
-    assert "Number(pendingCutDraft.duration) || duration" in art_script_response.text
-    assert (
-        art_script_response.text.count(
-            "requestDraftVersion !== transcriptTrackDraftVersion"
-        )
-        == 2
-    )
-    assert "window.setTimeout(addFullTranscriptTrack, 0);" in art_script_response.text
-    assert "comparableCaptionText(pendingTranscript.text)" not in art_script_response.text
-    assert "cutDraftTranscriptTrackCues" in art_script_response.text
-    assert "cutDraftTimedTranscriptWords" in art_script_response.text
-    assert "segmentLower.indexOf(wordLower, textOffset)" in art_script_response.text
-    assert "timedWords.at(-1).text += segmentContent.slice(textOffset)" in (
-        art_script_response.text
-    )
-    assert "replaceTranscriptTrackFromCutDraft" in art_script_response.text
-    assert "不会使用剪辑前的旧文案" in art_script_response.text
-    assert 'type: "editor-suite:request-cut-draft"' in art_script_response.text
-    assert 'data.type === "editor-suite:request-cut-draft"' in (
-        editor_suite_script_response.text
-    )
-    assert "scheduleTranscriptTrackRefresh();" in art_script_response.text
-    assert "trackRefreshPending ||" in art_script_response.text
-    assert (
-        'validationError === "全文艺术字轨道与当前视频文案不一致。"'
-        in art_script_response.text
-    )
-    assert "请删除后重新生成" not in art_script_response.text
-    assert "segmentationMethod" in art_script_response.text
-    assert "/art-text/transcript-track" in art_script_response.text
-    assert "全文艺术字轨道" in art_script_response.text
-    assert "rebuildTranscriptTrackLayout" in art_script_response.text
-    assert 'fontSize.addEventListener("change"' in art_script_response.text
-    assert "trackType" in art_script_response.text
-    assert (
-        'const TRANSCRIPT_TRACK_DEFAULT_POSITION = { x: 0.5, y: 0.9 };'
-        in art_script_response.text
-    )
-    assert "x: TRANSCRIPT_TRACK_DEFAULT_POSITION.x" in art_script_response.text
-    assert "y: TRANSCRIPT_TRACK_DEFAULT_POSITION.y" in art_script_response.text
-    assert 'class="art-editor-body"' in art_page_response.text
-    assert 'data-workbench-tab="ai"' in art_page_response.text
-    assert 'data-workbench-tab="output"' not in art_page_response.text
-    assert 'data-workbench-panel="output"' not in art_page_response.text
-    assert "生成下载" not in art_page_response.text
-    assert 'activateWorkbenchPanel("output")' not in art_script_response.text
-    art_output_runtime = art_page_response.text[
-        art_page_response.text.index('id="outputPanel"') :
-        art_page_response.text.index('id="generateArtVideo"')
-    ]
-    assert 'class="editor-suite-generation-runtime"' in art_output_runtime
-    assert 'aria-hidden="true"' in art_output_runtime
-    assert 'id="restartProjectButton"' in art_page_response.text
-    assert 'id="aiSuggestionCount"' in art_page_response.text
-    assert 'id="aiSuggestionReview"' in art_page_response.text
-    assert 'id="selectAllRetainedSegments"' in art_page_response.text
-    assert 'id="addSelectedRetainedSegments"' in art_page_response.text
-    assert 'id="addAllRetainedSegments"' in art_page_response.text
-    assert 'id="retainedBulkMessage"' in art_page_response.text
-    assert 'id="retainedText"' in art_page_response.text
-    assert 'id="saveRetainedText"' in art_page_response.text
-    assert 'id="retainedEditStatus"' in art_page_response.text
-    assert "saveRetainedTranscript" in art_script_response.text
-    assert 'method: "PUT"' in art_script_response.text
-    assert "/transcript`" in art_script_response.text
-    assert ".retained-transcript-editor {" in styles_response.text
-    assert 'id="applyCurrentSettingsToAll"' in art_page_response.text
-    assert 'id="applyAllSettingsMessage"' in art_page_response.text
-    assert 'id="fitArtToTranscript"' in art_page_response.text
-    assert 'id="artHistoryName"' not in art_page_response.text
-
-    assert 'id="artTimeFitMessage"' in art_page_response.text
-    assert 'id="frameTimeline"' in art_page_response.text
-    assert 'id="frameTimelineSeek"' in art_page_response.text
-    assert 'id="frameTimelineRuler"' in art_page_response.text
-    assert 'id="frameTimelineJumpInput"' in art_page_response.text
-    assert 'id="frameTimelineJumpButton"' in art_page_response.text
-    assert 'id="frameTimelineThumbnails"' in art_page_response.text
-    assert 'id="frameTimelineSegments"' in art_page_response.text
-    assert 'aria-label="艺术字时间轴"' in art_page_response.text
-    assert 'id="frameTimelineScroll"' in art_page_response.text
-    assert 'class="frame-timeline editor-layer-timeline"' in art_page_response.text
-    overlay_selection_start = art_page_response.text.index(
-        'class="overlay-selection-block"'
-    )
-    custom_text_start = art_page_response.text.index('class="custom-text-row"')
-    detail_settings_start = art_page_response.text.index('class="art-detail-heading"')
-    overlay_controls_start = art_page_response.text.index('id="overlayControls"')
-    assert (
-        overlay_selection_start
-        < custom_text_start
-        < detail_settings_start
-        < overlay_controls_start
-    )
-    assert "点击选择后，在下方修改" in art_page_response.text
-    assert 'id="continuePictureInPicture"' in art_page_response.text
-    assert 'id="transcriptStyleGrid"' in art_page_response.text
-    assert "先选择字幕艺术字类型" in art_page_response.text
-    assert "picture-in-picture?job=" in art_script_response.text
-    assert 'class="position-grid"' not in art_page_response.text
-    assert "positionButtons" not in art_script_response.text
-    assert 'id="artVideo" controls' not in art_page_response.text
-    assert 'id="finalVideo" controls' not in art_page_response.text
-    assert 'data-video-id="artVideo"' in art_page_response.text
-    assert 'data-video-id="finalVideo"' in art_page_response.text
-    assert art_page_response.text.count("data-media-controls") == 2
-    assert "确认后才会添加" in art_page_response.text
-    for art_style in (
-        "impact",
-        "neon",
-        "metal",
-        "sticker",
-        "clean",
-        "gradient",
-        "comic",
-        "ice",
-        "ink",
-        "ribbon",
-        "luxury",
+    for marker in (
+        "iframe",
+        "postMessage",
+        'addEventListener("message"',
+        "embedded",
+        "frameEntries",
+        "toolBridgeRevisions",
+        "desiredToolUrls",
+        "legacyTimelineDocument",
+        "toolStates",
+        "timelineHtml",
+        "overlayHtml",
+        "generationPayload",
+        "__EDITOR_PROJECT_STORE_ENABLED__",
+        "__EDITOR_ART_PANEL_ENABLED__",
+        "__EDITOR_PIP_PANEL_ENABLED__",
     ):
-        assert f'data-art-style="{art_style}"' in art_page_response.text
-    assert "restartProjectButton.addEventListener" in art_script_response.text
-    assert "activateWorkbenchPanel" in art_script_response.text
-    assert "positionPreviewOverlay" in art_script_response.text
-    assert "isOverlayVisibleAtTime" in art_script_response.text
-    assert "currentTime < end" in art_script_response.text
-    assert ".filter(({ overlay }) => isOverlayVisibleAtTime(overlay, currentTime))" in art_script_response.text
-    assert "loadFontLibrary" in art_script_response.text
-    assert "applyRequestedTemplateSelection" in art_script_response.text
-    assert "preferredArtTemplateSettings" in art_script_response.text
-    assert "/art-text/suggestions" in art_script_response.text
-    assert "confirmAiSuggestionDrafts" in art_script_response.text
-    assert "addRetainedSegmentsAsOverlays" in art_script_response.text
-    assert "isRetainedSegmentAdded" in art_script_response.text
-    assert "normalizeOverlayRange(segment.start, segment.end)" in art_script_response.text
-    assert "normalizeOverlayRange(start, end)" in art_script_response.text
-    assert "applySelectedSettingsToAllOverlays" in art_script_response.text
-    assert "matchingTranscriptSegment" in art_script_response.text
-    assert "fitSelectedArtTimeToTranscript" in art_script_response.text
-    assert "文案和时间保持不变" in art_script_response.text
-    assert "balanceHorizontalLine" in art_script_response.text
-    assert "setTranscriptTrackTemplate" in art_script_response.text
-    assert 'const TRANSCRIPT_TRACK_DEFAULT_STYLE = "impact";' in art_script_response.text
-    assert "selectedStyle = TRANSCRIPT_TRACK_DEFAULT_STYLE" in art_script_response.text
-    assert "一键添加视频文案" in art_script_response.text
-    assert "setupExternalVideoControls" in art_script_response.text
-    assert "requestFullscreen" in art_script_response.text
-    assert "buildFrameTimelineThumbnails" in art_script_response.text
-    assert "updateFrameTimelineScale" in art_script_response.text
-    assert "editor-layer-timeline-segment-label" in art_script_response.text
-    assert "renderFrameTimelineRuler" in art_script_response.text
-    assert "parseFrameTimelineTimeInput" in art_script_response.text
-    assert "jumpToFrameTimelineTime" in art_script_response.text
-    assert "refreshFrameTimeline" in art_script_response.text
-    assert "renderFrameTimelineOverlaySegments" in art_script_response.text
-    assert "FRAME_TIMELINE_TRACK_HEIGHT = 30" in art_script_response.text
-    assert "trackIndexes.set(trackKey, trackIndexes.size)" in art_script_response.text
-    assert "segment.dataset.timelineTrackIndex" in art_script_response.text
-    assert "timelineTrackCount" in art_script_response.text
-    assert "beginFrameTimelineSegmentAdjustment" in art_script_response.text
-    assert "updateManualOverlayTimelineRange" in art_script_response.text
-    assert "function syncFrameTimelineSegmentRange(overlay)" in art_script_response.text
-    manual_range_start = art_script_response.text.index(
-        "function updateManualOverlayTimelineRange(overlay, start, end)"
-    )
-    manual_range_end = art_script_response.text.index(
-        "function beginFrameTimelineSegmentAdjustment", manual_range_start
-    )
-    assert "syncFrameTimelineSegmentRange(overlay);" in (
-        art_script_response.text[manual_range_start:manual_range_end]
-    )
-    assert "data-art-time-drag" in art_script_response.text
-    assert "segment.dataset.effectStart" in art_script_response.text
-    assert "segment.dataset.effectEnd" in art_script_response.text
-    assert 'kind: "art"' in art_script_response.text
-    assert 'type: "editor-suite:tool-state"' in art_script_response.text
-    assert "updateEditorSuiteJobState" in art_script_response.text
-    assert "artGenerationObserver" in art_script_response.text
-    assert "applyEditorCutDraft" in art_script_response.text
-    assert "function retainedTimelineSpans" in art_script_response.text
-    assert "function editedRangeForSourceOverlay" in art_script_response.text
-    assert "anchorOverlayToSourceTimeline" in art_script_response.text
-    assert "buildTranscriptWordMatchIndex" in art_script_response.text
-    assert "matchOverlayToTranscriptWords" in art_script_response.text
-    assert "previous.end = current.start;" in art_script_response.text
-    assert "已按剪后文案的词级时间匹配" in art_script_response.text
-    assert "persistEmbeddedArtDraft" in art_script_response.text
-    assert "sourceStart: segment.sourceStart" in art_script_response.text
-    assert "payload.draftTranscript =" in art_script_response.text
-    assert "scheduleTranscriptTrackRefresh" in art_script_response.text
-    cut_sync_start = art_script_response.text.index(
-        "function applyEditorCutDraft(data)"
-    )
-    cut_sync_end = art_script_response.text.index(
-        "function handleEditorHostMessage", cut_sync_start
-    )
-    cut_sync_script = art_script_response.text[cut_sync_start:cut_sync_end]
-    assert "scheduleTranscriptTrackRefresh();" not in cut_sync_script
-    assert "replaceTranscriptTrackFromCutDraft(" in cut_sync_script
-    assert "editorHostCurrentTime" in art_script_response.text
-    assert "previewVisibilitySignature" in art_script_response.text
-    assert "renderPreview({ timeOnly: true })" in art_script_response.text
-    assert "renderArtTextCharacters" in art_script_response.text
-    assert "alignCharacterTimingsToAudioActivity" in art_script_response.text
-    assert "audioQuietRanges: retainedAudioQuietRanges" in art_script_response.text
-    assert "compactArtStyleSample" in art_script_response.text
-    assert "speechAnimationPreviewSignature" in art_script_response.text
-    assert "characterTimings" in art_script_response.text
-    assert "spokenDuration + 0.18" in art_script_response.text
-    assert '"center-highlight"' in art_script_response.text
-    assert '"character-bounce"' in art_script_response.text
+        assert marker not in suite
 
-    art_sync_start = art_script_response.text.index(
-        'if (data.type === "editor-suite:sync-time")'
-    )
-    art_sync_end = art_script_response.text.index(
-        'if (data.type !== "editor-suite:move-effect"', art_sync_start
-    )
-    art_sync_script = art_script_response.text[art_sync_start:art_sync_end]
-    assert "artVideo.currentTime = nextTime" not in art_sync_script
-    assert "artVideo.pause()" not in art_sync_script
-    assert "已按当前剪后文案实时同步" in art_script_response.text
-    assert "剪辑视频生成后即可使用 AI 全文分句" not in art_script_response.text
-    assert "beginFrameTimelineScrub" in art_script_response.text
-    assert "artTimelineStore" in art_script_response.text
-    assert "createPointerSession" in art_script_response.text
-    assert 'data.type === "editor-suite:timeline-action"' in art_script_response.text
-    assert "toDataURL(\"image/jpeg\"" in art_script_response.text
-    assert "const edgeOffset = Math.min(0.04, total / 2)" in art_script_response.text
-    assert 'videoSource === "original" && payload.edit?.status' in art_script_response.text
-    assert art_page_response.headers["cache-control"] == "no-store, max-age=0"
-    assert art_script_response.headers["cache-control"] == "no-store, max-age=0"
+    for bridge_projection in (
+        "selectCutDraftMessage",
+        "selectToolState",
+        "selectIframeProjection",
+        'type: "editor-suite:cut-draft"',
+        'changeKind: "tool-state"',
+        'changeKind: "project-projection"',
+    ):
+        assert bridge_projection not in project_store
 
 
-def test_picture_in_picture_frontend_contracts():
-    responses = _fetch_frontend_assets(
-        "/picture-in-picture",
-        "/picture-in-picture.js",
-        "/styles.css",
-        "/editor-suite.js",
-        "/art-text.js",
-    )
-    pip_page_response = responses["/picture-in-picture"]
-    pip_script_response = responses["/picture-in-picture.js"]
-    styles_response = responses["/styles.css"]
-    editor_suite_script_response = responses["/editor-suite.js"]
-    art_script_response = responses["/art-text.js"]
+def test_legacy_editor_pages_redirect_to_top_level_tools():
+    with TestClient(app_module.app, follow_redirects=False) as client:
+        art = client.get(
+            "/art-text?job=abc&source=edited&embedded=1&tool=pip"
+            "&template=impact&templateColor=%23ffffff"
+        )
+        pip = client.get(
+            "/picture-in-picture?job=abc&source=original&embedded=1&tool=art"
+        )
+        art_api = client.get(
+            "/api/transcriptions/00000000-0000-0000-0000-000000000000/art-text-video"
+        )
+        pip_api = client.get(
+            "/api/transcriptions/00000000-0000-0000-0000-000000000000/"
+            "picture-in-picture-video"
+        )
 
-    assert pip_page_response.status_code == 200
-    assert "/picture-in-picture.js?v=20260819-01" in pip_page_response.text
-    assert "/ui-feedback.js?v=20260807-03" in pip_page_response.text
-    assert "/styles.css?v=20260819-02" in pip_page_response.text
-    assert "/timeline-model.js?v=20260810-01" in pip_page_response.text
-    assert "/editor-pip-model.js?v=20260819-01" in pip_page_response.text
-    assert "/editor-suite.js?v=20260819-02" in pip_page_response.text
-    assert 'class="preview-grid"' in pip_page_response.text
-    assert 'data-preview-grid-toggle' in pip_page_response.text
-    assert 'data-editor-suite-nav data-stage="pip"' in pip_page_response.text
-    assert 'name="assetType" value="video"' in pip_page_response.text
-    assert "Seedance 动态镜头" in pip_page_response.text
-    assert 'class="pip-editor-body"' in pip_page_response.text
-    assert 'id="pipTimelineScroll"' in pip_page_response.text
-    assert 'class="frame-timeline editor-layer-timeline pip-timeline"' in pip_page_response.text
-    assert 'id="segmentList"' in pip_page_response.text
-    assert "time.textContent = formatTime(segment.start)" in pip_script_response.text
-    assert "beginPipTimelineSegmentAdjustment" in pip_script_response.text
-    assert "pipTimelineStore" in pip_script_response.text
-    assert "handle.dataset.timelineResize = mode" in pip_script_response.text
-    assert "grid-template-columns: 28px minmax(0, 1fr)" in styles_response.text
-    assert "grid-template-columns: 46px minmax(0, 1fr)" in styles_response.text
-    assert 'id="pipPrompt"' in pip_page_response.text
-    assert 'id="writePipPrompt"' in pip_page_response.text
-    assert 'id="promptWriterStatus"' in pip_page_response.text
-    assert 'id="pipStartTime"' in pip_page_response.text
-    assert 'id="pipEndTime"' in pip_page_response.text
-    assert 'id="fitPipToTranscript"' in pip_page_response.text
-    assert 'id="pipTimeMessage"' in pip_page_response.text
-    assert 'id="pipAspectRatioOptions"' in pip_page_response.text
-    for aspect_ratio in ("1:1", "3:4", "4:3", "16:9", "9:16"):
-        assert f'value="{aspect_ratio}"' in pip_page_response.text
-    assert 'id="generatePipImage"' in pip_page_response.text
-    assert "applyEditorCutDraft" in pip_script_response.text
-    assert "persistEmbeddedPipDraft" in pip_script_response.text
-    assert "start: item.start" in pip_script_response.text
-    assert "sourceStart: segment.sourceStart ?? null" in pip_script_response.text
-    assert 'id="imageProgress" class="pip-inline-progress pip-tech-progress"' in pip_page_response.text
-    assert "pip-tech-particle pip-tech-particle-5" in pip_page_response.text
-    assert 'id="generatedList"' in pip_page_response.text
-    assert 'id="pipOverlayLayer"' in pip_page_response.text
-    assert "选择一段口播文字，生成对应画面" not in pip_page_response.text
-    assert "每个画中画独立一条轨道" not in pip_page_response.text
-    assert "时间轴显示当前视频" not in pip_page_response.text
-    assert "画中画出现后可直接按住拖动摆放" not in pip_page_response.text
-    assert "previewHint" not in pip_script_response.text
-    assert "PIP_TIMELINE_TRACK_HEIGHT = 30" in pip_script_response.text
-    assert "segment.dataset.timelineTrackIndex" in pip_script_response.text
-    assert 'const trackLabel = `画中画${index + 1}`;' in pip_script_response.text
-    assert "label.textContent = trackLabel" in pip_script_response.text
-    assert (
-        'segment.title = `${trackLabel} ${formatRange(item.start, item.end)}`'
-        in pip_script_response.text
+    assert art.status_code == 307
+    assert art.headers["location"] == (
+        "/?job=abc&source=edited&template=impact&templateColor=%23ffffff&tool=art"
     )
-    assert "timelineTrackCount" in pip_script_response.text
-    assert 'type: "editor-suite:select-pip-timeline"' in editor_suite_script_response.text
-    assert 'data.type === "editor-suite:select-pip-timeline"' in pip_script_response.text
-    assert "拖动边框缩放" in pip_page_response.text
-    assert "beginPictureResize" in pip_script_response.text
-    assert "pictureResizeWidth" in pip_script_response.text
-    assert 'handle.className = "pip-resize-handle"' in pip_script_response.text
-    assert 'data.type === "editor-suite:resize-effect"' in pip_script_response.text
-    assert 'type: "editor-suite:resize-effect"' in editor_suite_script_response.text
-    assert ".pip-resize-handle" in styles_response.text
-    assert '[data-pip-resize="se"]' in styles_response.text
-    assert 'kind: "pip"' in pip_script_response.text
-    assert 'type: "editor-suite:tool-state"' in pip_script_response.text
-    assert "updateEditorSuiteJobState" in pip_script_response.text
-    assert "pipGenerationObserver" in pip_script_response.text
-    assert 'id="pipTimelineThumbnails"' in pip_page_response.text
-    assert 'id="generatePipVideo"' in pip_page_response.text
-    assert 'class="pip-output-section editor-suite-generation-runtime"' in pip_page_response.text
-    assert 'document.querySelector(".pip-output-section")?.scrollIntoView' not in pip_script_response.text
-    assert "Seedream · Seedance" in pip_page_response.text
-    assert 'assetType === "video" ? "videos" : "images"' in pip_script_response.text
-    assert "pollGeneratedAssets" in pip_script_response.text
-    assert "imageProgress.dataset.assetType = assetType" in pip_script_response.text
-    assert '"--pip-progress"' in pip_script_response.text
-    assert "writePromptDraft" in pip_script_response.text
-    assert "fitPipTimeToTranscript" in pip_script_response.text
-    assert "currentPipTimeRange" in pip_script_response.text
-    assert "start: timeRange.start" in pip_script_response.text
-    assert "end: timeRange.end" in pip_script_response.text
-    assert "/picture-in-picture/prompt" in pip_script_response.text
-    assert 'const endpoint = useComposition ? "compose" : "picture-in-picture"' in (
-        pip_script_response.text
-    )
-    assert "pictureInPictureOverlays: overlays" in pip_script_response.text
-    assert 'const endpoint = useComposition ? "compose" : "art-text"' in (
-        art_script_response.text
-    )
-    assert "AI 根据文字智能生成" in pip_script_response.text
-    assert "aspectRatio: currentImageAspectRatio()" in pip_script_response.text
-    assert '"original", "edited", "art"' in pip_script_response.text
-    assert "source: requestedSource" in pip_script_response.text
-    assert "renderPreview" in pip_script_response.text
-    assert "editorHostCurrentTime" in pip_script_response.text
-    assert "previewVisibilitySignature" in pip_script_response.text
-    assert "renderPreview({ timeOnly: true })" in pip_script_response.text
-    pip_sync_start = pip_script_response.text.index(
-        'if (data.type === "editor-suite:sync-time")'
-    )
-    pip_sync_end = pip_script_response.text.index(
-        'if (data.type !== "editor-suite:move-effect"', pip_sync_start
-    )
-    pip_sync_script = pip_script_response.text[pip_sync_start:pip_sync_end]
-    assert "pipVideo.currentTime = nextTime" not in pip_sync_script
-    assert "pipVideo.pause()" not in pip_sync_script
-    assert "buildPipTimelineThumbnails" in pip_script_response.text
-    assert 'toDataURL("image/jpeg"' in pip_script_response.text
-    assert "beginPictureDrag" in pip_script_response.text
-    assert "setPointerCapture" in pip_script_response.text
-    assert "constrainPictureItemToStage" in pip_script_response.text
-    assert 'requestedSource === "original"' in pip_script_response.text
-    assert "payload.edit?.status" in pip_script_response.text
-    assert "参考当前视频画面的色调、光线和质感" in pip_page_response.text
-    assert "min-height: 132px" in styles_response.text
-    assert ".pip-output-progress.pip-tech-progress" in styles_response.text
-    assert "@keyframes pip-tech-particle-drift" in styles_response.text
-    assert ".pip-generated-card.is-processing .pip-image-preview-button::after" in styles_response.text
-    assert "#pipVideoPlayer:fullscreen .pip-video-stage" in styles_response.text
-    assert "height: calc(100dvh - 88px)" in styles_response.text
-    assert "updatePipTimelineScale" in pip_script_response.text
-    assert "pipTimelineMajorStep" in pip_script_response.text
-    assert pip_page_response.headers["cache-control"] == "no-store, max-age=0"
-    assert editor_suite_script_response.headers["cache-control"] == "no-store, max-age=0"
-    assert pip_script_response.headers["cache-control"] == "no-store, max-age=0"
+    assert pip.status_code == 307
+    assert pip.headers["location"] == "/?job=abc&source=original&tool=pip"
+    assert art_api.status_code == 404
+    assert pip_api.status_code == 404
+    assert "location" not in art_api.headers
+    assert "location" not in pip_api.headers
 
+
+def test_removed_legacy_editor_resources_are_not_served():
+    with TestClient(app_module.app, follow_redirects=False) as client:
+        art_script = client.get("/art-text.js")
+        pip_script = client.get("/picture-in-picture.js")
+        art_page = client.get("/art-text")
+        pip_page = client.get("/picture-in-picture")
+
+    assert art_script.status_code == 404
+    assert pip_script.status_code == 404
+    assert art_page.status_code == 307
+    assert art_page.headers["location"] == "/?tool=art"
+    assert pip_page.status_code == 307
+    assert pip_page.headers["location"] == "/?tool=pip"
+
+
+def test_single_page_tool_links_target_the_top_level_document():
+    root = Path(__file__).resolve().parents[2]
+    app_source = (root / "web" / "app.js").read_text(encoding="utf-8")
+    suite_source = (root / "web" / "editor-suite.js").read_text(encoding="utf-8")
+    template_source = (root / "web" / "art-template-library.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "/art-text?job=" not in app_source
+    assert "/picture-in-picture?job=" not in app_source
+    assert "source=original&tool=art" in app_source
+    assert "source=original&tool=pip" in app_source
+    assert "source=${artSource}&tool=art" in suite_source
+    assert "source=${pipSource}&tool=pip" in suite_source
+    assert 'new URL("/", window.location.origin)' in template_source
+    assert 'destination.searchParams.set("tool", "art")' in template_source
 
 def test_art_template_library_frontend_contracts():
     responses = _fetch_frontend_assets(
         "/fonts",
         "/art-template-library.js",
         "/api/art-templates",
-        "/art-text.js",
+        "/editor-art-tool.js",
     )
     template_page_response = responses["/fonts"]
     template_script_response = responses["/art-template-library.js"]
     template_api_response = responses["/api/art-templates"]
-    art_script_response = responses["/art-text.js"]
+    art_tool_response = responses["/editor-art-tool.js"]
 
     assert template_page_response.status_code == 200
     assert "/styles.css?v=20260819-02" in template_page_response.text
-    assert "/art-template-library.js?v=20260812-02" in template_page_response.text
+    assert "/art-template-library.js?v=20260819-01" in template_page_response.text
     assert "当前模板主色" in template_page_response.text
     assert 'id="templateCardGrid"' in template_page_response.text
     assert 'id="useTemplateButton"' in template_page_response.text
@@ -1284,7 +926,7 @@ def test_art_template_library_frontend_contracts():
     assert "点击恢复后重新出现在模板库" in template_page_response.text
     assert "/api/art-templates" in template_script_response.text
     assert "preferredArtTemplateSettings" in template_script_response.text
-    assert "characterLayout" in art_script_response.text
+    assert "characterLayout" in art_tool_response.text
     assert "is-character-staggered" in template_script_response.text
     assert "const effects = normalizedTemplateEffects(template, color);" in (
         template_script_response.text
@@ -1302,8 +944,10 @@ def test_art_template_library_frontend_contracts():
     )
     assert 'method: "PATCH"' in template_script_response.text
     assert 'method: "DELETE"' in template_script_response.text
-    assert "loadArtTemplateLibrary" in art_script_response.text
-    assert "ART_STYLE_BASES" in art_script_response.text
+    assert "consumeInitialTemplateSelection" in art_tool_response.text
+    assert "normalizedTemplateSettings" in art_tool_response.text
+    assert 'new URL("/", window.location.origin)' in template_script_response.text
+    assert 'destination.searchParams.set("tool", "art")' in template_script_response.text
     assert "renderTemplateCharacters" in template_script_response.text
     assert 'type: "character-bounce"' in template_script_response.text
     assert template_page_response.headers["cache-control"] == "no-store, max-age=0"
@@ -3104,16 +2748,17 @@ def test_editor_project_store_integration_guards_text_and_compose_state():
     root = Path(__file__).resolve().parents[2]
     app_source = (root / "web" / "app.js").read_text(encoding="utf-8")
     suite_source = (root / "web" / "editor-suite.js").read_text(encoding="utf-8")
-    art_source = (root / "web" / "art-text.js").read_text(encoding="utf-8")
-    pip_source = (root / "web" / "picture-in-picture.js").read_text(
-        encoding="utf-8"
-    )
+    art_tool = (root / "web" / "editor-art-tool.js").read_text(encoding="utf-8")
+    pip_tool = (root / "web" / "editor-pip-tool.js").read_text(encoding="utf-8")
 
     save_start = app_source.index("async function saveSegmentText()")
     save_end = app_source.index("function broadcastTranscriptUpdated()", save_start)
     save_source = app_source[save_start:save_end]
-    assert "beginProjectEffect(\"transcript-save\")" in save_source
+    assert 'beginProjectEffect("transcript-save")' in save_source
     assert "applyTranscriptTextEffect" in save_source
+    assert "broadcastTranscriptUpdated();" in save_source
+    assert "if (textSaveEffect)" not in save_source
+    assert "projectStoreEnabled" not in save_source
     assert "window.location.reload" not in save_source
     assert "正在刷新页面" not in save_source
 
@@ -3121,91 +2766,29 @@ def test_editor_project_store_integration_guards_text_and_compose_state():
     compose_end = suite_source.index("function stableValue", compose_start)
     compose_source = suite_source[compose_start:compose_end]
     assert "selectCurrentProjectFrame()" in compose_source
-    assert "frame.composition" in compose_source
+    assert "frame?.composition" in compose_source
     assert "selectCompositionRequest" not in compose_source
     assert "toolStates.get" not in compose_source
+
     generate_start = suite_source.index("async function generateCurrentPreview()")
     generate_end = suite_source.index("async function cancelComposition", generate_start)
     generate_source = suite_source[generate_start:generate_end]
     assert "const frame = selectCurrentProjectFrame();" in generate_source
-    assert "const request = frame?.composition || compositionRequest();" in generate_source
-    assert "projectStoreEnabled" in suite_source
-    assert "window.__EDITOR_PROJECT_STORE_ENABLED__ !== false" in suite_source
-    assert "toolFrameOwnsSource(event.source, data.kind)" in suite_source
-    assert "event.origin !== window.location.origin" in suite_source
-    assert 'type: "editor-suite:transcript-text"' in suite_source
-    assert 'changeKind: "transcript-text"' in suite_source
-    assert "state.project.cut.transcript || state.project.transcript" in suite_source
-    assert "advanceToolBridgeRevision(name, message?.revision)" in suite_source
-    assert 'type: "editor-suite:project-ack"' in suite_source
-    assert "acknowledgeToolProjection(data.kind)" in suite_source
-    acknowledge_start = suite_source.index("function acknowledgeToolProjection")
-    acknowledge_end = suite_source.index(
-        "function postTranscriptTextProjection", acknowledge_start
-    )
-    acknowledge_source = suite_source[acknowledge_start:acknowledge_end]
-    assert "postProjectProjection" not in acknowledge_source
-    assert "advanceToolBridgeRevision(data.kind, messageRevision)" in suite_source
-    assert "messageRevision < previousBridgeRevision" in suite_source
-    assert "messageRevision === null" in suite_source
-    assert "renderJobState(data.job, { hydrateProject: !projectStoreEnabled })" in (
-        suite_source
-    )
-    job_state_start = suite_source.index(
-        'if (data.type === "editor-suite:job-state"'
-    )
-    job_state_end = suite_source.index(
-        'if (data.type === "editor-suite:seek"', job_state_start
-    )
-    job_state_handler = suite_source[job_state_start:job_state_end]
-    assert "if (!projectStoreEnabled)" in job_state_handler
-    assert "new CustomEvent(\"editor-suite:job-state\"" in job_state_handler
+    assert "const request = frame.composition;" in generate_source
 
-    art_text_start = art_source.index(
-        'if (data.type === "editor-suite:transcript-text"'
-    )
-    art_text_end = art_source.index(
-        'if (data.type === "editor-suite:generate-video"', art_text_start
-    )
-    art_text_handler = art_source[art_text_start:art_text_end]
-    assert "acceptEditorHostProjection" in art_text_handler
-    assert "applyEditorTranscriptText" in art_text_handler
-    assert "retimeDraftAnchoredOverlays" not in art_text_handler
-    assert "replaceTranscriptTrackFromCutDraft" not in art_text_handler
-    art_text_apply_start = art_source.index("function applyEditorTranscriptText")
-    art_text_apply_end = art_source.index(
-        "function applyEditorCutDraft", art_text_apply_start
-    )
-    art_text_apply = art_source[art_text_apply_start:art_text_apply_end]
-    assert "renderEditor({ preserveTimeline: true })" in art_text_apply
-    assert "pendingCutDraft =" not in art_text_apply
-    assert "appliedCutDraftState =" not in art_text_apply
-    assert "renderFrameTimelineOverlaySegments" not in art_text_apply
-    assert "syncArtTimelineModel" not in art_text_apply
-    assert 'data.type === "editor-suite:project-ack"' in art_source
-    assert 'changeKind: "job-state"' in art_source
-    assert "event.source !== window.parent" in art_source
+    for marker in (
+        "projectStoreEnabled",
+        "toolFrameOwnsSource",
+        "postMessage",
+        'addEventListener("message"',
+        "editor-suite:transcript-text",
+        "editor-suite:project-ack",
+        "advanceToolBridgeRevision",
+        "acknowledgeToolProjection",
+    ):
+        assert marker not in suite_source
 
-    pip_text_start = pip_source.index(
-        'if (data.type === "editor-suite:transcript-text"'
-    )
-    pip_text_end = pip_source.index(
-        'if (data.type === "editor-suite:generate-video"', pip_text_start
-    )
-    pip_text_handler = pip_source[pip_text_start:pip_text_end]
-    assert "acceptEditorHostProjection" in pip_text_handler
-    assert "applyEditorTranscriptText" in pip_text_handler
-    assert "matchingDraftSegment" not in pip_text_handler
-    pip_text_apply_start = pip_source.index("function applyEditorTranscriptText")
-    pip_text_apply_end = pip_source.index(
-        "function applyEditorCutDraft", pip_text_apply_start
-    )
-    pip_text_apply = pip_source[pip_text_apply_start:pip_text_apply_end]
-    assert "renderPreview({ preserveTimeline: true })" in pip_text_apply
-    assert "pendingCutDraft =" not in pip_text_apply
-    assert "renderTimelineSegments" not in pip_text_apply
-    assert "syncPipTimelineModel" not in pip_text_apply
-    assert "function renderTimelineSegments(options = {})" in pip_source
-    assert 'data.type === "editor-suite:project-ack"' in pip_source
-    assert 'changeKind: "job-state"' in pip_source
-    assert "event.source !== window.parent" in pip_source
+    assert "services.project.snapshot()" in art_tool
+    assert "services.project.snapshot()" in pip_tool
+    assert "sessionStorage" not in art_tool
+    assert "sessionStorage" not in pip_tool

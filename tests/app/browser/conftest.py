@@ -466,3 +466,45 @@ def seeded_transcript_track_editor_job(
             }
         )
     return seeded_editor_job
+
+
+@pytest.fixture
+def seeded_two_cue_transcript_track_editor_job(
+    seeded_editor_job: SeededEditorJob,
+) -> SeededEditorJob:
+    with app_module.JOBS_LOCK:
+        job = app_module.JOBS[seeded_editor_job.job_id]
+        first = job["art"]["overlays"][0]
+        first.update(
+            {
+                "id": "browser-transcript-cue-2",
+                "trackId": "browser-transcript-track",
+                "trackType": "transcript",
+                "sourceSegmentIndex": 1,
+            }
+        )
+        second = copy.deepcopy(first)
+        second.update(
+            {
+                "id": "browser-transcript-cue-1",
+                "text": "删除片段",
+                "start": 0.05,
+                "end": 0.3,
+                "sourceStart": 0.05,
+                "sourceEnd": 0.3,
+                "sourceSegmentIndex": 0,
+            }
+        )
+        job["art"]["overlays"] = [first, second]
+        for index, segment in enumerate(job["result"]["editableSegments"]):
+            segment["sourceSegmentIndex"] = index
+    return seeded_editor_job
+
+
+@pytest.fixture
+def seeded_editor_job_without_art(
+    seeded_editor_job: SeededEditorJob,
+) -> SeededEditorJob:
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[seeded_editor_job.job_id]["art"]["overlays"] = []
+    return seeded_editor_job

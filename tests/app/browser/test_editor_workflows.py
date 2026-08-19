@@ -72,6 +72,44 @@ def base_media_mutations(page) -> dict[str, int]:
     return page.evaluate("window.__b1MediaMutationProbe")
 
 
+def install_template_catalog_revision_probe(page) -> None:
+    page.add_init_script(
+        """(() => {
+          const originalFetch = window.fetch.bind(window);
+          window.fetch = async (...args) => {
+            const response = await originalFetch(...args);
+            const requestUrl = new URL(
+              typeof args[0] === 'string' ? args[0] : args[0].url,
+              window.location.origin,
+            );
+            if (requestUrl.pathname !== '/api/art-templates') return response;
+            const payload = await response.clone().json();
+            while (!window.EditorSuite?.projectSnapshot?.()) {
+              await new Promise(resolve => window.setTimeout(resolve, 0));
+            }
+            const snapshot = window.EditorSuite.projectSnapshot();
+            window.__templateCatalogBaseline = {
+              revision: snapshot.revision,
+              timingRevision: snapshot.timingRevision,
+              selection: snapshot.project.timeline.selection,
+              ranges: snapshot.project.art.overlays.map(item => ({
+                id: item.id,
+                start: item.start,
+                end: item.end,
+                sourceStart: item.sourceStart ?? null,
+                sourceEnd: item.sourceEnd ?? null,
+              })),
+            };
+            return new Response(JSON.stringify(payload), {
+              status: response.status,
+              statusText: response.statusText,
+              headers: response.headers,
+            });
+          };
+        })()"""
+    )
+
+
 def test_cut_draft_survives_refresh(
     browser_session,
     seeded_editor_job,
@@ -1171,25 +1209,50 @@ def test_schema_v1_art_draft_remains_compatible(
     assert restored["pipIds"] == [seeded_editor_job.pip_asset_id]
 
 
-def test_pip_iframe_fallback_and_standalone_page_remain_usable(
+def test_legacy_pip_url_redirects_to_single_top_level_runtime(
     browser_session,
     seeded_editor_job,
 ):
-    browser_session.page.add_init_script(
-        "window.__EDITOR_PIP_PANEL_ENABLED__ = false;"
+    page = browser_session.page
+    page.goto(
+        f"{browser_session.base_url}/picture-in-picture"
+        f"?job={seeded_editor_job.job_id}&source=art&embedded=1&tool=cut"
     )
-    page = open_editor(browser_session, seeded_editor_job)
-    page.locator('[data-editor-tool="pip"]').click()
-    pip_frame = page.frame_locator('iframe[title="画中画设置"]')
-    pip_frame.locator("#pipWorkspace").wait_for(state="visible")
-    assert page.locator('iframe[title="画中画设置"]').count() == 1
-    assert page.locator("#editorPipPanelRoot").evaluate("root => root.inert") is True
-    fallback_size = pip_frame.locator(
+    page.locator("#editorPipPanelRoot").wait_for(state="visible")
+    page.wait_for_function("() => window.EditorSuite?.activeTool() === 'pip'")
+
+    destination = page.evaluate(
+        """() => ({
+          path: location.pathname,
+          job: new URLSearchParams(location.search).get('job'),
+          source: new URLSearchParams(location.search).get('source'),
+          tool: new URLSearchParams(location.search).get('tool'),
+          hasEmbedded: new URLSearchParams(location.search).has('embedded'),
+          iframeCount: document.querySelectorAll('iframe').length,
+          videoCount: document.querySelectorAll('#cutPreviewVideo').length,
+          pipInert: document.querySelector('#editorPipPanelRoot').inert,
+          cutInert: document.querySelector('.text-editor-panel-stack').inert,
+        })"""
+    )
+    assert destination == {
+        "path": "/",
+        "job": seeded_editor_job.job_id,
+        "source": "art",
+        "tool": "pip",
+        "hasEmbedded": False,
+        "iframeCount": 0,
+        "videoCount": 1,
+        "pipInert": False,
+        "cutInert": True,
+    }
+
+    size = page.locator(
         f'.pip-generated-card[data-picture-id="{seeded_editor_job.pip_asset_id}"] '
         'input[type="number"]'
     )
-    assert fallback_size.get_attribute("max") is None
-    fallback_size.fill("175")
+    assert size.get_attribute("max") is None
+    size.fill("175")
+    size.press("Tab")
     page.wait_for_function(
         """id => Math.abs(
           window.EditorSuite.projectSnapshot().project.pip.overlays
@@ -1197,45 +1260,6 @@ def test_pip_iframe_fallback_and_standalone_page_remain_usable(
         ) < 0.0001""",
         arg=seeded_editor_job.pip_asset_id,
     )
-
-    page.goto(
-        f"{browser_session.base_url}/picture-in-picture"
-        f"?job={seeded_editor_job.job_id}&source=art"
-    )
-    page.locator("#pipWorkspace").wait_for(state="visible")
-    standalone = page.evaluate(
-        """() => ({
-          model: Boolean(window.EditorPipModel),
-          topLevelPanel: Boolean(document.querySelector('#editorPipPanelRoot')),
-          videoCount: document.querySelectorAll('#pipVideo').length,
-          segmentListCount: document.querySelectorAll('#segmentList').length,
-        })"""
-    )
-    assert standalone == {
-        "model": True,
-        "topLevelPanel": False,
-        "videoCount": 1,
-        "segmentListCount": 1,
-    }
-    standalone_size = page.locator(
-        f'.pip-generated-card[data-picture-id="{seeded_editor_job.pip_asset_id}"] '
-        'input[type="number"]'
-    )
-    assert standalone_size.get_attribute("max") is None
-    standalone_size.fill("175")
-    page.wait_for_function(
-        """id => Math.abs(
-          pictureItems.find(item => item.id === id)?.width - 1.75
-        ) < 0.0001""",
-        arg=seeded_editor_job.pip_asset_id,
-    )
-    standalone_size.fill("10")
-    standalone_size.press("Tab")
-    assert float(standalone_size.input_value()) == pytest.approx(175)
-    assert page.evaluate(
-        "id => pictureItems.find(item => item.id === id)?.width",
-        seeded_editor_job.pip_asset_id,
-    ) == pytest.approx(1.75)
 
 
 @pytest.mark.parametrize("playing", [False, True], ids=["paused", "playing"])
@@ -1401,7 +1425,7 @@ def test_unified_generate_posts_current_cut_art_and_pip_state(
 
 
 @pytest.mark.parametrize("playing", [False, True], ids=["paused", "playing"])
-def test_text_edit_preserves_media_iframes_and_effect_timing(
+def test_text_edit_preserves_single_page_runtime_and_effect_timing(
     browser_session,
     seeded_transcript_track_editor_job,
     playing,
@@ -1450,11 +1474,16 @@ def test_text_edit_preserves_media_iframes_and_effect_timing(
             sourceStart: item.sourceStart ?? null,
             sourceEnd: item.sourceEnd ?? null,
           }));
-              window.__b0TextEditIdentity = {
+          window.__b0TextEditIdentity = {
+            document,
             video,
             artPanel: document.querySelector('#editorArtPanelRoot'),
-                pipPanel: document.querySelector('#editorPipPanelRoot'),
-              };
+            pipPanel: document.querySelector('#editorPipPanelRoot'),
+          };
+          window.__b4TranscriptUpdates = [];
+          document.addEventListener('editor-suite:transcript-updated', event => {
+            window.__b4TranscriptUpdates.push(event.detail);
+          });
           return {
             src: video.currentSrc || video.src,
             currentTime: video.currentTime,
@@ -1487,13 +1516,13 @@ def test_text_edit_preserves_media_iframes_and_effect_timing(
           const request = window.EditorSuite.compositionRequest();
           return {
             identitySurvived: Boolean(identity),
+            sameDocument: identity?.document === document,
             sameVideo: identity?.video === video,
             sameArtPanel:
               identity?.artPanel === document.querySelector('#editorArtPanelRoot'),
             samePipPanel:
               identity?.pipPanel === document.querySelector('#editorPipPanelRoot'),
-            pipFrameCount:
-              document.querySelectorAll('iframe[title="画中画设置"]').length,
+            iframeCount: document.querySelectorAll('iframe').length,
             src: video.currentSrc || video.src,
             currentTime: video.currentTime,
             paused: video.paused,
@@ -1502,16 +1531,18 @@ def test_text_edit_preserves_media_iframes_and_effect_timing(
             artTimes: times(snapshot.project.art.overlays),
             pipTimes: times(snapshot.project.pip.overlays),
             artTexts: snapshot.project.art.overlays.map(item => item.text || ''),
-                composeArtTexts: request.artOverlays.map(item => item.text || ''),
-              };
+            composeArtTexts: request.artOverlays.map(item => item.text || ''),
+            transcriptUpdates: window.__b4TranscriptUpdates,
+          };
         }"""
     )
 
     assert after["identitySurvived"] is True
+    assert after["sameDocument"] is True
     assert after["sameVideo"] is True
     assert after["sameArtPanel"] is True
     assert after["samePipPanel"] is True
-    assert after["pipFrameCount"] == 0
+    assert after["iframeCount"] == 0
     assert after["src"] == before["src"]
     assert after["timingRevision"] == before["timingRevision"]
     assert after["revision"] > before["revision"]
@@ -1519,6 +1550,7 @@ def test_text_edit_preserves_media_iframes_and_effect_timing(
     assert after["pipTimes"] == before["pipTimes"]
     assert "全新文案" in after["artTexts"]
     assert "全新文案" in after["composeArtTexts"]
+    assert after["transcriptUpdates"] == [{"jobId": seeded_transcript_track_editor_job.job_id}]
     if playing:
         assert after["paused"] is False
         assert after["currentTime"] >= before["currentTime"] - 0.05
@@ -1764,176 +1796,372 @@ def test_b1_atomic_timeline_transaction_and_narrow_workspace(
     assert base_media_mutations(page) == {"srcWrites": 0, "loadCalls": 0}
 
 
-def test_iframe_revision_floor_rejects_stale_state_and_acks_local_edits(
+def test_template_deep_link_applies_to_selected_manual_overlay_once(
     browser_session,
     seeded_editor_job,
 ):
-    browser_session.page.add_init_script(
-        "window.__EDITOR_ART_PANEL_ENABLED__ = false;"
+    page = browser_session.page
+    install_template_catalog_revision_probe(page)
+    page.goto(
+        f"{browser_session.base_url}/?job={seeded_editor_job.job_id}"
+        "&tool=art&template=neon&templateColor=%2312ab34"
+        "&templateStroke=%23abcdef&templateFont=modern&templateSize=72"
     )
-    page = open_editor(browser_session, seeded_editor_job)
-    page.locator("#cutPreviewVideo").evaluate(
-        """video => {
-          video.pause();
-          video.currentTime = 0.5;
-          video.dispatchEvent(new Event('seeking'));
-          video.dispatchEvent(new Event('timeupdate'));
+    page.locator("#editorArtPanelRoot").wait_for(state="visible")
+    page.wait_for_function(
+        """() => {
+          const overlay = window.EditorSuite.projectSnapshot().project.art.overlays[0];
+          return overlay?.artStyle === 'neon' && overlay.fontSize === 72;
         }"""
     )
-    page.locator('[data-editor-tool="art"]').click()
-    art_frame = page.frame_locator('iframe[title="艺术字设置"]')
-    art_frame.locator("#artWorkspace").wait_for(state="visible")
-    page.locator("#editorSuitePreviewOverlay .is-art").wait_for(state="visible")
 
-    child_revision = art_frame.locator("body").evaluate(
-        "body => editorHostLastAppliedRevision"
-    )
-    before = page.evaluate(
+    result = page.evaluate(
         """() => {
           const snapshot = window.EditorSuite.projectSnapshot();
           return {
+            baseline: window.__templateCatalogBaseline,
             revision: snapshot.revision,
             timingRevision: snapshot.timingRevision,
-            art: snapshot.project.art,
+            ranges: snapshot.project.art.overlays.map(item => ({
+              id: item.id,
+              start: item.start,
+              end: item.end,
+              sourceStart: item.sourceStart ?? null,
+              sourceEnd: item.sourceEnd ?? null,
+            })),
+            overlay: snapshot.project.art.overlays[0],
+            iframeCount: document.querySelectorAll('iframe').length,
           };
         }"""
     )
-    page.evaluate(
-        """() => {
-          window.__staleToolStateHandled = false;
-          const listener = event => {
-            if (event.data?.probeId !== 'stale-art-state') return;
-            window.removeEventListener('message', listener);
-            window.__staleToolStateHandled = true;
-          };
-          window.addEventListener('message', listener);
-        }"""
-    )
-    art_frame.locator("body").evaluate(
-        """(body, payload) => {
-          window.parent.postMessage(payload, window.location.origin);
-        }""",
-        {
-            "type": "editor-suite:tool-state",
-            "kind": "art",
-            "probeId": "stale-art-state",
-            "revision": child_revision - 2,
-            "timingRevision": before["timingRevision"],
-            "changeKind": "tool-state",
-            "generationPayload": {
-                "source": "original",
-                "overlays": [{"text": "迟到旧状态", "start": 7, "end": 8}],
-            },
-        },
-    )
-    page.wait_for_function("window.__staleToolStateHandled === true")
-    after_stale = page.evaluate(
-        """() => {
-          const snapshot = window.EditorSuite.projectSnapshot();
-          return {
-            revision: snapshot.revision,
-            timingRevision: snapshot.timingRevision,
-            art: snapshot.project.art,
-          };
-        }"""
-    )
-    assert after_stale == before
-
-    first_x = 0.37
-    art_frame.locator("body").evaluate(
-        """(body, x) => {
-          overlays[0].x = x;
-          notifyEditorHost({ force: true });
-        }""",
-        arg=first_x,
-    )
-    page.wait_for_function(
-        """x => {
-          const item = window.EditorSuite.projectSnapshot().project.art.overlays[0];
-          return Math.abs(Number(item?.x) - x) < 0.0001;
-        }""",
-        arg=first_x,
-    )
-    first = page.evaluate(
-        """() => {
-          const snapshot = window.EditorSuite.projectSnapshot();
-          return { revision: snapshot.revision, timingRevision: snapshot.timingRevision };
-        }"""
-    )
-    art_frame.locator("body").evaluate(
-        """(body, revision) => new Promise(resolve => {
-          const finish = () => resolve(editorHostLastAppliedRevision);
-          if (editorHostLastAppliedRevision >= revision) finish();
-          else window.addEventListener('message', finish, { once: true });
-        })""",
-        first["revision"],
-    )
-
-    second_x = 0.41
-    art_frame.locator("body").evaluate(
-        """(body, x) => {
-          overlays[0].x = x;
-          notifyEditorHost({ force: true });
-        }""",
-        arg=second_x,
-    )
-    page.wait_for_function(
-        """x => {
-          const item = window.EditorSuite.projectSnapshot().project.art.overlays[0];
-          return Math.abs(Number(item?.x) - x) < 0.0001;
-        }""",
-        arg=second_x,
-    )
-    second = page.evaluate(
-        """() => {
-          const snapshot = window.EditorSuite.projectSnapshot();
-          return { revision: snapshot.revision, timingRevision: snapshot.timingRevision };
-        }"""
-    )
-    assert first["revision"] == before["revision"] + 1
-    assert second["revision"] == first["revision"] + 1
-    assert first["timingRevision"] == before["timingRevision"]
-    assert second["timingRevision"] == before["timingRevision"]
+    assert result["revision"] == result["baseline"]["revision"] + 1
+    assert result["timingRevision"] == result["baseline"]["timingRevision"]
+    assert result["ranges"] == result["baseline"]["ranges"]
+    assert result["iframeCount"] == 0
+    assert result["overlay"]["artStyle"] == "neon"
+    assert result["overlay"]["color"] == "#12AB34"
+    assert result["overlay"]["strokeColor"] == "#ABCDEF"
+    assert result["overlay"]["font"] == "modern"
+    assert result["overlay"]["fontSize"] == 72
 
 
-def test_standalone_art_page_keeps_legacy_editor_with_shared_renderer(
+def test_template_library_handoff_opens_the_top_level_art_tool(
     browser_session,
     seeded_editor_job,
 ):
     page = browser_session.page
     page.goto(
-        f"{browser_session.base_url}/art-text"
-        f"?job={seeded_editor_job.job_id}&source=original"
+        f"{browser_session.base_url}/fonts?job={seeded_editor_job.job_id}"
+        "&source=original"
     )
-    page.locator("#artWorkspace").wait_for(state="visible")
-    page.locator("#artVideo").wait_for(state="attached")
-    page.locator("#overlayText").wait_for(state="visible")
-    shared_runtime = page.evaluate(
-        """() => ({
-          model: Boolean(window.EditorArtModel),
-          renderer: Boolean(window.EditorArtRenderer),
-          topLevelPanel: Boolean(document.querySelector('#editorArtPanelRoot')),
-          overlayCount: overlays.length,
-        })"""
-    )
-    assert shared_runtime == {
-        "model": True,
-        "renderer": True,
-        "topLevelPanel": False,
-        "overlayCount": 1,
-    }
+    neon_card = page.locator('[data-template-id="neon"]')
+    neon_card.wait_for(state="visible")
+    neon_card.get_by_role("button", name="查看", exact=True).click()
+    page.locator("#templateFont").select_option("modern")
+    page.locator("#templatePreviewSize").fill("70")
+    page.locator("#templatePreviewColor").fill("#345678")
+    page.locator("#useTemplateButton").click()
 
-    page.locator("#overlayText").fill("独立页面仍可编辑")
+    page.locator("#editorArtPanelRoot").wait_for(state="visible")
     page.wait_for_function(
-        "() => overlays[0]?.text === '独立页面仍可编辑'"
-    )
-    page.locator("#artVideo").evaluate(
-        """video => {
-          video.currentTime = 0.5;
-          video.dispatchEvent(new Event('timeupdate'));
+        """() => {
+          const overlay = window.EditorSuite.projectSnapshot().project.art.overlays[0];
+          return overlay?.artStyle === 'neon' && overlay.fontSize === 70;
         }"""
     )
-    assert page.locator("#overlayLayer .preview-overlay").count() == 1
+    result = page.evaluate(
+        """() => {
+          const query = new URLSearchParams(location.search);
+          const overlay = window.EditorSuite.projectSnapshot().project.art.overlays[0];
+          return {
+            path: location.pathname,
+            job: query.get('job'),
+            source: query.get('source'),
+            tool: query.get('tool'),
+            template: query.get('template'),
+            templateColor: query.get('templateColor'),
+            templateStroke: query.get('templateStroke'),
+            templateFont: query.get('templateFont'),
+            templateSize: query.get('templateSize'),
+            iframeCount: document.querySelectorAll('iframe').length,
+            overlay,
+          };
+        }"""
+    )
+    assert result["path"] == "/"
+    assert result["job"] == seeded_editor_job.job_id
+    assert result["source"] == "original"
+    assert result["tool"] == "art"
+    assert result["template"] == "neon"
+    assert result["templateColor"] == "#345678"
+    assert result["templateStroke"]
+    assert result["templateFont"] == "modern"
+    assert result["templateSize"] == "70"
+    assert result["iframeCount"] == 0
+    assert result["overlay"]["artStyle"] == "neon"
+    assert result["overlay"]["color"] == "#345678".upper()
+    assert result["overlay"]["font"] == "modern"
+    assert result["overlay"]["fontSize"] == 70
+
+
+def test_template_deep_link_updates_selected_transcript_track_once(
+    browser_session,
+    seeded_two_cue_transcript_track_editor_job,
+):
+    job = seeded_two_cue_transcript_track_editor_job
+    page = browser_session.page
+    install_template_catalog_revision_probe(page)
+    page.goto(
+        f"{browser_session.base_url}/?job={job.job_id}"
+        "&tool=art&template=clean&templateColor=%23224466"
+        "&templateStroke=%23ddeeff&templateFont=song&templateSize=66"
+    )
+    page.locator("#editorArtPanelRoot").wait_for(state="visible")
+    page.wait_for_function(
+        """() => {
+          const overlays = window.EditorSuite.projectSnapshot().project.art.overlays;
+          return overlays.length === 2 && overlays.every(item =>
+            item.artStyle === 'clean' && item.fontSize === 66
+          );
+        }"""
+    )
+
+    result = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          return {
+            baseline: window.__templateCatalogBaseline,
+            revision: snapshot.revision,
+            timingRevision: snapshot.timingRevision,
+            ranges: snapshot.project.art.overlays.map(item => ({
+              id: item.id,
+              start: item.start,
+              end: item.end,
+              sourceStart: item.sourceStart ?? null,
+              sourceEnd: item.sourceEnd ?? null,
+            })),
+            overlays: snapshot.project.art.overlays,
+          };
+        }"""
+    )
+    assert result["revision"] == result["baseline"]["revision"] + 1
+    assert result["timingRevision"] == result["baseline"]["timingRevision"]
+    assert result["ranges"] == result["baseline"]["ranges"]
+    assert len(result["overlays"]) == 2
+    assert {item["trackId"] for item in result["overlays"]} == {
+        "browser-transcript-track"
+    }
+    for overlay in result["overlays"]:
+        assert overlay["artStyle"] == "clean"
+        assert overlay["color"] == "#224466"
+        assert overlay["strokeColor"] == "#DDEEFF"
+        assert overlay["font"] == "song"
+        assert overlay["fontSize"] == 66
+
+
+def test_template_preference_applies_to_new_manual_and_full_track_without_selection(
+    browser_session,
+    seeded_editor_job_without_art,
+):
+    job = seeded_editor_job_without_art
+    page = browser_session.page
+    install_template_catalog_revision_probe(page)
+    page.goto(
+        f"{browser_session.base_url}/?job={job.job_id}"
+        "&tool=art&template=neon&templateColor=%2313579b"
+        "&templateStroke=%232468ac&templateFont=kai&templateSize=64"
+    )
+    panel = page.locator("#editorArtPanelRoot")
+    panel.wait_for(state="visible")
+    page.wait_for_load_state("networkidle")
+
+    preferred_only = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          return {
+            baseline: window.__templateCatalogBaseline,
+            revision: snapshot.revision,
+            timingRevision: snapshot.timingRevision,
+            selection: snapshot.project.timeline.selection,
+            overlayCount: snapshot.project.art.overlays.length,
+          };
+        }"""
+    )
+    assert preferred_only["overlayCount"] == 0
+    assert preferred_only["selection"] is None
+    assert preferred_only["revision"] == preferred_only["baseline"]["revision"]
+    assert preferred_only["timingRevision"] == preferred_only["baseline"]["timingRevision"]
+
+    panel.locator("[data-art-add-text]").fill("使用首选模板")
+    panel.locator("[data-art-add]").click()
+    page.wait_for_function(
+        """() => window.EditorSuite.projectSnapshot().project.art.overlays[0]
+          ?.artStyle === 'neon'"""
+    )
+    manual = page.evaluate(
+        "window.EditorSuite.projectSnapshot().project.art.overlays[0]"
+    )
+    assert manual["color"] == "#13579B"
+    assert manual["strokeColor"] == "#2468AC"
+    assert manual["font"] == "kai"
+    assert manual["fontSize"] == 64
+
+    panel.locator("[data-art-delete]").click()
+    page.locator("#appDialogConfirm").click()
+    page.wait_for_function(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          return snapshot.project.art.overlays.length === 0 &&
+            snapshot.project.timeline.selection === null;
+        }"""
+    )
+    panel.locator('[data-art-tab="transcript"]').click()
+    panel.locator("[data-art-full-track]").click()
+    page.wait_for_function(
+        """() => {
+          const overlays = window.EditorSuite.projectSnapshot().project.art.overlays;
+          return overlays.length === 2 && overlays.every(item =>
+            item.trackType === 'transcript' && item.artStyle === 'neon'
+          );
+        }"""
+    )
+    track = page.evaluate(
+        "window.EditorSuite.projectSnapshot().project.art.overlays"
+    )
+    for overlay in track:
+        assert overlay["color"] == "#13579B"
+        assert overlay["strokeColor"] == "#2468AC"
+        assert overlay["font"] == "kai"
+        assert overlay["fontSize"] == 64
+
+
+def test_invalid_template_handoff_values_fall_back_safely(
+    browser_session,
+    seeded_editor_job_without_art,
+):
+    job = seeded_editor_job_without_art
+    page = browser_session.page
+    install_template_catalog_revision_probe(page)
+    page.goto(
+        f"{browser_session.base_url}/?job={job.job_id}"
+        "&tool=art&template=neon&templateColor=invalid"
+        "&templateStroke=%23xyzxyz&templateFont=missing-font"
+    )
+    panel = page.locator("#editorArtPanelRoot")
+    panel.wait_for(state="visible")
+    page.wait_for_load_state("networkidle")
+    assert page.evaluate(
+        "window.EditorSuite.parseRequestedArtTemplate('?template=neon').fontSize"
+    ) is None
+
+    panel.locator("[data-art-add-text]").fill("安全回退")
+    panel.locator("[data-art-add]").click()
+    page.wait_for_function(
+        """() => window.EditorSuite.projectSnapshot().project.art.overlays.length === 1"""
+    )
+    result = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          return {
+            baseline: window.__templateCatalogBaseline,
+            overlay: snapshot.project.art.overlays[0],
+          };
+        }"""
+    )
+    catalog = page.request.get(
+        f"{browser_session.base_url}/api/art-templates"
+    ).json()
+    neon = next(item for item in catalog["templates"] if item["id"] == "neon")
+    assert result["overlay"]["artStyle"] == "neon"
+    assert result["overlay"]["color"] == neon["color"].upper()
+    assert result["overlay"]["strokeColor"] == neon["strokeColor"].upper()
+    assert result["overlay"]["font"] == "bold"
+    assert result["overlay"]["fontSize"] == 54
+
+
+def test_unknown_template_handoff_is_ignored(
+    browser_session,
+    seeded_editor_job_without_art,
+):
+    job = seeded_editor_job_without_art
+    page = browser_session.page
+    install_template_catalog_revision_probe(page)
+    page.goto(
+        f"{browser_session.base_url}/?job={job.job_id}"
+        "&tool=art&template=missing-template&templateSize=180"
+    )
+    panel = page.locator("#editorArtPanelRoot")
+    panel.wait_for(state="visible")
+    page.wait_for_load_state("networkidle")
+    before_add = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          return {
+            baseline: window.__templateCatalogBaseline,
+            revision: snapshot.revision,
+            timingRevision: snapshot.timingRevision,
+          };
+        }"""
+    )
+    assert before_add["revision"] == before_add["baseline"]["revision"]
+    assert before_add["timingRevision"] == before_add["baseline"]["timingRevision"]
+
+    panel.locator("[data-art-add-text]").fill("默认模板")
+    panel.locator("[data-art-add]").click()
+    page.wait_for_function(
+        """() => window.EditorSuite.projectSnapshot().project.art.overlays.length === 1"""
+    )
+    overlay = page.evaluate(
+        "window.EditorSuite.projectSnapshot().project.art.overlays[0]"
+    )
+    assert overlay["artStyle"] == "impact"
+    assert overlay["fontSize"] == 54
+
+
+def test_legacy_art_url_redirects_to_narrow_single_page_runtime(
+    browser_session,
+    seeded_editor_job,
+):
+    page = browser_session.page
+    page.set_viewport_size({"width": 375, "height": 812})
+    page.goto(
+        f"{browser_session.base_url}/art-text"
+        f"?job={seeded_editor_job.job_id}&source=original&embedded=1&tool=pip"
+    )
+    page.locator("#editorArtPanelRoot").wait_for(state="visible")
+    page.wait_for_function("() => window.EditorSuite?.activeTool() === 'art'")
+
+    result = page.evaluate(
+        """() => ({
+          path: location.pathname,
+          job: new URLSearchParams(location.search).get('job'),
+          source: new URLSearchParams(location.search).get('source'),
+          tool: new URLSearchParams(location.search).get('tool'),
+          hasEmbedded: new URLSearchParams(location.search).has('embedded'),
+          iframeCount: document.querySelectorAll('iframe').length,
+          videoCount: document.querySelectorAll('#cutPreviewVideo').length,
+          legacyWorkspaceCount: document.querySelectorAll('#artWorkspace').length,
+          artInert: document.querySelector('#editorArtPanelRoot').inert,
+          pipInert: document.querySelector('#editorPipPanelRoot').inert,
+          cutInert: document.querySelector('.text-editor-panel-stack').inert,
+          overflow: document.documentElement.scrollWidth -
+            document.documentElement.clientWidth,
+        })"""
+    )
+    assert result == {
+        "path": "/",
+        "job": seeded_editor_job.job_id,
+        "source": "original",
+        "tool": "art",
+        "hasEmbedded": False,
+        "iframeCount": 0,
+        "videoCount": 1,
+        "legacyWorkspaceCount": 0,
+        "artInert": False,
+        "pipInert": True,
+        "cutInert": True,
+        "overflow": 0,
+    }
 
 
 def test_job_url_remains_editable_after_service_restart(
