@@ -10,6 +10,7 @@
     const SCHEMA_VERSION = 1;
     const ACTIONS = Object.freeze({
       PROJECT_HYDRATED: "projectHydrated",
+      PROJECT_DRAFT_RESTORED: "projectDraftRestored",
       TRANSCRIPT_TEXT_CHANGED: "transcriptTextChanged",
       CUT_TIMING_CHANGED: "cutTimingChanged",
       ART_STATE_CHANGED: "artStateChanged",
@@ -201,36 +202,80 @@
       ];
     }
 
+    function toolTimelineTracks(kind, tool) {
+      if (kind === "art" && root.EditorArtModel?.buildTimelineTracks) {
+        return root.EditorArtModel.buildTimelineTracks(tool?.overlays || []);
+      }
+      return (tool?.overlays || []).map((overlay, index) => {
+        const sourceId = String(
+          overlay.id ?? overlay.assetId ?? overlay.imageId ?? index,
+        );
+        return {
+          id: `${kind}:overlay:${sourceId}`,
+          kind,
+          name: kind === "pip" ? "画中画" : String(overlay.text || "艺术字"),
+          order: index,
+          clips: [{
+            id: `${kind}:${sourceId}`,
+            sourceId,
+            kind,
+            name: kind === "pip" ? "画中画" : String(overlay.text || "艺术字"),
+            start: Math.max(0, finiteNumber(overlay.start)),
+            end: Math.max(0, finiteNumber(overlay.end)),
+            minDuration: kind === "art" && overlay.trackType === "transcript"
+              ? 0.02
+              : 0.05,
+            payload: {
+              trackId: overlay.trackId || null,
+              trackType: overlay.trackType || null,
+              sourceStart: timingValue(overlay.sourceStart),
+              sourceEnd: timingValue(overlay.sourceEnd),
+            },
+          }],
+        };
+      });
+    }
+
     function projectFromJob(job, timelineApi) {
       const normalizedJob = isObject(job) ? clone(job) : null;
       const cut = cutFromJob(normalizedJob);
+      const art = normalizeTool(
+        normalizedJob?.art || {},
+        normalizedJob?.edit?.status === "completed" ? "edited" : "original",
+        "art",
+      );
+      const pip = normalizeTool(
+        {
+          ...(normalizedJob?.pictureInPicture || {}),
+          assets: [
+            ...(normalizedJob?.pictureInPictureImages || []).map((asset) => ({
+              ...asset,
+              type: "image",
+            })),
+            ...(normalizedJob?.pictureInPictureVideos || []).map((asset) => ({
+              ...asset,
+              type: "video",
+            })),
+          ],
+        },
+        normalizedJob?.art?.status === "completed" ? "art" : "original",
+        "pip",
+      );
       return {
         job: normalizedJob,
         transcript: transcriptFromJob(normalizedJob),
         editableSegments: editableSegmentsFromJob(normalizedJob),
         cut,
-        art: normalizeTool(normalizedJob?.art || {}, "original", "art"),
-        pip: normalizeTool(
-          {
-            ...(normalizedJob?.pictureInPicture || {}),
-            assets: [
-              ...(normalizedJob?.pictureInPictureImages || []).map((asset) => ({
-                ...asset,
-                type: "image",
-              })),
-              ...(normalizedJob?.pictureInPictureVideos || []).map((asset) => ({
-                ...asset,
-                type: "video",
-              })),
-            ],
-          },
-          normalizedJob?.art?.status === "completed" ? "art" : "original",
-          "pip",
-        ),
+        art,
+        pip,
         timeline: normalizeTimeline(
           {
             duration: cut.duration || finiteNumber(normalizedJob?.duration),
-            tracks: cutTimelineTracks(cut),
+            tracks: [
+              ...cutTimelineTracks(cut),
+              ...toolTimelineTracks("art", art),
+              ...toolTimelineTracks("pip", pip),
+            ],
           },
           timelineApi,
         ),
@@ -532,10 +577,33 @@
           return overlay;
         }
         matched = true;
+        const oldStart = Number(overlay.start);
+        const oldEnd = Number(overlay.end);
+        const oldDuration = oldEnd - oldStart;
+        const newDuration = end - start;
+        const characterTimings =
+          Array.isArray(overlay.characterTimings) &&
+          Number.isFinite(oldStart) &&
+          Number.isFinite(oldEnd) &&
+          oldDuration > 0 &&
+          Number.isFinite(start) &&
+          Number.isFinite(end) &&
+          newDuration > 0
+            ? overlay.characterTimings.map((timing) => ({
+                ...timing,
+                start:
+                  start +
+                  ((Number(timing.start) - oldStart) / oldDuration) * newDuration,
+                end:
+                  start +
+                  ((Number(timing.end) - oldStart) / oldDuration) * newDuration,
+              }))
+            : overlay.characterTimings;
         return {
           ...overlay,
           start,
           end,
+          ...(Array.isArray(characterTimings) ? { characterTimings } : {}),
           ...(hasSourceRange
             ? { sourceStart: Number(sourceStart), sourceEnd: Number(sourceEnd) }
             : {}),
@@ -569,6 +637,29 @@
         project = hydrated;
         jobId = String(job.id);
         serverVersion = String(job.updatedAt || job.createdAt || "");
+      } else if (action.type === ACTIONS.PROJECT_DRAFT_RESTORED) {
+        if (
+          String(payload.jobId || "") !== state.jobId ||
+          String(payload.serverVersion || "") !== state.serverVersion ||
+          !isObject(payload.art)
+        ) {
+          return null;
+        }
+        project.art = normalizeTool(
+          payload.art,
+          project.art.source,
+          "art",
+          project.art.assets,
+        );
+        if (payload.timeline) {
+          project.timeline = replaceTimelineKind(
+            project.timeline,
+            "art",
+            payload.timeline,
+            timelineApi,
+            { acceptIncomingSelection: true },
+          );
+        }
       } else if (action.type === ACTIONS.TRANSCRIPT_TEXT_CHANGED) {
         if (payload.job?.id && String(payload.job.id) !== state.jobId) return null;
         const transcript = payload.transcript || payload.job?.result;

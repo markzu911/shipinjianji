@@ -300,6 +300,9 @@ async function loadFontLibrary() {
 }
 
 function normalizedTemplateEffects(template = {}) {
+  if (window.EditorArtModel?.normalizeTemplateEffects) {
+    return window.EditorArtModel.normalizeTemplateEffects(template);
+  }
   const animation = template.animation || {};
   const characterLayout = template.characterLayout || {};
   const staggered = characterLayout.type === "staggered";
@@ -416,6 +419,16 @@ function renderArtTextCharacters(
   currentTime = null,
   playing = true,
 ) {
+  if (window.EditorArtRenderer?.renderCharacters) {
+    window.EditorArtRenderer.renderCharacters(
+      element,
+      text,
+      settings,
+      currentTime,
+      playing,
+    );
+    return;
+  }
   const value = String(text || "");
   const effects = {
     ...normalizedTemplateEffects(settings),
@@ -1811,6 +1824,9 @@ function balanceHorizontalLine(sourceLine, limit) {
 }
 
 function formatOverlayText(overlay) {
+  if (window.EditorArtRenderer?.formatText) {
+    return window.EditorArtRenderer.formatText(overlay);
+  }
   const limit = Number(overlay.charsPerLine) || 0;
   const wrappedLines = [];
   for (const sourceLine of String(overlay.text || "").split(/\r?\n/)) {
@@ -2229,6 +2245,17 @@ function syncVideoStageLayout() {
 
 function applyPreviewStyle(element, overlay) {
   const scale = overlayScale();
+  if (window.EditorArtRenderer?.applyStyle) {
+    element.style.left = `${overlay.x * 100}%`;
+    element.style.top = `${overlay.y * 100}%`;
+    element.style.transform = "translate(-50%, -50%)";
+    window.EditorArtRenderer.applyStyle(element, overlay, {
+      scale,
+      fontFamilies: FONT_FAMILIES,
+      baseStyle: ART_STYLE_BASES[overlay.artStyle] || overlay.artStyle,
+    });
+    return;
+  }
   const artStyle = ART_STYLE_BASES[overlay.artStyle] || overlay.artStyle;
   const scaledStroke = Math.max(0, overlay.strokeWidth * scale);
   element.style.left = `${overlay.x * 100}%`;

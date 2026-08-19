@@ -83,6 +83,9 @@
     }
 
     function normalizeEffects(overlay) {
+      if (root.EditorArtModel?.normalizeTemplateEffects) {
+        return root.EditorArtModel.normalizeTemplateEffects(overlay);
+      }
       const animation = overlay.animation || {};
       const layout = overlay.characterLayout || {};
       const staggered = layout.type === "staggered";
@@ -131,6 +134,9 @@
     }
 
     function normalizeCharacterTimings(value) {
+      if (root.EditorArtModel?.normalizeCharacterTimings) {
+        return root.EditorArtModel.normalizeCharacterTimings(value);
+      }
       return (Array.isArray(value) ? value : [])
         .map((timing) => ({
           start: finiteNumber(timing?.start, Number.NaN),
@@ -145,6 +151,9 @@
     }
 
     function sanitizeArtOverlay(value, index) {
+      if (root.EditorArtRenderer?.sanitizeOverlay) {
+        return root.EditorArtRenderer.sanitizeOverlay(value, index);
+      }
       const id = String(value?.id ?? value?.trackId ?? `art-overlay-${index}`);
       return {
         id,
@@ -288,6 +297,9 @@
     }
 
     function formatArtText(overlay) {
+      if (root.EditorArtRenderer?.formatText) {
+        return root.EditorArtRenderer.formatText(overlay);
+      }
       const wrappedLines = [];
       for (const sourceLine of overlay.text.split(/\r?\n/)) {
         const characters = [...sourceLine];
@@ -342,6 +354,8 @@
       const artRecords = new Map();
       const pipRecords = new Map();
       let currentTimeline = null;
+      let currentFrame = null;
+      let artDraft = null;
       let modelSignature = "";
       let activePointer = null;
       let destroyed = false;
@@ -360,6 +374,16 @@
       function renderArtCharacters(record, currentTime, playing) {
         const { node, overlay } = record;
         const text = formatArtText(overlay) || "请输入文字";
+        if (root.EditorArtRenderer?.renderCharacters) {
+          root.EditorArtRenderer.renderCharacters(
+            node,
+            text,
+            overlay,
+            currentTime,
+            playing,
+          );
+          return;
+        }
         const visibleCount = [...text].filter((character) => !/\s/u.test(character)).length;
         const hasSpeechTimings = overlay.characterTimings.length === visibleCount;
         const animate =
@@ -429,6 +453,13 @@
       function applyArtStyle(record) {
         const { node, overlay } = record;
         const scale = previewScale();
+        if (root.EditorArtRenderer?.applyStyle) {
+          root.EditorArtRenderer.applyStyle(node, overlay, {
+            scale,
+            fontFamilies: FONT_FAMILIES,
+          });
+          return;
+        }
         const stroke = Math.max(0, overlay.strokeWidth * scale);
         const style = node.style;
         style.fontFamily = FONT_FAMILIES[overlay.font] || overlay.font || FONT_FAMILIES.modern;
@@ -559,9 +590,15 @@
         node.className = "preview-overlay";
         node.dataset.overlayId = overlay.id;
         node.dataset.effectKind = "art";
-        node.setAttribute("role", "button");
-        node.setAttribute("tabindex", "0");
-        node.addEventListener("pointerdown", beginPointer);
+        if (overlay.previewDraft) {
+          node.classList.add("is-ai-draft");
+          node.dataset.previewDraft = "true";
+          node.setAttribute("aria-hidden", "true");
+        } else {
+          node.setAttribute("role", "button");
+          node.setAttribute("tabindex", "0");
+          node.addEventListener("pointerdown", beginPointer);
+        }
         return { node, overlay, signature: "", animationSignature: "" };
       }
 
@@ -827,13 +864,27 @@
 
       function render(frame = {}) {
         if (destroyed) return false;
+        currentFrame = frame;
         host.dataset.projectRevision = String(frame.revision ?? "");
         host.dataset.timingRevision = String(frame.timingRevision ?? "");
         artLayer.dataset.projectRevision = host.dataset.projectRevision;
         pipLayer.dataset.projectRevision = host.dataset.projectRevision;
-        const art = (Array.isArray(frame.preview?.art?.overlays)
+        const confirmedArt = (Array.isArray(frame.preview?.art?.overlays)
           ? frame.preview.art.overlays
           : []).map(sanitizeArtOverlay);
+        const art = artDraft
+          ? [
+              ...confirmedArt,
+              sanitizeArtOverlay(
+                {
+                  ...artDraft,
+                  id: `editor-art-draft:${String(artDraft.draftId || "preview")}`,
+                  previewDraft: true,
+                },
+                confirmedArt.length,
+              ),
+            ]
+          : confirmedArt;
         const pip = (Array.isArray(frame.preview?.pip?.overlays)
           ? frame.preview.pip.overlays
           : []).map(sanitizePipOverlay);
@@ -856,6 +907,15 @@
         updateSelection();
         syncTime();
         return true;
+      }
+
+      function setArtDraft(overlay) {
+        if (destroyed) return false;
+        artDraft = overlay && typeof overlay === "object"
+          ? JSON.parse(JSON.stringify(overlay))
+          : null;
+        modelSignature = "";
+        return currentFrame ? render(currentFrame) : true;
       }
 
       function pointerResizeDirection(target, boundary) {
@@ -1062,7 +1122,7 @@
         delete host.dataset.timingRevision;
       }
 
-      return Object.freeze({ destroy, render, syncTime });
+      return Object.freeze({ destroy, render, setArtDraft, syncTime });
     }
 
     return { createCompositor };

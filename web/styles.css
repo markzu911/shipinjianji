@@ -11757,6 +11757,139 @@ input[type="range"] {
   border: 0;
 }
 
+.editor-suite-art-panel {
+  overflow: hidden;
+  background: rgba(8, 14, 10, 0.96);
+}
+
+.editor-art-tool {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 16px;
+  overscroll-behavior: contain;
+}
+
+.editor-art-tool-tabs {
+  position: sticky;
+  top: -16px;
+  z-index: 3;
+  margin: -16px -16px 16px;
+  padding: 12px 16px;
+  background: rgba(8, 14, 10, 0.96);
+}
+
+.editor-art-tool-panel {
+  min-width: 0;
+}
+
+.editor-art-tool-panel > * + * {
+  margin-top: 14px;
+}
+
+.editor-art-overlay-list {
+  max-height: 190px;
+  overflow-y: auto;
+}
+
+.editor-art-overlay-list .overlay-list-item {
+  width: 100%;
+  min-height: 44px;
+  display: grid;
+  gap: 3px;
+  padding: 10px 12px;
+  color: var(--text-main);
+  text-align: left;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(205, 219, 229, 0.16);
+  border-radius: 6px;
+}
+
+.editor-art-overlay-list .overlay-list-item.is-selected {
+  border-color: rgba(89, 211, 137, 0.78);
+  background: rgba(89, 211, 137, 0.1);
+}
+
+.editor-art-controls {
+  min-width: 0;
+  margin-top: 16px;
+}
+
+.editor-art-tool .position-preset-chip {
+  display: inline-flex;
+  align-items: stretch;
+  padding: 0;
+  overflow: hidden;
+}
+
+.editor-art-tool .position-preset-chip > button {
+  min-height: 40px;
+  padding: 0 10px;
+  color: inherit;
+  background: transparent;
+  border: 0;
+}
+
+.editor-art-tool .position-preset-chip > button + button {
+  width: 40px;
+  padding: 0;
+  border-left: 1px solid rgba(205, 219, 229, 0.16);
+}
+
+.editor-art-ai-list,
+.editor-art-transcript-list {
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.editor-art-ai-list .ai-suggestion-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.editor-art-ai-list .editor-art-ai-sample {
+  grid-column: 2 / -1;
+}
+
+.editor-art-ai-list .secondary-button {
+  grid-column: 2 / -1;
+  justify-self: start;
+}
+
+.editor-art-tool [data-art-transcript-save],
+.editor-art-tool [data-art-full-track],
+.editor-art-tool [data-art-add-selected],
+.editor-art-tool [data-art-ai-request] {
+  min-height: 44px;
+}
+
+@media (max-width: 720px) {
+  .editor-art-tool {
+    padding: 12px;
+  }
+
+  .editor-art-tool-tabs {
+    top: -12px;
+    margin: -12px -12px 12px;
+    padding: 10px 12px;
+  }
+
+  .editor-art-tool .overlay-controls,
+  .editor-art-ai-list .ai-suggestion-card {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .editor-art-ai-list .editor-art-ai-sample,
+  .editor-art-ai-list .secondary-button {
+    grid-column: 1;
+  }
+}
+
 .editor-suite-preview-overlay {
   position: absolute;
   inset: 0;
