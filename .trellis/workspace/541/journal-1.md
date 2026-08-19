@@ -243,3 +243,26 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 12: 完成单页编辑器画中画面板迁移
+
+**Date**: 2026-08-19
+**Task**: 完成单页编辑器画中画面板迁移
+**Branch**: `develop`
+
+### Summary
+
+完成 B3 顶层 PipTool、共享项目状态与草稿 v2、画中画无最大缩放和中心裁切一致性；保留 B3 fallback/standalone，新增完整前端、后端和浏览器回归。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `700495e` | (see git log) |
+| `3655684` | (see git log) |
+| `93d6fba` | (see git log) |
+
+### Status
+
+[OK] **Completed**
