@@ -289,3 +289,24 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 14: 修复转写后预览加载
+
+**Date**: 2026-08-19
+**Task**: 修复转写后预览加载
+**Branch**: `develop`
+
+### Summary
+
+修复转写任务完成后原视频不自动加载的问题，补充同页状态迁移、失败重试和健康媒体去重回归。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `5d20067` | (see git log) |
+
+### Status
+
+[OK] **Completed**

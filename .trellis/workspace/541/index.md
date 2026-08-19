@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 13
+- **Total Sessions**: 14
 - **Last Active**: 2026-08-19
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~291 | Active |
+| `journal-1.md` | ~312 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 14 | 2026-08-19 | 修复转写后预览加载 | `5d20067` | `develop` |
 | 13 | 2026-08-19 | 完成单页编辑器旧运行时清理 | `14ee2f0`, `365640a`, `0d68bdc` | `develop` |
 | 12 | 2026-08-19 | 完成单页编辑器画中画面板迁移 | `700495e`, `3655684`, `93d6fba` | `develop` |
 | 11 | 2026-08-19 | 完成单页编辑器艺术字面板 B2 | `3b39872`, `63683a8`, `46dddd0` | `develop` |
