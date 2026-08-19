@@ -1,0 +1,10 @@
+{"file":".trellis/spec/frontend/index.md","reason":"定位原生脚本加载、页面职责和前端规范入口。"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"遵守 B0/B1 Store、原子 frame、唯一媒体/时间轴、iframe 兼容和脚本加载契约。"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"保持 inspector、表单、tab、拖动、窄屏与可访问性交互规范。"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"遵守 fetch/effect、轮询、媒体源和时间映射边界。"}
+{"file":".trellis/spec/testing/index.md","reason":"选择前端静态、Node、艺术字后端和完整测试门禁。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"执行真实浏览器、网络隔离、媒体 identity、原子 revision 和 375px 工作流。"}
+{"file":".trellis/spec/guides/project-overview.md","reason":"保持原生 JavaScript/FastAPI 运行模型和开发环境边界。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"检查 Store、iframe、API、刷新恢复与 compose 跨层数据流。"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"避免复制艺术字 renderer、时间映射和 payload 归一化。"}
+{"file":".trellis/tasks/08-19-single-page-editor-art-panel/research/b2-art-runtime.md","reason":"提供 B2 当前艺术字运行时证据、API/状态所有权、迁移边界和测试变化。"}

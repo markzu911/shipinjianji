@@ -1,0 +1,8 @@
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"核对唯一 Store/media/timeline、原子 frame、脚本资源和 feature flag authority。"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"检查 root-scoped lifecycle、焦点、表单、拖动和响应式行为。"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"检查异步 effect 取消、迟到响应、轮询和媒体 source 不变。"}
+{"file":".trellis/spec/testing/index.md","reason":"执行 focused 与完整测试、语法和静态契约检查。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"核对真实顶层艺术字、fallback、standalone、compose、revision 与窄屏断言。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"审查 Store/ArtTool/API/compose/恢复的完整读写流。"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"检查共享 model/renderer 是否真正消除第三套逻辑。"}
+{"file":".trellis/tasks/08-19-single-page-editor-art-panel/research/b2-art-runtime.md","reason":"按研究中的当前证据和迁移限制检查实现漂移。"}

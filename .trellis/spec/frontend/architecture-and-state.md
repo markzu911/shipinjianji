@@ -342,6 +342,85 @@ timelineController.render(frame);
 onCommit(transaction);
 ```
 
+## Scenario：顶层艺术字面板与版本化草稿恢复
+
+### 1. Scope / Trigger
+
+修改顶层艺术字 inspector、艺术字 effect、工具 URL 恢复或本地项目草稿时适用。顶层默认路径必须使用可挂载 `ArtTool` 和唯一 `EditorProjectStore`；旧 `/art-text` 页面与 feature flag iframe 仅作为互斥兼容路径。
+
+### 2. Signatures
+
+```javascript
+ArtTool.mount(root, services) -> {
+  activate(), deactivate(), render(frame), destroy()
+}
+
+// EditorSuite owns storage; ArtTool must not read it.
+sessionStorage[`editor-suite:project-draft:${jobId}`] = {
+  schemaVersion: 1,
+  jobId,
+  serverVersion, // editor-art-base-v1:<domain fingerprint>
+  revision,
+  art: { source, overlays },
+  selection,
+  savedAt,
+}
+```
+
+### 3. Contracts
+
+- `project.art`、公共预览、公共时间轴和 compose 都从同一个 Store frame 派生；ArtTool 只保留 tab、表单焦点、AI 待确认项和 busy/error 等瞬时 UI 状态。
+- 草稿 `serverVersion` 是服务端艺术字恢复基线的稳定指纹，至少覆盖 job id、服务端 transcript 文本/分段、edit 输出/文案和 art source/overlays/version。它必须排除根 job `updatedAt`、`cutDraft` 和 composition 进度等无关字段；保存剪辑草稿会更新根 `updatedAt`，直接使用它会误删仍有效的艺术字草稿。
+- 只有完整 `status=completed` 且包含 `result` 的 job 才能完成草稿判定。`restoredJobs` 标记必须在成功恢复，或对完整基线明确判定 schema/job/version/shape 无效后写入；不完整首轮 hydrate 不得消耗恢复机会。
+- Store 原子 `PROJECT_DRAFT_RESTORED` 仍用当前 Store `serverVersion` 防止 dispatch 期间 job 漂移；EditorSuite 在 dispatch 前校验 envelope 的领域指纹。
+- 带 `?job=<same>&tool=art` 的首次页面载入必须保留 art 工具；只有同一 document 真正切换到另一个 job 时才清除旧 `tool` 参数。
+- 全文轨道、文案保存、位置预设和 AI 请求都必须带 AbortController 与 job/revision guard。旧请求只能清理自己的 request/busy 状态，不得取消或解锁同 scope 的新请求。
+- 时间范围命令必须在同一次 Store 提交中按旧/新区间等比重映射 `characterTimings`；不能只改 overlay/clip 的 `start/end`，否则草稿恢复与 compose 校验会把逐字时间判为越界。
+- 手动从文案段添加艺术字时，即使同一段被重复添加，confirmed overlay id 也必须保持唯一；待确认 AI 草稿只通过 PreviewCompositor 的瞬时预览层显示，切换工具、取消、确认和销毁都要清除，且不得进入 Store revision 或 compose DTO。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 处理 |
+| --- | --- |
+| job 尚未 completed 或缺少 result | 暂不判定、不写 restoredJobs，等待后续完整 hydrate |
+| JSON 损坏、schema/job/shape 不匹配 | 忽略草稿并标记该完整基线已决断 |
+| 艺术字领域指纹不匹配 | 忽略草稿；不得覆盖新的服务端文案或 art |
+| 仅 cutDraft/root updatedAt 改变 | 指纹保持一致，恢复 overlays/selection/time |
+| 工具 deactivate/destroy/job 切换 | abort 当前请求；迟到响应不得 dispatch Store |
+| 旧请求在新请求之后返回 | 旧请求 no-op，不能清理新请求 token/timer/busy |
+
+### 5. Good / Base / Bad Cases
+
+- Good：用户修改艺术字文字、时间和坐标，剪辑草稿随后自动保存并改变 job `updatedAt`；刷新仍恢复稳定 id、selection、时间和 compose。
+- Base：首次 hydrate 只有 job id/status，没有完整 result；恢复适配器等待下一次完整响应后再校验。
+- Bad：把根 `job.updatedAt` 直接写进 art 草稿，或进入 `restoreEditorDraft()` 就先 `restoredJobs.add(jobId)`；前者造成无关保存误失效，后者会让并发首轮吞掉有效草稿。
+
+### 6. Tests Required
+
+- Node/静态：ArtTool 不包含 storage/message/video/timeline store；重复 mount/destroy 可撤销；Store 原子恢复覆盖错误 job/version 和等价 no-op。
+- 真实浏览器：text/style 一次 revision 且 timing 不变，range 一次 revision/timing；cutDraft 自动保存后 reload 仍恢复 art；`tool=art` 保留；媒体同页不发生 `src/load()`。
+- effect 竞态：让旧全文轨道请求忽略 abort 并迟到返回，断言旧响应 0 revision、0 overlay，新请求仍恰好提交 1 revision。
+- fallback/兼容：feature flag 关闭时只有 art iframe authority，独立 `/art-text` 与 PiP iframe 继续可用。
+
+### 7. Wrong vs Correct
+
+```javascript
+// Wrong: unrelated cut draft writes invalidate art, and partial hydrate
+// permanently consumes the only recovery attempt.
+envelope.serverVersion = job.updatedAt;
+restoredJobs.add(job.id);
+if (!job.result) return false;
+
+// Correct: wait for a complete baseline and fingerprint only relevant domains.
+if (job.status !== "completed" || !job.result) return false;
+if (envelope.serverVersion !== editorDraftServerVersion(job)) {
+  restoredJobs.add(job.id);
+  return false;
+}
+const accepted = store.dispatch(restoreAction).accepted;
+restoredJobs.add(job.id);
+```
+
 ## 禁止事项
 
 - 不引入框架或构建系统来完成局部修改。
