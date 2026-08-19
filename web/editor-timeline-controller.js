@@ -36,6 +36,9 @@
     const layer = options.root || null;
     const track = options.track || layer?.parentElement || null;
     const keyboardTarget = options.keyboardTarget || root.document || null;
+    const visibleKinds = Array.isArray(options.visibleKinds)
+      ? new Set(options.visibleKinds.map((kind) => String(kind)))
+      : null;
     const historyLimit = Math.max(
       1,
       Math.floor(finiteNumber(options.historyLimit, DEFAULT_HISTORY_LIMIT)),
@@ -78,6 +81,7 @@
       let rowIndex = 0;
 
       for (const timelineTrack of documentState.tracks) {
+        if (visibleKinds && !visibleKinds.has(String(timelineTrack.kind))) continue;
         for (const clip of timelineTrack.clips) {
           const segment = root.document.createElement("button");
           segment.type = "button";

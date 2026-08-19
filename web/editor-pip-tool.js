@@ -225,7 +225,7 @@
       function syncRangeInputs() {
         const overlay = selectedOverlay();
         const segment = selectedSegment();
-        const range = overlay || state.requestedRange || segment;
+        const range = state.requestedRange || overlay || segment;
         if (!range) return;
         for (const input of queryAll("[data-pip-range]")) {
           if (host.ownerDocument.activeElement === input) continue;
@@ -249,16 +249,21 @@
         list.replaceChildren();
         const records = segments();
         if (!records.length) {
+          list.scrollTop = 0;
           const empty = host.ownerDocument.createElement("p");
           empty.className = "pip-empty-state";
           empty.textContent = "当前视频没有可选择的文字片段。";
           list.append(empty);
+          query("[data-pip-segment-time]").textContent = "尚未选择";
           return;
         }
+        let selectionReset = false;
         if (!records.some((segment) => segment.id === state.selectedSegmentId)) {
           state.selectedSegmentId = records[0].id;
           state.requestedRange = { start: records[0].start, end: records[0].end };
+          selectionReset = true;
         }
+        let selectedLabel = null;
         for (const segment of records) {
           const label = host.ownerDocument.createElement("label");
           label.className = "pip-segment-option";
@@ -277,11 +282,23 @@
           copy.append(time, text);
           label.append(radio, copy);
           list.append(label);
+          if (segment.id === state.selectedSegmentId) selectedLabel = label;
         }
         const segment = selectedSegment();
         query("[data-pip-segment-time]").textContent = segment
           ? `${formatTime(segment.start)} - ${formatTime(segment.end)}`
           : "尚未选择";
+        if (selectionReset) {
+          list.scrollTop = 0;
+        } else if (selectedLabel && list.clientHeight > 0) {
+          const listRect = list.getBoundingClientRect();
+          const itemRect = selectedLabel.getBoundingClientRect();
+          if (itemRect.top < listRect.top) {
+            list.scrollTop -= listRect.top - itemRect.top;
+          } else if (itemRect.bottom > listRect.bottom) {
+            list.scrollTop += itemRect.bottom - listRect.bottom;
+          }
+        }
       }
 
       function placementKey(overlay) {

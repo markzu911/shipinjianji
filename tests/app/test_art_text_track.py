@@ -1092,7 +1092,7 @@ def test_art_text_balances_lines_and_keeps_closing_punctuation_off_line_start():
     )
 
 
-def test_character_bounce_timings_skip_real_audio_pause():
+def test_reliable_word_timings_are_not_reprojected_around_audio_pause():
     timings = app_module.transcript_art_text_character_timings(
         [{"text": "你身边人人都觉得", "start": 0.0, "end": 8.0}],
         0.0,
@@ -1101,8 +1101,19 @@ def test_character_bounce_timings_skip_real_audio_pause():
     )
 
     assert len(timings) == 8
-    assert all(not 1.2 <= timing["start"] < 4.2 for timing in timings)
-    assert any(timing["start"] >= 4.2 for timing in timings)
+    assert timings[0] == {"start": 0.0, "end": 1.0}
+    assert timings[2] == {"start": 2.0, "end": 3.0}
+
+
+def test_quiet_sentence_tail_does_not_move_first_reliable_character():
+    timings = app_module.transcript_art_text_character_timings(
+        [{"text": "我也这么想", "start": 3.21, "end": 4.21}],
+        3.11,
+        5.0,
+        [{"start": 3.96, "end": 5.0}],
+    )
+
+    assert timings[0]["start"] == pytest.approx(3.21, abs=0.01)
 
 
 def test_supplied_audio_aligned_timings_are_not_clamped_back_into_silence():
@@ -1150,7 +1161,7 @@ def test_character_bounce_overlay_starts_at_voice_after_leading_pause():
     assert all(timing["start"] >= 2.0 for timing in overlays[0]["characterTimings"])
 
 
-def test_static_transcript_overlays_share_segment_audio_alignment():
+def test_static_transcript_overlays_keep_authoritative_character_timings():
     overlays = app_module.align_text_overlays_to_audio_activity(
         [
             {
@@ -1180,10 +1191,9 @@ def test_static_transcript_overlays_share_segment_audio_alignment():
         [{"start": 0.0, "end": 3.0, "text": "ABCD"}],
     )
 
-    assert overlays[0]["start"] == pytest.approx(2.0)
+    assert overlays[0]["start"] == pytest.approx(0.0)
     assert overlays[0]["end"] <= overlays[1]["start"]
-    assert all(
-        timing["start"] >= 2.0
-        for overlay in overlays
-        for timing in overlay["characterTimings"]
-    )
+    assert overlays[0]["characterTimings"] == [
+        {"start": 0.0, "end": 0.25},
+        {"start": 0.25, "end": 0.5},
+    ]

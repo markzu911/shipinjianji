@@ -52,20 +52,20 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
     assert "/app.js?v=20260819-01" in page_response.text
-    assert "/styles.css?v=20260819-02" in page_response.text
+    assert "/styles.css?v=20260819-04" in page_response.text
     assert "/transcript-follow-scroll.js?v=20260818-03" in page_response.text
     assert "/ui-feedback.js?v=20260807-03" in page_response.text
     assert "/timeline-model.js?v=20260810-01" in page_response.text
     assert "/editor-pip-model.js?v=20260819-01" in page_response.text
-    assert "/editor-project-store.js?v=20260819-04" in page_response.text
+    assert "/editor-project-store.js?v=20260819-05" in page_response.text
     assert "/editor-media-controller.js?v=20260819-01" in page_response.text
-    assert "/editor-art-model.js?v=20260819-01" in page_response.text
+    assert "/editor-art-model.js?v=20260819-03" in page_response.text
     assert "/editor-art-renderer.js?v=20260819-01" in page_response.text
     assert "/editor-preview-compositor.js?v=20260819-02" in page_response.text
-    assert "/editor-timeline-controller.js?v=20260818-01" in page_response.text
-    assert "/editor-art-tool.js?v=20260819-02" in page_response.text
-    assert "/editor-pip-tool.js?v=20260819-01" in page_response.text
-    assert "/editor-suite.js?v=20260819-03" in page_response.text
+    assert "/editor-timeline-controller.js?v=20260819-01" in page_response.text
+    assert "/editor-art-tool.js?v=20260819-06" in page_response.text
+    assert "/editor-pip-tool.js?v=20260819-02" in page_response.text
+    assert "/editor-suite.js?v=20260819-05" in page_response.text
     assert timeline_script_response.status_code == 200
     assert timeline_script_response.headers["cache-control"] == "no-store, max-age=0"
     assert "function createStore" in timeline_script_response.text
@@ -788,7 +788,34 @@ def test_top_level_art_and_pip_tools_are_the_only_editor_runtime():
     assert "generateCurrentPreview" in tool
     assert "data-art-full-track" in tool
     assert "data-art-ai-request" in tool
-    assert "data-art-transcript-save" in tool
+    assert "一键添加视频文案" in tool
+    assert "按剪后词级时间自动生成全文艺术字，默认使用“热血立体”。" in tool
+    assert tool.count('role="tab" data-art-tab=') == 2
+    assert 'data-art-tab="transcript"' not in tool
+    assert 'data-art-panel="transcript"' not in tool
+    for tab, panel in (("settings", "settings"), ("ai", "ai")):
+        assert (
+            f'id="editor-art-{tab}-tab" role="tab" data-art-tab="{tab}" '
+            f'aria-controls="editor-art-{panel}-panel"'
+        ) in tool
+        assert (
+            f'id="editor-art-{panel}-panel" data-art-panel="{panel}" '
+            f'role="tabpanel" aria-labelledby="editor-art-{tab}-tab"'
+        ) in tool
+    settings_panel = tool[
+        tool.index('data-art-panel="settings"') :
+        tool.index('data-art-panel="ai"')
+    ]
+    assert "data-art-full-track" in settings_panel
+    for duplicate_transcript_control in (
+        "data-art-transcript-text",
+        "data-art-transcript-save",
+        "data-art-transcript-list",
+        "data-art-add-selected",
+    ):
+        assert duplicate_transcript_control not in settings_panel
+    assert "function saveTranscript(" not in tool
+    assert "function addSelectedSegments(" not in tool
     assert "consumeInitialTemplateSelection();" in tool
     assert "pendingTemplateSelection" in tool
     assert "preferredTemplateSettings" in tool
@@ -910,7 +937,7 @@ def test_art_template_library_frontend_contracts():
     art_tool_response = responses["/editor-art-tool.js"]
 
     assert template_page_response.status_code == 200
-    assert "/styles.css?v=20260819-02" in template_page_response.text
+    assert "/styles.css?v=20260819-04" in template_page_response.text
     assert "/art-template-library.js?v=20260819-01" in template_page_response.text
     assert "当前模板主色" in template_page_response.text
     assert 'id="templateCardGrid"' in template_page_response.text
@@ -971,7 +998,7 @@ def test_font_manager_frontend_contracts():
     font_script_response = responses["/font-manager.js"]
 
     assert font_page_response.status_code == 200
-    assert "/styles.css?v=20260819-02" in font_page_response.text
+    assert "/styles.css?v=20260819-04" in font_page_response.text
     assert "/font-manager.js?v=" in font_page_response.text
     assert 'id="fontUploadForm"' in font_page_response.text
     assert 'id="fontCardGrid"' in font_page_response.text
@@ -2792,3 +2819,36 @@ def test_editor_project_store_integration_guards_text_and_compose_state():
     assert "services.project.snapshot()" in pip_tool
     assert "sessionStorage" not in art_tool
     assert "sessionStorage" not in pip_tool
+
+
+def test_realtime_effect_timeline_and_inspector_contracts():
+    root = Path(__file__).resolve().parents[2]
+    suite = (root / "web" / "editor-suite.js").read_text(encoding="utf-8")
+    project_store = (root / "web" / "editor-project-store.js").read_text(
+        encoding="utf-8"
+    )
+    art_model = (root / "web" / "editor-art-model.js").read_text(encoding="utf-8")
+    art_tool = (root / "web" / "editor-art-tool.js").read_text(encoding="utf-8")
+    pip_tool = (root / "web" / "editor-pip-tool.js").read_text(encoding="utf-8")
+    styles = (root / "web" / "styles.css").read_text(encoding="utf-8")
+
+    assert 'visibleKinds: ["art", "pip"]' in suite
+    assert "matchTranscriptPhrase" in art_model
+    assert "reconcileArtWithCut" in art_model
+    assert "root.EditorArtModel?.reconcileArtWithCut?.(" in project_store
+    assert 'replaceTimelineKind(\n            project.timeline,\n            "art"' in project_store
+    assert "suppressedOverlays: state.project.art.suppressedOverlays || []" in suite
+    assert "model.matchTranscriptPhrase(transcript(), selected.text, selected.start)" in art_tool
+    assert "draftTranscript: transcript()" in art_tool
+    assert "draftDuration: duration()" in art_tool
+    assert "services.media.editedToSource?.(suggestion.start" in art_tool
+    assert "data-art-selection-empty" in art_tool
+    assert "ownedRoot.scrollTop = 0" in art_tool
+    assert "scrollIntoView" not in pip_tool
+    assert "list.scrollTop += itemRect.bottom - listRect.bottom" in pip_tool
+    assert ".editor-art-selection-empty" in styles
+    art_tabs_start = styles.index(".editor-art-tool-tabs {")
+    art_tabs_end = styles.index("}", art_tabs_start)
+    assert "grid-template-columns" not in styles[
+        art_tabs_start:art_tabs_end
+    ]

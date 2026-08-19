@@ -377,6 +377,227 @@ console.log(JSON.stringify({
     assert "status" not in result["composePip"]
 
 
+def test_editor_project_store_atomically_reconciles_cut_art_and_restores_undo() -> None:
+    result = run_store_script(
+        r"""
+global.EditorArtModel = require('./web/editor-art-model.js');
+const model = global.EditorArtModel;
+const store = projectStore.createStore({}, { timeline });
+store.dispatch({ type: 'projectHydrated', payload: { job: {
+  id: 'job-cut-art', status: 'completed', duration: 6,
+  result: { mediaDuration: 6, text: '甲乙丙丁', segments: [] },
+} } });
+const overlay = (value) => model.normalizeOverlay(value, { duration: 6 });
+const art = { source: 'original', overlays: [
+  overlay({
+    id: 'cue-one', text: '甲乙', start: 0, end: 2,
+    sourceStart: 0, sourceEnd: 2, trackType: 'transcript', trackId: 'full',
+    characterTimings: [{ start: 0, end: 1 }, { start: 1, end: 2 }],
+  }),
+  overlay({
+    id: 'cue-two', text: '丙丁', start: 2, end: 4,
+    sourceStart: 2, sourceEnd: 4, trackType: 'transcript', trackId: 'full',
+    characterTimings: [{ start: 2, end: 3 }, { start: 3, end: 4 }],
+  }),
+  overlay({ id: 'manual', text: '乙', start: 1, end: 2, sourceStart: 1, sourceEnd: 2 }),
+  overlay({ id: 'custom', text: '标题', start: 0.2, end: 0.8 }),
+] };
+store.dispatch({ type: 'activeToolChanged', payload: { tool: 'art' } });
+store.dispatch({ type: 'artStateChanged', payload: {
+  art,
+  timeline: model.buildTimeline(art, 6, { clipId: 'art:cue-two' }),
+} });
+const before = store.getState();
+const transcript = (parts) => ({ segments: parts.map(([text, start, end, sourceStart, sourceEnd]) => ({
+  text, start, end, sourceStart, sourceEnd,
+  words: [{ text, start, end, sourceStart, sourceEnd }],
+})) });
+const observed = [];
+store.subscribe((state, previous, action) => {
+  if (action.type !== 'cutTimingChanged') return;
+  const frame = projectStore.selectEditorFrame(state, timeline);
+  observed.push({
+    revisionDelta: state.revision - previous.revision,
+    overlayIds: state.project.art.overlays.map(item => item.id),
+    timelineIds: frame.timeline.tracks.filter(track => track.kind === 'art')
+      .flatMap(track => track.clips.map(clip => clip.sourceId)),
+    composeIds: frame.composition.artOverlays.map(item => item.text),
+  });
+});
+const cross = store.dispatch({ type: 'cutTimingChanged', payload: {
+  active: true, ranges: [{ start: 1, end: 3 }], sourceDuration: 6, duration: 4,
+  transcript: transcript([['甲', 0, 1, 0, 1], ['丁', 1, 2, 3, 4]]),
+} });
+const afterCross = store.getState();
+const fullCue = store.dispatch({ type: 'cutTimingChanged', payload: {
+  active: true, ranges: [{ start: 2, end: 4 }], sourceDuration: 6, duration: 4,
+  transcript: transcript([['甲乙', 0, 2, 0, 2]]),
+} });
+const afterFullCue = store.getState();
+const undo = store.dispatch({ type: 'cutTimingChanged', payload: {
+  active: false, ranges: [], sourceDuration: 6, duration: 6,
+  transcript: transcript([['甲乙丙丁', 0, 4, 0, 4]]),
+} });
+const afterUndo = store.getState();
+console.log(JSON.stringify({
+  beforeRevision: before.revision,
+  cross,
+  fullCue,
+  undo,
+  observed,
+  crossText: afterCross.project.art.overlays.map(item => [item.id, item.text]),
+  crossSuppressed: afterCross.project.art.suppressedOverlays.map(item => item.id),
+  fullCueIds: afterFullCue.project.art.overlays.map(item => item.id),
+  fullCueSuppressed: afterFullCue.project.art.suppressedOverlays.map(item => item.id),
+  fullCueSelection: afterFullCue.project.timeline.selection,
+  undoText: afterUndo.project.art.overlays.map(item => [item.id, item.text]),
+  undoSuppressed: afterUndo.project.art.suppressedOverlays,
+  composeKeys: Object.keys(projectStore.selectCompositionRequest(afterCross).artOverlays[0]),
+}));
+"""
+    )
+
+    assert result["cross"]["revision"] == result["beforeRevision"] + 1
+    assert result["fullCue"]["revision"] == result["beforeRevision"] + 2
+    assert result["undo"]["revision"] == result["beforeRevision"] + 3
+    assert result["crossText"] == [
+        ["cue-one", "甲"],
+        ["custom", "标题"],
+        ["cue-two", "丁"],
+    ]
+    assert result["crossSuppressed"] == ["manual"]
+    assert result["fullCueIds"] == ["cue-one", "custom", "manual"]
+    assert result["fullCueSuppressed"] == ["cue-two"]
+    assert result["fullCueSelection"]["clipId"] == "art:cue-one"
+    assert result["undoText"] == [
+        ["cue-one", "甲乙"],
+        ["custom", "标题"],
+        ["manual", "乙"],
+        ["cue-two", "丙丁"],
+    ]
+    assert result["undoSuppressed"] == []
+    assert all(item["revisionDelta"] == 1 for item in result["observed"])
+    for item in result["observed"]:
+        assert sorted(item["overlayIds"]) == sorted(item["timelineIds"])
+        assert len(item["overlayIds"]) == len(item["composeIds"])
+    assert "_cutReconciliation" not in result["composeKeys"]
+
+
+def test_editor_project_store_does_not_retime_art_for_transcript_only_cut_update() -> None:
+    result = run_store_script(
+        r"""
+global.EditorArtModel = require('./web/editor-art-model.js');
+const model = global.EditorArtModel;
+const store = projectStore.createStore({}, { timeline });
+store.dispatch({ type: 'projectHydrated', payload: { job: {
+  id: 'job-transcript-only', status: 'completed', duration: 1,
+  result: { mediaDuration: 1, text: '旧文案', segments: [] },
+} } });
+const art = { source: 'original', overlays: [model.normalizeOverlay({
+  id: 'cue', text: '旧文案', start: 0.4, end: 0.85,
+  sourceStart: 0.4, sourceEnd: 0.85,
+  trackType: 'transcript', trackId: 'full',
+}, { duration: 1 })] };
+store.dispatch({ type: 'artStateChanged', payload: {
+  art,
+  timeline: model.buildTimeline(art, 1, { clipId: 'art:cue' }),
+} });
+store.dispatch({ type: 'cutTimingChanged', payload: {
+  active: false, ranges: [], sourceDuration: 1, duration: 1,
+  transcript: { text: '旧文案', segments: [{
+    text: '旧文案', start: 0.35, end: 0.95,
+    sourceStart: 0.35, sourceEnd: 0.95,
+    words: [{ text: '旧文案', start: 0.35, end: 0.95,
+      sourceStart: 0.35, sourceEnd: 0.95 }],
+  }] },
+} });
+const before = store.getState();
+const dispatchResult = store.dispatch({ type: 'cutTimingChanged', payload: {
+  active: false, ranges: [], sourceDuration: 1, duration: 1,
+  transcript: { text: '全新文案', segments: [{
+    text: '全新文案', start: 0.35, end: 0.95,
+    sourceStart: 0.35, sourceEnd: 0.95,
+    words: [{ text: '全新文案', start: 0.35, end: 0.95,
+      sourceStart: 0.35, sourceEnd: 0.95 }],
+  }] },
+} });
+const after = store.getState();
+console.log(JSON.stringify({
+  dispatchResult,
+  beforeTimingRevision: before.timingRevision,
+  afterTimingRevision: after.timingRevision,
+  beforeArt: before.project.art,
+  afterArt: after.project.art,
+}));
+"""
+    )
+
+    assert result["dispatchResult"]["accepted"] is True
+    assert result["afterTimingRevision"] == result["beforeTimingRevision"]
+    assert result["afterArt"] == result["beforeArt"]
+
+
+def test_editor_project_store_reconciles_stale_art_draft_with_current_cut() -> None:
+    result = run_store_script(
+        r"""
+global.EditorArtModel = require('./web/editor-art-model.js');
+const model = global.EditorArtModel;
+const store = projectStore.createStore({}, { timeline });
+store.dispatch({ type: 'projectHydrated', payload: { job: {
+  id: 'job-stale-draft', status: 'completed', duration: 4, updatedAt: 'server-v1',
+  result: { mediaDuration: 4, text: '甲乙丙丁', segments: [] },
+} } });
+const transcript = { text: '丙丁', segments: [{
+  text: '丙丁', start: 0, end: 2, sourceStart: 2, sourceEnd: 4,
+  words: [{ text: '丙丁', start: 0, end: 2, sourceStart: 2, sourceEnd: 4 }],
+}] };
+store.dispatch({ type: 'cutTimingChanged', payload: {
+  active: true, ranges: [{ start: 0, end: 2 }],
+  sourceDuration: 4, duration: 2, transcript,
+} });
+const overlay = (value) => model.normalizeOverlay(value, { duration: 4 });
+const staleArt = { source: 'original', suppressedOverlays: [], overlays: [
+  overlay({
+    id: 'cue-one', text: '甲乙', start: 0, end: 2,
+    sourceStart: 0, sourceEnd: 2, trackType: 'transcript', trackId: 'full',
+  }),
+  overlay({
+    id: 'cue-two', text: '丙丁', start: 2, end: 4,
+    sourceStart: 2, sourceEnd: 4, trackType: 'transcript', trackId: 'full',
+  }),
+] };
+const restored = store.dispatch({ type: 'projectDraftRestored', payload: {
+  jobId: 'job-stale-draft', serverVersion: 'server-v1', art: staleArt,
+  timeline: model.buildTimeline(staleArt, 4, { clipId: 'art:cue-one' }),
+} });
+const snapshot = store.getState();
+const frame = projectStore.selectEditorFrame(snapshot, timeline);
+console.log(JSON.stringify({
+  restored,
+  active: snapshot.project.art.overlays.map(({ id, text, start, end }) => ({
+    id, text, start, end,
+  })),
+  suppressed: snapshot.project.art.suppressedOverlays.map(item => item.id),
+  selection: snapshot.project.timeline.selection,
+  timelineIds: frame.timeline.tracks.filter(track => track.kind === 'art')
+    .flatMap(track => track.clips.map(clip => clip.sourceId)),
+  timelineDuration: frame.timeline.duration,
+  composition: frame.composition.artOverlays.map(item => item.text),
+}));
+"""
+    )
+
+    assert result["restored"]["accepted"] is True
+    assert result["active"] == [
+        {"id": "cue-two", "text": "丙丁", "start": 0, "end": 2}
+    ]
+    assert result["suppressed"] == ["cue-one"]
+    assert result["selection"]["clipId"] == "art:cue-two"
+    assert result["timelineIds"] == ["cue-two"]
+    assert result["timelineDuration"] == 2
+    assert result["composition"] == ["丙丁"]
+
+
 def test_editor_project_store_timeline_range_action_is_atomic_and_echo_is_noop() -> None:
     result = run_store_script(
         r"""

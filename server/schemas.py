@@ -141,6 +141,8 @@ class ArtTextSuggestionRequest(BaseModel):
     count: int
     source: Literal["original", "edited"] = "edited"
     existingOverlays: list[TextOverlay] = Field(default_factory=list)
+    draftTranscript: dict[str, Any] | None = None
+    draftDuration: float | None = Field(default=None, gt=0, le=86400)
 
 
 class PictureInPictureImageRequest(BaseModel):

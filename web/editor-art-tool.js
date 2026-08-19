@@ -40,7 +40,6 @@
       required(services?.commands?.replaceArt, "commands.replaceArt");
       required(services?.commands?.selectArt, "commands.selectArt");
       required(services?.commands?.setArtRange, "commands.setArtRange");
-      required(services?.commands?.saveTranscript, "commands.saveTranscript");
       required(services?.commands?.generateCurrentPreview, "commands.generateCurrentPreview");
       required(services?.api?.request, "api.request");
       mountedTools.get(host)?.destroy();
@@ -49,16 +48,27 @@
       ownedRoot.className = "editor-art-tool";
       ownedRoot.innerHTML = `
         <div class="workbench-tabbar editor-art-tool-tabs" role="tablist" aria-label="艺术字编辑功能">
-          <button type="button" class="workbench-tab" role="tab" data-art-tab="settings" aria-selected="true">艺术字设置</button>
-          <button type="button" class="workbench-tab" role="tab" data-art-tab="ai" aria-selected="false">AI 推荐</button>
-          <button type="button" class="workbench-tab" role="tab" data-art-tab="transcript" aria-selected="false">视频文案</button>
+          <button type="button" class="workbench-tab" id="editor-art-settings-tab" role="tab" data-art-tab="settings" aria-controls="editor-art-settings-panel" aria-selected="true">艺术字设置</button>
+          <button type="button" class="workbench-tab" id="editor-art-ai-tab" role="tab" data-art-tab="ai" aria-controls="editor-art-ai-panel" aria-selected="false">AI 推荐</button>
         </div>
-        <section class="editor-art-tool-panel" data-art-panel="settings" role="tabpanel">
+        <section class="editor-art-tool-panel" id="editor-art-settings-panel" data-art-panel="settings" role="tabpanel" aria-labelledby="editor-art-settings-tab">
           <div class="art-section-heading"><div><p class="step-label">艺术字设置</p><h2>选择并调整艺术字</h2></div><span class="result-chip" data-art-count>0 / 20</span></div>
           <ol class="overlay-list editor-art-overlay-list" data-art-list></ol>
           <label class="field full-field"><span>自定义文字</span><span class="inline-input-action"><input data-art-add-text maxlength="60" placeholder="例如：今天分享三个重点" /><button type="button" class="secondary-button" data-art-add>添加</button></span></label>
           <p class="form-error" data-art-error role="alert" hidden></p>
-          <fieldset class="overlay-controls editor-art-controls" data-art-controls disabled>
+          <section class="editor-art-transcript-section" data-art-transcript-section aria-labelledby="editor-art-transcript-title">
+            <div class="transcript-quick-action">
+              <div>
+                <strong id="editor-art-transcript-title">视频文案</strong>
+                <small>按剪后词级时间自动生成全文艺术字，默认使用“热血立体”。</small>
+              </div>
+              <button type="button" class="primary-button compact-button" data-art-full-track>一键添加视频文案</button>
+              <p class="retained-bulk-message" data-art-transcript-status role="status" hidden></p>
+            </div>
+          </section>
+          <div class="art-detail-heading"><strong>详细设置</strong><span>修改当前选中的艺术字</span></div>
+          <div class="editor-art-selection-empty" data-art-selection-empty role="status">选择一条艺术字后可调整样式和时间。</div>
+          <fieldset class="overlay-controls editor-art-controls" data-art-controls hidden disabled>
             <legend class="sr-only">当前艺术字设置</legend>
             <div class="art-style-picker full-field"><span class="field-label">艺术字模板</span><div class="art-style-grid" data-art-templates role="radiogroup"></div></div>
             <label class="field full-field"><span>文字内容</span><textarea rows="2" maxlength="60" data-art-field="text"></textarea></label>
@@ -83,7 +93,7 @@
             <button type="button" class="text-danger-button full-field" data-art-delete>删除当前艺术字</button>
           </fieldset>
         </section>
-        <section class="editor-art-tool-panel" data-art-panel="ai" role="tabpanel" hidden>
+        <section class="editor-art-tool-panel" id="editor-art-ai-panel" data-art-panel="ai" role="tabpanel" aria-labelledby="editor-art-ai-tab" hidden>
           <div class="art-section-heading"><div><p class="step-label">AI 推荐</p><h2>推荐重点文案、时间与位置</h2></div><span class="result-chip">确认后添加</span></div>
           <label class="field"><span>本次新增数量</span><input type="number" min="1" max="20" value="3" data-art-ai-count /></label>
           <button type="button" class="primary-button" data-art-ai-request>AI 分析并推荐</button>
@@ -91,15 +101,6 @@
           <p class="form-error" data-art-ai-error role="alert" hidden></p>
           <ol class="ai-suggestion-list editor-art-ai-list" data-art-ai-list></ol>
           <div class="ai-review-actions" data-art-ai-actions hidden><button type="button" class="secondary-button" data-art-ai-cancel>取消草稿</button><button type="button" class="primary-button" data-art-ai-confirm>确认添加</button></div>
-        </section>
-        <section class="editor-art-tool-panel" data-art-panel="transcript" role="tabpanel" hidden>
-          <div class="art-section-heading"><div><p class="step-label">视频文案</p><h2>修改文案并添加到视频</h2></div><span class="result-chip" data-art-transcript-meta></span></div>
-          <label class="field full-field"><span>保留文案</span><textarea rows="7" data-art-transcript-text></textarea></label>
-          <button type="button" class="secondary-button" data-art-transcript-save>保存文案</button>
-          <button type="button" class="primary-button" data-art-full-track>一键添加全文艺术字</button>
-          <p class="retained-bulk-message" data-art-transcript-status role="status" hidden></p>
-          <ol class="retained-segments editor-art-transcript-list" data-art-transcript-list></ol>
-          <button type="button" class="secondary-button" data-art-add-selected disabled>添加所选文案</button>
         </section>
       `;
       host.replaceChildren(ownedRoot);
@@ -119,11 +120,9 @@
         templateEffects: {},
         fonts: BUILTIN_FONTS.map(([id, name]) => ({ id, name, source: "builtin" })),
         presets: [],
-        selectedSegments: new Set(),
         requests: new Map(),
         pollTimer: null,
         catalogsLoaded: false,
-        transcriptSignature: "",
         pendingTemplateSelection:
           services.initialTemplateSelection &&
           typeof services.initialTemplateSelection === "object"
@@ -143,6 +142,13 @@
 
       function art() {
         return snapshot()?.project?.art || { source: "original", overlays: [], assets: [] };
+      }
+
+      function manualOverlayCount() {
+        return [
+          ...(art().overlays || []),
+          ...(art().suppressedOverlays || []),
+        ].filter((overlay) => !model.isTranscriptOverlay(overlay)).length;
       }
 
       function selectedOverlay() {
@@ -221,8 +227,13 @@
 
       function replaceArt(overlays, options = {}) {
         const current = art();
+        const suppressedOverlays = options.dropSuppressedTranscriptTracks
+          ? (current.suppressedOverlays || []).filter(
+              (overlay) => !model.isTranscriptOverlay(overlay),
+            )
+          : current.suppressedOverlays || [];
         return services.commands.replaceArt(
-          { ...current, overlays },
+          { ...current, overlays, suppressedOverlays },
           { ...options, selection: options.selection },
         );
       }
@@ -236,6 +247,14 @@
         for (const panel of queryAll("[data-art-panel]")) {
           panel.hidden = panel.dataset.artPanel !== state.activeTab;
         }
+      }
+
+      function setActiveTab(tab) {
+        if (!query(`[data-art-tab="${tab}"]`)) return false;
+        state.activeTab = tab;
+        renderTabs();
+        ownedRoot.scrollTop = 0;
+        return true;
       }
 
       function renderTemplates(selected) {
@@ -279,7 +298,7 @@
           item.append(button);
           list.append(item);
         }
-        query("[data-art-count]").textContent = `${art().overlays.filter((item) => !model.isTranscriptOverlay(item)).length} / ${model.MANUAL_OVERLAY_LIMIT}`;
+        query("[data-art-count]").textContent = `${manualOverlayCount()} / ${model.MANUAL_OVERLAY_LIMIT}`;
       }
 
       function setField(selector, value) {
@@ -291,6 +310,8 @@
 
       function renderControls(selected) {
         const controls = query("[data-art-controls]");
+        query("[data-art-selection-empty]").hidden = Boolean(selected);
+        controls.hidden = !selected;
         controls.disabled = !selected;
         if (!selected) return;
         for (const field of queryAll("[data-art-field]")) setField(`[data-art-field="${field.dataset.artField}"]`, selected[field.dataset.artField]);
@@ -324,65 +345,6 @@
 
       function transcriptSegments() {
         return (Array.isArray(transcript()?.segments) ? transcript().segments : []).filter((segment) => String(segment.text || "").trim());
-      }
-
-      function segmentKey(segment, index) {
-        return String(segment.id ?? `${Number(segment.start).toFixed(3)}:${Number(segment.end).toFixed(3)}:${index}`);
-      }
-
-      function renderTranscript() {
-        const current = transcript();
-        const jobId = snapshot()?.jobId || "";
-        const textarea = query("[data-art-transcript-text]");
-        const segments = transcriptSegments();
-        const signature = JSON.stringify({
-          jobId,
-          text: String(current.text || ""),
-          segments: segments.map((segment) => ({
-            id: segment.id,
-            text: segment.text,
-            start: segment.start,
-            end: segment.end,
-          })),
-        });
-        if (
-          state.transcriptSignature !== signature &&
-          textarea !== ownedRoot.ownerDocument.activeElement
-        ) {
-          textarea.value = String(current.text || transcriptSegments().map((item) => item.text).join(""));
-          state.transcriptSignature = signature;
-        }
-        const validKeys = new Set(
-          segments.map((segment, index) => segmentKey(segment, index)),
-        );
-        for (const key of [...state.selectedSegments]) {
-          if (!validKeys.has(key)) state.selectedSegments.delete(key);
-        }
-        query("[data-art-transcript-meta]").textContent = `${segments.length} 段`;
-        const list = query("[data-art-transcript-list]");
-        list.replaceChildren();
-        segments.forEach((segment, index) => {
-          const key = segmentKey(segment, index);
-          const item = host.ownerDocument.createElement("li");
-          item.className = "retained-segment";
-          const label = host.ownerDocument.createElement("label");
-          label.className = "retained-segment-check";
-          const checkbox = host.ownerDocument.createElement("input");
-          checkbox.type = "checkbox";
-          checkbox.dataset.artSegment = key;
-          checkbox.checked = state.selectedSegments.has(key);
-          const text = host.ownerDocument.createElement("span");
-          text.textContent = String(segment.text || "");
-          label.append(checkbox, text);
-          const play = host.ownerDocument.createElement("button");
-          play.type = "button";
-          play.dataset.artSegmentPlay = key;
-          play.textContent = "试听";
-          item.append(label, play);
-          list.append(item);
-        });
-        query("[data-art-add-selected]").disabled =
-          state.selectedSegments.size === 0 || Boolean(state.busyEffect);
       }
 
       function renderAi() {
@@ -426,7 +388,6 @@
         const busy = Boolean(state.busyEffect);
         for (const selector of [
           "[data-art-full-track]",
-          "[data-art-transcript-save]",
           "[data-art-ai-request]",
           "[data-art-ai-count]",
           "[data-art-ai-confirm]",
@@ -434,10 +395,6 @@
         ]) {
           const control = query(selector);
           if (control) control.disabled = busy;
-        }
-        const addSelected = query("[data-art-add-selected]");
-        if (addSelected) {
-          addSelected.disabled = busy || state.selectedSegments.size === 0;
         }
       }
 
@@ -448,7 +405,6 @@
         renderOverlayList(selected);
         renderControls(selected);
         renderPresets();
-        renderTranscript();
         renderAi();
         renderBusyControls();
       }
@@ -534,7 +490,7 @@
 
       function addManual(text, range = null, extra = {}) {
         const current = art().overlays;
-        if (current.filter((item) => !model.isTranscriptOverlay(item)).length >= model.MANUAL_OVERLAY_LIMIT) {
+        if (manualOverlayCount() >= model.MANUAL_OVERLAY_LIMIT) {
           setMessage("[data-art-error]", `一个视频最多添加 ${model.MANUAL_OVERLAY_LIMIT} 条自定义艺术字。`);
           return null;
         }
@@ -654,7 +610,9 @@
         const currentTranscript = transcript();
         if (!transcriptSegments().length || state.busyEffect) return;
         const selected = selectedOverlay();
-        const styleSeed = selected || state.preferredTemplateSettings || {};
+        const styleSeed = model.isTranscriptOverlay(selected)
+          ? selected
+          : state.preferredTemplateSettings || {};
         const artStyle = styleSeed.artStyle || "impact";
         const template = state.templates.find((item) => item.id === artStyle);
         const palette = template || model.DEFAULT_PALETTES[artStyle] || model.DEFAULT_PALETTES.impact;
@@ -694,6 +652,7 @@
           const replaced = replaceArt([...retained, ...track], {
             selection: track[0] ? `art:${track[0].id}` : null,
             token: request.token,
+            dropSuppressedTranscriptTracks: true,
           });
           if (replaced?.accepted) setMessage("[data-art-transcript-status]", `已生成 ${track.length} 个全文艺术字片段。`, "success");
         } catch (error) {
@@ -702,31 +661,6 @@
           }
         } finally {
           if (finishRequest("track", request)) renderAll();
-        }
-      }
-
-      async function saveTranscript() {
-        const text = query("[data-art-transcript-text]").value.trim();
-        if (!text || state.busyEffect) return;
-        const request = beginRequest("transcript", "art-transcript-save");
-        state.busyEffect = "transcript";
-        renderBusyControls();
-        setMessage("[data-art-transcript-status]", "正在保存文案并保持现有 cue 时间…", "neutral");
-        try {
-          const result = await services.commands.saveTranscript(text, {
-            token: request.token,
-            signal: request.controller.signal,
-          });
-          if (result?.accepted && ownsRequest("transcript", request)) {
-            state.transcriptSignature = "";
-            setMessage("[data-art-transcript-status]", "文案已保存，现有全文艺术字时间保持不变。", "success");
-          }
-        } catch (error) {
-          if (error.name !== "AbortError" && ownsRequest("transcript", request)) {
-            setMessage("[data-art-transcript-status]", error.message);
-          }
-        } finally {
-          if (finishRequest("transcript", request)) renderAll();
         }
       }
 
@@ -775,7 +709,7 @@
         if (state.busyEffect) return;
         const count = Number(query("[data-art-ai-count]").value);
         const manual = art().overlays.filter((item) => !model.isTranscriptOverlay(item));
-        if (!Number.isInteger(count) || count < 1 || count + manual.length > model.MANUAL_OVERLAY_LIMIT) {
+        if (!Number.isInteger(count) || count < 1 || count + manualOverlayCount() > model.MANUAL_OVERLAY_LIMIT) {
           setMessage("[data-art-ai-error]", "推荐数量超出当前艺术字容量。");
           return;
         }
@@ -786,7 +720,13 @@
         try {
           const job = await services.api.request(`/api/transcriptions/${encodeURIComponent(snapshot().jobId)}/art-text/suggestions`, {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ source: art().source, count, existingOverlays: manual.map(({ id, ...overlay }) => overlay) }),
+            body: JSON.stringify({
+              source: art().source,
+              count,
+              existingOverlays: manual.map(({ id, ...overlay }) => overlay),
+              draftTranscript: transcript(),
+              draftDuration: duration(),
+            }),
             signal: request.controller.signal,
           });
           if (!requestCurrent("ai", request)) {
@@ -828,11 +768,20 @@
         const accepted = state.aiDraftSuggestions.filter((item) => item.accepted !== false);
         if (!accepted.length) return;
         let overlays = [...art().overlays];
-        for (const suggestion of accepted) overlays.push(model.overlayFromSuggestion(suggestion, overlays, { duration: duration() }));
+        for (const suggestion of accepted) {
+          const sourceStart = services.media.editedToSource?.(suggestion.start, "start");
+          const sourceEnd = services.media.editedToSource?.(suggestion.end, "end");
+          overlays.push(model.overlayFromSuggestion({
+            ...suggestion,
+            ...(Number.isFinite(sourceStart) && Number.isFinite(sourceEnd) && sourceEnd > sourceStart
+              ? { sourceStart, sourceEnd }
+              : {}),
+          }, overlays, { duration: duration() }));
+        }
         const first = overlays[art().overlays.length];
         replaceArt(overlays, { selection: first ? `art:${first.id}` : null });
         void clearAi();
-        state.activeTab = "settings";
+        setActiveTab("settings");
         renderAll();
       }
 
@@ -855,38 +804,17 @@
           return;
         }
         const overlays = model.removeOverlay(art().overlays, selected.id);
-        replaceArt(overlays, { selection: overlays[0] ? `art:${overlays[0].id}` : null });
-      }
-
-      function addSelectedSegments() {
-        const segments = transcriptSegments();
-        let overlays = [...art().overlays];
-        let first = null;
-        segments.forEach((segment, index) => {
-          if (!state.selectedSegments.has(segmentKey(segment, index))) return;
-          if (overlays.filter((item) => !model.isTranscriptOverlay(item)).length >= model.MANUAL_OVERLAY_LIMIT) return;
-          const overlay = model.createOverlay(
-            overlays,
-            { ...state.preferredTemplateSettings, ...segment },
-            { duration: duration() },
-          );
-          overlays.push(overlay);
-          first ||= overlay;
+        replaceArt(overlays, {
+          selection: overlays[0] ? `art:${overlays[0].id}` : null,
+          dropSuppressedTranscriptTracks: track,
         });
-        state.selectedSegments.clear();
-        replaceArt(overlays, { selection: first ? `art:${first.id}` : null });
-      }
-
-      function findSegment(key) {
-        return transcriptSegments().find((segment, index) => segmentKey(segment, index) === key);
       }
 
       function handleClick(event) {
         const target = event.target.closest("button");
         if (!target || !ownedRoot.contains(target)) return;
         if (target.dataset.artTab) {
-          state.activeTab = target.dataset.artTab;
-          renderTabs();
+          setActiveTab(target.dataset.artTab);
         } else if (target.hasAttribute("data-art-add")) {
           const input = query("[data-art-add-text]");
           if (addManual(input.value)) input.value = "";
@@ -905,19 +833,21 @@
           if (selected) replaceArt(model.applyStyleToManualOverlays(art().overlays, selected.id, { duration: duration() }), { selection: `art:${selected.id}` });
         } else if (target.hasAttribute("data-art-fit")) {
           const selected = selectedOverlay();
-          const segments = transcriptSegments();
-          const normalized = String(selected?.text || "").replace(/[\s\p{P}]/gu, "");
-          const match = segments.find((segment) => String(segment.text || "").replace(/[\s\p{P}]/gu, "").includes(normalized)) || segments.find((segment) => Number(segment.start) <= selected?.start && Number(segment.end) >= selected?.start);
-          if (selected && match) services.commands.setArtRange(selected.id, Number(match.start), Number(match.end), { sourceStart: match.sourceStart, sourceEnd: match.sourceEnd });
+          const match = selected
+            ? model.matchTranscriptPhrase(transcript(), selected.text, selected.start)
+            : null;
+          if (selected && match) {
+            const anchors = Number.isFinite(match.sourceStart) && Number.isFinite(match.sourceEnd)
+              ? { sourceStart: match.sourceStart, sourceEnd: match.sourceEnd }
+              : {};
+            services.commands.setArtRange(selected.id, match.start, match.end, anchors);
+          }
         } else if (target.hasAttribute("data-art-preset-save")) savePreset();
         else if (target.dataset.artPreset) {
           const preset = state.presets.find((item) => String(item.id) === target.dataset.artPreset);
           if (preset) commitSelectedPatch({ x: Number(preset.x), y: Number(preset.y) });
         } else if (target.dataset.artPresetDelete) deletePreset(target.dataset.artPresetDelete);
         else if (target.hasAttribute("data-art-full-track")) createFullTrack();
-        else if (target.hasAttribute("data-art-transcript-save")) saveTranscript();
-        else if (target.hasAttribute("data-art-add-selected")) addSelectedSegments();
-        else if (target.dataset.artSegmentPlay) services.media.seekEdited(Number(findSegment(target.dataset.artSegmentPlay)?.start) || 0);
         else if (target.hasAttribute("data-art-ai-request")) requestAi();
         else if (target.hasAttribute("data-art-ai-cancel")) clearAi();
         else if (target.hasAttribute("data-art-ai-confirm")) confirmAi();
@@ -949,10 +879,6 @@
           const percent = Math.min(95, Math.max(5, Number(target.value) || 5));
           target.value = percent.toFixed(1);
           commitSelectedPatch({ [target.dataset.artCoordinate]: percent / 100 });
-        } else if (target.dataset.artSegment) {
-          target.checked ? state.selectedSegments.add(target.dataset.artSegment) : state.selectedSegments.delete(target.dataset.artSegment);
-          query("[data-art-add-selected]").disabled =
-            state.selectedSegments.size === 0 || Boolean(state.busyEffect);
         } else if (target.dataset.artAiAccept !== undefined) {
           const item = state.aiDraftSuggestions[Number(target.dataset.artAiAccept)];
           if (item) item.accepted = target.checked;
@@ -971,8 +897,7 @@
         if (current >= 0 && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
           event.preventDefault();
           const index = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : (current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
-          state.activeTab = tabs[index].dataset.artTab;
-          renderTabs();
+          setActiveTab(tabs[index].dataset.artTab);
           tabs[index].focus();
         } else if (event.key === "Enter" && event.target.matches("[data-art-add-text]")) {
           event.preventDefault();
@@ -1002,8 +927,6 @@
         if (next.jobId !== previous.jobId) {
           for (const scope of [...state.requests.keys()]) abortEffect(scope);
           state.aiDraftSuggestions = [];
-          state.selectedSegments.clear();
-          state.transcriptSignature = "";
           state.previewDraftId = null;
           syncAiPreview();
         }

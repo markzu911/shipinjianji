@@ -161,6 +161,245 @@ console.log(JSON.stringify({
     assert "position" not in payload["confirmedKeys"]
 
 
+def test_editor_art_model_matches_phrase_characters_and_nearest_occurrence():
+    payload = run_node(
+        r"""
+const model = require('./web/editor-art-model.js');
+const transcript = { segments: [
+  {
+    text: '先说保留重点，再说保留重点。', start: 1, end: 5,
+    sourceStart: 5, sourceEnd: 9,
+    words: [
+      { text: '先说', start: 1, end: 1.4, sourceStart: 5, sourceEnd: 5.4 },
+      { text: '保留重点', start: 1.4, end: 2.2, sourceStart: 5.4, sourceEnd: 6.2 },
+      { text: '，再说', start: 2.2, end: 3.2, sourceStart: 6.2, sourceEnd: 7.2 },
+      { text: '保留重点。', start: 3.2, end: 4.2, sourceStart: 7.2, sourceEnd: 8.2 },
+    ],
+  },
+] };
+console.log(JSON.stringify({
+  first: model.matchTranscriptPhrase(transcript, '保留重点', 1.5),
+  nearest: model.matchTranscriptPhrase(transcript, '保留重点', 3.6),
+  insideWord: model.matchTranscriptPhrase(transcript, '留重', 1.7),
+  legacyAsr: model.matchTranscriptPhrase({ segments: [{
+    text: '旧数据', start: 0, end: 1,
+    asrWords: [{ text: '旧数据', start: 0.2, end: 0.8 }],
+  }] }, '数据', 0.5),
+  irregular: model.matchTranscriptPhrase({ segments: [{
+    text: '甲乙丙', start: 1, end: 3, sourceStart: 10, sourceEnd: 14,
+    words: [{
+      text: '甲乙丙', start: 1, end: 3, sourceStart: 10, sourceEnd: 14,
+      characterTimings: [
+        { start: 1, end: 1.2 },
+        { start: 1.2, end: 2.7 },
+        { start: 2.7, end: 3 },
+      ],
+    }],
+  }] }, '乙', 1.5),
+}));
+"""
+    )
+
+    assert payload["first"] == {
+        "start": 1.4,
+        "end": 2.2,
+        "sourceStart": 5.4,
+        "sourceEnd": 6.2,
+    }
+    assert payload["nearest"] == {
+        "start": 3.2,
+        "end": 4.2,
+        "sourceStart": 7.2,
+        "sourceEnd": 8.2,
+    }
+    assert payload["insideWord"] == {
+        "start": 1.6,
+        "end": 2.0,
+        "sourceStart": 5.6,
+        "sourceEnd": 6.0,
+    }
+    assert payload["legacyAsr"] == {
+        "start": 0.4,
+        "end": 0.8,
+        "sourceStart": None,
+        "sourceEnd": None,
+    }
+    assert payload["irregular"] == {
+        "start": 1.2,
+        "end": 2.7,
+        "sourceStart": 10.4,
+        "sourceEnd": 13.4,
+    }
+
+
+def test_editor_art_model_reconciles_cut_characters_cues_and_anchored_overlays():
+    payload = run_node(
+        r"""
+const model = require('./web/editor-art-model.js');
+const overlay = (value) => model.normalizeOverlay(value, { duration: 6 });
+const base = { source: 'original', overlays: [
+  overlay({
+    id: 'cue-one', text: '甲乙', start: 0, end: 2,
+    sourceStart: 0, sourceEnd: 2, trackType: 'transcript', trackId: 'full',
+    characterTimings: [{ start: 0, end: 1 }, { start: 1, end: 2 }],
+  }),
+  overlay({
+    id: 'cue-two', text: '丙丁', start: 2, end: 4,
+    sourceStart: 2, sourceEnd: 4, trackType: 'transcript', trackId: 'full',
+    characterTimings: [{ start: 2, end: 3 }, { start: 3, end: 4 }],
+  }),
+  overlay({
+    id: 'manual', text: '乙', start: 1, end: 2,
+    sourceStart: 1, sourceEnd: 2,
+  }),
+  overlay({
+    id: 'partial', text: '范围', start: 0.5, end: 1.5,
+    sourceStart: 0.5, sourceEnd: 1.5,
+  }),
+  overlay({ id: 'custom', text: '标题', start: 0.2, end: 0.8 }),
+] };
+const originalCut = { ranges: [], sourceDuration: 6, duration: 6 };
+const transcript = (parts) => ({ segments: parts.map(([text, start, end, sourceStart, sourceEnd]) => ({
+  text, start, end, sourceStart, sourceEnd,
+  words: [{ text, start, end, sourceStart, sourceEnd }],
+})) });
+const crossCut = {
+  ranges: [{ start: 1, end: 3 }], sourceDuration: 6, duration: 4,
+  transcript: transcript([
+    ['甲', 0, 1, 0, 1],
+    ['丁', 1, 2, 3, 4],
+  ]),
+};
+const cross = model.reconcileArtWithCut(base, originalCut, crossCut).art;
+const singleCharacterCut = {
+  ranges: [{ start: 1, end: 2 }], sourceDuration: 6, duration: 5,
+  transcript: transcript([
+    ['甲', 0, 1, 0, 1],
+    ['丙丁', 1, 3, 2, 4],
+  ]),
+};
+const singleCharacter = model.reconcileArtWithCut(
+  base,
+  originalCut,
+  singleCharacterCut,
+).art;
+const fullCueCut = {
+  ranges: [{ start: 2, end: 4 }], sourceDuration: 6, duration: 4,
+  transcript: transcript([['甲乙', 0, 2, 0, 2]]),
+};
+const fullCue = model.reconcileArtWithCut(base, originalCut, fullCueCut).art;
+const restored = model.reconcileArtWithCut(cross, crossCut, {
+  ranges: [], sourceDuration: 6, duration: 6,
+  transcript: transcript([['甲乙丙丁', 0, 4, 0, 4]]),
+}).art;
+console.log(JSON.stringify({
+  cross: cross.overlays.map(({ id, text, start, end, characterTimings }) => ({
+    id, text, start, end, characterTimings,
+  })),
+  crossSuppressed: cross.suppressedOverlays.map(({ id }) => id),
+  singleCharacter: singleCharacter.overlays
+    .filter(item => item.trackType === 'transcript')
+    .map(({ id, text, start, end }) => ({ id, text, start, end })),
+  fullCueActive: fullCue.overlays.map(({ id }) => id),
+  fullCueSuppressed: fullCue.suppressedOverlays.map(({ id }) => id),
+  restored: restored.overlays.map(({ id, text, start, end }) => ({ id, text, start, end })),
+}));
+"""
+    )
+
+    assert payload["cross"] == [
+        {
+            "id": "cue-one",
+            "text": "甲",
+            "start": 0,
+            "end": 1,
+            "characterTimings": [{"start": 0, "end": 1}],
+        },
+        {
+            "id": "custom",
+            "text": "标题",
+            "start": 0.2,
+            "end": 0.8,
+            "characterTimings": [
+                {"start": 0.2, "end": 0.5},
+                {"start": 0.5, "end": 0.8},
+            ],
+        },
+        {
+            "id": "partial",
+            "text": "范围",
+            "start": 0.5,
+            "end": 1,
+            "characterTimings": [
+                {"start": 0.5, "end": 0.75},
+                {"start": 0.75, "end": 1},
+            ],
+        },
+        {
+            "id": "cue-two",
+            "text": "丁",
+            "start": 1,
+            "end": 2,
+            "characterTimings": [{"start": 1, "end": 2}],
+        },
+    ]
+    assert payload["crossSuppressed"] == ["manual"]
+    assert payload["singleCharacter"] == [
+        {"id": "cue-one", "text": "甲", "start": 0, "end": 1},
+        {"id": "cue-two", "text": "丙丁", "start": 1, "end": 3},
+    ]
+    assert payload["fullCueActive"] == [
+        "cue-one",
+        "custom",
+        "partial",
+        "manual",
+    ]
+    assert payload["fullCueSuppressed"] == ["cue-two"]
+    assert payload["restored"] == [
+        {"id": "cue-one", "text": "甲乙", "start": 0, "end": 2},
+        {"id": "custom", "text": "标题", "start": 0.2, "end": 0.8},
+        {"id": "partial", "text": "范围", "start": 0.5, "end": 1.5},
+        {"id": "manual", "text": "乙", "start": 1, "end": 2},
+        {"id": "cue-two", "text": "丙丁", "start": 2, "end": 4},
+    ]
+
+
+def test_editor_art_model_reconciliation_preserves_word_spaces_without_punctuation():
+    payload = run_node(
+        r"""
+const model = require('./web/editor-art-model.js');
+const base = { source: 'original', overlays: [model.normalizeOverlay({
+  id: 'cue-english', text: 'hello world', start: 0, end: 2,
+  sourceStart: 0, sourceEnd: 2, trackType: 'transcript', trackId: 'full',
+}, { duration: 2 })] };
+const cut = {
+  ranges: [], sourceDuration: 2, duration: 2,
+  transcript: { segments: [{
+    text: 'hello world!', start: 0, end: 2, sourceStart: 0, sourceEnd: 2,
+    words: [
+      { text: 'hello ', start: 0, end: 1, sourceStart: 0, sourceEnd: 1 },
+      { text: 'world!', start: 1, end: 2, sourceStart: 1, sourceEnd: 2 },
+    ],
+  }] },
+};
+const reconciled = model.reconcileArtWithCut(base, cut, cut).art.overlays[0];
+console.log(JSON.stringify({
+  text: reconciled.text,
+  timingCount: reconciled.characterTimings.length,
+  timingStart: reconciled.characterTimings[0].start,
+  timingEnd: reconciled.characterTimings.at(-1).end,
+}));
+"""
+    )
+
+    assert payload == {
+        "text": "hello world",
+        "timingCount": 10,
+        "timingStart": 0,
+        "timingEnd": 2,
+    }
+
+
 def test_editor_art_renderer_formats_layout_and_character_effects():
     payload = run_node(
         r"""

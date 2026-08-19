@@ -136,9 +136,19 @@
           id: semanticOverlayId(kind, overlay, index),
         }),
       );
+      const activeIds = new Set(overlays.map((overlay) => String(overlay.id)));
+      const suppressedOverlays = kind === "art"
+        ? (Array.isArray(value.suppressedOverlays) ? value.suppressedOverlays : [])
+            .map((overlay, index) => ({
+              ...clone(overlay),
+              id: semanticOverlayId(kind, overlay, overlays.length + index),
+            }))
+            .filter((overlay) => !activeIds.has(String(overlay.id)))
+        : [];
       return {
         source: String(value.source || fallbackSource),
         overlays,
+        ...(kind === "art" ? { suppressedOverlays } : {}),
         assets: normalizeAssets(
           value.assets === undefined
             ? fallbackAssets
@@ -573,6 +583,28 @@
       return { clip, timeline: store.snapshot() };
     }
 
+    function resolveArtSelection(selection, previousArt, nextArt, activeIds) {
+      const selectedClipId = String(selection?.clipId || "");
+      const selectedArtId = selectedClipId.startsWith("art:")
+        ? selectedClipId.slice(4)
+        : "";
+      if (!selectedArtId || activeIds.includes(selectedArtId)) return selection;
+      const hidden = [
+        ...(previousArt?.overlays || []),
+        ...(previousArt?.suppressedOverlays || []),
+        ...(nextArt?.suppressedOverlays || []),
+      ].find((overlay) => String(overlay.id) === selectedArtId);
+      const sameTrack = hidden?.trackId
+        ? (nextArt?.overlays || [])
+            .filter((overlay) => overlay.trackId === hidden.trackId)
+            .sort((left, right) =>
+              Math.abs(finiteNumber(left.start) - finiteNumber(hidden.start)) -
+              Math.abs(finiteNumber(right.start) - finiteNumber(hidden.start)),
+            )[0]
+        : null;
+      return sameTrack ? { clipId: `art:${sameTrack.id}` } : null;
+    }
+
     function updateToolOverlayRange(
       tool,
       clip,
@@ -673,6 +705,8 @@
         ) {
           return null;
         }
+        let restoredArtBeforeReconciliation = null;
+        let restoredArtReconciliation = null;
         if (isObject(payload.art)) {
           project.art = normalizeTool(
             payload.art,
@@ -680,6 +714,20 @@
             "art",
             project.art.assets,
           );
+          restoredArtBeforeReconciliation = project.art;
+          restoredArtReconciliation = root.EditorArtModel?.reconcileArtWithCut?.(
+            project.art,
+            project.cut,
+            project.cut,
+          ) || null;
+          if (restoredArtReconciliation?.art) {
+            project.art = normalizeTool(
+              restoredArtReconciliation.art,
+              project.art.source,
+              "art",
+              project.art.assets,
+            );
+          }
         }
         if (isObject(payload.pip)) {
           project.pip = normalizeTool(
@@ -714,6 +762,33 @@
             timelineApi,
           );
         }
+        if (restoredArtReconciliation?.art) {
+          const incomingSelection = payload.timeline?.selection || project.timeline.selection;
+          const artSelection = resolveArtSelection(
+            incomingSelection,
+            restoredArtBeforeReconciliation,
+            project.art,
+            restoredArtReconciliation.activeIds,
+          );
+          project.timeline = replaceTimelineKind(
+            project.timeline,
+            "art",
+            {
+              duration: project.cut.duration,
+              tracks: toolTimelineTracks("art", project.art),
+              selection: artSelection,
+            },
+            timelineApi,
+            {
+              acceptIncomingSelection: String(incomingSelection?.clipId || "")
+                .startsWith("art:"),
+            },
+          );
+        }
+        project.timeline = normalizeTimeline(
+          { ...project.timeline, duration: project.cut.duration },
+          timelineApi,
+        );
       } else if (action.type === ACTIONS.TRANSCRIPT_TEXT_CHANGED) {
         if (payload.job?.id && String(payload.job.id) !== state.jobId) return null;
         const transcript = payload.transcript || payload.job?.result;
@@ -729,7 +804,27 @@
           payload.serverVersion || payload.job?.updatedAt || serverVersion,
         );
       } else if (action.type === ACTIONS.CUT_TIMING_CHANGED) {
+        const previousCut = project.cut;
+        const previousArt = project.art;
+        const selectionBeforeCut = project.timeline.selection;
         project.cut = normalizeCut(payload.cut || payload);
+        const cutTimingChanged =
+          cutTimingSignature(previousCut) !== cutTimingSignature(project.cut);
+        const reconciliation = cutTimingChanged
+          ? root.EditorArtModel?.reconcileArtWithCut?.(
+              project.art,
+              previousCut,
+              project.cut,
+            )
+          : null;
+        if (reconciliation?.art) {
+          project.art = normalizeTool(
+            reconciliation.art,
+            project.art.source,
+            "art",
+            project.art.assets,
+          );
+        }
         const incomingCutTimeline = payload.timeline
           ? normalizeTimeline(payload.timeline, timelineApi)
           : { duration: project.cut.duration, tracks: [] };
@@ -751,6 +846,36 @@
           },
           timelineApi,
           { acceptIncomingSelection: ui.activeTool === "cut" },
+        );
+        if (reconciliation?.art) {
+          const currentSelection = String(selectionBeforeCut?.clipId || "").startsWith("art:")
+            ? selectionBeforeCut
+            : project.timeline.selection;
+          const selectedClipId = String(currentSelection?.clipId || "");
+          const selectedArtId = selectedClipId.startsWith("art:")
+            ? selectedClipId.slice(4)
+            : "";
+          const artSelection = resolveArtSelection(
+            currentSelection,
+            previousArt,
+            project.art,
+            reconciliation.activeIds,
+          );
+          project.timeline = replaceTimelineKind(
+            project.timeline,
+            "art",
+            {
+              duration: project.cut.duration,
+              tracks: toolTimelineTracks("art", project.art),
+              selection: artSelection,
+            },
+            timelineApi,
+            { acceptIncomingSelection: Boolean(selectedArtId) },
+          );
+        }
+        project.timeline = normalizeTimeline(
+          { ...project.timeline, duration: project.cut.duration },
+          timelineApi,
         );
       } else if (
         action.type === ACTIONS.ART_STATE_CHANGED ||

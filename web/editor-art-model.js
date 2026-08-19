@@ -9,6 +9,7 @@
 
     const MANUAL_OVERLAY_LIMIT = 20;
     const TRANSCRIPT_TRACK_TYPE = "transcript";
+    const CUT_RECONCILIATION_FIELD = "_cutReconciliation";
     const TRANSCRIPT_STYLE_FIELDS = Object.freeze([
       "font", "fontSize", "color", "strokeColor", "strokeWidth", "shadow",
       "x", "y", "direction", "textAlign", "charsPerLine",
@@ -130,6 +131,453 @@
         limit,
       );
       return { start: safeStart, end: safeEnd };
+    }
+
+    function contentCharacters(value) {
+      return [...String(value || "")].filter(
+        (character) => !/\s/u.test(character) && !/\p{P}/u.test(character),
+      );
+    }
+
+    function validTimedRange(value, startKey = "start", endKey = "end") {
+      const start = Number(value?.[startKey]);
+      const end = Number(value?.[endKey]);
+      return Number.isFinite(start) && Number.isFinite(end) && end > start
+        ? { start, end }
+        : null;
+    }
+
+    function roundTiming(value) {
+      return Math.round(Number(value) * 1e6) / 1e6;
+    }
+
+    function sourceRangeForItem(item, segment) {
+      const direct = validTimedRange(item, "sourceStart", "sourceEnd");
+      if (direct) return direct;
+      const source = validTimedRange(segment, "sourceStart", "sourceEnd");
+      const edited = validTimedRange(segment);
+      const itemRange = validTimedRange(item);
+      if (!source || !edited || !itemRange) return null;
+      const scale = (source.end - source.start) / (edited.end - edited.start);
+      return {
+        start: source.start + (itemRange.start - edited.start) * scale,
+        end: source.start + (itemRange.end - edited.start) * scale,
+      };
+    }
+
+    function transcriptCharacterUnits(transcript = {}, options = {}) {
+      const units = [];
+      const charactersFor = options.includePunctuation
+        ? (value) => [...String(value || "")].filter((character) => !/\s/u.test(character))
+        : contentCharacters;
+      let pendingWhitespace = false;
+      for (const [segmentIndex, segment] of (
+        Array.isArray(transcript?.segments) ? transcript.segments : []
+      ).entries()) {
+        const words = (Array.isArray(segment?.words) ? segment.words : []).filter(
+          (word) => charactersFor(word?.text).length && validTimedRange(word),
+        );
+        const asrWords = (Array.isArray(segment?.asrWords) ? segment.asrWords : []).filter(
+          (word) => charactersFor(word?.text).length && validTimedRange(word),
+        );
+        const items = words.length ? words : asrWords.length ? asrWords : [segment];
+        for (const item of items) {
+          const characters = [];
+          for (const character of [...String(item?.text || "")]) {
+            if (/\s/u.test(character)) {
+              pendingWhitespace = pendingWhitespace || units.length > 0 || characters.length > 0;
+              continue;
+            }
+            if (!options.includePunctuation && /\p{P}/u.test(character)) continue;
+            characters.push({
+              character,
+              separatorBefore: pendingWhitespace ? " " : "",
+            });
+            pendingWhitespace = false;
+          }
+          const range = validTimedRange(item);
+          if (!characters.length || !range) continue;
+          const supplied = Array.isArray(item.characterTimings)
+            ? item.characterTimings.map((timing) => validTimedRange(timing))
+            : [];
+          const source = sourceRangeForItem(item, segment);
+          for (let index = 0; index < characters.length; index += 1) {
+            const characterRange = supplied.length === characters.length && supplied[index]
+              ? supplied[index]
+              : {
+                  start: range.start + ((range.end - range.start) * index) / characters.length,
+                  end: range.start + ((range.end - range.start) * (index + 1)) / characters.length,
+                };
+            const sourceScale = source
+              ? (source.end - source.start) / (range.end - range.start)
+              : null;
+            const sourceStart = source
+              ? source.start + (characterRange.start - range.start) * sourceScale
+              : null;
+            const sourceEnd = source
+              ? source.start + (characterRange.end - range.start) * sourceScale
+              : null;
+            units.push({
+              character: characters[index].character,
+              separatorBefore: characters[index].separatorBefore,
+              start: characterRange.start,
+              end: characterRange.end,
+              sourceStart,
+              sourceEnd,
+              segmentIndex,
+            });
+          }
+        }
+      }
+      return units;
+    }
+
+    function exactTranscriptPhraseMatch(
+      transcript,
+      phrase,
+      currentStart = 0,
+      options = {},
+    ) {
+      const target = contentCharacters(phrase);
+      const units = transcriptCharacterUnits(transcript);
+      const candidates = [];
+      if (target.length && units.length >= target.length) {
+        for (let index = 0; index <= units.length - target.length; index += 1) {
+          if (!target.every((character, offset) => units[index + offset].character === character)) {
+            continue;
+          }
+          const first = units[index];
+          const last = units[index + target.length - 1];
+          candidates.push({
+            index,
+            first,
+            last,
+            units: units.slice(index, index + target.length),
+          });
+        }
+      }
+      if (!candidates.length) return null;
+      const reference = finiteNumber(currentStart);
+      const sourceReference = Number(options.sourceStart);
+      candidates.sort((left, right) => {
+        const leftSourceDistance = Number.isFinite(sourceReference) && Number.isFinite(left.first.sourceStart)
+          ? Math.abs(left.first.sourceStart - sourceReference)
+          : Number.POSITIVE_INFINITY;
+        const rightSourceDistance = Number.isFinite(sourceReference) && Number.isFinite(right.first.sourceStart)
+          ? Math.abs(right.first.sourceStart - sourceReference)
+          : Number.POSITIVE_INFINITY;
+        return leftSourceDistance - rightSourceDistance ||
+          Math.abs(left.first.start - reference) - Math.abs(right.first.start - reference) ||
+          left.index - right.index;
+      });
+      return candidates[0];
+    }
+
+    function matchTranscriptPhrase(transcript, phrase, currentStart = 0) {
+      const exact = exactTranscriptPhraseMatch(transcript, phrase, currentStart);
+      if (exact) {
+        const { first, last } = exact;
+        return {
+          start: roundTiming(first.start),
+          end: roundTiming(last.end),
+          sourceStart: Number.isFinite(first.sourceStart) ? roundTiming(first.sourceStart) : null,
+          sourceEnd: Number.isFinite(last.sourceEnd) ? roundTiming(last.sourceEnd) : null,
+        };
+      }
+
+      const reference = finiteNumber(currentStart);
+      const segment = (Array.isArray(transcript?.segments) ? transcript.segments : []).find(
+        (item) => {
+          const range = validTimedRange(item);
+          return range && range.start <= reference && range.end >= reference;
+        },
+      );
+      const range = validTimedRange(segment);
+      if (!range) return null;
+      const source = validTimedRange(segment, "sourceStart", "sourceEnd");
+      return {
+        start: roundTiming(range.start),
+        end: roundTiming(range.end),
+        sourceStart: source ? roundTiming(source.start) : null,
+        sourceEnd: source ? roundTiming(source.end) : null,
+      };
+    }
+
+    function normalizeCutRanges(cut = {}) {
+      const sourceDuration = Math.max(0, finiteNumber(cut.sourceDuration));
+      const ranges = (Array.isArray(cut.ranges) ? cut.ranges : [])
+        .flatMap((range) => {
+          const start = clamp(finiteNumber(range?.start), 0, sourceDuration);
+          const end = clamp(finiteNumber(range?.end), start, sourceDuration);
+          return end > start ? [{ start, end }] : [];
+        })
+        .sort((left, right) => left.start - right.start || left.end - right.end);
+      return ranges.reduce((merged, range) => {
+        const previous = merged.at(-1);
+        if (!previous || range.start > previous.end + 0.000001) {
+          merged.push({ ...range });
+        } else {
+          previous.end = Math.max(previous.end, range.end);
+        }
+        return merged;
+      }, []);
+    }
+
+    function retainedTimelineSpans(cut = {}) {
+      const sourceDuration = Math.max(0, finiteNumber(cut.sourceDuration));
+      if (!sourceDuration) return [];
+      const spans = [];
+      let sourceCursor = 0;
+      let editedCursor = 0;
+      for (const range of normalizeCutRanges(cut)) {
+        if (range.start > sourceCursor) {
+          const spanDuration = range.start - sourceCursor;
+          spans.push({
+            sourceStart: sourceCursor,
+            sourceEnd: range.start,
+            editedStart: editedCursor,
+            editedEnd: editedCursor + spanDuration,
+          });
+          editedCursor += spanDuration;
+        }
+        sourceCursor = Math.max(sourceCursor, range.end);
+      }
+      if (sourceCursor < sourceDuration) {
+        spans.push({
+          sourceStart: sourceCursor,
+          sourceEnd: sourceDuration,
+          editedStart: editedCursor,
+          editedEnd: editedCursor + sourceDuration - sourceCursor,
+        });
+      }
+      return spans;
+    }
+
+    function sourceRangeFromEditedRange(overlay, cut = {}) {
+      const spans = retainedTimelineSpans(cut);
+      if (!spans.length) return null;
+      const map = (seconds, edge) => {
+        const time = Math.max(0, finiteNumber(seconds));
+        for (const span of spans) {
+          const inside = edge === "end"
+            ? time <= span.editedEnd + 0.000001
+            : time < span.editedEnd - 0.000001;
+          if (inside) {
+            return clamp(
+              span.sourceStart + time - span.editedStart,
+              span.sourceStart,
+              span.sourceEnd,
+            );
+          }
+        }
+        return spans.at(-1).sourceEnd;
+      };
+      const start = map(overlay?.start, "start");
+      const end = map(overlay?.end, "end");
+      return end > start ? { start, end } : null;
+    }
+
+    function editedRangeForSourceRange(sourceRange, cut = {}) {
+      if (!sourceRange) return null;
+      const intersections = retainedTimelineSpans(cut).flatMap((span) => {
+        const sourceStart = Math.max(sourceRange.start, span.sourceStart);
+        const sourceEnd = Math.min(sourceRange.end, span.sourceEnd);
+        return sourceEnd > sourceStart
+          ? [{
+              sourceStart,
+              sourceEnd,
+              start: span.editedStart + sourceStart - span.sourceStart,
+              end: span.editedStart + sourceEnd - span.sourceStart,
+            }]
+          : [];
+      });
+      if (!intersections.length) return null;
+      return {
+        start: intersections[0].start,
+        end: intersections.at(-1).end,
+        sourceStart: intersections[0].sourceStart,
+        sourceEnd: intersections.at(-1).sourceEnd,
+      };
+    }
+
+    function overlaySourceRange(overlay, previousCut = null) {
+      return validTimedRange(overlay, "sourceStart", "sourceEnd") ||
+        (previousCut ? sourceRangeFromEditedRange(overlay, previousCut) : null);
+    }
+
+    function cleanReconciliationBase(overlay) {
+      const base = clone(overlay || {});
+      delete base[CUT_RECONCILIATION_FIELD];
+      return base;
+    }
+
+    function transcriptReconciliationBase(overlay, previousCut) {
+      const stored = overlay?.[CUT_RECONCILIATION_FIELD]?.overlay;
+      const base = cleanReconciliationBase(stored || overlay);
+      const sourceRange = overlaySourceRange(base, previousCut);
+      if (sourceRange) {
+        base.sourceStart = sourceRange.start;
+        base.sourceEnd = sourceRange.end;
+      }
+      return base;
+    }
+
+    function withTranscriptReconciliationBase(overlay, base) {
+      return {
+        ...overlay,
+        [CUT_RECONCILIATION_FIELD]: {
+          version: 1,
+          overlay: cleanReconciliationBase(base),
+        },
+      };
+    }
+
+    function reconcileTranscriptOverlay(
+      overlay,
+      previousCut,
+      nextCut,
+      displayUnits,
+      reliableSourceUnits,
+      duration,
+    ) {
+      const base = transcriptReconciliationBase(overlay, previousCut);
+      const sourceRange = overlaySourceRange(base, previousCut);
+      if (!sourceRange) {
+        const exact = exactTranscriptPhraseMatch(
+          nextCut?.transcript,
+          base.text,
+          overlay.start,
+        );
+        if (!exact) {
+          return { active: withTranscriptReconciliationBase(clone(overlay), base) };
+        }
+        const rebuilt = normalizeOverlay({
+          ...clone(overlay),
+          start: exact.first.start,
+          end: exact.last.end,
+          characterTimings: exact.units.map((unit) => ({ start: unit.start, end: unit.end })),
+        }, { duration });
+        return { active: withTranscriptReconciliationBase(rebuilt, base) };
+      }
+
+      const retainedRange = editedRangeForSourceRange(sourceRange, nextCut);
+      if (!retainedRange) {
+        return { suppressed: withTranscriptReconciliationBase(clone(overlay), base) };
+      }
+      const matchedUnits = displayUnits.filter((unit) => {
+        if (!Number.isFinite(unit.sourceStart) || !Number.isFinite(unit.sourceEnd)) {
+          return false;
+        }
+        const midpoint = unit.sourceStart + (unit.sourceEnd - unit.sourceStart) / 2;
+        return midpoint >= sourceRange.start - 0.000001 && midpoint < sourceRange.end - 0.000001;
+      });
+      if (!matchedUnits.length && reliableSourceUnits.length) {
+        return { suppressed: withTranscriptReconciliationBase(clone(overlay), base) };
+      }
+
+      const rebuilt = matchedUnits.length
+        ? normalizeOverlay({
+            ...clone(overlay),
+            text: matchedUnits.map((unit, index) =>
+              `${index ? unit.separatorBefore : ""}${unit.character}`).join(""),
+            start: matchedUnits[0].start,
+            end: matchedUnits.at(-1).end,
+            sourceStart: matchedUnits[0].sourceStart,
+            sourceEnd: matchedUnits.at(-1).sourceEnd,
+            characterTimings: matchedUnits.map((unit) => ({
+              start: unit.start,
+              end: unit.end,
+            })),
+          }, { duration })
+        : normalizeOverlay({
+            ...clone(overlay),
+            start: retainedRange.start,
+            end: retainedRange.end,
+            characterTimings: [],
+          }, { duration });
+      return { active: withTranscriptReconciliationBase(rebuilt, base) };
+    }
+
+    function reconcileAnchoredOverlay(overlay, nextCut, duration) {
+      const sourceRange = validTimedRange(overlay, "sourceStart", "sourceEnd");
+      if (!sourceRange) return { active: clone(overlay) };
+      const retainedRange = editedRangeForSourceRange(sourceRange, nextCut);
+      if (!retainedRange) return { suppressed: clone(overlay) };
+
+      const exact = exactTranscriptPhraseMatch(
+        nextCut?.transcript,
+        overlay.text,
+        retainedRange.start,
+        { sourceStart: sourceRange.start },
+      );
+      const exactInsideAnchor = exact &&
+        (!Number.isFinite(exact.first.sourceStart) ||
+          (exact.first.sourceStart < sourceRange.end + 0.000001 &&
+            exact.last.sourceEnd > sourceRange.start - 0.000001));
+      const next = exactInsideAnchor
+        ? {
+            ...clone(overlay),
+            start: exact.first.start,
+            end: exact.last.end,
+            sourceStart: Number.isFinite(exact.first.sourceStart)
+              ? exact.first.sourceStart
+              : overlay.sourceStart,
+            sourceEnd: Number.isFinite(exact.last.sourceEnd)
+              ? exact.last.sourceEnd
+              : overlay.sourceEnd,
+            characterTimings: exact.units.map((unit) => ({ start: unit.start, end: unit.end })),
+          }
+        : {
+            ...clone(overlay),
+            start: retainedRange.start,
+            end: retainedRange.end,
+            characterTimings: [],
+          };
+      return { active: normalizeOverlay(next, { duration }) };
+    }
+
+    function reconcileArtWithCut(art = {}, previousCut = {}, nextCut = {}) {
+      const duration = Math.max(0.02, finiteNumber(nextCut?.duration, 0.02));
+      const displayUnits = transcriptCharacterUnits(nextCut?.transcript);
+      const reliableSourceUnits = displayUnits.filter(
+        (unit) => Number.isFinite(unit.sourceStart) && Number.isFinite(unit.sourceEnd),
+      );
+      const byId = new Map();
+      for (const overlay of Array.isArray(art?.suppressedOverlays)
+        ? art.suppressedOverlays
+        : []) {
+        byId.set(String(overlay?.id ?? ""), clone(overlay));
+      }
+      for (const overlay of Array.isArray(art?.overlays) ? art.overlays : []) {
+        byId.set(String(overlay?.id ?? ""), clone(overlay));
+      }
+
+      const overlays = [];
+      const suppressedOverlays = [];
+      for (const overlay of byId.values()) {
+        const result = isTranscriptOverlay(overlay)
+          ? reconcileTranscriptOverlay(
+              overlay,
+              previousCut,
+              nextCut,
+              displayUnits,
+              reliableSourceUnits,
+              duration,
+            )
+          : reconcileAnchoredOverlay(overlay, nextCut, duration);
+        if (result.active) overlays.push(result.active);
+        else if (result.suppressed) suppressedOverlays.push(result.suppressed);
+      }
+      overlays.sort((left, right) => finiteNumber(left.start) - finiteNumber(right.start));
+      suppressedOverlays.sort((left, right) => finiteNumber(left.start) - finiteNumber(right.start));
+      return {
+        art: {
+          ...clone(art),
+          overlays,
+          suppressedOverlays,
+        },
+        activeIds: overlays.map((overlay) => String(overlay.id)),
+      };
     }
 
     function nextStableId(overlays, prefix = "art-overlay") {
@@ -504,6 +952,7 @@
     return Object.freeze({
       MANUAL_OVERLAY_LIMIT,
       TRANSCRIPT_TRACK_TYPE,
+      CUT_RECONCILIATION_FIELD,
       TRANSCRIPT_STYLE_FIELDS,
       TRANSCRIPT_CUE_FIELDS,
       DEFAULT_PALETTES,
@@ -515,6 +964,7 @@
       createOverlay,
       formatText,
       isTranscriptOverlay,
+      matchTranscriptPhrase,
       nextStableId,
       normalizeCharacterTimings,
       normalizeColor,
@@ -522,6 +972,7 @@
       normalizeRange,
       normalizeTemplateEffects,
       overlayFromSuggestion,
+      reconcileArtWithCut,
       removeOverlay,
       updateOverlay,
       validateOverlays,

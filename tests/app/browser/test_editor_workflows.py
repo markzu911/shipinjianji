@@ -236,6 +236,55 @@ def test_tool_switch_keeps_selection_preview_and_playback_position(
     page.locator('[data-editor-tool="art"]').click()
     art_panel = page.locator("#editorArtPanelRoot")
     art_panel.wait_for(state="visible")
+    assert art_panel.locator("[data-art-tab]").all_inner_texts() == [
+        "艺术字设置",
+        "AI 推荐",
+    ]
+    assert art_panel.locator('[data-art-tab="transcript"]').count() == 0
+    assert art_panel.locator(
+        '[data-art-panel="settings"] [data-art-transcript-section]'
+    ).is_visible()
+    transcript_action = art_panel.locator("[data-art-transcript-section]")
+    assert transcript_action.get_by_role(
+        "button", name="一键添加视频文案", exact=True
+    ).count() == 1
+    assert transcript_action.locator("textarea").count() == 0
+    assert transcript_action.locator("[data-art-transcript-save]").count() == 0
+    assert transcript_action.locator("[data-art-transcript-list]").count() == 0
+    assert transcript_action.locator("[data-art-add-selected]").count() == 0
+    for tab_name in ("settings", "ai"):
+        tab = art_panel.locator(f'[data-art-tab="{tab_name}"]')
+        panel = art_panel.locator(f'[data-art-panel="{tab_name}"]')
+        assert tab.get_attribute("aria-controls") == panel.get_attribute("id")
+        assert panel.get_attribute("aria-labelledby") == tab.get_attribute("id")
+    settings_tab = art_panel.locator('[data-art-tab="settings"]')
+    ai_tab = art_panel.locator('[data-art-tab="ai"]')
+    settings_tab.focus()
+    settings_tab.press("ArrowRight")
+    assert ai_tab.get_attribute("aria-selected") == "true"
+    assert art_panel.locator('[data-art-panel="settings"]').is_hidden()
+    assert art_panel.locator('[data-art-panel="ai"]').is_visible()
+    ai_tab.press("End")
+    assert ai_tab.get_attribute("aria-selected") == "true"
+    ai_tab.press("Home")
+    assert settings_tab.get_attribute("aria-selected") == "true"
+    settings_tab.press("ArrowLeft")
+    assert ai_tab.get_attribute("aria-selected") == "true"
+    ai_tab.press("Home")
+    assert art_panel.locator('[data-art-panel="ai"]').is_hidden()
+    assert art_panel.locator('[data-art-panel="ai"] :focus').count() == 0
+    tab_tops = art_panel.locator("[data-art-tab]").evaluate_all(
+        "tabs => tabs.map(tab => Math.round(tab.getBoundingClientRect().top))"
+    )
+    assert len(set(tab_tops)) == 1
+    art_panel.locator(".editor-art-tool").evaluate(
+        "panel => { panel.scrollTop = panel.scrollHeight; }"
+    )
+    art_panel.locator('[data-art-tab="ai"]').click()
+    assert art_panel.locator(".editor-art-tool").evaluate(
+        "panel => panel.scrollTop"
+    ) == 0
+    art_panel.locator('[data-art-tab="settings"]').click()
     assert page.locator('iframe[title="艺术字设置"]').count() == 0
     selected_art = art_panel.locator(
         "[data-art-list] .overlay-list-item.is-selected"
@@ -470,7 +519,6 @@ def test_top_level_art_track_and_ai_draft_commit_atomically(
           });
         }"""
     )
-    panel.locator('[data-art-tab="transcript"]').click()
     with page.expect_response(track_url) as track_response:
         panel.locator("[data-art-full-track]").click()
     assert track_response.value.status == 200
@@ -497,7 +545,101 @@ def test_top_level_art_track_and_ai_draft_commit_atomically(
         track_state["actions"][0]["previousTimingRevision"] + 1
     )
     assert len(track_state["request"]["artOverlays"]) == 3
+    transcript_ids = [
+        item["id"]
+        for item in track_state["overlays"]
+        if item.get("trackType") == "transcript"
+    ]
+    page.evaluate(
+        """() => window.EditorSuite.setCutDraft({
+          active: true,
+          ranges: [{ start: 0.05, end: 0.3 }],
+          sourceDuration: 1,
+          duration: 0.75,
+          transcript: {
+            text: '保留内容',
+            segments: [{
+              id: 'retained', text: '保留内容', start: 0.1, end: 0.7,
+              sourceStart: 0.35, sourceEnd: 0.95,
+              words: [{
+                text: '保留内容', start: 0.1, end: 0.7,
+                sourceStart: 0.35, sourceEnd: 0.95,
+              }],
+            }],
+          },
+        })"""
+    )
+    page.wait_for_function(
+        """() => window.EditorSuite.projectSnapshot().project.art.overlays
+          .filter(item => item.trackType === 'transcript').length === 1"""
+    )
+    cut_frame = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          const frame = window.EditorProjectStore.selectEditorFrame(snapshot);
+          return {
+            activeTranscript: snapshot.project.art.overlays
+              .filter(item => item.trackType === 'transcript')
+              .map(item => ({ id: item.id, text: item.text })),
+            suppressed: snapshot.project.art.suppressedOverlays.map(item => item.id),
+            timeline: frame.timeline.tracks.filter(track => track.kind === 'art')
+              .flatMap(track => track.clips.map(clip => clip.sourceId)),
+            preview: frame.preview.art.overlays.map(item => item.id),
+            composition: frame.composition.artOverlays.map(item => item.text),
+          };
+        }"""
+    )
+    assert cut_frame["activeTranscript"] == [
+        {"id": transcript_ids[1], "text": "保留内容"}
+    ]
+    assert cut_frame["suppressed"] == [transcript_ids[0]]
+    assert sorted(cut_frame["timeline"]) == sorted(cut_frame["preview"])
+    assert "删除片段" not in cut_frame["composition"]
 
+    page.evaluate(
+        """() => window.EditorSuite.setCutDraft({
+          active: false,
+          ranges: [],
+          sourceDuration: 1,
+          duration: 1,
+          transcript: {
+            text: '删除片段 保留内容',
+            segments: [
+              {
+                id: 'first', text: '删除片段', start: 0.05, end: 0.3,
+                sourceStart: 0.05, sourceEnd: 0.3,
+                words: [{
+                  text: '删除片段', start: 0.05, end: 0.3,
+                  sourceStart: 0.05, sourceEnd: 0.3,
+                }],
+              },
+              {
+                id: 'second', text: '保留内容', start: 0.35, end: 0.95,
+                sourceStart: 0.35, sourceEnd: 0.95,
+                words: [{
+                  text: '保留内容', start: 0.35, end: 0.95,
+                  sourceStart: 0.35, sourceEnd: 0.95,
+                }],
+              },
+            ],
+          },
+        })"""
+    )
+    page.wait_for_function(
+        """() => window.EditorSuite.projectSnapshot().project.art.overlays
+          .filter(item => item.trackType === 'transcript').length === 2"""
+    )
+    restored_track = page.evaluate(
+        """() => ({
+          ids: window.EditorSuite.projectSnapshot().project.art.overlays
+            .filter(item => item.trackType === 'transcript').map(item => item.id),
+          suppressed: window.EditorSuite.projectSnapshot().project.art.suppressedOverlays,
+        })"""
+    )
+    assert sorted(restored_track["ids"]) == sorted(transcript_ids)
+    assert restored_track["suppressed"] == []
+
+    suggestion_requests: list[dict[str, object]] = []
     suggestion_url = re.compile(
         rf".*/api/transcriptions/{seeded_editor_job.job_id}/art-text/suggestions$"
     )
@@ -509,6 +651,9 @@ def test_top_level_art_track_and_ai_draft_commit_atomically(
         if route.request.method == "DELETE":
             route.fulfill(status=204, body="")
         else:
+            suggestion_requests.append(
+                json.loads(route.request.post_data or "{}")
+            )
             route.fulfill(
                 status=202,
                 content_type="application/json",
@@ -541,6 +686,8 @@ def test_top_level_art_track_and_ai_draft_commit_atomically(
     with page.expect_response(suggestion_url) as suggestion_response:
         panel.locator("[data-art-ai-request]").click()
     assert suggestion_response.value.status == 202
+    assert suggestion_requests[0]["draftDuration"] == pytest.approx(1.0)
+    assert suggestion_requests[0]["draftTranscript"]["segments"]
     panel.locator("[data-art-ai-list] .ai-suggestion-card").wait_for()
     assert page.evaluate("window.EditorSuite.projectSnapshot().revision") == before_ai
     before_preview_request = page.evaluate(
@@ -598,6 +745,13 @@ def test_top_level_art_track_and_ai_draft_commit_atomically(
         item["text"] == "AI 重点"
         for item in after_ai["request"]["artOverlays"]
     )
+    confirmed_ai = next(
+        item
+        for item in after_ai["request"]["artOverlays"]
+        if item["text"] == "AI 重点"
+    )
+    assert confirmed_ai["sourceStart"] == pytest.approx(0.2)
+    assert confirmed_ai["sourceEnd"] == pytest.approx(0.5)
     page.wait_for_function("window.__b2AiDeletePending === true")
     assert panel.locator("[data-art-ai-request]").is_disabled()
     panel.locator("[data-art-ai-request]").evaluate("button => button.click()")
@@ -618,7 +772,6 @@ def test_top_level_art_deactivation_rejects_late_track_response(
     page.locator('[data-editor-tool="art"]').click()
     panel = page.locator("#editorArtPanelRoot")
     panel.wait_for(state="visible")
-    panel.locator('[data-art-tab="transcript"]').click()
     page.evaluate(
         """() => {
           const originalFetch = window.fetch.bind(window);
@@ -703,63 +856,6 @@ def test_top_level_art_deactivation_rejects_late_track_response(
     )
 
 
-def test_top_level_art_deactivation_aborts_transcript_save(
-    browser_session,
-    seeded_editor_job,
-):
-    page = open_editor(browser_session, seeded_editor_job)
-    page.locator('[data-editor-tool="art"]').click()
-    panel = page.locator("#editorArtPanelRoot")
-    panel.wait_for(state="visible")
-    panel.locator('[data-art-tab="transcript"]').click()
-    before_revision = page.evaluate(
-        "window.EditorSuite.projectSnapshot().revision"
-    )
-    page.evaluate(
-        """() => {
-          const originalFetch = window.fetch.bind(window);
-          window.__b2TranscriptSave = { requested: false, aborted: false };
-          window.__b2TranscriptActions = [];
-          window.EditorSuite.subscribeProject((next, previous, action) => {
-            window.__b2TranscriptActions.push(action.type);
-          });
-          window.fetch = (input, options = {}) => {
-            const url = String(input?.url || input || '');
-            if (url.endsWith('/transcript') && options.method === 'PUT') {
-              window.__b2TranscriptSave.requested = true;
-              return new Promise((resolve, reject) => {
-                const abort = () => {
-                  window.__b2TranscriptSave.aborted = true;
-                  reject(new DOMException('Aborted', 'AbortError'));
-                };
-                if (options.signal?.aborted) abort();
-                else options.signal?.addEventListener('abort', abort, { once: true });
-              });
-            }
-            return originalFetch(input, options);
-          };
-        }"""
-    )
-    panel.locator("[data-art-transcript-text]").fill("取消中的文案保存")
-    panel.locator("[data-art-transcript-save]").click()
-    page.wait_for_function("window.__b2TranscriptSave.requested === true")
-
-    page.locator('[data-editor-tool="cut"]').click()
-    page.wait_for_function("window.__b2TranscriptSave.aborted === true")
-    after = page.evaluate(
-        """() => ({
-          snapshot: window.EditorSuite.projectSnapshot(),
-          actions: window.__b2TranscriptActions,
-        })"""
-    )
-    assert after["snapshot"]["revision"] == before_revision + 1
-    assert after["snapshot"]["project"]["art"]["overlays"][0]["text"] == (
-        "保留内容"
-    )
-    assert after["actions"] == ["activeToolChanged"]
-    assert panel.evaluate("panel => panel.inert") is True
-
-
 def test_top_level_pip_prompt_image_controls_and_schema_v2_recovery(
     browser_session,
     seeded_editor_job,
@@ -830,6 +926,37 @@ def test_top_level_pip_prompt_image_controls_and_schema_v2_recovery(
     page.locator('[data-editor-tool="pip"]').click()
     panel = page.locator("#editorPipPanelRoot")
     panel.wait_for(state="visible")
+    segment_list = panel.locator("[data-pip-segments]")
+    outer_scroll = panel.locator(".editor-pip-tool").evaluate(
+        "tool => tool.scrollTop"
+    )
+    segment_list.locator("label", has_text="保留内容").locator("input").check()
+    segment_list.evaluate(
+        "list => { list.style.height = '80px'; list.scrollTop = list.scrollHeight; }"
+    )
+    segment_list.locator("label", has_text="删除片段").locator("input").check()
+    selected_bounds = segment_list.evaluate(
+        """list => {
+          const item = list.querySelector('.is-selected');
+          const listRect = list.getBoundingClientRect();
+          const itemRect = item.getBoundingClientRect();
+          const selectedText = item.querySelector('strong').textContent;
+          const expected = window.EditorSuite.projectSnapshot().project.cut
+            .transcript.segments.find(segment => segment.text === selectedText);
+          const start = Number(document.querySelector('[data-pip-range="start"]').value);
+          const end = Number(document.querySelector('[data-pip-range="end"]').value);
+          return {
+            visible: itemRect.top >= listRect.top - 1 &&
+              itemRect.bottom <= listRect.bottom + 1,
+            rangeMatches: Math.abs(start - expected.start) < 0.001 &&
+              Math.abs(end - expected.end) < 0.001,
+          };
+        }"""
+    )
+    assert selected_bounds == {"visible": True, "rangeMatches": True}
+    assert panel.locator(".editor-pip-tool").evaluate(
+        "tool => tool.scrollTop"
+    ) == outer_scroll
     panel.locator("[data-pip-segments] label", has_text="保留内容").locator(
         "input"
     ).check()
@@ -1445,8 +1572,9 @@ def test_unified_generate_posts_current_cut_art_and_pip_state(
     expected_art_end = float(
         art_panel.locator('[data-art-range="end"]').input_value()
     )
-    expected_pip_start = float(pip_panel.locator("#pipStartTime").input_value())
-    expected_pip_end = float(pip_panel.locator("#pipEndTime").input_value())
+    expected_pip = page.evaluate(
+        "window.EditorSuite.projectSnapshot().project.pip.overlays[0]"
+    )
     assert payload["target"] == "all"
     assert payload["ranges"] == [
         {
@@ -1484,11 +1612,11 @@ def test_unified_generate_posts_current_cut_art_and_pip_state(
             == seeded_editor_job.pip_overlay[key]
         )
     assert payload["pictureInPictureOverlays"][0]["start"] == pytest.approx(
-        expected_pip_start,
+        expected_pip["start"],
         abs=0.001,
     )
     assert payload["pictureInPictureOverlays"][0]["end"] == pytest.approx(
-        expected_pip_end,
+        expected_pip["end"],
         abs=0.001,
     )
     assert payload["historyName"] is None
@@ -1692,6 +1820,9 @@ def test_b1_atomic_timeline_transaction_and_narrow_workspace(
         '#editorSuiteTimelineLayer [data-effect-kind="art"]'
     ).first
     art_segment.wait_for(state="visible")
+    assert page.locator(
+        '#editorSuiteTimelineLayer [data-effect-kind="cut"]'
+    ).count() == 0
     page.locator(
         '#editorSuiteTimelineLayer [data-effect-kind="pip"]'
     ).first.click()
@@ -2085,7 +2216,8 @@ def test_template_preference_applies_to_new_manual_and_full_track_without_select
             snapshot.project.timeline.selection === null;
         }"""
     )
-    panel.locator('[data-art-tab="transcript"]').click()
+    assert panel.locator("[data-art-selection-empty]").is_visible()
+    assert panel.locator("[data-art-controls]").is_hidden()
     panel.locator("[data-art-full-track]").click()
     page.wait_for_function(
         """() => {
@@ -2216,6 +2348,11 @@ def test_legacy_art_url_redirects_to_narrow_single_page_runtime(
           cutInert: document.querySelector('.text-editor-panel-stack').inert,
           overflow: document.documentElement.scrollWidth -
             document.documentElement.clientWidth,
+          artTabs: [...document.querySelectorAll('#editorArtPanelRoot [data-art-tab]')]
+            .map(tab => tab.textContent.trim()),
+          transcriptInSettings: Boolean(document.querySelector(
+            '#editorArtPanelRoot [data-art-panel="settings"] [data-art-transcript-section]'
+          )),
         })"""
     )
     assert result == {
@@ -2231,6 +2368,8 @@ def test_legacy_art_url_redirects_to_narrow_single_page_runtime(
         "pipInert": True,
         "cutInert": True,
         "overflow": 0,
+        "artTabs": ["艺术字设置", "AI 推荐"],
+        "transcriptInSettings": True,
     }
 
 

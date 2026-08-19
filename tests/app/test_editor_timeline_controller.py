@@ -228,3 +228,49 @@ console.log(JSON.stringify({
         "commitCount": 1,
         "history": {"index": 0, "entries": []},
     }
+
+
+def test_timeline_controller_projects_only_configured_visible_kinds():
+    payload = run_node(
+        r"""
+const timeline = require('./web/timeline-model.js');
+global.EditorTimeline = timeline;
+function element() {
+  return {
+    dataset: {}, children: [], hidden: false,
+    style: { values: {}, setProperty(k, v) { this.values[k] = v; }, removeProperty(k) { delete this.values[k]; } },
+    classList: { toggle() {} },
+    setAttribute() {}, addEventListener() {}, removeEventListener() {},
+    append(...items) { this.children.push(...items); },
+    replaceChildren(...items) { this.children = items; },
+  };
+}
+global.document = { createElement: () => element() };
+const timelineController = require('./web/editor-timeline-controller.js');
+const layer = element();
+const controller = timelineController.createController({
+  timeline, root: layer, keyboardTarget: null, visibleKinds: ['art', 'pip'],
+});
+const documentState = controller.render({
+  revision: 3, timingRevision: 2,
+  timeline: { duration: 10, tracks: [
+    { id: 'cut', kind: 'cut', clips: [{ id: 'cut:1', sourceId: 'c', start: 0, end: 1 }] },
+    { id: 'art', kind: 'art', clips: [{ id: 'art:1', sourceId: 'a', start: 1, end: 2 }] },
+    { id: 'pip', kind: 'pip', clips: [{ id: 'pip:1', sourceId: 'p', start: 2, end: 3 }] },
+  ] },
+});
+console.log(JSON.stringify({
+  kinds: layer.children.map(item => item.dataset.effectKind),
+  rows: layer.children.map(item => item.dataset.timelineTrackIndex),
+  authoritativeKinds: documentState.tracks.map(track => track.kind),
+  height: layer.style.height,
+}));
+"""
+    )
+
+    assert payload == {
+        "kinds": ["art", "pip"],
+        "rows": ["0", "1"],
+        "authoritativeKinds": ["cut", "art", "pip"],
+        "height": "60px",
+    }

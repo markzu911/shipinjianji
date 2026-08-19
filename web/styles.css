@@ -11793,6 +11793,7 @@ input[type="range"] {
 .editor-pip-segment-list {
   max-height: 210px;
   overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
 .editor-pip-generated-list {
@@ -11859,6 +11860,32 @@ input[type="range"] {
 .editor-art-controls {
   min-width: 0;
   margin-top: 16px;
+}
+
+.editor-art-transcript-section {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+  padding-block: 16px;
+  border-block: 1px solid rgba(205, 219, 229, 0.14);
+}
+
+.editor-art-transcript-section .transcript-quick-action {
+  margin-bottom: 0;
+}
+
+.editor-art-transcript-section + .art-detail-heading {
+  margin-top: 16px;
+}
+
+.editor-art-selection-empty {
+  min-height: 72px;
+  display: grid;
+  place-items: center;
+  padding: 16px 8px;
+  color: var(--text-muted);
+  text-align: center;
+  border-block: 1px solid rgba(205, 219, 229, 0.14);
 }
 
 .editor-art-tool .position-preset-chip {

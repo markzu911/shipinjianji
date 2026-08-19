@@ -305,3 +305,198 @@ def test_ai_art_suggestion_endpoint_uses_original_video_and_can_be_cleared(
     assert clear_response.status_code == 200
     assert clear_response.json() == {"status": "cleared"}
     assert cleared_job_response.json()["artSuggestion"] is None
+
+
+def test_ai_art_suggestion_endpoint_accepts_live_edited_draft_without_edit_file(
+    sample_video: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    job_id = "23232323-2323-2323-2323-232323232323"
+    original_transcript = {
+        "text": "删除内容保留重点",
+        "duration": 1.0,
+        "segments": [
+            {"id": 0, "start": 0.0, "end": 1.0, "text": "删除内容保留重点"}
+        ],
+    }
+    draft_transcript = {
+        "text": "保留重点",
+        "duration": 0.6,
+        "segments": [
+            {
+                "id": "retained-1",
+                "start": 0.1,
+                "end": 0.6,
+                "sourceStart": 0.5,
+                "sourceEnd": 1.0,
+                "text": "保留重点",
+                "words": [
+                    {
+                        "text": "保留重点",
+                        "start": 0.1,
+                        "end": 0.6,
+                        "sourceStart": 0.5,
+                        "sourceEnd": 1.0,
+                    }
+                ],
+            }
+        ],
+    }
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "filename": sample_video.name,
+            "duration": 1.0,
+            "status": "completed",
+            "result": original_transcript,
+            "edit": None,
+            "art": None,
+            "artSuggestion": None,
+            "updatedAt": app_module.utc_now(),
+        }
+        app_module.JOB_FILES[job_id] = sample_video
+
+    captured = {}
+
+    def fake_generate(
+        input_path,
+        source_transcript,
+        duration,
+        count,
+        existing_overlays,
+        progress_callback,
+    ):
+        captured.update(
+            input_path=input_path,
+            transcript=source_transcript,
+            duration=duration,
+        )
+        return app_module.normalize_ai_art_suggestions(
+            [], source_transcript, duration, count
+        )
+
+    monkeypatch.setattr(app_module, "generate_art_text_suggestions", fake_generate)
+
+    with TestClient(app_module.app) as client:
+        response = client.post(
+            f"/api/transcriptions/{job_id}/art-text/suggestions",
+            json={
+                "source": "edited",
+                "count": 1,
+                "existingOverlays": [],
+                "draftTranscript": draft_transcript,
+                "draftDuration": 0.6,
+            },
+        )
+
+    assert response.status_code == 202, response.text
+    assert captured == {
+        "input_path": sample_video,
+        "transcript": draft_transcript,
+        "duration": 0.6,
+    }
+
+
+@pytest.mark.parametrize("field", ["words", "asrWords"])
+def test_live_art_transcript_rejects_oversized_nested_timing_lists(field: str):
+    with pytest.raises(ValueError, match="词级文案过长"):
+        app_module.validate_live_art_transcript(
+            {
+                "segments": [
+                    {
+                        "text": "保留重点",
+                        "start": 0.0,
+                        "end": 1.0,
+                        field: [{}]
+                        * (app_module.MAX_LIVE_ART_TRANSCRIPT_TIMED_ITEMS + 1),
+                    }
+                ]
+            },
+            1.0,
+            1.0,
+        )
+
+
+def test_art_frame_samples_separate_original_seek_from_edited_label():
+    samples = app_module.select_art_frame_samples(
+        {
+            "segments": [
+                {
+                    "text": "保留重点",
+                    "start": 3.21,
+                    "end": 4.21,
+                    "sourceStart": 7.29,
+                    "sourceEnd": 8.29,
+                }
+            ]
+        },
+        8.0,
+        1,
+    )
+
+    anchored = min(samples, key=lambda sample: abs(sample["displayTime"] - 3.71))
+    assert anchored["displayTime"] == pytest.approx(3.71)
+    assert anchored["mediaTime"] == pytest.approx(7.79)
+    assert all(
+        sample["mediaTime"] - sample["displayTime"] == pytest.approx(4.08)
+        for sample in samples
+    )
+
+
+def test_art_frame_samples_fill_unanchored_single_segment_after_deduplication():
+    samples = app_module.select_art_frame_samples(
+        {
+            "segments": [
+                {
+                    "text": "保留重点",
+                    "start": 0.0,
+                    "end": 1.0,
+                }
+            ]
+        },
+        1.0,
+        1,
+    )
+
+    assert len(samples) == 4
+    assert all(sample["mediaTime"] == sample["displayTime"] for sample in samples)
+
+
+def test_art_contact_sheet_seeks_media_time_and_labels_display_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    seeks: list[float] = []
+    labels: list[str] = []
+
+    def fake_run(command, **_kwargs):
+        seeks.append(float(command[command.index("-ss") + 1]))
+        app_module.Image.new("RGB", (16, 9), "black").save(command[-1], "JPEG")
+        return type("Completed", (), {"returncode": 0})()
+
+    original_draw = app_module.ImageDraw.Draw
+
+    def recording_draw(image):
+        delegate = original_draw(image)
+
+        class DrawProxy:
+            def rectangle(self, *args, **kwargs):
+                return delegate.rectangle(*args, **kwargs)
+
+            def text(self, position, value, *args, **kwargs):
+                labels.append(str(value))
+                return delegate.text(position, value, *args, **kwargs)
+
+        return DrawProxy()
+
+    monkeypatch.setattr(app_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(app_module.ImageDraw, "Draw", recording_draw)
+    output = app_module.create_art_contact_sheet(
+        tmp_path / "original.mp4",
+        tmp_path,
+        [{"mediaTime": 7.79, "displayTime": 3.71}],
+    )
+
+    assert output.is_file()
+    assert seeks == [pytest.approx(7.79)]
+    assert labels == ["FRAME 01  3.7s"]

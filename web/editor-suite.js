@@ -166,6 +166,7 @@
         root: timelineLayer,
         track: timelineTrack,
         timeline: window.EditorTimeline,
+        visibleKinds: ["art", "pip"],
         mediaController,
         onSelect: selectSemanticClip,
         onCommit: commitTimelineRange,
@@ -268,7 +269,8 @@
         ["art", "pip"].includes(rangeKind)) ||
       (actionType === window.EditorProjectStore.ACTIONS.SELECTION_CHANGED &&
         (!selectionId || /^(art|pip):/.test(selectionId))) ||
-      actionType === window.EditorProjectStore.ACTIONS.TRANSCRIPT_TEXT_CHANGED;
+      actionType === window.EditorProjectStore.ACTIONS.TRANSCRIPT_TEXT_CHANGED ||
+      actionType === window.EditorProjectStore.ACTIONS.CUT_TIMING_CHANGED;
     if (!relevant) return;
     const storage = draftStorage();
     if (!storage) return;
@@ -283,6 +285,7 @@
           art: {
             source: state.project.art.source,
             overlays: state.project.art.overlays,
+            suppressedOverlays: state.project.art.suppressedOverlays || [],
           },
           pip: {
             source: state.project.pip.source,
@@ -339,7 +342,11 @@
       Number(state.project.cut.duration) || 0,
     );
     const rawOverlays = envelope.art.overlays;
-    const validRecords = rawOverlays.length <= 500 && rawOverlays.every(
+    const rawSuppressedOverlays = Array.isArray(envelope.art.suppressedOverlays)
+      ? envelope.art.suppressedOverlays
+      : [];
+    const allRawOverlays = [...rawOverlays, ...rawSuppressedOverlays];
+    const validRecords = allRawOverlays.length <= 500 && allRawOverlays.every(
       (overlay) =>
         overlay &&
         typeof overlay === "object" &&
@@ -349,17 +356,22 @@
           Number.isFinite(Number(value)),
         ),
     );
-    const uniqueIds = new Set(rawOverlays.map((overlay) => String(overlay?.id ?? "")));
+    const uniqueIds = new Set(allRawOverlays.map((overlay) => String(overlay?.id ?? "")));
     if (
       !["original", "edited"].includes(source) ||
       !validRecords ||
-      uniqueIds.size !== rawOverlays.length
+      uniqueIds.size !== allRawOverlays.length
     ) {
       editorDraftRestoredJobs.add(state.jobId);
       return false;
     }
     const overlays = rawOverlays.map((overlay) =>
       window.EditorArtModel.normalizeOverlay(overlay, { duration }),
+    );
+    const suppressedOverlays = rawSuppressedOverlays.map((overlay) =>
+      window.EditorArtModel.normalizeOverlay(overlay, {
+        duration: Math.max(duration, Number(state.project.cut.sourceDuration) || 0),
+      }),
     );
     if (overlays.length && window.EditorArtModel.validateOverlays(overlays, duration)) {
       editorDraftRestoredJobs.add(state.jobId);
@@ -368,6 +380,7 @@
     const art = {
       source,
       overlays,
+      suppressedOverlays,
       assets: [],
     };
     let pip = null;
@@ -523,52 +536,6 @@
     });
   }
 
-  async function saveArtTranscript(text, options = {}) {
-    const state = projectSnapshot();
-    if (!state?.jobId) throw new Error("当前视频任务不可用。");
-    const token = options.token || projectStore.beginEffect("art-transcript-save");
-    await artApiRequest(
-      `/api/transcriptions/${encodeURIComponent(state.jobId)}/transcript`,
-      {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
-        signal: options.signal,
-      },
-    );
-    if (
-      !projectStore.isCurrentEffect(token) ||
-      token.baseRevision !== projectSnapshot().revision
-    ) {
-      return { accepted: false, revision: projectSnapshot().revision };
-    }
-    const job = await artApiRequest(
-      `/api/transcriptions/${encodeURIComponent(state.jobId)}`,
-      { signal: options.signal },
-    );
-    if (
-      !projectStore.isCurrentEffect(token) ||
-      token.baseRevision !== projectSnapshot().revision
-    ) {
-      return { accepted: false, revision: projectSnapshot().revision };
-    }
-    const result = projectStore.applyEffect(token, {
-      type: window.EditorProjectStore.ACTIONS.TRANSCRIPT_TEXT_CHANGED,
-      payload: {
-        job,
-        transcript: job.result,
-        editableSegments: job.result?.editableSegments || [],
-        serverArt: job.art || null,
-        serverVersion: job.updatedAt || "",
-      },
-    });
-    if (result.accepted) {
-      currentJob = projectSnapshot().project.job;
-      syncGenerationButton();
-    }
-    return result;
-  }
-
   function createArtToolServices() {
     return {
       project: {
@@ -593,7 +560,6 @@
         replaceArt: replaceArtState,
         selectArt,
         setArtRange,
-        saveTranscript: saveArtTranscript,
         refreshJob: refresh,
         generateCurrentPreview,
       },
