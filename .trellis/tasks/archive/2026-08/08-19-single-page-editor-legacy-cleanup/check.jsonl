@@ -1,0 +1,10 @@
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"审查 redirect/template/Store/preview/timeline/compose 全链路没有旧页面或双 authority。"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"确认 iframe、legacy state、mirror renderer 和重复媒体时间线实现已实际删除。"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"核对唯一顶层 runtime、同文档事件、草稿、脚本加载和深链契约。"}
+{"file":".trellis/spec/frontend/picture-in-picture-runtime.md","reason":"核对删除 fallback 后 PipTool 的已验证素材、缩放、恢复和 compose 行为未回归。"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"检查 panel lifecycle、hidden/inert、导航、桌面与 375px 行为。"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"检查历史页面 redirect 与业务 API 隔离、唯一 video identity 和无 reload。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"检查 RedirectResponse query 编码、冲突参数和 API route 回归。"}
+{"file":".trellis/spec/testing/index.md","reason":"执行 focused、browser、完整测试、语法、资源缺失和 diff 门禁。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"核对历史 URL、模板库、三工具切换、媒体 identity、compose 与 375px 真实行为。"}
+{"file":".trellis/tasks/08-19-single-page-editor-legacy-cleanup/research/b4-legacy-runtime.md","reason":"按规划时的 legacy 清单逐项确认删除与必要同文档契约保留。"}

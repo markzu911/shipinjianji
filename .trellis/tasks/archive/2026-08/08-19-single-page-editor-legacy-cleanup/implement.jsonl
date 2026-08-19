@@ -1,0 +1,12 @@
+{"file":".trellis/spec/guides/project-overview.md","reason":"保持原生 JavaScript/FastAPI、开发端口和不触碰生产环境的项目边界。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"检查历史页面 URL、顶层 Store、模板参数、工具状态和 compose 的完整跨层流。"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"删除重复 video/store/timeline/preview/generation owner，确保共享模块成为唯一实现。"}
+{"file":".trellis/spec/frontend/index.md","reason":"定位原生脚本加载、资源版本和前端规范入口。"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"遵守唯一 Store/media/timeline/frame、顶层工具和项目草稿契约，并移除迁移期 bridge。"}
+{"file":".trellis/spec/frontend/picture-in-picture-runtime.md","reason":"保留已验证 PipTool、素材、草稿和无上限缩放能力，同时删除 fallback/standalone 边界。"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"保持顶层 panel lifecycle、hidden/inert、深链和 375px 可访问行为。"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"确保页面 redirect 不影响业务 API，并验证工具切换不 reload 唯一基础视频。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"实现结构化 query redirect 时保持路由边界、输入处理与测试质量。"}
+{"file":".trellis/spec/testing/index.md","reason":"选择 route、静态、Node、browser、完整回归和 diff 门禁。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"把迁移期 iframe 用例替换为历史 redirect、模板深链、顶层 identity 和 375px 行为。"}
+{"file":".trellis/tasks/08-19-single-page-editor-legacy-cleanup/research/b4-legacy-runtime.md","reason":"提供当前 legacy owner、旧资源、模板兼容缺口、测试替换面和不可误删事件的代码证据。"}
