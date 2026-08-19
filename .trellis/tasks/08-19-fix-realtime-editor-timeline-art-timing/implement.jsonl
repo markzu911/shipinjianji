@@ -1,0 +1,11 @@
+{"file":".trellis/spec/guides/project-overview.md","reason":"确认单页原生 Web 编辑器、开发运行方式与实时剪辑核心约束。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"约束源时间/剪后时间、Store、API、预览和 compose 的跨层数据流。"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"复用唯一媒体时间映射、Store frame 和时间轴所有者。"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"保持单页唯一运行时、原子 editor frame、顶层 ArtTool/PipTool 和草稿恢复契约。"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"实现 tab、空状态、滚动、响应式与可访问交互。"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"实现实时草稿 API、媒体源与 source/edited 时间映射。"}
+{"file":".trellis/spec/frontend/picture-in-picture-runtime.md","reason":"保持顶层 PipTool 的 selection、素材和唯一 Store 运行时。"}
+{"file":".trellis/spec/backend/media-and-timeline.md","reason":"遵守 word/字符语义时间优先和媒体静音不得反写文字时间的契约。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"执行后端 API 兼容、区间不变量与完整验证。"}
+{"file":".trellis/spec/testing/index.md","reason":"选择 art、timeline、frontend 与完整应用回归。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"验证唯一 document/video、三工具切换、桌面和窄屏工作流。"}

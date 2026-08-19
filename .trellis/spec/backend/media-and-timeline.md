@@ -8,6 +8,8 @@
 - 删除区间经 `normalize_delete_ranges`、`build_keep_ranges` 和音频边界吸附形成物理剪切计划。
 - 剪后 transcript、艺术字和画中画需要使用 retained transcript/source anchor 映射，不能凭相同秒数猜测。
 - 预览和最终合成必须消费同一组归一化 overlay 数据。
+- 有效 word 或已有 character timing 是全文艺术字的语义时间权威；音频 quiet range 不得压缩、重排或覆盖这些边界。静音只允许在缺少可靠文字时间时作为降级参考。
+- 实时艺术字 AI 草稿的 `start/end/duration` 属于剪后时间，`sourceStart/sourceEnd` 属于原片时间。关键帧样本必须显式携带 `{mediaTime, displayTime}`：FFmpeg seek 使用 `mediaTime`，联系表标签和模型提示使用 `displayTime`。
 
 任何跨剪辑边界功能都应明确输入时间轴、输出时间轴和转换函数，并增加往返测试。
 
@@ -42,6 +44,7 @@ x = clamp(main_w * center_x - overlay_w / 2, min_x, max_x)
 - 临时图片、视频、字幕文本和 filter script 必须位于 job 工作目录。
 - 下载外部视频后重新 probe/规范化，不信任扩展名或响应声明。
 - 用户可控颜色、字体、位置、尺寸、时长先经过白名单或 clamp。
+- `draftTranscript` 属于不可信浏览器输入；段落、`words/asrWords` 的结构、数量、文本总量、有限区间和成对 source anchor 必须在进入后台任务前统一校验，旧请求可继续省略草稿字段。
 - 不允许输出路径逃逸 `DATA_DIR`，也不允许清理任意用户路径。
 
 ## 验证重点
@@ -52,6 +55,79 @@ x = clamp(main_w * center_x - overlay_w / 2, min_x, max_x)
 - Windows 长命令、缺失字体、取消、失败清理和音频规范化有回归测试。
 
 参考：`server/app.py` 的 `timeline_after_deletions`、`build_retained_transcript`、`render_*`；`tests/test_app.py` 的 cut boundary、art text、picture-in-picture 和 preview composition 用例。
+
+## 场景：实时艺术字草稿使用双时间坐标
+
+### 1. Scope / Trigger
+
+- 在未生成 `edited.mp4` 的文字剪辑草稿上生成全文艺术字或 AI 建议时，浏览器必须提交当前剪后 transcript 和时长，后端继续从原视频取帧。
+- 该契约跨越艺术字请求 schema、草稿校验、关键帧采样、AI 提示词和浏览器 overlay 确认；修改任一环节时都必须同时验证剪后时间与原片时间。
+
+### 2. Signatures
+
+- API：`POST /api/transcriptions/{job_id}/art-text/transcript-track`
+- 请求：`TranscriptArtTextTrackRequest(..., draftTranscript?: object, draftDuration?: number)`
+- API：`POST /api/transcriptions/{job_id}/art-text/suggestions`
+- 请求：`ArtTextSuggestionRequest(count, source="edited", existingOverlays=[], draftTranscript?: object, draftDuration?: number)`
+- 后端：`validate_live_art_transcript(draft_transcript, duration, source_duration=None)`
+- 后端：`select_art_frame_samples(transcript, duration, count) -> list[{mediaTime, displayTime}]`
+- 后端：`create_art_contact_sheet(input_path, output_dir, frame_samples)`
+
+### 3. Contracts
+
+- `draftTranscript.segments[].start/end`、嵌套 `words/asrWords[].start/end` 和 `draftDuration` 都是剪后时间；可选 `sourceStart/sourceEnd` 成对出现并表示原片锚点。
+- `draftTranscript` 存在时 `draftDuration` 必填。后端使用草稿 transcript 生成建议范围和提示词，但 `input_path` 仍指向原视频，不生成中间视频。
+- 每个关键帧样本都必须携带 `{mediaTime, displayTime}`：FFmpeg seek 只读 `mediaTime`，联系表标签和模型提示只读 `displayTime`。
+- 草稿最多 `1000` 个 segment、`50000` 个 `words/asrWords` 条目；segment 文本总量和词级文本总量分别不得超过 `50000` 字符。
+- 所有 edited/source 区间必须有限、非负且 `end > start`；edited 终点不得超过 `draftDuration + 0.01s`，source 终点不得超过原视频时长 `+0.01s`。
+- 旧客户端可同时省略 `draftTranscript/draftDuration`，此时沿用已生成 edit 或原片 transcript，并允许 `mediaTime === displayTime` 的单时间路径。
+- AI 返回和确认后的 overlay 的 `start/end` 始终是剪后时间；浏览器通过唯一 `MediaController` 补齐 `sourceStart/sourceEnd`，Store、预览和 compose 不得重新解释坐标。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 结果 |
+| --- | --- |
+| 只提交 `draftTranscript`，缺少 `draftDuration` | `400`，提示剪辑草稿缺少视频时长，不创建后台任务 |
+| segment 为空、非对象、无文字或超过 `1000` 个 | `400`，提示草稿文案格式无效或没有可用文案 |
+| `words/asrWords` 非数组、包含非对象或总数超过 `50000` | `400`，提示词级时间格式无效或词级文案过长 |
+| segment 或词级文本超过 `50000` 字符 | `400`，不截断后继续请求 AI |
+| edited/source 区间非有限、反向、越界 | `400`，提示草稿包含无效时间 |
+| 仅有一个 source anchor | `400`，提示源时间锚点不完整 |
+| 草稿字段全部省略 | 保持旧请求行为，读取 job 中既有 transcript/edit |
+| 草稿存在且 source anchor 有效 | 建议使用剪后范围，关键帧从对应原片时间提取 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：删除原片 `0-4.08s` 后，剪后 `3.21s` 的文字携带原片 `7.29s` 锚点；AI 提示显示 `3.21s`，FFmpeg 在 `7.29s` 附近取帧。
+- Base：未发生文字剪辑或旧客户端未提交草稿时，展示时间与取帧时间相同，现有结果保持兼容。
+- Bad：按剪后 `3.21s` 直接 seek 原片，或把原片 `7.29s` 写入建议 `start`，会造成画面分析和艺术字时间至少一侧错位。
+
+### 6. Tests Required
+
+- Schema/API：两个请求模型接受可选草稿字段；草稿与时长必须成套使用，旧请求继续通过。
+- 校验单元测试：覆盖 segment、`words/asrWords` 的结构、数量、文本长度、有限区间、越界区间和成对 source anchor。
+- 采样测试：断言 `{mediaTime, displayTime}` 同时存在，原片 seek 与剪后标签各自使用正确字段。
+- AI API：捕获后台任务输入、联系表样本和提示词，确认实时草稿替代 job 旧 transcript，但媒体路径仍为原视频。
+- 前端/浏览器：文字删除后无需生成中间视频即可请求、预览并确认艺术字；确认结果同时具有 edited range 和 source anchors。
+
+### 7. Wrong vs Correct
+
+```python
+# Wrong: 剪后秒数不能直接用于原片取帧。
+ffmpeg_seek = sample["displayTime"]
+
+# Correct: 媒体读取与用户可见时间显式分离。
+ffmpeg_seek = sample["mediaTime"]
+prompt_label = sample["displayTime"]
+```
+
+```javascript
+// Wrong: 只传 job 中的旧 transcript，AI 不知道当前文字删除结果。
+body = { count, existingOverlays };
+
+// Correct: 建议范围使用当前实时剪后草稿。
+body = { count, existingOverlays, draftTranscript, draftDuration };
+```
 
 ## 场景：文字草稿在预览前完成音频边界校准
 

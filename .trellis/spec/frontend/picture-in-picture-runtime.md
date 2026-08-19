@@ -23,7 +23,7 @@ sessionStorage[`editor-suite:project-draft:${jobId}`] = {
   schemaVersion: 2,
   jobId,
   serverVersion,
-  art: { source, overlays },
+  art: { source, overlays, suppressedOverlays },
   pip: { source, overlays },
   selection: { clipId } | null,
   savedAt,
@@ -39,7 +39,7 @@ sessionStorage[`editor-suite:project-draft:${jobId}`] = {
 - 图片或 ready video 在一次语义 command 中合并 asset 并启用 overlay；queued/processing video 只进入 assets，completed 后自动启用一次，failed 保留错误素材但不得进入 overlays。
 - 请求结果必须同时校验 lifecycle、job、source、effect token，并从最新 snapshot 按 asset id 合并；切换工具/job 后迟到响应为 no-op，不能覆盖用户已改的范围、位置、尺寸或启用状态。
 - 画中画宽度必须 finite 且 `>= EditorPipModel.MIN_WIDTH`（当前 15%），不设最大值。面板 number input 不含 `max`；公共 compositor、Store、草稿和后端共用相同最小值与中心裁切语义。
-- schema v2 不保存 assets；恢复前先从当前 job 建立注册表，再原子恢复 art+pip+selection。未知 asset、重复 id、disabled overlay、无效数值/范围/source 或非空未知 selection 使整份 v2 草稿失效。schema v1 继续只恢复 art，pip 保持服务端状态。
+- schema v2 不保存 assets；艺术字同时保存活动 `overlays` 和撤销剪辑所需的内部 `suppressedOverlays`。恢复前先从当前 job 建立注册表，再按当前 cut reconcile art 并原子恢复 art+pip+selection。未知 asset、跨两个艺术字集合的重复 id、disabled overlay、无效数值/范围/source 或非空未知 selection 使整份 v2 草稿失效。schema v1 继续只恢复 art，pip 保持服务端状态。
 - `/picture-in-picture` 只返回 307 到 `/?tool=pip`，保留 `job/source` 等 query、覆盖冲突 `tool` 并删除 `embedded`；目标页面必须激活 `#editorPipPanelRoot`，运行 DOM 中 iframe 数量为 0。
 - `picture-in-picture.html/js` 不存在。PipTool、公共预览、时间线和 compose 必须继续共享同一个 Store frame，禁止恢复第二个 video、storage、message 或生成 runtime。
 

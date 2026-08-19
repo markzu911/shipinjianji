@@ -194,6 +194,7 @@ EditorTimelineController.createController(options).render(frame) -> timelineDocu
 
 - 页面只创建一个绑定 `#cutPreviewVideo` 的 `MediaController`；它唯一拥有基础视频 `src/load()`、source/edited 时间转换和播放帧时钟。普通 revision、保存和工具切换只调用 `applyFrame` 的同源 no-op 路径，不得替换媒体节点或重新加载。
 - `PreviewCompositor`、`TimelineController` 和 compose 只消费同一 frame 的 `preview`、`timeline`、`composition`；三个公共 DOM 根必须暴露一致的 `data-project-revision` 和 `data-timing-revision`。
+- `frame.timeline` 始终保留完整 `cut/art/pip` 语义轨道；公共效果层只通过 `TimelineController` 的 `visibleKinds` 投影 `art/pip`。剪后文案只由 `#cutFrameTimelineText` 展示，禁止为了去重从 Store 删除 `cut` 轨或创建第二份 timeline document。
 - source mutation 只允许新 job 首次加载、显式清空或显式选择另一媒体。`setCutRanges()` 只更新时间映射，不修改 `src/currentTime/playback`。
 - 时间轴 `pointermove` 只更新 controller 内的临时 document；`pointerup` 从当前权威 `frame.timeline` 生成并提交一次语义事务；`pointercancel` 丢弃临时 document，不增加 revision/history，未选 clip 的 cancel 也不得为了 selection 单独提交。
 - art/pip range 由 TimelineController 在 pointerup 直接提交一个顶层语义事务；pointermove 只保留瞬时预览，不形成第二次 revision。非当前工具的 command 不得抢占全局 selection。
@@ -261,11 +262,12 @@ ArtTool.mount(root, services) -> {
 
 // EditorSuite owns storage; ArtTool must not read it.
 sessionStorage[`editor-suite:project-draft:${jobId}`] = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   jobId,
   serverVersion, // editor-art-base-v1:<domain fingerprint>
   revision,
-  art: { source, overlays },
+  art: { source, overlays, suppressedOverlays },
+  pip: { source, overlays },
   selection,
   savedAt,
 }
@@ -279,9 +281,13 @@ sessionStorage[`editor-suite:project-draft:${jobId}`] = {
 - Store 原子 `PROJECT_DRAFT_RESTORED` 仍用当前 Store `serverVersion` 防止 dispatch 期间 job 漂移；EditorSuite 在 dispatch 前校验 envelope 的领域指纹。
 - 带 `?job=<same>&tool=art` 的首次页面载入必须保留 art 工具；只有同一 document 真正切换到另一个 job 时才清除旧 `tool` 参数。
 - 模板 query 由 EditorSuite 解析后通过 services 注入；缺少/空 `templateSize` 必须保持 `null`，不得因 `Number(null)` 变成 20。无效 template 整体忽略，无效 font/color/size 按 catalog 和当前选中项安全回退。
-- 全文轨道、文案保存、位置预设和 AI 请求都必须带 AbortController 与 job/revision guard。旧请求只能清理自己的 request/busy 状态，不得取消或解锁同 scope 的新请求。
+- 全文轨道、位置预设和 AI 请求都必须带 AbortController 与 job/revision guard。旧请求只能清理自己的 request/busy 状态，不得取消或解锁同 scope 的新请求。
 - 时间范围命令必须在同一次 Store 提交中按旧/新区间等比重映射 `characterTimings`；不能只改 overlay/clip 的 `start/end`，否则草稿恢复与 compose 校验会把逐字时间判为越界。
 - 手动从文案段添加艺术字时，即使同一段被重复添加，confirmed overlay id 也必须保持唯一；待确认 AI 草稿只通过 PreviewCompositor 的瞬时预览层显示，切换工具、取消、确认和销毁都要清除，且不得进入 Store revision 或 compose DTO。
+- 实时 AI 建议提交当前 `draftTranscript/draftDuration`，并继续分析原视频：取帧使用原片 `mediaTime`，拼图标签、提示词和建议范围使用剪后 `displayTime`。旧请求没有草稿时沿用原媒体与单时间值路径；确认建议时由唯一 MediaController 为 overlay 补齐 `sourceStart/sourceEnd`。
+- “贴合匹配文案时间”按 `words -> asrWords -> segment` 逐字符建立时间单元，忽略空白与标点，枚举全部短语候选并稳定选择距离当前 overlay 开始时间最近的一处。返回范围使用首尾字符的剪后边界；source anchor 按实际字符边界在对应 item 的 source/edited 区间间映射，不能在已有非均匀 `characterTimings` 时重新按字符序号均分。
+- `CUT_TIMING_CHANGED` 必须在一次 Store transaction 内同步 cut、art、selection 和 timeline。全文轨道按最新剪后 transcript 的字符/word 边界删减和重定时；带 source anchor 的普通艺术字按保留原片范围重映射，完全落入删除区间时移入 `art.suppressedOverlays`；无可靠文案关联的自定义艺术字保持不变。
+- `suppressedOverlays` 是项目内部可逆状态，不进入 preview、公共效果时间轴或 compose DTO，但必须随 schema v2 草稿持久化。撤销文字删除或恢复旧草稿时重新 reconcile，使用稳定 overlay id 恢复；若 selection 指向被隐藏项，只能回退到同一 transcript track 中最近的活动 cue，否则清空。
 
 ### 4. Validation & Error Matrix
 
@@ -293,6 +299,8 @@ sessionStorage[`editor-suite:project-draft:${jobId}`] = {
 | 仅 cutDraft/root updatedAt 改变 | 指纹保持一致，恢复 overlays/selection/time |
 | 工具 deactivate/destroy/job 切换 | abort 当前请求；迟到响应不得 dispatch Store |
 | 旧请求在新请求之后返回 | 旧请求 no-op，不能清理新请求 token/timer/busy |
+| cut 删除完整 transcript cue/带锚点艺术字 | 从活动 overlays、preview、timeline、compose 移除，写入 `suppressedOverlays` |
+| 撤销上述 cut 或恢复早于当前 cut 的草稿 | 在同一 revision 内 reconcile 并用稳定 id 恢复/继续隐藏 |
 
 ### 5. Good / Base / Bad Cases
 
@@ -302,7 +310,7 @@ sessionStorage[`editor-suite:project-draft:${jobId}`] = {
 
 ### 6. Tests Required
 
-- Node/静态：ArtTool 不包含 storage/message/video/timeline store；重复 mount/destroy 可撤销；Store 原子恢复覆盖错误 job/version 和等价 no-op。
+- Node/静态：ArtTool 不包含 storage/message/video/timeline store；重复 mount/destroy 可撤销；Store 原子恢复覆盖错误 job/version、等价 no-op、cut-to-art 删减/撤销和陈旧草稿 reconcile。
 - 真实浏览器：text/style 一次 revision 且 timing 不变，range 一次 revision/timing；cutDraft 自动保存后 reload 仍恢复 art；`tool=art` 保留；媒体同页不发生 `src/load()`。
 - effect 竞态：让旧全文轨道请求忽略 abort 并迟到返回，断言旧响应 0 revision、0 overlay，新请求仍恰好提交 1 revision。
 - 历史 URL/模板兼容：307 后顶层 art root 可用，manual/全文轨道/无 selection/无效参数均按单次 handoff 契约运行，DOM 中 iframe 数量始终为 0。

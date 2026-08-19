@@ -97,6 +97,9 @@ window.EditorProjectStore.selectEditorFrame(snapshot) -> frame
 - 无 selection 后新增 manual 和全文轨道使用首选模板；无效 template/font/color/size 覆盖安全回退。
 - 文字保存与三工具切换保持 document/video/tool root identity，基础媒体 probe 的 `srcWrites/loadCalls` 都为 0。
 - pointercancel 无 revision，pointerup 单 revision；undo/redo、preview/timeline/compose revision 保持一致。
+- 公共文案轨只出现一次，效果层没有 `data-effect-kind="cut"`，但 Store frame 仍包含 `cut/art/pip`；art/pip clip 继续可选择和调整。
+- 艺术字顶层只保留“艺术字设置”和“AI 推荐”两个 tab，桌面保持单行；设置面板只提供“一键添加视频文案”，不重复文案编辑、保存、分段列表或选段添加。tab 与 panel 必须通过 `id`、`aria-controls`、`aria-labelledby` 双向关联，方向键/Home/End 可在两个 tab 间切换，隐藏 panel 不可聚焦；切换后仅重置 ArtTool 自身滚动，无 selection 时隐藏设置矩阵。画中画重绘只调整文案列表 `scrollTop`，选中项可见且外层 inspector 不移动。
+- AI 建议请求携带实时剪后草稿，确认后的 overlay 同时具有 edited range 和 source anchors；重复短语命中离当前 overlay 最近的字符级范围。
 
 ### 5. Wrong vs Correct
 

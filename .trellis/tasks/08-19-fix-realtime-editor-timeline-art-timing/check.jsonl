@@ -1,0 +1,9 @@
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"检查浏览器草稿、API、Store、时间轴、预览和 compose 的完整数据链。"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"检查单页唯一运行时、原子 frame 和效果时间轴没有第二 authority。"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"检查 tab、空状态、滚动、可访问性和 375px 响应式。"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"检查 source/edited 映射、实时草稿请求和媒体不重载。"}
+{"file":".trellis/spec/frontend/picture-in-picture-runtime.md","reason":"检查 PipTool selection 与列表可视状态一致。"}
+{"file":".trellis/spec/backend/media-and-timeline.md","reason":"检查可靠文字时间不被静音重排及双坐标契约。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"检查 API 兼容、有限区间和完整测试门禁。"}
+{"file":".trellis/spec/testing/index.md","reason":"执行聚焦、完整应用和静态契约测试。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"执行真实 Chromium 的唯一轨道、三工具和响应式验证。"}
