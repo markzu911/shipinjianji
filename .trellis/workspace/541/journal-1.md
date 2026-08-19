@@ -310,3 +310,25 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 15: 修复实时艺术字同步与面板回归
+
+**Date**: 2026-08-19
+**Task**: 修复实时艺术字同步与面板回归
+**Branch**: `develop`
+
+### Summary
+
+恢复艺术字最终版双页签与一键视频文案入口；在 CUT_TIMING_CHANGED 中原子同步全文及锚点艺术字，支持删除、隐藏、撤销和陈旧草稿恢复；补齐双时间坐标、AI 取帧和完整回归规范。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `5e1a593` | (see git log) |
+| `4c27fca` | (see git log) |
+
+### Status
+
+[OK] **Completed**
