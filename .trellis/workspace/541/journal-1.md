@@ -220,3 +220,26 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 11: 完成单页编辑器艺术字面板 B2
+
+**Date**: 2026-08-19
+**Task**: 完成单页编辑器艺术字面板 B2
+**Branch**: `develop`
+
+### Summary
+
+将艺术字 inspector 迁入顶层 ArtTool，共享 Store、媒体、预览、时间轴与 compose；补齐版本化草稿恢复、请求取消和 legacy fallback，并通过 221 项应用测试与 14 项浏览器工作流。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `3b39872` | (see git log) |
+| `63683a8` | (see git log) |
+| `46dddd0` | (see git log) |
+
+### Status
+
+[OK] **Completed**
