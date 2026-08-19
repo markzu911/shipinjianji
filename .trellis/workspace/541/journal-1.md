@@ -332,3 +332,25 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 16: 合并文案艺术字轨道设置
+
+**Date**: 2026-08-19
+**Task**: 合并文案艺术字轨道设置
+**Branch**: `develop`
+
+### Summary
+
+将同一文案艺术字轨道在 ArtTool 中合并为一个入口并统一修改共享样式，保留分段 cue 时间与渲染；补齐删除空状态、字段保真、静态与真实浏览器回归及 Trellis 契约。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `67a06e5` | (see git log) |
+| `a46d68c` | (see git log) |
+
+### Status
+
+[OK] **Completed**
