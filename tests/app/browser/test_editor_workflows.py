@@ -72,6 +72,76 @@ def base_media_mutations(page) -> dict[str, int]:
     return page.evaluate("window.__b1MediaMutationProbe")
 
 
+def test_transcription_completion_loads_and_plays_preview_without_reload(
+    browser_session,
+    seeded_editor_job,
+):
+    page = browser_session.page
+    job_url = (
+        f"{browser_session.base_url}/api/transcriptions/"
+        f"{seeded_editor_job.job_id}"
+    )
+    completed_job = page.request.get(job_url).json()
+    response_state = {"completed": False}
+
+    def fulfill_job(route) -> None:
+        payload = json.loads(json.dumps(completed_job))
+        if not response_state["completed"]:
+            payload.update(
+                status="transcribing",
+                stage="Transcribing",
+                progress=65,
+                duration=0,
+                result=None,
+            )
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(payload, ensure_ascii=False),
+        )
+
+    page.route(job_url, fulfill_job)
+    page.goto(f"{browser_session.base_url}/?job={seeded_editor_job.job_id}")
+    page.wait_for_function(
+        """() => window.EditorSuite?.projectSnapshot?.().project.job?.status
+          === 'transcribing'"""
+    )
+    video = page.locator("#cutPreviewVideo")
+    queued_media = video.evaluate(
+        """video => ({
+          src: video.getAttribute('src'),
+          currentSrc: video.currentSrc,
+          frameSource: window.EditorProjectStore.selectEditorFrame(
+            window.EditorSuite.projectSnapshot(),
+          ).media.sourceUrl,
+        })"""
+    )
+    assert queued_media == {"src": None, "currentSrc": "", "frameSource": ""}
+
+    install_base_media_mutation_probe(page)
+    response_state["completed"] = True
+    page.locator("#resultCard").wait_for(state="visible", timeout=10_000)
+    page.wait_for_function(
+        """() => {
+          const video = document.querySelector('#cutPreviewVideo');
+          return video?.readyState >= 1 && Number.isFinite(video.duration)
+            && video.duration > 0;
+        }"""
+    )
+    assert base_media_mutations(page) == {"srcWrites": 1, "loadCalls": 1}
+
+    page.locator("#cutPreviewPlay").click()
+    page.wait_for_function(
+        """() => {
+          const video = document.querySelector('#cutPreviewVideo');
+          return video && !video.paused && video.currentTime > 0.02;
+        }"""
+    )
+
+    page.evaluate("job => window.EditorSuite.update(job)", completed_job)
+    assert base_media_mutations(page) == {"srcWrites": 1, "loadCalls": 1}
+
+
 def install_template_catalog_revision_probe(page) -> None:
     page.add_init_script(
         """(() => {

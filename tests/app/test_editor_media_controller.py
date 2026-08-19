@@ -136,6 +136,88 @@ console.log(JSON.stringify({
     assert result["stateEvents"] >= 4
 
 
+def test_media_controller_retries_failed_same_key_without_reloading_healthy_media() -> None:
+    result = run_media_script(
+        r"""
+function createVideo() {
+  const listeners = new Map();
+  let source = '';
+  return {
+    NETWORK_NO_SOURCE: 3,
+    duration: 10,
+    currentTime: 0,
+    paused: true,
+    ended: false,
+    readyState: 0,
+    networkState: 2,
+    error: null,
+    dataset: {},
+    loadCount: 0,
+    srcWriteCount: 0,
+    get src() { return source; },
+    set src(value) { source = String(value); this.srcWriteCount += 1; },
+    get currentSrc() { return source; },
+    getAttribute(name) { return name === 'src' ? source || null : null; },
+    removeAttribute(name) { if (name === 'src') source = ''; },
+    load() { this.loadCount += 1; },
+    play() { this.paused = false; return Promise.resolve(); },
+    pause() { this.paused = true; },
+    addEventListener(type, callback) {
+      if (!listeners.has(type)) listeners.set(type, new Set());
+      listeners.get(type).add(callback);
+    },
+    removeEventListener(type, callback) { listeners.get(type)?.delete(callback); },
+    dispatch(type) { for (const callback of [...(listeners.get(type) || [])]) callback(); },
+  };
+}
+const video = createVideo();
+const controller = media.createController(video);
+const settings = { key: 'job-one:/video-one', sourceDuration: 10 };
+const firstLoad = controller.setSource('/video-one', settings);
+const loadingRepeat = controller.setSource('/video-one', settings);
+video.dispatch('loadstart');
+video.networkState = video.NETWORK_NO_SOURCE;
+const failedBeforeErrorEventRetry = controller.setSource('/video-one', settings);
+video.error = { code: 4 };
+video.networkState = video.NETWORK_NO_SOURCE;
+video.dispatch('error');
+video.error = null;
+video.networkState = 1;
+const failedAfterErrorEventRetry = controller.setSource('/video-one', settings);
+video.error = null;
+video.networkState = 1;
+video.readyState = 4;
+video.dispatch('loadedmetadata');
+video.currentTime = 4;
+video.paused = false;
+const healthyRepeat = controller.setSource('/video-one', settings);
+console.log(JSON.stringify({
+  firstLoad,
+  loadingRepeat,
+  failedBeforeErrorEventRetry,
+  failedAfterErrorEventRetry,
+  healthyRepeat,
+  loadCount: video.loadCount,
+  srcWriteCount: video.srcWriteCount,
+  currentTime: video.currentTime,
+  paused: video.paused,
+}));
+"""
+    )
+
+    assert result == {
+        "firstLoad": True,
+        "loadingRepeat": False,
+        "failedBeforeErrorEventRetry": True,
+        "failedAfterErrorEventRetry": True,
+        "healthyRepeat": False,
+        "loadCount": 3,
+        "srcWriteCount": 3,
+        "currentTime": 4,
+        "paused": False,
+    }
+
+
 def test_media_frame_clock_has_one_cancellable_generation_guarded_callback() -> None:
     result = run_media_script(
         r"""

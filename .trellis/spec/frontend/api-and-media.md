@@ -18,6 +18,8 @@
 
 - 原视频、剪辑版、艺术字版和画中画版都有独立 API；不要仅凭某个 DOM URL 推断语义。
 - 选择源时同时确定 transcript/time anchor；剪后源必须使用 retained transcript 或显式映射。
+- 受 job 状态保护的媒体只能在对应 API 可读后投影 source URL；处理中状态不得提前占用完成态的 source key。
+- 相同 source key 只有在媒体健康或仍处于有效加载中时才跳过 `load()`；`video.error`、已开始加载后的 `NETWORK_NO_SOURCE` 或错误事件必须允许重试。`src` 写入到 `loadstart` 之间的瞬时 `NETWORK_NO_SOURCE` 仍属于本次加载，不能据此重复重载。
 - Object URL 在替换/重置/卸载时 `URL.revokeObjectURL`。
 - 视频 metadata 未加载前不依赖 duration/dimensions；使用现有 wait helper 和错误事件。
 

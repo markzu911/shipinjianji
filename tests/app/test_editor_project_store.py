@@ -90,6 +90,32 @@ console.log(JSON.stringify({ first, same, second }));
     }
 
 
+def test_editor_project_store_only_selects_media_after_transcription_completes() -> None:
+    result = run_store_script(
+        r"""
+const store = projectStore.createStore({}, { timeline });
+function hydrate(status, result = null) {
+  store.dispatch({ type: 'projectHydrated', payload: { job: {
+    id: 'job-transition', status, duration: result ? 10 : 0, result,
+  } } });
+  return projectStore.selectEditorFrame(store.getState(), timeline).media.sourceUrl;
+}
+const queued = hydrate('queued');
+const transcribing = hydrate('transcribing');
+const completed = hydrate('completed', {
+  mediaDuration: 10, text: 'ready', segments: [], editableSegments: [],
+});
+console.log(JSON.stringify({ queued, transcribing, completed }));
+"""
+    )
+
+    assert result == {
+        "queued": "",
+        "transcribing": "",
+        "completed": "/api/transcriptions/job-transition/original-video",
+    }
+
+
 def test_editor_project_store_revision_matrix_and_text_only_merge() -> None:
     result = run_store_script(
         r"""

@@ -172,6 +172,9 @@
       let cutRanges = [];
       let cutRangeSignature = "";
       let configuredSourceDuration = 0;
+      let sourceLoadPending = false;
+      let sourceLoadStarted = false;
+      let sourceLoadFailed = false;
       let destroyed = false;
       const frameListeners = new Set();
       const stateListeners = new Set();
@@ -263,12 +266,25 @@
       });
 
       const stateEvents = [
-        "loadedmetadata", "durationchange", "play", "pause", "ended",
-        "seeking", "seeked", "emptied", "volumechange",
+        "loadstart", "loadedmetadata", "durationchange", "play", "pause", "ended",
+        "seeking", "seeked", "emptied", "error", "volumechange",
       ];
       const stateHandlers = new Map(
         stateEvents.map((eventName) => {
-          const handler = () => emitState(eventName);
+          const handler = () => {
+            if (eventName === "loadstart") {
+              sourceLoadStarted = true;
+            } else if (eventName === "loadedmetadata") {
+              sourceLoadPending = false;
+              sourceLoadStarted = false;
+              sourceLoadFailed = false;
+            } else if (eventName === "error") {
+              sourceLoadPending = false;
+              sourceLoadStarted = false;
+              sourceLoadFailed = true;
+            }
+            emitState(eventName);
+          };
           video.addEventListener(eventName, handler);
           return [eventName, handler];
         }),
@@ -284,12 +300,44 @@
         }
       }
 
+      function currentSourceNeedsRecovery() {
+        const networkNoSource = Number(video.NETWORK_NO_SOURCE ?? 3);
+        if (
+          sourceLoadFailed ||
+          Boolean(video.error)
+        ) {
+          return true;
+        }
+        if (
+          Number(video.networkState) === networkNoSource &&
+          (!sourceLoadPending || sourceLoadStarted)
+        ) {
+          return true;
+        }
+        if (sourceLoadPending) return false;
+        const hasAttachedSource = Boolean(
+          String(video.currentSrc || "").trim() ||
+          String(video.getAttribute?.("src") || "").trim(),
+        );
+        return Number(video.readyState) === 0 && !hasAttachedSource;
+      }
+
       function setSource(url, settings = {}) {
         if (destroyed) return false;
         const nextKey = String(settings.key || normalizedSource(url));
-        if (!settings.force && nextKey && nextKey === sourceKey) return false;
+        if (
+          !settings.force &&
+          nextKey &&
+          nextKey === sourceKey &&
+          !currentSourceNeedsRecovery()
+        ) {
+          return false;
+        }
         if (!url) return clearSource(settings);
         sourceKey = nextKey;
+        sourceLoadPending = true;
+        sourceLoadStarted = false;
+        sourceLoadFailed = false;
         configuredSourceDuration = Math.max(
           0,
           finiteNumber(settings.sourceDuration, configuredSourceDuration),
@@ -308,6 +356,9 @@
         if (!hasSource && !settings.force) return false;
         video.pause?.();
         sourceKey = "";
+        sourceLoadPending = false;
+        sourceLoadStarted = false;
+        sourceLoadFailed = false;
         configuredSourceDuration = 0;
         video.removeAttribute?.("src");
         video.load?.();

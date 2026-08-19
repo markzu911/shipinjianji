@@ -976,7 +976,7 @@
         timingRevision: state.timingRevision,
         media: {
           jobId: state.jobId,
-          sourceUrl: state.jobId
+          sourceUrl: state.jobId && state.project.job?.status === "completed"
             ? `/api/transcriptions/${encodeURIComponent(state.jobId)}/original-video`
             : "",
           sourceDuration: state.project.cut.sourceDuration,

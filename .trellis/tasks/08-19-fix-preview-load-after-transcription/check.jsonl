@@ -1,0 +1,5 @@
+{"file":".trellis/spec/frontend/index.md","reason":"按前端 Quality Check 验证实现。"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"检查媒体重试与避免重复 load 的行为。"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"检查统一媒体状态边界没有回退。"}
+{"file":".trellis/spec/testing/index.md","reason":"执行与变更风险匹配的测试。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"检查同页状态迁移的浏览器回归覆盖。"}
