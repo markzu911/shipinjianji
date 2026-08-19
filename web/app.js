@@ -1222,12 +1222,7 @@ async function saveSegmentText() {
     return;
   }
   const textSaveJobId = currentJobId;
-  const projectStoreEnabled = Boolean(
-    window.EditorSuite?.projectStoreEnabled?.(),
-  );
-  const textSaveEffect = projectStoreEnabled
-    ? window.EditorSuite.beginProjectEffect("transcript-save")
-    : null;
+  const textSaveEffect = window.EditorSuite.beginProjectEffect("transcript-save");
   setSegmentOperationBusy(true);
   try {
     const response = await fetch(
@@ -1254,38 +1249,35 @@ async function saveSegmentText() {
     renderCutSegments();
     renderCutTimelineTextSegments();
     updateSelectionSummary();
-    if (textSaveEffect) {
-      const readProject = async () => {
-        const jobResponse = await fetch(
-          `/api/transcriptions/${encodeURIComponent(textSaveJobId)}`,
-        );
-        const jobPayload = await jobResponse.json();
-        if (!jobResponse.ok) {
-          throw new Error(jobPayload.detail || "文字已保存，但同步项目状态失败。");
-        }
-        return jobPayload;
-      };
-      const jobPayload = await readProject();
-      let applied = window.EditorSuite.applyTranscriptTextEffect(
-        textSaveEffect,
-        jobPayload,
+    const readProject = async () => {
+      const jobResponse = await fetch(
+        `/api/transcriptions/${encodeURIComponent(textSaveJobId)}`,
       );
-      if (!applied.accepted) {
-        const refreshEffect = window.EditorSuite.beginProjectEffect(
-          "transcript-refresh",
-        );
-        const refreshedJob = await readProject();
-        applied = window.EditorSuite.applyTranscriptTextEffect(
-          refreshEffect,
-          refreshedJob,
-        );
+      const jobPayload = await jobResponse.json();
+      if (!jobResponse.ok) {
+        throw new Error(jobPayload.detail || "文字已保存，但同步项目状态失败。");
       }
-      if (!applied.accepted) {
-        throw new Error("文字已保存，但当前时间轴已变化，请稍后重试同步。");
-      }
-    } else {
-      broadcastTranscriptUpdated();
+      return jobPayload;
+    };
+    const jobPayload = await readProject();
+    let applied = window.EditorSuite.applyTranscriptTextEffect(
+      textSaveEffect,
+      jobPayload,
+    );
+    if (!applied.accepted) {
+      const refreshEffect = window.EditorSuite.beginProjectEffect(
+        "transcript-refresh",
+      );
+      const refreshedJob = await readProject();
+      applied = window.EditorSuite.applyTranscriptTextEffect(
+        refreshEffect,
+        refreshedJob,
+      );
     }
+    if (!applied.accepted) {
+      throw new Error("文字已保存，但当前时间轴已变化，请稍后重试同步。");
+    }
+    broadcastTranscriptUpdated();
     setSegmentOperationBusy(false);
     closeSegmentEditDialog();
     setSegmentStructureStatus("已保存这段文字，项目预览已同步。", "success");
@@ -4729,9 +4721,9 @@ function renderResult(job) {
   setOriginalSourceActionsAllowed(!job.edit?.status);
   generateCutButton.querySelector("span").textContent = "生成剪辑视频";
   skipToArtButton.href =
-    `/art-text?job=${encodeURIComponent(currentJobId)}&source=original`;
+    `/?job=${encodeURIComponent(currentJobId)}&source=original&tool=art`;
   directPipButton.href =
-    `/picture-in-picture?job=${encodeURIComponent(currentJobId)}&source=original`;
+    `/?job=${encodeURIComponent(currentJobId)}&source=original&tool=pip`;
   if (!cutMediaController()) {
     cutPreviewVideo.src =
       `/api/transcriptions/${encodeURIComponent(currentJobId)}/original-video`;
@@ -4846,9 +4838,9 @@ function renderEdit(edit) {
     editedVideo.src = source;
     downloadVideoButton.href = `${edit.outputUrl}?download=true`;
     continueArtButton.href =
-      `/art-text?job=${encodeURIComponent(currentJobId)}&source=edited`;
+      `/?job=${encodeURIComponent(currentJobId)}&source=edited&tool=art`;
     continuePipButton.href =
-      `/picture-in-picture?job=${encodeURIComponent(currentJobId)}&source=edited`;
+      `/?job=${encodeURIComponent(currentJobId)}&source=edited&tool=pip`;
     cutDuration.textContent = `成片 ${formatTime(edit.outputDuration)}`;
     cutResult.scrollIntoView({ behavior: "smooth", block: "start" });
     cutResultTitle.focus({ preventScroll: true });

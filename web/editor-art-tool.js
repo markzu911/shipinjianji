@@ -124,6 +124,12 @@
         pollTimer: null,
         catalogsLoaded: false,
         transcriptSignature: "",
+        pendingTemplateSelection:
+          services.initialTemplateSelection &&
+          typeof services.initialTemplateSelection === "object"
+            ? { ...services.initialTemplateSelection }
+            : null,
+        preferredTemplateSettings: null,
       };
 
       function snapshot() {
@@ -465,6 +471,67 @@
         replaceArt(overlays, { selection: `art:${selected.id}` });
       }
 
+      function normalizedTemplateSettings(selection, selected = selectedOverlay()) {
+        const template = state.templates.find(
+          (item) => String(item.id) === String(selection?.id || ""),
+        );
+        if (!template) return null;
+        const fallbackFont = state.fonts.some(
+          (font) => String(font.id) === String(selected?.font || ""),
+        )
+          ? String(selected.font)
+          : "bold";
+        const requestedFont = String(selection.font || "");
+        const requestedSize =
+          selection.fontSize === null ||
+          selection.fontSize === undefined ||
+          String(selection.fontSize).trim() === ""
+            ? Number.NaN
+            : Number(selection.fontSize);
+        return {
+          artStyle: String(template.id),
+          color: model.normalizeColor(selection.color, template.color),
+          strokeColor: model.normalizeColor(
+            selection.strokeColor,
+            template.strokeColor,
+          ),
+          font: state.fonts.some(
+            (font) => String(font.id) === requestedFont,
+          )
+            ? requestedFont
+            : fallbackFont,
+          fontSize: Number.isFinite(requestedSize)
+            ? Math.min(180, Math.max(20, Math.round(requestedSize)))
+            : Math.min(180, Math.max(20, Number(selected?.fontSize) || 54)),
+          ...model.normalizeTemplateEffects(template),
+        };
+      }
+
+      function consumeInitialTemplateSelection() {
+        const selection = state.pendingTemplateSelection;
+        state.pendingTemplateSelection = null;
+        if (!selection) return false;
+        const selected = selectedOverlay();
+        const settings = normalizedTemplateSettings(selection, selected);
+        if (!settings) return false;
+        state.preferredTemplateSettings = settings;
+        if (!selected) return true;
+        const overlays = model.updateOverlay(
+          art().overlays,
+          selected.id,
+          settings,
+          {
+            duration: duration(),
+            palettes: Object.fromEntries(
+              state.templates.map((item) => [item.id, item]),
+            ),
+            templateEffects: state.templateEffects,
+          },
+        );
+        replaceArt(overlays, { selection: `art:${selected.id}` });
+        return true;
+      }
+
       function addManual(text, range = null, extra = {}) {
         const current = art().overlays;
         if (current.filter((item) => !model.isTranscriptOverlay(item)).length >= model.MANUAL_OVERLAY_LIMIT) {
@@ -481,6 +548,7 @@
         const sourceStart = Number.isFinite(Number(extra.sourceStart)) ? Number(extra.sourceStart) : services.media.editedToSource?.(start, "start");
         const sourceEnd = Number.isFinite(Number(extra.sourceEnd)) ? Number(extra.sourceEnd) : services.media.editedToSource?.(end, "end");
         const overlay = model.createOverlay(current, {
+          ...state.preferredTemplateSettings,
           text: value, start, end, sourceStart, sourceEnd, ...extra,
         }, { duration: duration() });
         replaceArt([...current, overlay], { selection: `art:${overlay.id}` });
@@ -516,6 +584,7 @@
         }
         if (presetResult.status === "fulfilled") state.presets = presetResult.value.presets || [];
         state.requests.delete("catalogs");
+        consumeInitialTemplateSelection();
         renderAll();
       }
 
@@ -585,15 +654,26 @@
         const currentTranscript = transcript();
         if (!transcriptSegments().length || state.busyEffect) return;
         const selected = selectedOverlay();
-        const styleSeed = selected || {};
-        const palette = model.DEFAULT_PALETTES.impact;
+        const styleSeed = selected || state.preferredTemplateSettings || {};
+        const artStyle = styleSeed.artStyle || "impact";
+        const template = state.templates.find((item) => item.id === artStyle);
+        const palette = template || model.DEFAULT_PALETTES[artStyle] || model.DEFAULT_PALETTES.impact;
+        const effects = model.normalizeTemplateEffects({ ...palette, ...styleSeed });
         const style = {
           font: styleSeed.font || "bold", fontSize: styleSeed.fontSize || 54,
-          color: palette.color, strokeColor: palette.strokeColor,
-          strokeWidth: styleSeed.strokeWidth ?? 3, shadow: true, x: 0.5, y: 0.82,
+          color: styleSeed.color || palette.color,
+          strokeColor: styleSeed.strokeColor || palette.strokeColor,
+          strokeWidth: styleSeed.strokeWidth ?? 3,
+          shadow: styleSeed.shadow !== false,
+          x: 0.5, y: 0.82,
           direction: "horizontal", textAlign: "center", charsPerLine: 0,
-          letterSpacing: 0, lineSpacing: 0, artStyle: "impact",
-          ...state.templateEffects.impact,
+          letterSpacing: effects.letterSpacing,
+          lineSpacing: 0,
+          artStyle,
+          textColorMode: effects.textColorMode,
+          secondaryColor: effects.secondaryColor,
+          animation: effects.animation,
+          characterLayout: effects.characterLayout,
         };
         const request = beginRequest("track", "art-transcript-track");
         state.busyEffect = "track";
@@ -785,7 +865,11 @@
         segments.forEach((segment, index) => {
           if (!state.selectedSegments.has(segmentKey(segment, index))) return;
           if (overlays.filter((item) => !model.isTranscriptOverlay(item)).length >= model.MANUAL_OVERLAY_LIMIT) return;
-          const overlay = model.createOverlay(overlays, segment, { duration: duration() });
+          const overlay = model.createOverlay(
+            overlays,
+            { ...state.preferredTemplateSettings, ...segment },
+            { duration: duration() },
+          );
           overlays.push(overlay);
           first ||= overlay;
         });

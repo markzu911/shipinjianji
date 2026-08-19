@@ -915,27 +915,6 @@
       };
     }
 
-    function selectCutDraftMessage(state) {
-      return clone({
-        type: "editor-suite:cut-draft",
-        ...state.project.cut,
-        revision: state.revision,
-        timingRevision: state.timingRevision,
-        changeKind: "cut-timing",
-      });
-    }
-
-    function selectToolState(state, kind) {
-      if (!["art", "pip"].includes(kind)) return null;
-      return clone({
-        kind,
-        ...state.project[kind],
-        revision: state.revision,
-        timingRevision: state.timingRevision,
-        changeKind: "tool-state",
-      });
-    }
-
     function selectTimelineDocument(state, timelineApi = root.EditorTimeline) {
       return normalizeTimeline(state.project.timeline, timelineApi);
     }
@@ -1009,33 +988,16 @@
       });
     }
 
-    function selectIframeProjection(state, kind) {
-      if (!["art", "pip"].includes(kind)) return null;
-      return clone({
-        kind,
-        revision: state.revision,
-        timingRevision: state.timingRevision,
-        changeKind: "project-projection",
-        cutDraft: state.project.cut,
-        transcript: state.project.transcript,
-        editableSegments: state.project.editableSegments,
-        tool: state.project[kind],
-      });
-    }
-
     return {
       SCHEMA_VERSION,
       ACTIONS,
       createStore,
       cutTimingSignature,
       toolTimingSignature,
-      selectCutDraftMessage,
-      selectToolState,
       selectTimelineDocument,
       selectPreviewLayers,
       selectCompositionRequest,
       selectEditorFrame,
-      selectIframeProjection,
     };
   },
 );

@@ -7,13 +7,28 @@
   const initialRequestedJobId = new URLSearchParams(
     window.location.search,
   ).get("job");
-  const embeddedEditor = new URLSearchParams(window.location.search).get("embedded") === "1";
-  const toolLabels = {
-    cut: "视频剪辑",
-    art: "艺术字",
-    pip: "画中画",
-  };
+  const initialArtTemplateSelection = parseRequestedArtTemplate(
+    window.location.search,
+  );
   const PIP_MIN_WIDTH = window.EditorPipModel?.MIN_WIDTH || 0.15;
+
+  function parseRequestedArtTemplate(search) {
+    const query = new URLSearchParams(search || "");
+    const id = String(query.get("template") || "").trim();
+    if (!id) return null;
+    const sizeValue = query.get("templateSize");
+    const rawSize =
+      sizeValue === null || sizeValue.trim() === ""
+        ? null
+        : Number(sizeValue);
+    return Object.freeze({
+      id,
+      color: query.get("templateColor"),
+      strokeColor: query.get("templateStroke"),
+      font: query.get("templateFont"),
+      fontSize: Number.isFinite(rawSize) ? rawSize : null,
+    });
+  }
 
   root.innerHTML = `
     <nav class="editor-suite-nav" aria-label="统一视频编辑工作台">
@@ -113,10 +128,6 @@
   const generateButton = root.querySelector("[data-editor-suite-generate]");
   const downloadButton = root.querySelector("[data-editor-suite-download]");
   const saveButton = root.querySelector("[data-editor-suite-save]");
-  const frameEntries = new Map();
-  const toolStates = new Map();
-  const toolBridgeRevisions = new Map();
-  const desiredToolUrls = new Map();
   let activeTool = stage;
   let refreshToken = 0;
   let currentJob = null;
@@ -132,40 +143,10 @@
     duration: 0,
     transcript: null,
   };
-  let legacyTimelineDocument = window.EditorTimeline.normalizeDocument({
-    duration: 0,
-    tracks: [],
-  });
-  const projectStoreEnabled = Boolean(
-    stage === "cut" &&
-      window.EditorProjectStore &&
-      window.__EDITOR_PROJECT_STORE_ENABLED__ !== false,
+  const projectStore = window.EditorProjectStore.createStore(
+    { ui: { activeTool } },
+    { timeline: window.EditorTimeline },
   );
-  const projectStore = projectStoreEnabled
-    ? window.EditorProjectStore.createStore(
-        { ui: { activeTool } },
-        { timeline: window.EditorTimeline },
-      )
-    : null;
-  const topLevelArtEnabled = Boolean(
-    projectStoreEnabled &&
-      window.__EDITOR_ART_PANEL_ENABLED__ !== false &&
-      window.ArtTool &&
-      artPanelRoot,
-  );
-  const topLevelPipEnabled = Boolean(
-    projectStoreEnabled &&
-      window.__EDITOR_PIP_PANEL_ENABLED__ !== false &&
-      window.PipTool &&
-      window.EditorPipModel &&
-      pipPanelRoot,
-  );
-  function topLevelToolEnabled(kind) {
-    return kind === "art" ? topLevelArtEnabled : kind === "pip" ? topLevelPipEnabled : false;
-  }
-  function legacyToolNames() {
-    return ["art", "pip"].filter((kind) => !topLevelToolEnabled(kind));
-  }
   const mediaController = previewVideo && window.EditorMedia
     ? window.EditorMedia.createController(previewVideo)
     : null;
@@ -194,72 +175,15 @@
     : null;
   const editorDraftRestoredJobs = new Set();
   let suppressEditorDraftPersistence = false;
-  const artTool = topLevelArtEnabled
-    ? window.ArtTool.mount(artPanelRoot, createArtToolServices())
-    : null;
-  const pipTool = topLevelPipEnabled
-    ? window.PipTool.mount(pipPanelRoot, createPipToolServices())
-    : null;
+  const artTool = window.ArtTool.mount(artPanelRoot, createArtToolServices());
+  const pipTool = window.PipTool.mount(pipPanelRoot, createPipToolServices());
 
   function projectSnapshot() {
-    return projectStore?.getState() || null;
+    return projectStore.getState();
   }
 
   function syncProjectTimeline() {
-    if (!projectStoreEnabled) return legacyTimelineDocument;
     return projectStore.select(window.EditorProjectStore.selectTimelineDocument);
-  }
-
-  function bridgeRevision(value) {
-    if (value === undefined || value === null || value === "") return null;
-    const revision = Number(value);
-    return Number.isFinite(revision) ? revision : null;
-  }
-
-  function advanceToolBridgeRevision(name, revision) {
-    const normalized = bridgeRevision(revision);
-    if (!projectStoreEnabled || normalized === null) return;
-    toolBridgeRevisions.set(
-      name,
-      Math.max(toolBridgeRevisions.get(name) ?? -1, normalized),
-    );
-  }
-
-  function postProjectProjection(name, message) {
-    const entry = frameEntries.get(name);
-    if (!entry?.frame?.contentWindow) return;
-    advanceToolBridgeRevision(name, message?.revision);
-    entry.frame.contentWindow.postMessage(message, window.location.origin);
-  }
-
-  function acknowledgeToolProjection(name, state = projectSnapshot()) {
-    const entry = frameEntries.get(name);
-    if (!state || !entry?.frame?.contentWindow) return;
-    entry.frame.contentWindow.postMessage({
-      type: "editor-suite:project-ack",
-      kind: name,
-      revision: state.revision,
-      timingRevision: state.timingRevision,
-      changeKind: "tool-state-ack",
-    }, window.location.origin);
-  }
-
-  function postTranscriptTextProjection(name, state = projectSnapshot()) {
-    if (!state) return;
-    postProjectProjection(
-      name,
-      {
-        type: "editor-suite:transcript-text",
-        kind: name,
-        transcript:
-          state.project.cut.transcript || state.project.transcript,
-        editableSegments: state.project.editableSegments,
-        art: state.project.art,
-        revision: state.revision,
-        timingRevision: state.timingRevision,
-        changeKind: "transcript-text",
-      },
-    );
   }
 
   function editorDraftKey(jobId) {
@@ -377,7 +301,6 @@
 
   function restoreEditorDraft(state) {
     if (
-      (!topLevelArtEnabled && !topLevelPipEnabled) ||
       !state?.jobId ||
       editorDraftRestoredJobs.has(state.jobId)
     ) {
@@ -650,10 +573,10 @@
     return {
       project: {
         snapshot: projectSnapshot,
-        subscribe: (listener) => projectStore?.subscribe(listener) || (() => {}),
-        dispatch: (action) => projectStore?.dispatch(action),
-        beginEffect: (scope) => projectStore?.beginEffect(scope) || null,
-        isCurrentEffect: (token) => projectStore?.isCurrentEffect(token) || false,
+        subscribe: (listener) => projectStore.subscribe(listener),
+        dispatch: (action) => projectStore.dispatch(action),
+        beginEffect: (scope) => projectStore.beginEffect(scope),
+        isCurrentEffect: (token) => projectStore.isCurrentEffect(token),
       },
       media: {
         currentEditedTime: workspaceCurrentTime,
@@ -679,6 +602,7 @@
         confirm: (options) => window.appConfirm(options),
         generation: window.appGeneration,
       },
+      initialTemplateSelection: initialArtTemplateSelection,
     };
   }
 
@@ -780,9 +704,9 @@
     return {
       project: {
         snapshot: projectSnapshot,
-        subscribe: (listener) => projectStore?.subscribe(listener) || (() => {}),
-        beginEffect: (scope) => projectStore?.beginEffect(scope) || null,
-        isCurrentEffect: (token) => projectStore?.isCurrentEffect(token) || false,
+        subscribe: (listener) => projectStore.subscribe(listener),
+        beginEffect: (scope) => projectStore.beginEffect(scope),
+        isCurrentEffect: (token) => projectStore.isCurrentEffect(token),
       },
       media: {
         currentEditedTime: workspaceCurrentTime,
@@ -806,46 +730,13 @@
     };
   }
 
-  const unsubscribeProjectStore = projectStore?.subscribe((next, previous, action) => {
+  const unsubscribeProjectStore = projectStore.subscribe((next, previous, action) => {
     renderEditorFrame(next);
-    if (action.type === window.EditorProjectStore.ACTIONS.TRANSCRIPT_TEXT_CHANGED) {
-      for (const name of legacyToolNames()) {
-        postTranscriptTextProjection(name, next);
-      }
-    }
     if (next.ui.activeTool !== previous.ui.activeTool) {
       activeTool = next.ui.activeTool;
     }
-    if (topLevelArtEnabled || topLevelPipEnabled) persistEditorDraft(next, action);
-  }) || (() => {});
-
-  function syncToolTimeline(kind, timeline, options = {}) {
-    if (!timeline || !Array.isArray(timeline.tracks)) return;
-    const duration = Math.max(
-      legacyTimelineDocument.duration,
-      Number(timeline.duration) || 0,
-    );
-    const selection =
-      options.selection !== undefined
-        ? options.selection
-        : kind === activeTool
-          ? timeline.selection?.clipId || null
-          : undefined;
-    legacyTimelineDocument = window.EditorTimeline.normalizeDocument({
-      ...legacyTimelineDocument,
-      duration,
-      tracks: [
-        ...legacyTimelineDocument.tracks.filter((track) => track.kind !== kind),
-        ...timeline.tracks.filter((track) => track.kind === kind),
-      ],
-      selection: selection === undefined
-        ? legacyTimelineDocument.selection
-        : selection
-          ? { clipId: String(selection) }
-          : null,
-    });
-    renderEditorFrame();
-  }
+    persistEditorDraft(next, action);
+  });
 
   function supportsInlineWorkspace() {
     return Boolean(
@@ -880,7 +771,6 @@
     tool.href = enabled ? href : "#";
     tool.setAttribute("aria-disabled", String(!enabled));
     tool.tabIndex = enabled ? 0 : -1;
-    if (name !== "cut" && enabled) desiredToolUrls.set(name, href);
   }
 
   function setToolState(name, label, complete = false) {
@@ -953,12 +843,8 @@
     }
     updateDouyinBaseVideo();
     window.dispatchEvent(new Event("resize"));
-    if (projectStoreEnabled) {
-      if (currentEditorFrame) previewCompositor?.render(currentEditorFrame);
-    } else {
-      renderMirroredPreview();
-    }
-    syncMirroredPlayback();
+    if (currentEditorFrame) previewCompositor?.render(currentEditorFrame);
+    syncDouyinBasePlayback();
   }
 
   function editedDouyinVideoUrl() {
@@ -1042,53 +928,8 @@
     }
   }
 
-  function previewCompositionState() {
-    if (projectStoreEnabled) {
-      const request = projectStore.select(
-        window.EditorProjectStore.selectCompositionRequest,
-      );
-      return {
-        ranges: request.ranges,
-        art: {
-          source: request.artSource,
-          overlays: request.artOverlays,
-        },
-        pictureInPicture: {
-          source: request.pictureInPictureSource,
-          overlays: request.pictureInPictureOverlays,
-        },
-      };
-    }
-    const ranges = cutDraftActive
-      ? cutDraftState.ranges
-      : currentJob?.edit?.status === "completed"
-        ? currentJob.edit.requestedRanges || currentJob.edit.ranges || []
-        : [];
-    const art = toolStates.get("art") || (
-      currentJob?.art?.overlays
-        ? {
-            source: currentJob.art.source || "original",
-            overlays: currentJob.art.overlays,
-          }
-        : { overlays: [] }
-    );
-    const pictureInPicture = toolStates.get("pip") || (
-      currentJob?.pictureInPicture?.overlays
-        ? {
-            source: currentJob.pictureInPicture.source || "original",
-            overlays: currentJob.pictureInPicture.overlays,
-          }
-        : { overlays: [] }
-    );
-    return {
-      ranges: Array.isArray(ranges) ? ranges : [],
-      art,
-      pictureInPicture,
-    };
-  }
-
   function selectCurrentProjectFrame(state = projectSnapshot()) {
-    if (!projectStoreEnabled || !state) return null;
+    if (!state) return null;
     return window.EditorProjectStore.selectEditorFrame(
       state,
       window.EditorTimeline,
@@ -1097,19 +938,7 @@
 
   function compositionRequest() {
     const frame = selectCurrentProjectFrame();
-    if (frame) return frame.composition;
-    const composition = previewCompositionState();
-    return {
-      target: "all",
-      ranges: composition.ranges,
-      artOverlays: composition.art?.overlays || [],
-      artSource: composition.art?.source || "original",
-      pictureInPictureOverlays:
-        composition.pictureInPicture?.overlays || [],
-      pictureInPictureSource:
-        composition.pictureInPicture?.source || "original",
-      historyName: null,
-    };
+    return frame?.composition || null;
   }
 
   function stableValue(value) {
@@ -1279,7 +1108,7 @@
       syncGenerationButton();
       return;
     }
-    const request = frame?.composition || compositionRequest();
+    const request = frame.composition;
     generateButton.disabled = true;
     generateButton.classList.add("is-busy");
     status.textContent = "正在创建当前预览合成任务…";
@@ -1366,7 +1195,7 @@
           videoUrl: outputUrl,
           downloadUrl: outputUrl ? `${outputUrl}?download=true` : null,
           duration: formatGenerationDuration(composition.outputDuration),
-          redirectOnClose: embeddedEditor ? null : "/",
+          redirectOnClose: "/",
         });
         return;
       }
@@ -1402,100 +1231,17 @@
     try {
       const url = new URL(href, window.location.href);
       if (url.origin !== window.location.origin) return "";
-      if (url.pathname === "/art-text") return "art";
-      if (url.pathname === "/picture-in-picture") return "pip";
-      if (url.pathname === "/") return "cut";
+      if (url.pathname !== "/") return "";
+      const tool = url.searchParams.get("tool");
+      return ["art", "pip"].includes(tool) ? tool : "cut";
     } catch {
       return "";
     }
     return "";
   }
 
-  function embeddedUrl(href) {
-    const url = new URL(href, window.location.href);
-    url.searchParams.set("embedded", "1");
-    return `${url.pathname}${url.search}`;
-  }
-
-  function normalizedToolHref(href) {
-    const url = new URL(href, window.location.href);
-    url.searchParams.delete("embedded");
-    url.searchParams.sort();
-    return `${url.pathname}${url.search}`;
-  }
-
   function workspaceCurrentTime() {
     return mediaController?.currentEditedTime() || 0;
-  }
-
-  function workspaceSourceTime(editedTime) {
-    return mediaController?.editedToSource(editedTime) || 0;
-  }
-
-  function syncFrameCutDraft(name) {
-    const message = projectStoreEnabled
-      ? projectStore.select(window.EditorProjectStore.selectCutDraftMessage)
-      : {
-          type: "editor-suite:cut-draft",
-          ...cutDraftState,
-        };
-    postProjectProjection(name, message);
-  }
-
-  function syncFrameTime(name = activeTool) {
-    const entry = frameEntries.get(name);
-    if (!entry?.frame?.contentWindow || !mediaController) return;
-    entry.frame.contentWindow.postMessage(
-      {
-        type: "editor-suite:sync-time",
-        currentTime: workspaceCurrentTime(),
-        playing: !mediaController.video().paused,
-      },
-      window.location.origin,
-    );
-  }
-
-  function createToolFrame(name, href) {
-    const toolHref = normalizedToolHref(href);
-    const panel = document.createElement("section");
-    panel.className = "editor-suite-tool-panel is-loading";
-    panel.dataset.editorSuitePanel = name;
-    panel.setAttribute("role", "tabpanel");
-    panel.setAttribute("aria-label", `${toolLabels[name]}设置`);
-    panel.setAttribute("aria-hidden", "true");
-    panel.setAttribute("inert", "");
-
-    const frame = document.createElement("iframe");
-    frame.className = "editor-suite-tool-frame";
-    frame.title = `${toolLabels[name]}设置`;
-    frame.loading = "eager";
-    frame.dataset.toolHref = toolHref;
-    frame.src = embeddedUrl(toolHref);
-    frame.addEventListener("load", () => {
-      panel.classList.remove("is-loading");
-      syncFrameCutDraft(name);
-      if (projectStoreEnabled) postTranscriptTextProjection(name);
-      syncFrameTime(name);
-    });
-    panel.append(frame);
-    inspectorHost.append(panel);
-    const entry = { frame, panel };
-    frameEntries.set(name, entry);
-    return entry;
-  }
-
-  function ensureToolFrame(name, href) {
-    const toolHref = normalizedToolHref(href);
-    const current = frameEntries.get(name);
-    if (!current) return createToolFrame(name, toolHref);
-    if (current.frame.dataset.toolHref !== toolHref) {
-      current.panel.classList.add("is-loading");
-      current.frame.dataset.toolHref = toolHref;
-      current.frame.src = embeddedUrl(toolHref);
-      toolStates.delete(name);
-      syncGenerationButton();
-    }
-    return current;
   }
 
   function updateBrowserTool(name, replace = false) {
@@ -1507,39 +1253,10 @@
     window.history[method]({ ...(window.history.state || {}), editorTool: name }, "", url);
   }
 
-  function syncMirroredPlayback() {
-    syncDouyinBasePlayback();
-  }
-
-  function fallbackEditorFrame() {
-    const composition = compositionRequest();
-    return {
-      revision: 0,
-      timingRevision: 0,
-      media: {
-        jobId: String(currentJob?.id || ""),
-        sourceUrl: currentJob?.id
-          ? `/api/transcriptions/${encodeURIComponent(currentJob.id)}/original-video`
-          : "",
-        sourceDuration: Math.max(
-          0,
-          Number(cutDraftState.sourceDuration || currentJob?.duration) || 0,
-        ),
-        cutRanges: composition.ranges,
-      },
-      preview: {
-        art: toolStates.get("art") || { source: "original", overlays: [], assets: [] },
-        pip: toolStates.get("pip") || { source: "original", overlays: [], assets: [] },
-        selection: legacyTimelineDocument.selection,
-      },
-      timeline: legacyTimelineDocument,
-      composition,
-    };
-  }
-
   function renderEditorFrame(state = projectSnapshot()) {
     if (!mediaController) return null;
-    const nextFrame = selectCurrentProjectFrame(state) || fallbackEditorFrame();
+    const nextFrame = selectCurrentProjectFrame(state);
+    if (!nextFrame) return null;
     currentEditorFrame = nextFrame;
     mediaController.applyFrame(nextFrame);
     previewCompositor?.render(nextFrame);
@@ -1556,14 +1273,6 @@
     return nextFrame;
   }
 
-  function renderMirroredPreview() {
-    return renderEditorFrame();
-  }
-
-  function renderMirroredTimeline() {
-    return renderEditorFrame();
-  }
-
   function semanticClipDetails(value = {}) {
     const clip = value.clip || null;
     const kind = String(value.kind || clip?.kind || value.track?.kind || "");
@@ -1577,24 +1286,12 @@
     if (!details.clipId || !["cut", "art", "pip"].includes(details.kind)) {
       return false;
     }
-    const result = projectStore?.dispatch({
+    const result = projectStore.dispatch({
       type: window.EditorProjectStore.ACTIONS.SELECTION_CHANGED,
       payload: { selection: { clipId: details.clipId } },
-    }) || { accepted: true };
+    });
     if (["art", "pip"].includes(details.kind)) {
-      openTool(details.kind, desiredToolUrls.get(details.kind));
-      if (!topLevelToolEnabled(details.kind)) {
-        acknowledgeToolProjection(details.kind);
-        postProjectProjection(details.kind, {
-          type: "editor-suite:timeline-action",
-          action: "select",
-          kind: details.kind,
-          clipId: details.clipId,
-          sourceId: details.sourceId,
-          currentTime: details.clip?.start ?? workspaceCurrentTime(),
-          revision: projectSnapshot()?.revision,
-        });
-      }
+      openTool(details.kind);
     }
     return result;
   }
@@ -1612,7 +1309,7 @@
           sourceEnd: mediaController.editedToSource(transaction.end, "end"),
         }
       : transaction;
-    const result = projectStore?.dispatch(
+    const result = projectStore.dispatch(
       transaction.kind === "cut" && cutProjection
         ? {
             type: window.EditorProjectStore.ACTIONS.CUT_TIMING_CHANGED,
@@ -1622,36 +1319,7 @@
             type: window.EditorProjectStore.ACTIONS.TIMELINE_CLIP_RANGE_CHANGED,
             payload: committedTransaction,
           },
-    ) || { accepted: true };
-    if (
-      result.accepted &&
-      ["art", "pip"].includes(transaction.kind) &&
-      !topLevelToolEnabled(transaction.kind)
-    ) {
-      acknowledgeToolProjection(transaction.kind);
-      postProjectProjection(transaction.kind, {
-        type: "editor-suite:timeline-action",
-        action: "set-range",
-        kind: transaction.kind,
-        clipId: transaction.clipId,
-        sourceId: transaction.sourceId,
-        start: transaction.start,
-        end: transaction.end,
-        currentTime: transaction.start,
-        revision: result.revision,
-      });
-      postProjectProjection(transaction.kind, {
-        type: "editor-suite:timeline-action",
-        action: "commit",
-        kind: transaction.kind,
-        clipId: transaction.clipId,
-        sourceId: transaction.sourceId,
-        start: transaction.start,
-        end: transaction.end,
-        currentTime: transaction.start,
-        revision: result.revision,
-      });
-    }
+    );
     return result;
   }
 
@@ -1663,7 +1331,7 @@
     return false;
   }
 
-  function commitPreviewPatch(value, patch, messageType) {
+  function commitPreviewPatch(value, patch) {
     const kind = String(value?.kind || "");
     const id = String(value?.id || "");
     if (!projectStore || !["art", "pip"].includes(kind) || !id) return false;
@@ -1690,23 +1358,6 @@
         : window.EditorProjectStore.ACTIONS.PIP_STATE_CHANGED,
       payload: { ...tool, overlays },
     });
-    if (!result.accepted) return result;
-    if (!topLevelToolEnabled(kind)) {
-      acknowledgeToolProjection(kind);
-      postProjectProjection(kind, {
-        type: messageType,
-        kind,
-        id,
-        ...patch,
-        revision: result.revision,
-      });
-      postProjectProjection(kind, {
-        type: "editor-suite:move-finish",
-        kind,
-        id,
-        revision: result.revision,
-      });
-    }
     return result;
   }
 
@@ -1714,7 +1365,6 @@
     return commitPreviewPatch(
       value,
       { x: Number(value.x), y: Number(value.y) },
-      "editor-suite:move-effect",
     );
   }
 
@@ -1724,7 +1374,6 @@
     return commitPreviewPatch(
       value,
       { width },
-      "editor-suite:resize-effect",
     );
   }
 
@@ -1736,19 +1385,14 @@
     }
     const isCut = activeTool === "cut";
     cutPanelStack.hidden = !isCut;
+    cutPanelStack.toggleAttribute("inert", !isCut);
     inspectorHost.hidden = false;
     inspectorHost.classList.toggle("is-background", isCut);
     inspectorHost.setAttribute("aria-hidden", String(isCut));
     inspector.dataset.activeTool = activeTool;
     document.body.dataset.activeEditorTool = activeTool;
-    for (const [name, entry] of frameEntries) {
-      const selected = !isCut && name === activeTool;
-      entry.panel.classList.toggle("is-active", selected);
-      entry.panel.setAttribute("aria-hidden", String(!selected));
-      entry.panel.toggleAttribute("inert", !selected);
-    }
     if (artPanelRoot) {
-      const selected = !isCut && activeTool === "art" && topLevelArtEnabled;
+      const selected = !isCut && activeTool === "art";
       artPanelRoot.classList.toggle("is-active", selected);
       artPanelRoot.setAttribute("aria-hidden", String(!selected));
       artPanelRoot.toggleAttribute("inert", !selected);
@@ -1756,23 +1400,16 @@
       else artTool?.deactivate();
     }
     if (pipPanelRoot) {
-      const selected = !isCut && activeTool === "pip" && topLevelPipEnabled;
+      const selected = !isCut && activeTool === "pip";
       pipPanelRoot.classList.toggle("is-active", selected);
       pipPanelRoot.setAttribute("aria-hidden", String(!selected));
       pipPanelRoot.toggleAttribute("inert", !selected);
       if (selected) pipTool?.activate();
       else pipTool?.deactivate();
     }
-    if (!projectStoreEnabled) {
-      renderMirroredPreview();
-      renderMirroredTimeline();
-    }
     updateActiveTool();
     syncGenerationButton();
     syncSaveButton();
-    if (!isCut && !topLevelToolEnabled(activeTool)) {
-      window.requestAnimationFrame(() => syncFrameTime(activeTool));
-    }
   }
 
   function openTool(name, href = "", options = {}) {
@@ -1780,17 +1417,10 @@
     const tool = tools.get(name);
     if (tool.getAttribute("aria-disabled") === "true") return false;
     if (!supportsInlineWorkspace()) {
-      if (href && !options.fromNavigation) window.location.href = href;
       return false;
-    }
-    if (name !== "cut" && !topLevelToolEnabled(name)) {
-      const targetHref = href || desiredToolUrls.get(name) || tool.href;
-      if (!targetHref || targetHref === "#") return false;
-      ensureToolFrame(name, targetHref);
     }
     if (
       name === "art" &&
-      topLevelArtEnabled &&
       !String(projectSnapshot()?.project.timeline.selection?.clipId || "").startsWith("art:")
     ) {
       const firstArt = projectSnapshot()?.project.art.overlays[0];
@@ -1798,14 +1428,13 @@
     }
     if (
       name === "pip" &&
-      topLevelPipEnabled &&
       !String(projectSnapshot()?.project.timeline.selection?.clipId || "").startsWith("pip:")
     ) {
       const firstPip = projectSnapshot()?.project.pip.overlays[0];
       if (firstPip) selectPip(firstPip.assetId || firstPip.id);
     }
     activeTool = name;
-    projectStore?.dispatch({
+    projectStore.dispatch({
       type: window.EditorProjectStore.ACTIONS.ACTIVE_TOOL_CHANGED,
       payload: { tool: name },
     });
@@ -1836,21 +1465,15 @@
 
     if (options.hydrateProject !== false) {
       suppressEditorDraftPersistence = true;
-      projectStore?.dispatch({
+      projectStore.dispatch({
         type: window.EditorProjectStore.ACTIONS.PROJECT_HYDRATED,
         payload: { job, preserveLocalTools: true },
       });
-      if (projectStoreEnabled) restoreEditorDraft(projectSnapshot());
+      restoreEditorDraft(projectSnapshot());
       suppressEditorDraftPersistence = false;
     }
     const jobChanged = job.id !== previousJobId;
     previousJobId = job.id;
-    if (jobChanged && !projectStoreEnabled) {
-      legacyTimelineDocument = window.EditorTimeline.normalizeDocument({
-        duration: Number(job.duration) || 0,
-        tracks: [],
-      });
-    }
     if (
       jobChanged &&
       stage === "cut" &&
@@ -1897,12 +1520,12 @@
     setToolLink("cut", `/?job=${encodedJobId}`, true);
     setToolLink(
       "art",
-      `/art-text?job=${encodedJobId}&source=${artSource}`,
+      `/?job=${encodedJobId}&source=${artSource}&tool=art`,
       downstreamReady,
     );
     setToolLink(
       "pip",
-      `/picture-in-picture?job=${encodedJobId}&source=${pipSource}`,
+      `/?job=${encodedJobId}&source=${pipSource}&tool=pip`,
       downstreamReady,
     );
     setDouyinPreviewAvailable(ready);
@@ -1966,24 +1589,9 @@
     syncGenerationButton();
 
     if (supportsInlineWorkspace()) {
-      const artHref = desiredToolUrls.get("art");
-      if (
-        !topLevelArtEnabled &&
-        artHref &&
-        tools.get("art")?.getAttribute("aria-disabled") !== "true"
-      ) {
-        ensureToolFrame("art", artHref);
-      }
-      for (const name of legacyToolNames()) {
-        const entry = frameEntries.get(name);
-        const href = desiredToolUrls.get(name);
-        if (entry && href && entry.frame.dataset.toolHref !== href) {
-          ensureToolFrame(name, href);
-        }
-      }
       const requestedTool = new URLSearchParams(window.location.search).get("tool");
       if (["art", "pip"].includes(requestedTool) && tools.get(requestedTool)?.getAttribute("aria-disabled") !== "true") {
-        openTool(requestedTool, desiredToolUrls.get(requestedTool), {
+        openTool(requestedTool, tools.get(requestedTool)?.href, {
           skipHistory: true,
         });
       } else {
@@ -2040,76 +1648,50 @@
       duration: Math.max(0, Number(payload.duration) || 0),
       transcript: payload.transcript || null,
     };
-    const previousTimingRevision = projectSnapshot()?.timingRevision ?? -1;
-    const dispatchResult = projectStore?.dispatch({
+    projectStore.dispatch({
       type: window.EditorProjectStore.ACTIONS.CUT_TIMING_CHANGED,
       payload: {
         cut: nextCutDraftState,
         timeline: payload.timeline || null,
       },
     });
-    cutDraftState = projectStoreEnabled
-      ? projectSnapshot().project.cut
-      : nextCutDraftState;
+    cutDraftState = projectSnapshot().project.cut;
     cutDraftActive = cutDraftState.active;
     updateDouyinBaseVideo();
-    const timingChanged = projectStoreEnabled
-      ? dispatchResult?.accepted &&
-        projectSnapshot().timingRevision !== previousTimingRevision
-      : true;
-    if (timingChanged) {
-      for (const name of legacyToolNames()) {
-        syncFrameCutDraft(name);
-      }
-    }
     if (currentJob) renderJobState(currentJob);
     else syncGenerationButton();
   }
 
   function setTimelineTracks(kind, tracks, options = {}) {
-    if (projectStoreEnabled) {
-      const timeline = {
-        duration: Math.max(0, Number(options.duration) || 0),
-        tracks: Array.isArray(tracks) ? tracks : [],
-        selection: options.selection
-          ? { clipId: String(options.selection) }
-          : null,
-      };
-      if (kind === "cut") {
-        projectStore.dispatch({
-          type: window.EditorProjectStore.ACTIONS.CUT_TIMING_CHANGED,
-          payload: {
-            cut: projectSnapshot().project.cut,
-            timeline,
-          },
-        });
-      } else if (["art", "pip"].includes(kind)) {
-        const currentTool = projectSnapshot().project[kind];
-        projectStore.dispatch({
-          type:
-            kind === "art"
-              ? window.EditorProjectStore.ACTIONS.ART_STATE_CHANGED
-              : window.EditorProjectStore.ACTIONS.PIP_STATE_CHANGED,
-          payload: {
-            ...currentTool,
-            timeline,
-          },
-        });
-      }
-      return syncProjectTimeline();
+    const timeline = {
+      duration: Math.max(0, Number(options.duration) || 0),
+      tracks: Array.isArray(tracks) ? tracks : [],
+      selection: options.selection
+        ? { clipId: String(options.selection) }
+        : null,
+    };
+    if (kind === "cut") {
+      projectStore.dispatch({
+        type: window.EditorProjectStore.ACTIONS.CUT_TIMING_CHANGED,
+        payload: {
+          cut: projectSnapshot().project.cut,
+          timeline,
+        },
+      });
+    } else if (["art", "pip"].includes(kind)) {
+      const currentTool = projectSnapshot().project[kind];
+      projectStore.dispatch({
+        type:
+          kind === "art"
+            ? window.EditorProjectStore.ACTIONS.ART_STATE_CHANGED
+            : window.EditorProjectStore.ACTIONS.PIP_STATE_CHANGED,
+        payload: {
+          ...currentTool,
+          timeline,
+        },
+      });
     }
-    syncToolTimeline(
-      kind,
-      {
-        duration: Math.max(0, Number(options.duration) || 0),
-        tracks: Array.isArray(tracks) ? tracks : [],
-        selection: options.selection
-          ? { clipId: String(options.selection) }
-          : null,
-      },
-      { selection: options.selection || null },
-    );
-    return legacyTimelineDocument;
+    return syncProjectTimeline();
   }
 
   douyinPreviewToggle?.addEventListener("click", () => {
@@ -2118,22 +1700,9 @@
 
   for (const [name, tool] of tools) {
     tool.addEventListener("click", (event) => {
-      if (tool.getAttribute("aria-disabled") === "true") {
-        event.preventDefault();
-        return;
-      }
-      if (embeddedEditor && window.parent !== window) {
-        event.preventDefault();
-        window.parent.postMessage(
-          { type: "editor-suite:open-tool", kind: name, href: tool.href },
-          window.location.origin,
-        );
-        return;
-      }
-      if (supportsInlineWorkspace()) {
-        event.preventDefault();
-        openTool(name, tool.href);
-      }
+      event.preventDefault();
+      if (tool.getAttribute("aria-disabled") === "true") return;
+      openTool(name, tool.href);
     });
   }
 
@@ -2144,669 +1713,15 @@
       const anchor = event.target.closest("a[href]");
       if (!anchor || root.contains(anchor) || anchor.hasAttribute("download")) return;
       const name = toolFromHref(anchor.getAttribute("href"));
-      if (!name) return;
-      if (embeddedEditor && window.parent !== window) {
-        event.preventDefault();
-        window.parent.postMessage(
-          { type: "editor-suite:open-tool", kind: name, href: anchor.href },
-          window.location.origin,
-        );
-        return;
-      }
-      if (!supportsInlineWorkspace() || name === "cut") return;
+      if (!["art", "pip"].includes(name) || !supportsInlineWorkspace()) return;
       event.preventDefault();
       openTool(name, anchor.href);
     },
     true,
   );
 
-  function toolFrameOwnsSource(source, kind = "") {
-    if (kind) return frameEntries.get(kind)?.frame.contentWindow === source;
-    return [...frameEntries.values()].some(
-      (entry) => entry.frame.contentWindow === source,
-    );
-  }
-
-  window.addEventListener("message", (event) => {
-    if (event.origin !== window.location.origin || !supportsInlineWorkspace()) return;
-    const data = event.data || {};
-    if (data.type === "editor-suite:open-tool" && tools.has(data.kind)) {
-      if (!toolFrameOwnsSource(event.source)) return;
-      openTool(data.kind, data.href || desiredToolUrls.get(data.kind));
-      return;
-    }
-    if (data.type === "editor-suite:job-state" && data.job?.id) {
-      if (
-        !["art", "pip"].includes(data.kind) ||
-        !toolFrameOwnsSource(event.source, data.kind)
-      ) {
-        return;
-      }
-      if (projectStoreEnabled) {
-        const messageRevision = bridgeRevision(data.revision);
-        const acceptanceFloor = toolBridgeRevisions.get(data.kind) ?? -1;
-        if (
-          messageRevision === null ||
-          messageRevision < acceptanceFloor
-        ) {
-          return;
-        }
-      }
-      renderJobState(data.job, { hydrateProject: !projectStoreEnabled });
-      if (!projectStoreEnabled) {
-        window.dispatchEvent(
-          new CustomEvent("editor-suite:job-state", { detail: data.job }),
-        );
-      }
-      return;
-    }
-    if (data.type === "editor-suite:seek" && data.kind === activeTool) {
-      if (!toolFrameOwnsSource(event.source, data.kind)) return;
-      const nextTime = Number(data.currentTime);
-      if (
-        Number.isFinite(nextTime) &&
-        Math.abs(nextTime - workspaceCurrentTime()) > 0.05
-      ) {
-        mediaController?.seekEdited(nextTime);
-      }
-      return;
-    }
-    if (
-      data.type === "editor-suite:request-cut-draft" &&
-      ["art", "pip"].includes(data.kind) &&
-      frameEntries.get(data.kind)?.frame.contentWindow === event.source
-    ) {
-      syncFrameCutDraft(data.kind);
-      return;
-    }
-    if (data.type !== "editor-suite:tool-state" || !["art", "pip"].includes(data.kind)) {
-      return;
-    }
-    if (!toolFrameOwnsSource(event.source, data.kind)) return;
-    const messageRevision = bridgeRevision(data.revision);
-    const previousBridgeRevision = toolBridgeRevisions.get(data.kind) ?? -1;
-    if (projectStoreEnabled) {
-      if (
-        messageRevision === null ||
-        messageRevision < previousBridgeRevision
-      ) {
-        return;
-      }
-    }
-    advanceToolBridgeRevision(data.kind, messageRevision);
-    const bridgeState = {
-      source: String(data.source || projectSnapshot()?.project[data.kind]?.source || "original"),
-      overlays: Array.isArray(data.overlays) ? data.overlays : [],
-      assets: Array.isArray(data.assets) ? data.assets : [],
-      timeline: data.timeline || null,
-      generationDisabled: data.generationDisabled !== false,
-      generationLabel: String(data.generationLabel || ""),
-      generationBusy: Boolean(data.generationBusy),
-      generationError: String(data.generationError || ""),
-      revision: messageRevision,
-      timingRevision: bridgeRevision(data.timingRevision),
-      changeKind: String(data.changeKind || "tool-state"),
-    };
-    toolStates.set(data.kind, bridgeState);
-    if (projectStoreEnabled) {
-      projectStore.dispatch({
-        type:
-          data.kind === "art"
-            ? window.EditorProjectStore.ACTIONS.ART_STATE_CHANGED
-            : window.EditorProjectStore.ACTIONS.PIP_STATE_CHANGED,
-        payload: {
-          source: bridgeState.source,
-          overlays: bridgeState.overlays,
-          assets: bridgeState.assets,
-          timeline: bridgeState.timeline,
-        },
-      });
-      acknowledgeToolProjection(data.kind);
-    } else {
-      syncToolTimeline(data.kind, data.timeline);
-    }
-    syncGenerationButton();
-    if (!projectStoreEnabled) {
-      renderMirroredPreview();
-      renderMirroredTimeline();
-    }
-    if (data.kind === activeTool) {
-      const childTime = Number(data.currentTime);
-      if (
-        Number.isFinite(childTime) &&
-        Math.abs(childTime - workspaceCurrentTime()) > 0.05
-      ) {
-        syncFrameTime(data.kind);
-      }
-    }
-  });
-
-  document.addEventListener("editor-suite:tool-state", (event) => {
-    const data = event.detail || {};
-    if (!['art', 'pip'].includes(data.kind)) return;
-    if (topLevelToolEnabled(data.kind)) return;
-    toolStates.set(data.kind, data);
-    if (projectStoreEnabled) {
-      projectStore.dispatch({
-        type:
-          data.kind === "art"
-            ? window.EditorProjectStore.ACTIONS.ART_STATE_CHANGED
-            : window.EditorProjectStore.ACTIONS.PIP_STATE_CHANGED,
-        payload: {
-          source: data.source || projectSnapshot().project[data.kind].source,
-          overlays: Array.isArray(data.overlays) ? data.overlays : [],
-          assets: Array.isArray(data.assets) ? data.assets : [],
-          timeline: data.timeline || null,
-        },
-      });
-    } else {
-      syncToolTimeline(data.kind, data.timeline);
-    }
-    syncGenerationButton();
-    if (!projectStoreEnabled) {
-      renderMirroredPreview();
-      renderMirroredTimeline();
-    }
-  });
-
-  mediaController?.subscribeFrame(() => {
-    for (const name of frameEntries.keys()) syncFrameTime(name);
-    syncMirroredPlayback();
-  });
-  mediaController?.subscribeState(() => {
-    for (const name of frameEntries.keys()) syncFrameTime(name);
-    syncMirroredPlayback();
-  });
-
-  function beginMirroredPipResize(event, target, canvas, id, direction) {
-    const canvasRect = canvas?.getBoundingClientRect();
-    const targetRect = target.getBoundingClientRect();
-    if (!canvasRect || canvasRect.width <= 0 || canvasRect.height <= 0) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const startClientX = event.clientX;
-    const startClientY = event.clientY;
-    const startWidth =
-      Number.parseFloat(target.style.width) / 100 ||
-      targetRect.width / canvasRect.width;
-    const media = target.querySelector("img, video");
-    const imageAspectRatio = Math.max(
-      0.1,
-      media?.naturalWidth && media?.naturalHeight
-        ? media.naturalWidth / media.naturalHeight
-        : media?.videoWidth && media?.videoHeight
-          ? media.videoWidth / media.videoHeight
-          : targetRect.width / targetRect.height,
-    );
-    let moved = false;
-    let framePending = false;
-    let latestWidth = startWidth;
-    let finished = false;
-
-    const move = (moveEvent) => {
-      const deltaX = moveEvent.clientX - startClientX;
-      const deltaY = moveEvent.clientY - startClientY;
-      if (!moved && Math.hypot(deltaX, deltaY) < 3) return;
-      moved = true;
-      if (framePending) return;
-      framePending = true;
-      const horizontalDirection = direction.includes("e")
-        ? 1
-        : direction.includes("w")
-          ? -1
-          : 0;
-      const verticalDirection = direction.includes("s")
-        ? 1
-        : direction.includes("n")
-          ? -1
-          : 0;
-      const horizontalChange =
-        (horizontalDirection * deltaX * 2) / canvasRect.width;
-      const verticalChange =
-        (verticalDirection * deltaY * 2 * imageAspectRatio) /
-        canvasRect.width;
-      const widthChange =
-        horizontalDirection && verticalDirection
-          ? Math.abs(horizontalChange) >= Math.abs(verticalChange)
-            ? horizontalChange
-            : verticalChange
-          : horizontalChange || verticalChange;
-      const width = Math.max(PIP_MIN_WIDTH, startWidth + widthChange);
-      latestWidth = width;
-      window.requestAnimationFrame(() => {
-        framePending = false;
-        if (finished) return;
-        if (!previewOverlay?.contains(target)) return;
-        target.classList.add("is-selected", "is-resizing");
-        target.style.width = `${width * 100}%`;
-        frameEntries.get("pip")?.frame.contentWindow?.postMessage(
-          { type: "editor-suite:resize-effect", kind: "pip", id, width },
-          window.location.origin,
-        );
-      });
-    };
-
-    const finish = () => {
-      finished = true;
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", finish);
-      window.removeEventListener("pointercancel", finish);
-      target.classList.remove("is-resizing");
-      frameEntries.get("pip")?.frame.contentWindow?.postMessage(
-        {
-          type: "editor-suite:resize-effect",
-          kind: "pip",
-          id,
-          width: latestWidth,
-        },
-        window.location.origin,
-      );
-      frameEntries.get("pip")?.frame.contentWindow?.postMessage(
-        { type: "editor-suite:move-finish", kind: "pip", id },
-        window.location.origin,
-      );
-    };
-
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", finish, { once: true });
-    window.addEventListener("pointercancel", finish, { once: true });
-  }
-
-  if (!previewCompositor) previewOverlay?.addEventListener("pointerdown", (event) => {
-    if (activeTool === "cut" || event.button !== 0) return;
-    const target = event.target.closest("[data-overlay-id], [data-picture-id]");
-    if (!target) return;
-    const effectKind = target.closest("[data-effect-kind]")?.dataset.effectKind;
-    if (effectKind !== activeTool) return;
-    event.preventDefault();
-    const canvas = target.closest(".editor-suite-preview-canvas");
-    const id = target.dataset.overlayId || target.dataset.pictureId;
-    const resizeHandle = event.target.closest("[data-pip-resize]");
-    if (effectKind === "pip" && resizeHandle) {
-      beginMirroredPipResize(
-        event,
-        target,
-        canvas,
-        id,
-        resizeHandle.dataset.pipResize,
-      );
-      return;
-    }
-    const startClientX = event.clientX;
-    const startClientY = event.clientY;
-    let moved = false;
-    let framePending = false;
-    let currentTarget = target;
-
-    // Capture the grab offset — the pointer's distance from the element's
-    // visual center — plus the canvas bounds once at drag start, so the grabbed
-    // point stays under the pointer (1:1) instead of the element center snapping
-    // onto it. The canvas may be rebuilt while dragging, so its rect is frozen
-    // here rather than re-read from a possibly-detached node.
-    const canvasRect = canvas?.getBoundingClientRect();
-    const grabRect = target.getBoundingClientRect();
-    const grabOffsetX = event.clientX - (grabRect.left + grabRect.width / 2);
-    const grabOffsetY = event.clientY - (grabRect.top + grabRect.height / 2);
-
-    // The mirror canvas may be rebuilt by a snapshot while dragging, so
-    // re-resolve the element by id instead of keeping a stale reference.
-    const resolveTarget = () => {
-      if (previewOverlay?.contains(currentTarget)) return currentTarget;
-      const found = canvas?.querySelector(
-        `[data-picture-id="${id}"], [data-overlay-id="${id}"]`,
-      );
-      if (found) currentTarget = found;
-      return currentTarget;
-    };
-
-    const move = (moveEvent) => {
-      const deltaX = moveEvent.clientX - startClientX;
-      const deltaY = moveEvent.clientY - startClientY;
-      if (!moved && Math.hypot(deltaX, deltaY) < 3) return;
-      moved = true;
-      if (framePending) return;
-      framePending = true;
-      const clientX = moveEvent.clientX;
-      const clientY = moveEvent.clientY;
-      // Coalesce to one write per frame and move the mirrored element directly
-      // (no snapshot round-trip), so dragging stays smooth on the compositor.
-      window.requestAnimationFrame(() => {
-        framePending = false;
-        const element = resolveTarget();
-        if (!previewOverlay?.contains(element)) return;
-        element.classList.add("is-dragging");
-        if (!canvasRect || canvasRect.width <= 0 || canvasRect.height <= 0) return;
-        const x = Math.min(
-          0.95,
-          Math.max(
-            0.05,
-            (clientX - grabOffsetX - canvasRect.left) / canvasRect.width,
-          ),
-        );
-        const y = Math.min(
-          0.95,
-          Math.max(
-            0.05,
-            (clientY - grabOffsetY - canvasRect.top) / canvasRect.height,
-          ),
-        );
-        element.style.left = `${x * 100}%`;
-        element.style.top = `${y * 100}%`;
-        frameEntries.get(effectKind)?.frame.contentWindow?.postMessage(
-          { type: "editor-suite:move-effect", kind: effectKind, id, x, y },
-          window.location.origin,
-        );
-      });
-    };
-
-    const finish = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", finish);
-      window.removeEventListener("pointercancel", finish);
-      resolveTarget()?.classList.remove("is-dragging");
-      frameEntries.get(effectKind)?.frame.contentWindow?.postMessage(
-        { type: "editor-suite:move-finish", kind: effectKind, id },
-        window.location.origin,
-      );
-    };
-
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", finish, { once: true });
-    window.addEventListener("pointercancel", finish, { once: true });
-  });
-
-  if (!timelineController) timelineLayer?.addEventListener(
-    "pointerdown",
-    (event) => {
-      const unifiedSegment = event.target.closest(
-        "[data-timeline-clip-id][data-effect-kind]",
-      );
-      if (unifiedSegment && event.button === 0) {
-        event.preventDefault();
-        event.stopPropagation();
-        const kind = unifiedSegment.dataset.effectKind;
-        const clipId = unifiedSegment.dataset.timelineClipId;
-        const transientTimelineStore = window.EditorTimeline.createStore(
-          syncProjectTimeline(),
-        );
-        const clip = transientTimelineStore.findClip(clipId);
-        const frame = frameEntries.get(kind)?.frame;
-        if (!clip || !frame?.contentWindow) return;
-        openTool(kind, desiredToolUrls.get(kind));
-        transientTimelineStore.selectClip(clipId, { silent: true });
-        projectStore?.dispatch({
-          type: window.EditorProjectStore.ACTIONS.SELECTION_CHANGED,
-          payload: { selection: { clipId } },
-        });
-        for (const candidate of timelineLayer.querySelectorAll(
-          "[data-timeline-clip-id]",
-        )) {
-          const selected = candidate.dataset.timelineClipId === clipId;
-          candidate.classList.toggle("is-selected", selected);
-          candidate.setAttribute("aria-pressed", String(selected));
-        }
-        mediaController?.seekEdited(clip.start);
-        frame.contentWindow.postMessage(
-          {
-            type: "editor-suite:timeline-action",
-            action: "select",
-            kind,
-            clipId,
-            sourceId: clip.sourceId,
-            currentTime: clip.start,
-          },
-          window.location.origin,
-        );
-        if (!clip.editable) return;
-
-        const mode =
-          event.target.closest("[data-timeline-resize]")?.dataset
-            .timelineResize ||
-          event.target.closest("[data-art-time-drag]")?.dataset.artTimeDrag ||
-          "move";
-        const total = Math.max(
-          transientTimelineStore.snapshot().duration,
-          Number(previewVideo.duration) || 0,
-          Number(document.querySelector("#cutFrameTimelineSeek")?.max) || 0,
-        );
-        const pointerSession = window.EditorTimeline.createPointerSession(
-          transientTimelineStore,
-          {
-            clipId,
-            mode,
-            startClientX: event.clientX,
-            trackWidth: timelineTrack.getBoundingClientRect().width,
-            duration: total,
-          },
-        );
-        if (!pointerSession) return;
-        let moved = false;
-        let currentSegment = unifiedSegment;
-
-        const resolveSegment = () => {
-          if (timelineLayer.contains(currentSegment)) return currentSegment;
-          const found = timelineLayer.querySelector(
-            `[data-timeline-clip-id="${clipId}"]`,
-          );
-          if (found) currentSegment = found;
-          return currentSegment;
-        };
-
-        const move = (moveEvent) => {
-          if (!moved && Math.abs(moveEvent.clientX - event.clientX) < 3) return;
-          moved = true;
-          const nextClip = pointerSession.update(moveEvent.clientX);
-          const liveSegment = resolveSegment();
-          liveSegment.classList.add("is-selected", "is-dragging");
-          liveSegment.dataset.effectStart = String(nextClip.start);
-          liveSegment.dataset.effectEnd = String(nextClip.end);
-          liveSegment.style.left = `${(nextClip.start / total) * 100}%`;
-          liveSegment.style.width = `${Math.max(
-            0.8,
-            ((nextClip.end - nextClip.start) / total) * 100,
-          )}%`;
-          const currentTime = mode === "end" ? nextClip.end : nextClip.start;
-          mediaController?.seekEdited(currentTime);
-          frame.contentWindow.postMessage(
-            {
-              type: "editor-suite:timeline-action",
-              action: "set-range",
-              kind,
-              clipId,
-              sourceId: clip.sourceId,
-              start: nextClip.start,
-              end: nextClip.end,
-              currentTime,
-            },
-            window.location.origin,
-          );
-        };
-
-        const finish = () => {
-          window.removeEventListener("pointermove", move);
-          window.removeEventListener("pointerup", finish);
-          window.removeEventListener("pointercancel", finish);
-          resolveSegment()?.classList.remove("is-dragging");
-          const finalClip = pointerSession.finish({ commit: false });
-          frame.contentWindow.postMessage(
-            {
-              type: "editor-suite:timeline-action",
-              action: "commit",
-              kind,
-              clipId,
-              sourceId: clip.sourceId,
-              start: finalClip.start,
-              end: finalClip.end,
-            },
-            window.location.origin,
-          );
-        };
-        window.addEventListener("pointermove", move);
-        window.addEventListener("pointerup", finish, { once: true });
-        window.addEventListener("pointercancel", finish, { once: true });
-        return;
-      }
-      const pipSegment = event.target.closest(
-        '.pip-timeline-segment[data-effect-kind="pip"][data-picture-id]',
-      );
-      if (pipSegment && event.button === 0) {
-        event.preventDefault();
-        event.stopPropagation();
-        const id = pipSegment.dataset.pictureId;
-        const start = Math.max(0, Number(pipSegment.dataset.effectStart) || 0);
-        const pipFrame = frameEntries.get("pip")?.frame;
-        if (!pipFrame?.contentWindow) return;
-        openTool("pip", desiredToolUrls.get("pip"));
-        mediaController?.seekEdited(start);
-        pipFrame.contentWindow.postMessage(
-          {
-            type: "editor-suite:select-pip-timeline",
-            kind: "pip",
-            id,
-            currentTime: start,
-          },
-          window.location.origin,
-        );
-        return;
-      }
-      const segment = event.target.closest(
-        '.frame-timeline-segment[data-effect-kind="art"][data-overlay-id]',
-      );
-      if (!segment || event.button !== 0) return;
-      event.preventDefault();
-      event.stopPropagation();
-      const id = segment.dataset.overlayId;
-      const artFrame = frameEntries.get("art")?.frame;
-      if (!artFrame?.contentWindow) return;
-      openTool("art", desiredToolUrls.get("art"));
-      artFrame.contentWindow.postMessage(
-        {
-          type: "editor-suite:select-art-timeline",
-          kind: "art",
-          id,
-          currentTime: workspaceCurrentTime(),
-        },
-        window.location.origin,
-      );
-      if (segment.dataset.timelineEditable !== "true") return;
-
-      const mode =
-        event.target.closest("[data-art-time-drag]")?.dataset.artTimeDrag ||
-        "move";
-      const original = {
-        start: Number(segment.dataset.effectStart) || 0,
-        end: Number(segment.dataset.effectEnd) || 0,
-      };
-      const startClientX = event.clientX;
-      const total =
-        Number(previewVideo.duration) ||
-        Number(document.querySelector("#cutFrameTimelineSeek")?.max) ||
-        0;
-      let moved = false;
-      let currentSegment = segment;
-
-      const resolveSegment = () => {
-        if (timelineLayer.contains(currentSegment)) return currentSegment;
-        const found = timelineLayer.querySelector(
-          `.frame-timeline-segment[data-effect-kind="art"][data-overlay-id="${id}"]`,
-        );
-        if (found) currentSegment = found;
-        return currentSegment;
-      };
-
-      const move = (moveEvent) => {
-        if (!moved && Math.abs(moveEvent.clientX - startClientX) < 3) return;
-        moved = true;
-        if (total <= 0) return;
-        const delta =
-          ((moveEvent.clientX - startClientX) /
-            timelineTrack.getBoundingClientRect().width) * total;
-        let start = original.start;
-        let end = original.end;
-        if (mode === "start") {
-          start = Math.min(
-            original.end - 0.1,
-            Math.max(0, original.start + delta),
-          );
-        } else if (mode === "end") {
-          end = Math.min(
-            total,
-            Math.max(original.start + 0.1, original.end + delta),
-          );
-        } else {
-          const length = original.end - original.start;
-          start = Math.min(total - length, Math.max(0, original.start + delta));
-          end = start + length;
-        }
-        const liveSegment = resolveSegment();
-        liveSegment.classList.add("is-selected", "is-dragging");
-        liveSegment.style.left = `${(start / total) * 100}%`;
-        liveSegment.style.width = `${Math.max(
-          0.8,
-          ((end - start) / total) * 100,
-        )}%`;
-        const currentTime = mode === "end" ? end : start;
-        mediaController?.seekEdited(currentTime);
-        artFrame.contentWindow.postMessage(
-          {
-            type: "editor-suite:adjust-art-timeline",
-            kind: "art",
-            id,
-            start,
-            end,
-            currentTime,
-          },
-          window.location.origin,
-        );
-      };
-
-      const finish = () => {
-        window.removeEventListener("pointermove", move);
-        window.removeEventListener("pointerup", finish);
-        window.removeEventListener("pointercancel", finish);
-        resolveSegment()?.classList.remove("is-dragging");
-        artFrame.contentWindow.postMessage(
-          { type: "editor-suite:move-finish", kind: "art", id },
-          window.location.origin,
-        );
-      };
-      window.addEventListener("pointermove", move);
-      window.addEventListener("pointerup", finish, { once: true });
-      window.addEventListener("pointercancel", finish, { once: true });
-    },
-    true,
-  );
-
-  timelineTrack?.addEventListener(
-    "pointerdown",
-    (event) => {
-      if (activeTool === "cut") return;
-      if (
-        event.target.closest(
-          '.frame-timeline-segment[data-effect-kind="art"], ' +
-            '.pip-timeline-segment[data-effect-kind="pip"]',
-        )
-      ) {
-        return;
-      }
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      const seek = (moveEvent) => {
-        const bounds = timelineTrack.getBoundingClientRect();
-        const ratio = Math.min(1, Math.max(0, (moveEvent.clientX - bounds.left) / bounds.width));
-        const total = Number(previewVideo.duration) || Number(document.querySelector("#cutFrameTimelineSeek")?.max) || 0;
-        if (total > 0) mediaController?.seekEdited(ratio * total);
-      };
-      const finish = () => {
-        window.removeEventListener("pointermove", seek, true);
-        window.removeEventListener("pointerup", finish, true);
-      };
-      seek(event);
-      window.addEventListener("pointermove", seek, true);
-      window.addEventListener("pointerup", finish, { capture: true, once: true });
-    },
-    true,
-  );
+  mediaController?.subscribeFrame(syncDouyinBasePlayback);
+  mediaController?.subscribeState(syncDouyinBasePlayback);
 
   generateButton?.addEventListener("click", generateCurrentPreview);
   saveButton?.addEventListener("click", saveCurrentVersion);
@@ -2815,7 +1730,7 @@
     if (!supportsInlineWorkspace()) return;
     const requested = new URLSearchParams(window.location.search).get("tool");
     const name = ["art", "pip"].includes(requested) ? requested : "cut";
-    openTool(name, desiredToolUrls.get(name) || tools.get(name)?.href, {
+    openTool(name, tools.get(name)?.href, {
       skipHistory: true,
       fromNavigation: true,
     });
@@ -2841,14 +1756,12 @@
         if (cutTimelineAdapter === adapter) cutTimelineAdapter = null;
       };
     },
-    projectStoreEnabled: () => projectStoreEnabled,
-    topLevelArtEnabled: () => topLevelArtEnabled,
-    topLevelPipEnabled: () => topLevelPipEnabled,
+    parseRequestedArtTemplate,
     projectSnapshot,
-    subscribeProject: (listener) => projectStore?.subscribe(listener) || (() => {}),
-    beginProjectEffect: (scope) => projectStore?.beginEffect(scope) || null,
+    subscribeProject: (listener) => projectStore.subscribe(listener),
+    beginProjectEffect: (scope) => projectStore.beginEffect(scope),
     isCurrentProjectEffect: (token) =>
-      projectStore?.isCurrentEffect(token) || false,
+      projectStore.isCurrentEffect(token),
     applyTranscriptTextEffect: (token, job) => {
       if (
         !projectStore ||
@@ -2884,21 +1797,9 @@
     previewCompositor?.destroy();
     timelineController?.destroy();
     mediaController?.destroy();
-    projectStore?.destroy();
+    projectStore.destroy();
   });
   document.addEventListener("editor-suite:refresh", () => refresh());
-  document.addEventListener("editor-suite:transcript-updated", (event) => {
-    if (projectStoreEnabled) return;
-    // The cut page edited transcript text; ask an embedded art page to
-    // re-read the re-segmented subtitle track from the server.
-    const artEntry = frameEntries.get("art");
-    if (artEntry?.frame?.contentWindow) {
-      artEntry.frame.contentWindow.postMessage(
-        { type: "editor-suite:transcript-updated" },
-        window.location.origin,
-      );
-    }
-  });
   updateActiveTool();
   syncGenerationButton();
   refresh();

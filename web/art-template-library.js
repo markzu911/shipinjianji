@@ -101,8 +101,8 @@ try {
 
 if (JOB_ID_PATTERN.test(jobId)) {
   backToVideoEditor.href =
-    `/art-text?job=${encodeURIComponent(jobId)}` +
-    `&source=${encodeURIComponent(videoSource)}`;
+    `/?job=${encodeURIComponent(jobId)}` +
+    `&source=${encodeURIComponent(videoSource)}&tool=art`;
 }
 
 function currentTemplate() {
@@ -508,9 +508,10 @@ function useTemplate(templateId) {
   announce(`已选择 ${template.name}。`);
 
   if (!JOB_ID_PATTERN.test(jobId)) return;
-  const destination = new URL("/art-text", window.location.origin);
+  const destination = new URL("/", window.location.origin);
   destination.searchParams.set("job", jobId);
   destination.searchParams.set("source", videoSource);
+  destination.searchParams.set("tool", "art");
   destination.searchParams.set("template", selection.id);
   destination.searchParams.set("templateColor", selection.color);
   destination.searchParams.set("templateStroke", selection.strokeColor);

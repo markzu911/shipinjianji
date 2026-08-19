@@ -25,7 +25,7 @@ from datetime import UTC, datetime
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any, Callable, Literal
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 import dashscope
 import httpx
@@ -33,8 +33,8 @@ import jieba
 from dashscope import Generation, MultiModalConversation
 from dashscope.audio.asr import Recognition
 from dashscope.utils.oss_utils import OssUtils
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv, set_key, unset_key
 from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont, ImageStat
@@ -399,11 +399,7 @@ async def disable_frontend_cache(request, call_next):
         "/ui-feedback.js",
         "/styles.css",
         "/art-text",
-        "/art-text.html",
-        "/art-text.js",
         "/picture-in-picture",
-        "/picture-in-picture.html",
-        "/picture-in-picture.js",
         "/fonts",
         "/templates",
         "/art-templates",
@@ -11715,14 +11711,24 @@ def get_picture_in_picture_video(
     )
 
 
+def redirect_legacy_editor_page(request: Request, tool: str) -> RedirectResponse:
+    query = [
+        (key, value)
+        for key, value in request.query_params.multi_items()
+        if key not in {"embedded", "tool"}
+    ]
+    query.append(("tool", tool))
+    return RedirectResponse(url=f"/?{urlencode(query)}", status_code=307)
+
+
 @app.get("/art-text")
-def get_art_text_page() -> FileResponse:
-    return FileResponse(WEB_DIR / "art-text.html")
+def get_art_text_page(request: Request) -> RedirectResponse:
+    return redirect_legacy_editor_page(request, "art")
 
 
 @app.get("/picture-in-picture")
-def get_picture_in_picture_page() -> FileResponse:
-    return FileResponse(WEB_DIR / "picture-in-picture.html")
+def get_picture_in_picture_page(request: Request) -> RedirectResponse:
+    return redirect_legacy_editor_page(request, "pip")
 
 
 @app.get("/fonts")
