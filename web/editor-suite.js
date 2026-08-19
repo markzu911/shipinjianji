@@ -13,6 +13,7 @@
     art: "艺术字",
     pip: "画中画",
   };
+  const PIP_MIN_WIDTH = window.EditorPipModel?.MIN_WIDTH || 0.15;
 
   root.innerHTML = `
     <nav class="editor-suite-nav" aria-label="统一视频编辑工作台">
@@ -95,6 +96,7 @@
   const cutPanelStack = inspector?.querySelector(".text-editor-panel-stack");
   const inspectorHost = document.querySelector("#editorSuiteInspectorHost");
   const artPanelRoot = document.querySelector("#editorArtPanelRoot");
+  const pipPanelRoot = document.querySelector("#editorPipPanelRoot");
   const previewOverlay = document.querySelector("#editorSuitePreviewOverlay");
   const timelineLayer = document.querySelector("#editorSuiteTimelineLayer");
   const timelineTrack = document.querySelector("#cutFrameTimelineTrack");
@@ -151,6 +153,19 @@
       window.ArtTool &&
       artPanelRoot,
   );
+  const topLevelPipEnabled = Boolean(
+    projectStoreEnabled &&
+      window.__EDITOR_PIP_PANEL_ENABLED__ !== false &&
+      window.PipTool &&
+      window.EditorPipModel &&
+      pipPanelRoot,
+  );
+  function topLevelToolEnabled(kind) {
+    return kind === "art" ? topLevelArtEnabled : kind === "pip" ? topLevelPipEnabled : false;
+  }
+  function legacyToolNames() {
+    return ["art", "pip"].filter((kind) => !topLevelToolEnabled(kind));
+  }
   const mediaController = previewVideo && window.EditorMedia
     ? window.EditorMedia.createController(previewVideo)
     : null;
@@ -181,6 +196,9 @@
   let suppressEditorDraftPersistence = false;
   const artTool = topLevelArtEnabled
     ? window.ArtTool.mount(artPanelRoot, createArtToolServices())
+    : null;
+  const pipTool = topLevelPipEnabled
+    ? window.PipTool.mount(pipPanelRoot, createPipToolServices())
     : null;
 
   function projectSnapshot() {
@@ -297,6 +315,19 @@
     }
   }
 
+  function isValidV2DraftSelection(value) {
+    if (value === null) return true;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const keys = Object.keys(value);
+    return (
+      keys.length === 1 &&
+      keys[0] === "clipId" &&
+      typeof value.clipId === "string" &&
+      value.clipId.trim() === value.clipId &&
+      value.clipId.length > 0
+    );
+  }
+
   function persistEditorDraft(state, action) {
     if (suppressEditorDraftPersistence || !state?.jobId) return;
     const actionType = String(action?.type || "");
@@ -305,11 +336,14 @@
       state.project.timeline.selection?.clipId || "",
     );
     const relevant =
-      actionType === window.EditorProjectStore.ACTIONS.ART_STATE_CHANGED ||
+      [
+        window.EditorProjectStore.ACTIONS.ART_STATE_CHANGED,
+        window.EditorProjectStore.ACTIONS.PIP_STATE_CHANGED,
+      ].includes(actionType) ||
       (actionType === window.EditorProjectStore.ACTIONS.TIMELINE_CLIP_RANGE_CHANGED &&
-        rangeKind === "art") ||
+        ["art", "pip"].includes(rangeKind)) ||
       (actionType === window.EditorProjectStore.ACTIONS.SELECTION_CHANGED &&
-        (!selectionId || selectionId.startsWith("art:"))) ||
+        (!selectionId || /^(art|pip):/.test(selectionId))) ||
       actionType === window.EditorProjectStore.ACTIONS.TRANSCRIPT_TEXT_CHANGED;
     if (!relevant) return;
     const storage = draftStorage();
@@ -318,12 +352,19 @@
       storage.setItem(
         editorDraftKey(state.jobId),
         JSON.stringify({
-          schemaVersion: 1,
+          schemaVersion: 2,
           jobId: state.jobId,
           serverVersion: editorDraftServerVersion(state.project.job),
           revision: state.revision,
-          art: state.project.art,
-          selection: selectionId.startsWith("art:")
+          art: {
+            source: state.project.art.source,
+            overlays: state.project.art.overlays,
+          },
+          pip: {
+            source: state.project.pip.source,
+            overlays: state.project.pip.overlays,
+          },
+          selection: /^(art|pip):/.test(selectionId)
             ? { clipId: selectionId }
             : null,
           savedAt: new Date().toISOString(),
@@ -336,7 +377,7 @@
 
   function restoreEditorDraft(state) {
     if (
-      !topLevelArtEnabled ||
+      (!topLevelArtEnabled && !topLevelPipEnabled) ||
       !state?.jobId ||
       editorDraftRestoredJobs.has(state.jobId)
     ) {
@@ -355,12 +396,16 @@
       return false;
     }
     if (
-      envelope?.schemaVersion !== 1 ||
+      ![1, 2].includes(envelope?.schemaVersion) ||
       envelope.jobId !== state.jobId ||
       String(envelope.serverVersion || "") !==
         editorDraftServerVersion(state.project.job) ||
       !envelope.art ||
-      !Array.isArray(envelope.art.overlays)
+      !Array.isArray(envelope.art.overlays) ||
+      (envelope.schemaVersion === 2 &&
+        (!envelope.pip ||
+          !Array.isArray(envelope.pip.overlays) ||
+          !isValidV2DraftSelection(envelope.selection)))
     ) {
       editorDraftRestoredJobs.add(state.jobId);
       return false;
@@ -402,23 +447,72 @@
       overlays,
       assets: [],
     };
-    const selection = envelope.selection?.clipId &&
-      art.overlays.some(
-        (overlay) => `art:${overlay.id}` === String(envelope.selection.clipId),
-      )
-      ? { clipId: String(envelope.selection.clipId) }
+    let pip = null;
+    if (envelope.schemaVersion === 2) {
+      const pipSource = String(envelope.pip.source || state.project.pip.source);
+      const pipOverlays = window.EditorPipModel?.validateDraftOverlays(
+        envelope.pip.overlays,
+        {
+          source: pipSource,
+          duration,
+          assets: state.project.pip.assets,
+        },
+      );
+      if (
+        !window.EditorPipModel?.SOURCES.includes(pipSource) ||
+        pipSource !== state.project.pip.source ||
+        !pipOverlays
+      ) {
+        editorDraftRestoredJobs.add(state.jobId);
+        return false;
+      }
+      pip = {
+        source: pipSource,
+        overlays: pipOverlays,
+        assets: state.project.pip.assets,
+      };
+    }
+    const requestedSelection = envelope.schemaVersion === 2
+      ? envelope.selection?.clipId || ""
+      : String(envelope.selection?.clipId || "");
+    const artSelectionValid = art.overlays.some(
+      (overlay) => `art:${overlay.id}` === requestedSelection,
+    );
+    const pipSelectionValid = pip?.overlays.some(
+      (overlay) => `pip:${overlay.assetId}` === requestedSelection,
+    );
+    if (
+      envelope.schemaVersion === 2 &&
+      requestedSelection &&
+      !artSelectionValid &&
+      !pipSelectionValid
+    ) {
+      editorDraftRestoredJobs.add(state.jobId);
+      return false;
+    }
+    const selection = artSelectionValid || pipSelectionValid
+      ? { clipId: requestedSelection }
       : null;
-    const timeline = window.EditorArtModel.buildTimeline(
+    const artTimeline = window.EditorArtModel.buildTimeline(
       art,
       duration,
       selection,
     );
+    const pipTimeline = pip
+      ? window.EditorPipModel.buildTimeline(pip, duration, selection)
+      : { tracks: [] };
+    const timeline = window.EditorTimeline.normalizeDocument({
+      duration,
+      tracks: [...artTimeline.tracks, ...pipTimeline.tracks],
+      selection,
+    });
     const restored = projectStore.dispatch({
       type: window.EditorProjectStore.ACTIONS.PROJECT_DRAFT_RESTORED,
       payload: {
         jobId: state.jobId,
         serverVersion: state.serverVersion,
         art,
+        ...(pip ? { pip } : {}),
         timeline,
       },
     }).accepted;
@@ -588,17 +682,141 @@
     };
   }
 
+  function replacePipState(pip, options = {}) {
+    if (!projectStore || !window.EditorPipModel) {
+      return { accepted: false, revision: 0, timingRevision: 0 };
+    }
+    const state = projectSnapshot();
+    const duration = Math.max(
+      Number(state.project.timeline.duration) || 0,
+      Number(state.project.cut.duration) || 0,
+    );
+    const current = state.project.pip;
+    const nextPip = window.EditorPipModel.normalizeProject(
+      {
+        ...current,
+        ...pip,
+        assets: window.EditorPipModel.mergeAssets(
+          current.assets,
+          pip?.assets,
+          { source: pip?.source || current.source },
+        ),
+        overlays: Array.isArray(pip?.overlays) ? pip.overlays : current.overlays,
+      },
+      {
+        fallbackSource: current.source,
+        duration,
+      },
+    );
+    const requestedSelection = options.selection === undefined
+      ? state.project.timeline.selection
+      : options.selection
+        ? { clipId: String(options.selection) }
+        : null;
+    const timeline = window.EditorPipModel.buildTimeline(
+      nextPip,
+      duration,
+      requestedSelection,
+    );
+    const action = {
+      type: window.EditorProjectStore.ACTIONS.PIP_STATE_CHANGED,
+      payload: { pip: nextPip, timeline },
+    };
+    return options.token
+      ? projectStore.applyEffect(options.token, action)
+      : projectStore.dispatch(action);
+  }
+
+  function selectPip(id) {
+    const state = projectSnapshot();
+    const normalizedId = String(id || "");
+    if (
+      !projectStore ||
+      !state?.project.pip.overlays.some(
+        (overlay) => String(overlay.assetId || overlay.id) === normalizedId,
+      )
+    ) {
+      return false;
+    }
+    return projectStore.dispatch({
+      type: window.EditorProjectStore.ACTIONS.SELECTION_CHANGED,
+      payload: { selection: { clipId: `pip:${normalizedId}` } },
+    });
+  }
+
+  function setPipRange(id, start, end, anchors = {}) {
+    const state = projectSnapshot();
+    const overlay = state?.project.pip.overlays.find(
+      (item) => String(item.assetId || item.id) === String(id),
+    );
+    if (!overlay) return false;
+    const range = window.EditorPipModel.normalizeRange(
+      start,
+      end,
+      state.project.timeline.duration || state.project.cut.duration,
+      0.05,
+    );
+    if (!range) return false;
+    const sourceStart = Number.isFinite(Number(anchors.sourceStart))
+      ? Number(anchors.sourceStart)
+      : mediaController?.editedToSource(range.start, "start");
+    const sourceEnd = Number.isFinite(Number(anchors.sourceEnd))
+      ? Number(anchors.sourceEnd)
+      : mediaController?.editedToSource(range.end, "end");
+    return projectStore.dispatch({
+      type: window.EditorProjectStore.ACTIONS.TIMELINE_CLIP_RANGE_CHANGED,
+      payload: {
+        kind: "pip",
+        clipId: `pip:${id}`,
+        sourceId: String(id),
+        ...range,
+        sourceStart,
+        sourceEnd,
+      },
+    });
+  }
+
+  function createPipToolServices() {
+    return {
+      project: {
+        snapshot: projectSnapshot,
+        subscribe: (listener) => projectStore?.subscribe(listener) || (() => {}),
+        beginEffect: (scope) => projectStore?.beginEffect(scope) || null,
+        isCurrentEffect: (token) => projectStore?.isCurrentEffect(token) || false,
+      },
+      media: {
+        currentEditedTime: workspaceCurrentTime,
+        seekEdited: (seconds) => mediaController?.seekEdited(seconds),
+        editedToSource: (seconds, edge) =>
+          mediaController?.editedToSource(seconds, edge),
+        subscribeFrame: (listener) =>
+          mediaController?.subscribeFrame(listener) || (() => {}),
+      },
+      commands: {
+        replacePip: replacePipState,
+        selectPip,
+        setPipRange,
+        generateCurrentPreview,
+      },
+      api: { request: artApiRequest },
+      feedback: {
+        confirm: (options) => window.appConfirm(options),
+        generation: window.appGeneration,
+      },
+    };
+  }
+
   const unsubscribeProjectStore = projectStore?.subscribe((next, previous, action) => {
     renderEditorFrame(next);
     if (action.type === window.EditorProjectStore.ACTIONS.TRANSCRIPT_TEXT_CHANGED) {
-      for (const name of topLevelArtEnabled ? ["pip"] : ["art", "pip"]) {
+      for (const name of legacyToolNames()) {
         postTranscriptTextProjection(name, next);
       }
     }
     if (next.ui.activeTool !== previous.ui.activeTool) {
       activeTool = next.ui.activeTool;
     }
-    if (topLevelArtEnabled) persistEditorDraft(next, action);
+    if (topLevelArtEnabled || topLevelPipEnabled) persistEditorDraft(next, action);
   }) || (() => {});
 
   function syncToolTimeline(kind, timeline, options = {}) {
@@ -1327,6 +1545,7 @@
     previewCompositor?.render(nextFrame);
     timelineController?.render(nextFrame);
     artTool?.render(nextFrame);
+    pipTool?.render(nextFrame);
     if (previewOverlay) {
       previewOverlay.hidden = !(
         nextFrame.preview.art.overlays.length ||
@@ -1364,7 +1583,7 @@
     }) || { accepted: true };
     if (["art", "pip"].includes(details.kind)) {
       openTool(details.kind, desiredToolUrls.get(details.kind));
-      if (details.kind !== "art" || !topLevelArtEnabled) {
+      if (!topLevelToolEnabled(details.kind)) {
         acknowledgeToolProjection(details.kind);
         postProjectProjection(details.kind, {
           type: "editor-suite:timeline-action",
@@ -1386,7 +1605,7 @@
       cutProjection = cutTimelineAdapter.applyRange(transaction);
       if (!cutProjection) return false;
     }
-    const committedTransaction = transaction.kind === "art" && mediaController
+    const committedTransaction = ["art", "pip"].includes(transaction.kind) && mediaController
       ? {
           ...transaction,
           sourceStart: mediaController.editedToSource(transaction.start, "start"),
@@ -1407,7 +1626,7 @@
     if (
       result.accepted &&
       ["art", "pip"].includes(transaction.kind) &&
-      (transaction.kind !== "art" || !topLevelArtEnabled)
+      !topLevelToolEnabled(transaction.kind)
     ) {
       acknowledgeToolProjection(transaction.kind);
       postProjectProjection(transaction.kind, {
@@ -1472,7 +1691,7 @@
       payload: { ...tool, overlays },
     });
     if (!result.accepted) return result;
-    if (kind !== "art" || !topLevelArtEnabled) {
+    if (!topLevelToolEnabled(kind)) {
       acknowledgeToolProjection(kind);
       postProjectProjection(kind, {
         type: messageType,
@@ -1500,9 +1719,11 @@
   }
 
   function commitPreviewResize(value) {
+    const width = Number(value.width);
+    if (!Number.isFinite(width) || width < PIP_MIN_WIDTH) return false;
     return commitPreviewPatch(
       value,
-      { width: Math.max(0.2, Number(value.width) || 0.2) },
+      { width },
       "editor-suite:resize-effect",
     );
   }
@@ -1534,6 +1755,14 @@
       if (selected) artTool?.activate();
       else artTool?.deactivate();
     }
+    if (pipPanelRoot) {
+      const selected = !isCut && activeTool === "pip" && topLevelPipEnabled;
+      pipPanelRoot.classList.toggle("is-active", selected);
+      pipPanelRoot.setAttribute("aria-hidden", String(!selected));
+      pipPanelRoot.toggleAttribute("inert", !selected);
+      if (selected) pipTool?.activate();
+      else pipTool?.deactivate();
+    }
     if (!projectStoreEnabled) {
       renderMirroredPreview();
       renderMirroredTimeline();
@@ -1541,7 +1770,7 @@
     updateActiveTool();
     syncGenerationButton();
     syncSaveButton();
-    if (!isCut && (activeTool !== "art" || !topLevelArtEnabled)) {
+    if (!isCut && !topLevelToolEnabled(activeTool)) {
       window.requestAnimationFrame(() => syncFrameTime(activeTool));
     }
   }
@@ -1554,7 +1783,7 @@
       if (href && !options.fromNavigation) window.location.href = href;
       return false;
     }
-    if (name !== "cut" && (name !== "art" || !topLevelArtEnabled)) {
+    if (name !== "cut" && !topLevelToolEnabled(name)) {
       const targetHref = href || desiredToolUrls.get(name) || tool.href;
       if (!targetHref || targetHref === "#") return false;
       ensureToolFrame(name, targetHref);
@@ -1566,6 +1795,14 @@
     ) {
       const firstArt = projectSnapshot()?.project.art.overlays[0];
       if (firstArt) selectArt(firstArt.id);
+    }
+    if (
+      name === "pip" &&
+      topLevelPipEnabled &&
+      !String(projectSnapshot()?.project.timeline.selection?.clipId || "").startsWith("pip:")
+    ) {
+      const firstPip = projectSnapshot()?.project.pip.overlays[0];
+      if (firstPip) selectPip(firstPip.assetId || firstPip.id);
     }
     activeTool = name;
     projectStore?.dispatch({
@@ -1737,7 +1974,7 @@
       ) {
         ensureToolFrame("art", artHref);
       }
-      for (const name of topLevelArtEnabled ? ["pip"] : ["art", "pip"]) {
+      for (const name of legacyToolNames()) {
         const entry = frameEntries.get(name);
         const href = desiredToolUrls.get(name);
         if (entry && href && entry.frame.dataset.toolHref !== href) {
@@ -1821,7 +2058,7 @@
         projectSnapshot().timingRevision !== previousTimingRevision
       : true;
     if (timingChanged) {
-      for (const name of topLevelArtEnabled ? ["pip"] : ["art", "pip"]) {
+      for (const name of legacyToolNames()) {
         syncFrameCutDraft(name);
       }
     }
@@ -2047,7 +2284,7 @@
   document.addEventListener("editor-suite:tool-state", (event) => {
     const data = event.detail || {};
     if (!['art', 'pip'].includes(data.kind)) return;
-    if (topLevelArtEnabled && data.kind === "art") return;
+    if (topLevelToolEnabled(data.kind)) return;
     toolStates.set(data.kind, data);
     if (projectStoreEnabled) {
       projectStore.dispatch({
@@ -2092,8 +2329,6 @@
     const startWidth =
       Number.parseFloat(target.style.width) / 100 ||
       targetRect.width / canvasRect.width;
-    const centerX = Number.parseFloat(target.style.left) / 100 || 0.5;
-    const centerY = Number.parseFloat(target.style.top) / 100 || 0.5;
     const media = target.querySelector("img, video");
     const imageAspectRatio = Math.max(
       0.1,
@@ -2102,15 +2337,6 @@
         : media?.videoWidth && media?.videoHeight
           ? media.videoWidth / media.videoHeight
           : targetRect.width / targetRect.height,
-    );
-    const maximumWidth = Math.max(
-      0.05,
-      Math.min(
-        0.55,
-        2 * Math.min(centerX, 1 - centerX),
-        (2 * Math.min(centerY, 1 - centerY) * imageAspectRatio * canvasRect.height) /
-          canvasRect.width,
-      ),
     );
     let moved = false;
     let framePending = false;
@@ -2145,10 +2371,7 @@
             ? horizontalChange
             : verticalChange
           : horizontalChange || verticalChange;
-      const width = Math.min(
-        maximumWidth,
-        Math.max(Math.min(0.2, maximumWidth), startWidth + widthChange),
-      );
+      const width = Math.max(PIP_MIN_WIDTH, startWidth + widthChange);
       latestWidth = width;
       window.requestAnimationFrame(() => {
         framePending = false;
@@ -2620,6 +2843,7 @@
     },
     projectStoreEnabled: () => projectStoreEnabled,
     topLevelArtEnabled: () => topLevelArtEnabled,
+    topLevelPipEnabled: () => topLevelPipEnabled,
     projectSnapshot,
     subscribeProject: (listener) => projectStore?.subscribe(listener) || (() => {}),
     beginProjectEffect: (scope) => projectStore?.beginEffect(scope) || null,
@@ -2656,6 +2880,7 @@
   window.addEventListener("beforeunload", () => {
     unsubscribeProjectStore();
     artTool?.destroy();
+    pipTool?.destroy();
     previewCompositor?.destroy();
     timelineController?.destroy();
     mediaController?.destroy();

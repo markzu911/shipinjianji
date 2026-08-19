@@ -7,7 +7,7 @@
   function editorPreviewFactory(root) {
     "use strict";
 
-    const PIP_MIN_WIDTH = 0.2;
+    const PIP_MIN_WIDTH = root.EditorPipModel?.MIN_WIDTH || 0.15;
     const ART_POSITION_MIN = 0.05;
     const ART_POSITION_MAX = 0.95;
     const RESIZE_DIRECTIONS = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];

@@ -84,7 +84,7 @@ const PIP_TIMELINE_TEXT_CHAR_WIDTH = 10;
 const PIP_TIMELINE_TEXT_LINES = 2;
 const PIP_TIMELINE_TRACK_HEIGHT = 30;
 const PIP_TIMELINE_BASE_HEIGHT = 44;
-const PIP_MIN_WIDTH = 0.2;
+const PIP_MIN_WIDTH = window.EditorPipModel?.MIN_WIDTH || 0.15;
 const PIP_MAX_WIDTH = Number.POSITIVE_INFINITY;
 
 const query = new URLSearchParams(window.location.search);
@@ -180,7 +180,9 @@ function currentAssetType() {
 }
 
 function isReadyAsset(item) {
-  return item.type !== "video" || item.status === "completed";
+  return window.EditorPipModel?.isReadyAsset
+    ? window.EditorPipModel.isReadyAsset(item)
+    : item.type !== "video" || item.status === "completed";
 }
 
 function assetKindLabel(item) {
@@ -280,14 +282,8 @@ function constrainPictureItemToStage(
 ) {
   const layerBounds = bounds || pipOverlayLayer.getBoundingClientRect();
   if (layerBounds.width <= 0 || layerBounds.height <= 0) return;
-  const halfWidth = Math.min(0.49, item.width / 2);
-  const normalizedHeight =
-    (item.width * layerBounds.width) /
-    Math.max(0.1, imageAspectRatio) /
-    layerBounds.height;
-  const halfHeight = Math.min(0.49, normalizedHeight / 2);
-  item.x = clamp(item.x, halfWidth, 1 - halfWidth);
-  item.y = clamp(item.y, halfHeight, 1 - halfHeight);
+  item.x = clamp(item.x, 0.05, 0.95);
+  item.y = clamp(item.y, 0.05, 0.95);
 }
 
 function pictureItemAspectRatio(item, element) {
@@ -302,14 +298,7 @@ function pictureItemAspectRatio(item, element) {
 }
 
 function maximumPictureWidthAtPosition(item, imageAspectRatio, bounds) {
-  const horizontalRoom = 2 * Math.min(item.x, 1 - item.x);
-  const verticalRoom =
-    (2 * Math.min(item.y, 1 - item.y) * imageAspectRatio * bounds.height) /
-    bounds.width;
-  return Math.max(
-    0.05,
-    Math.min(PIP_MAX_WIDTH, horizontalRoom, verticalRoom),
-  );
+  return PIP_MAX_WIDTH;
 }
 
 function pictureResizeWidth(resize, event) {
@@ -1547,7 +1536,9 @@ function handleEditorHostMessage(event) {
       (candidate) => String(candidate.id) === String(data.id),
     );
     if (!item) return;
-    item.width = clamp(Number(data.width) || item.width, PIP_MIN_WIDTH, PIP_MAX_WIDTH);
+    const width = Number(data.width);
+    if (!Number.isFinite(width) || width < PIP_MIN_WIDTH) return;
+    item.width = width;
     selectedPictureItemId = item.id;
     syncPipTimelineModel();
     pipTimelineStore.patchClipPayload(
@@ -1781,20 +1772,39 @@ function renderGeneratedList() {
     const sizeText = document.createElement("span");
     sizeText.textContent = `大小 ${Math.round(item.width * 100)}%`;
     const size = document.createElement("input");
-    size.type = "range";
-    size.min = "20";
-    size.max = "55";
+    size.type = "number";
+    size.min = String(PIP_MIN_WIDTH * 100);
     size.step = "1";
     size.value = String(Math.round(item.width * 100));
     size.setAttribute("aria-label", `调整“${item.text}”的大小`);
     size.addEventListener("input", () => {
-      item.width = Number(size.value) / 100;
+      const widthPercent = Number(size.value);
+      if (
+        size.value.trim() === "" ||
+        !Number.isFinite(widthPercent) ||
+        widthPercent < PIP_MIN_WIDTH * 100
+      ) {
+        return;
+      }
+      item.width = widthPercent / 100;
       constrainPictureItemToStage(item);
       selectedPictureItemId = item.id;
       sizeText.textContent = `大小 ${size.value}%`;
       seekToPictureItem(item);
       renderPreview();
       persistEmbeddedPipDraft();
+    });
+    size.addEventListener("change", () => {
+      const widthPercent = Number(size.value);
+      if (
+        size.value.trim() !== "" &&
+        Number.isFinite(widthPercent) &&
+        widthPercent >= PIP_MIN_WIDTH * 100
+      ) {
+        return;
+      }
+      size.value = String(Math.round(item.width * 100));
+      sizeText.textContent = `大小 ${size.value}%`;
     });
     sizeLabel.append(sizeText, size);
     controls.append(positionLabel, sizeLabel);

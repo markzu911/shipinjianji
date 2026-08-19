@@ -386,6 +386,7 @@ async def disable_frontend_cache(request, call_next):
         "/app.js",
         "/transcript-follow-scroll.js",
         "/timeline-model.js",
+        "/editor-pip-model.js",
         "/editor-project-store.js",
         "/editor-media-controller.js",
         "/editor-art-model.js",
@@ -393,6 +394,7 @@ async def disable_frontend_cache(request, call_next):
         "/editor-preview-compositor.js",
         "/editor-timeline-controller.js",
         "/editor-art-tool.js",
+        "/editor-pip-tool.js",
         "/editor-suite.js",
         "/ui-feedback.js",
         "/styles.css",
@@ -6989,8 +6991,8 @@ def normalize_picture_in_picture_overlays(
             raise ValueError(f"第 {index} 张画中画时间超出视频范围。")
         if not 0.05 <= overlay.x <= 0.95 or not 0.05 <= overlay.y <= 0.95:
             raise ValueError(f"第 {index} 张画中画位置超出画面。")
-        if not 0.15 <= overlay.width <= 0.65:
-            raise ValueError(f"第 {index} 张画中画宽度应在 15%–65% 之间。")
+        if overlay.width < 0.15:
+            raise ValueError(f"第 {index} 张画中画宽度不能小于 15%。")
 
         normalized.append(
             {
@@ -7164,8 +7166,10 @@ def render_picture_in_picture_video(
             )
         filter_parts.append(
             f"{source}{scaled}overlay="
-            f"x='max(0,min(main_w-overlay_w,main_w*{overlay['x']:.4f}-overlay_w/2))':"
-            f"y='max(0,min(main_h-overlay_h,main_h*{overlay['y']:.4f}-overlay_h/2))':"
+            f"x='max(min(0,main_w-overlay_w),"
+            f"min(max(0,main_w-overlay_w),main_w*{overlay['x']:.4f}-overlay_w/2))':"
+            f"y='max(min(0,main_h-overlay_h),"
+            f"min(max(0,main_h-overlay_h),main_h*{overlay['y']:.4f}-overlay_h/2))':"
             f"enable='between(t,{overlay['start']:.3f},{overlay['end']:.3f})'"
             f"{target}"
         )

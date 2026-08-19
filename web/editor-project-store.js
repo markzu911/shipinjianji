@@ -82,7 +82,10 @@
       return `${kind}:overlay:${index}`;
     }
 
-    function normalizeAssets(assets) {
+    function normalizeAssets(assets, options = {}) {
+      if (root.EditorPipModel?.normalizeAssets) {
+        return root.EditorPipModel.normalizeAssets(assets, options);
+      }
       const records = Array.isArray(assets)
         ? assets
         : isObject(assets)
@@ -110,6 +113,23 @@
       kind = "art",
       fallbackAssets = [],
     ) {
+      if (kind === "pip" && root.EditorPipModel?.normalizeProject) {
+        const source = root.EditorPipModel.normalizeSource(
+          value.source,
+          fallbackSource,
+        );
+        return root.EditorPipModel.normalizeProject(
+          {
+            ...clone(value),
+            source,
+            assets: [
+              ...normalizeAssets(fallbackAssets, { source }),
+              ...normalizeAssets(value.assets, { source }),
+            ],
+          },
+          { fallbackSource: source },
+        );
+      }
       const overlays = (Array.isArray(value.overlays) ? value.overlays : []).map(
         (overlay, index) => ({
           ...clone(overlay),
@@ -630,7 +650,15 @@
         const preserveLocalTools = sameJob && payload.preserveLocalTools !== false;
         if (preserveLocalTools) {
           hydrated.art = clone(project.art);
-          hydrated.pip = clone(project.pip);
+          hydrated.pip = normalizeTool(
+            {
+              ...clone(project.pip),
+              assets: hydrated.pip.assets,
+            },
+            project.pip.source,
+            "pip",
+            project.pip.assets,
+          );
           hydrated.timeline = clone(project.timeline);
           hydrated.cut = clone(project.cut);
         }
@@ -641,23 +669,49 @@
         if (
           String(payload.jobId || "") !== state.jobId ||
           String(payload.serverVersion || "") !== state.serverVersion ||
-          !isObject(payload.art)
+          (!isObject(payload.art) && !isObject(payload.pip))
         ) {
           return null;
         }
-        project.art = normalizeTool(
-          payload.art,
-          project.art.source,
-          "art",
-          project.art.assets,
-        );
-        if (payload.timeline) {
-          project.timeline = replaceTimelineKind(
-            project.timeline,
+        if (isObject(payload.art)) {
+          project.art = normalizeTool(
+            payload.art,
+            project.art.source,
             "art",
-            payload.timeline,
+            project.art.assets,
+          );
+        }
+        if (isObject(payload.pip)) {
+          project.pip = normalizeTool(
+            payload.pip,
+            project.pip.source,
+            "pip",
+            project.pip.assets,
+          );
+        }
+        if (payload.timeline) {
+          if (isObject(payload.art)) {
+            project.timeline = replaceTimelineKind(
+              project.timeline,
+              "art",
+              payload.timeline,
+              timelineApi,
+            );
+          }
+          if (isObject(payload.pip)) {
+            project.timeline = replaceTimelineKind(
+              project.timeline,
+              "pip",
+              payload.timeline,
+              timelineApi,
+            );
+          }
+          project.timeline = normalizeTimeline(
+            {
+              ...project.timeline,
+              selection: payload.timeline.selection || null,
+            },
             timelineApi,
-            { acceptIncomingSelection: true },
           );
         }
       } else if (action.type === ACTIONS.TRANSCRIPT_TEXT_CHANGED) {
