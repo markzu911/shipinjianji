@@ -398,3 +398,25 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 19: 修复艺术字预览与轨道布局
+
+**Date**: 2026-08-20
+**Task**: 修复艺术字预览与轨道布局
+**Branch**: `develop`
+
+### Summary
+
+统一艺术字与画中画的源视频预览画布，固定手动和文案艺术字各占独立单行，并严格消除文案 cue 时间重叠；新增竖屏浏览器、时间边界和轨道回归。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `97eddff` | (see git log) |
+| `ea5e72a` | (see git log) |
+
+### Status
+
+[OK] **Completed**
