@@ -5,7 +5,7 @@
 项目没有数据库：
 
 - `JOBS` 和 `JOB_FILES` 保存当前进程的任务状态，受 `JOBS_LOCK` 保护；服务重启后丢失。
-- `data/jobs/<uuid>/` 保存上传源文件、处理中间文件和 `cut-draft.json`。
+- `data/jobs/<uuid>/` 保存上传源文件、处理中间文件、`cut-draft.json` 和可重建的 `acoustic-alignment.json`。
 - `data/history/` 保存最终版本、缩略图和 history manifest，跨重启存在。
 - `data/fonts/`、`data/art-templates/`、`data/art-position-presets/` 各自使用 manifest JSON。
 - `.env` 保存模型服务商配置和凭证，由 settings API 在锁内更新。
@@ -18,7 +18,10 @@
 - 复合内容使用稳定、可读的 JSON；已有 manifest 保持列表/对象形状。
 - 草稿和媒体输出采用同目录临时文件后 `replace`，避免读到半写入文件。
 - 写 manifest 前获取领域锁；读改写必须在同一个临界区内完成。
+- 声学 sidecar 同样使用同目录临时文件后 `replace`，并在进程内按 sidecar 路径串行执行“读取、缺失句段推理、写回”；锁对象必须可回收，不能随已清理 job 永久增长。
 - 读取损坏或缺失的可选草稿可返回 `None`；持久库损坏应产生可诊断错误，不能悄悄覆盖为空库。
+
+`acoustic-alignment.json` 只缓存固定 aligner/schema/model revision 与当前源媒体指纹匹配的完整句段字符证据。读取时必须重新验证字符数量、顺序、finite 单调时间、句段包络和非坍缩结构，不能仅信任磁盘中的 `validation.valid=true`。旧任务按本次草稿影响的句段惰性补齐，新转写可全量预计算；文本或源媒体 fingerprint 变化只使对应记录自然失效，不批量改写历史任务。
 
 参考：`save_cut_draft`、`save_history_versions_unlocked`、`save_uploaded_art_templates_unlocked`、`persist_model_provider_settings`。
 

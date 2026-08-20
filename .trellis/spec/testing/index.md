@@ -20,7 +20,7 @@
 - `test_frontend_contracts.py`：资源版本、DOM/ARIA、跨页面消息安全和 Node 行为契约。
 - `test_asset_libraries.py`：艺术字模板、位置预设和字体资源库。
 - `test_transcription_suggestions.py`：语音识别、语义分词、AI 建议和无语音检测。
-- `test_cut_draft.py`、`test_cut_acoustic_boundaries.py`、`test_cut_rendering.py`：文字草稿、声学边界和剪辑渲染。
+- `test_acoustic_alignment.py`、`test_cut_draft.py`、`test_cut_acoustic_boundaries.py`、`test_cut_rendering.py`：完整句段强制对齐、缓存/安全降级、文字与时间轴草稿边界和剪辑渲染。
 - `test_art_text_api.py`、`test_art_text_track.py`、`test_art_text_rendering.py`：艺术字 API、轨道分段和视觉渲染。
 - `test_picture_in_picture.py`、`test_composition.py`：画中画生成、时间锚点和统一合成。
 
@@ -31,6 +31,7 @@
 - 使用 FastAPI `TestClient` 走真实路由和序列化边界。
 - 文件隔离使用 `tmp_path`，并 monkeypatch `DATA_DIR`、manifest 路径或服务函数。
 - 外部 AI/HTTP 请求必须 monkeypatch；测试不得产生真实请求、费用或依赖凭证。
+- FunASR 模型加载、下载和推理也属于外部运行时；普通单元和浏览器 fixture 必须 monkeypatch 对齐缓存入口，不读取用户模型目录或触发网络下载。真实模型样片 gate 单独运行并明确记录平台、revision、权重校验和与结果。
 - 媒体算法使用短小真实样片/音频，断言 ffprobe、时间、像素或生成文件，而不是只断言 mock 被调用。
 - 后台任务测试可 monkeypatch `BackgroundTasks.add_task` 为同步执行，或直接调用 `process_*` 并检查终态与清理。
 - 涉及全局 `JOBS`、缓存、模型设置或线程局部状态时，fixture 必须恢复，测试顺序不能影响结果。
@@ -48,7 +49,7 @@
 - API/后端通用：完整 `tests/app/`。
 - 设置、维护或历史：对应 `test_settings.py` 或 `test_maintenance_history.py`，随后完整测试。
 - 转写或建议：`test_transcription_suggestions.py`。
-- 时间轴或剪辑：`test_cut_draft.py`、`test_cut_acoustic_boundaries.py` 和 `test_cut_rendering.py`。
+- 时间轴或剪辑：`test_acoustic_alignment.py`、`test_cut_draft.py`、`test_cut_acoustic_boundaries.py` 和 `test_cut_rendering.py`；同时覆盖 timeline 双范围、`0.20s` 吸附上限、静音内精确范围、草稿 revision 生成门槛与生成阶段零次重对齐。
 - overlay 或统一合成：art + pip + composition 对应模块，随后完整测试。
 - 打包/数据目录：`tests/test_build_mac_package.py`，确认不包含本机 jobs/history/秘密。
 - HTML/CSS/JS 行为变更：Python 静态契约测试之外，用浏览器验证桌面和 375px 窄屏的核心工作流。

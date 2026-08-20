@@ -1,0 +1,30 @@
+{
+  "id": "eliminate-cut-tail-protect-retained-speech",
+  "name": "eliminate-cut-tail-protect-retained-speech",
+  "title": "彻底消除裁剪尾音并保护下一段语音",
+  "description": "统一自动和手动删除的声学边界，清除被删文案尾音且不损伤下一段保留语音。",
+  "status": "in_progress",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P0",
+  "creator": "541",
+  "assignee": "541",
+  "createdAt": "2026-08-20",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "develop",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": "08-13-project-optimization-audit",
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {
+    "phase0_automated_gate": "passed",
+    "needs_reapproval": "false",
+    "revised_plan_approved": "true"
+  }
+}

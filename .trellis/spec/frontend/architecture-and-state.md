@@ -129,7 +129,8 @@ const mediaRanges = mergeCutRanges(
 - 原始 `asrWords` 可以跨越自然词边界，不能作为不可分割删除单元，也不能把“给一”“得你”之类模型 token 的下一字符带入删除。
 - 文案点击、AI 建议初始化、草稿恢复和撤销/重做都必须经 `canonicalizeTextSelectionRange` / `normalizeRestoredTextDeleteRange` 扩展到相交字符，并用规范后的边界重建 map key。
 - `buildSegmentTextRuns` 继续逐字符投影删除状态；文字静音扩展和空白范围不能使未选字符进入恢复态。手动 `timelineRanges` 不使用字符扩展。
-- 手动时间轴范围只 clamp 到媒体时长并保留用户选择的精确起止；二次确认后仍可只覆盖字符的一部分。
+- 手动时间轴范围的 `originalStart/originalEnd` 只 clamp 到媒体时长并保留用户选择的精确起止；二次确认后仍可只覆盖字符的一部分。服务端可以把物理 `start/end` 在 `0.20s` 内吸附到可靠的字符声学转换，前端必须原子应用草稿响应，同时保留 `original*` 供文字删除态、撤销/重做和 retained transcript 使用。
+- `generateCut()` 与统一 compose 必须先等待草稿保存队列完成，再携带当前 `cutDraftRevision`；revision 只是服务端权威草稿的并发令牌，不得增加 ProjectStore 的用户编辑 revision。旧响应只有在 job、请求签名和 revision 仍匹配时才能更新预览。
 
 具体字段、回退矩阵和跨层测试见后端规格 `media-and-timeline.md` 的“ASR 原始 word 与展示分词使用双层时间契约”。
 

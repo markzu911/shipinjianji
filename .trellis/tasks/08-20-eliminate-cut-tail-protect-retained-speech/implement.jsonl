@@ -1,0 +1,11 @@
+{"file":".trellis/spec/backend/media-and-timeline.md","reason":"实现语义/物理双范围、共享边界、retained transcript 和生成不重算契约"}
+{"file":".trellis/spec/backend/persistence-and-jobs.md","reason":"实现 cut-draft revision、兼容字段、sidecar 缓存和原子持久化"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"保持时间范围、API 兼容、媒体安全和真实样片质量要求"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"原子回写 timeline 双范围、Store frame、live transcript 和生成同步"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"修改手动时间轴从始终精确到语音附近安全吸附的交互契约"}
+{"file":".trellis/spec/operations/index.md","reason":"约束 DATA_DIR 模型缓存、运行配置和 Mac 发布包"}
+{"file":".trellis/spec/testing/index.md","reason":"落实剪辑、真实 FFmpeg、外部模型 monkeypatch 和浏览器测试"}
+{"file":".trellis/tasks/08-20-eliminate-cut-tail-protect-retained-speech/research/current-media-evidence.md","reason":"复现得你边界、高能量误判和 AAC 排除证据"}
+{"file":".trellis/tasks/08-20-eliminate-cut-tail-protect-retained-speech/research/acoustic-alignment-options.md","reason":"对齐引擎选择、依赖、缓存、降级和验收依据"}
+{"file":".trellis/tasks/08-20-eliminate-cut-tail-protect-retained-speech/research/cut-boundary-dataflow.md","reason":"三入口到草稿、预览、生成和 retained transcript 的完整数据流"}
+{"file":".trellis/tasks/08-20-eliminate-cut-tail-protect-retained-speech/research/fa-zh-spike-results.md","reason":"固定运行时、完整句段准入、真实 FFmpeg/ASR/PCM 与资源成本证据"}
