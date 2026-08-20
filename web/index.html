@@ -13,7 +13,7 @@
     <script src="/ui-feedback.js?v=20260807-03" defer></script>
     <script src="/timeline-model.js?v=20260810-01" defer></script>
     <script src="/editor-pip-model.js?v=20260819-01" defer></script>
-    <script src="/editor-project-store.js?v=20260819-05" defer></script>
+    <script src="/editor-project-store.js?v=20260820-01" defer></script>
     <script src="/editor-media-controller.js?v=20260819-01" defer></script>
     <script src="/editor-art-model.js?v=20260820-01" defer></script>
     <script src="/editor-art-renderer.js?v=20260819-01" defer></script>
@@ -21,9 +21,9 @@
     <script src="/editor-timeline-controller.js?v=20260820-02" defer></script>
     <script src="/editor-art-tool.js?v=20260819-07" defer></script>
     <script src="/editor-pip-tool.js?v=20260819-02" defer></script>
-    <script src="/editor-suite.js?v=20260820-01" defer></script>
+    <script src="/editor-suite.js?v=20260820-02" defer></script>
     <script src="/transcript-follow-scroll.js?v=20260818-03" defer></script>
-    <script src="/app.js?v=20260819-01" defer></script>
+    <script src="/app.js?v=20260820-01" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main">跳到主要内容</a>
@@ -491,7 +491,7 @@
 
               <div id="cutFrameTimeline" class="frame-timeline cut-frame-timeline" aria-label="公共帧时间轴" hidden>
                 <div class="frame-timeline-heading cut-frame-timeline-heading">
-                  <span class="sr-only">拖动自定义区间；选区保持精确范围，可微调，再次点击确认删除</span>
+                  <span class="sr-only">拖动自定义区间；语音附近确认后会对齐安全边界，可微调并再次点击确认删除</span>
                   <output id="cutFrameTimelineTime">00:00 / 00:00</output>
                 </div>
                 <div id="cutFrameTimelineScroll" class="cut-frame-timeline-scroll">

@@ -63,6 +63,10 @@
       return {
         active: Boolean(value.active),
         ranges: normalizeRanges(value.ranges),
+        cutDraftRevision: Math.max(
+          0,
+          finiteNumber(value.cutDraftRevision),
+        ),
         sourceDuration: Math.max(0, finiteNumber(value.sourceDuration)),
         duration: Math.max(0, finiteNumber(value.duration)),
         transcript: isObject(value.transcript) ? clone(value.transcript) : null,
@@ -940,12 +944,24 @@
 
       const comparable = { ...state, project, ui, jobId, serverVersion };
       if (stableSignature(comparable) === stableSignature(state)) return null;
+      const cutDraftMetadataOnly =
+        action.type === ACTIONS.CUT_TIMING_CHANGED &&
+        stableSignature({
+          ...comparable,
+          project: {
+            ...project,
+            cut: {
+              ...project.cut,
+              cutDraftRevision: state.project.cut.cutDraftRevision,
+            },
+          },
+        }) === stableSignature(state);
       const timingChanged =
         (action.type === ACTIONS.PROJECT_HYDRATED && jobId !== state.jobId) ||
         projectTimingSignature(project) !== projectTimingSignature(state.project);
       return owned({
         ...comparable,
-        revision: state.revision + 1,
+        revision: state.revision + (cutDraftMetadataOnly ? 0 : 1),
         timingRevision: state.timingRevision + (timingChanged ? 1 : 0),
       });
     }
@@ -1084,6 +1100,9 @@
       return clone({
         target: "all",
         ranges,
+        ...(state.project.cut.cutDraftRevision > 0
+          ? { cutDraftRevision: state.project.cut.cutDraftRevision }
+          : {}),
         artOverlays: state.project.art.overlays.map((overlay) =>
           projectFields(overlay, ART_COMPOSITION_FIELDS)),
         artSource: state.project.art.source || "original",

@@ -139,6 +139,7 @@
   let cutDraftState = {
     active: false,
     ranges: [],
+    cutDraftRevision: 0,
     sourceDuration: 0,
     duration: 0,
     transcript: null,
@@ -919,7 +920,7 @@
 
   function compositionVisualSignature(value) {
     if (!value) return "";
-    const { target, historyName, ...visual } = value;
+    const { target, historyName, cutDraftRevision, ...visual } = value;
     return JSON.stringify(stableValue(visual));
   }
 
@@ -1066,20 +1067,18 @@
     if (!compositionReady()) return;
     const jobId = currentJobId();
     if (!jobId) return;
-    const frame = selectCurrentProjectFrame();
-    const validationError = compositionValidationError(frame);
-    if (validationError) {
-      status.textContent = validationError;
-      root.dataset.state = "error";
-      syncGenerationButton();
-      return;
-    }
-    const request = frame.composition;
     generateButton.disabled = true;
     generateButton.classList.add("is-busy");
     status.textContent = "正在创建当前预览合成任务…";
     root.dataset.state = "working";
     try {
+      if (typeof cutTimelineAdapter?.flushDraft === "function") {
+        await cutTimelineAdapter.flushDraft();
+      }
+      const frame = selectCurrentProjectFrame();
+      const validationError = compositionValidationError(frame);
+      if (validationError) throw new Error(validationError);
+      const request = frame.composition;
       const response = await fetch(
         `/api/transcriptions/${encodeURIComponent(jobId)}/compose`,
         {
@@ -1615,6 +1614,10 @@
     const nextCutDraftState = {
       active: Boolean(payload.active),
       ranges,
+      cutDraftRevision: Math.max(
+        0,
+        Number(payload.cutDraftRevision ?? cutDraftState.cutDraftRevision) || 0,
+      ),
       sourceDuration: Math.max(0, Number(payload.sourceDuration) || 0),
       duration: Math.max(0, Number(payload.duration) || 0),
       transcript: payload.transcript || null,

@@ -12,6 +12,7 @@ class DeleteRange(BaseModel):
 
 class CutRequest(BaseModel):
     ranges: list[DeleteRange]
+    cutDraftRevision: int | None = Field(default=None, ge=0)
     historyName: str | None = Field(default=None, max_length=80)
 
 
@@ -28,6 +29,12 @@ class CutDraftNoSpeechRange(DeleteRange):
     key: str = Field(min_length=1, max_length=120)
 
 
+class CutDraftTimelineRange(DeleteRange):
+    key: str | None = Field(default=None, min_length=1, max_length=120)
+    originalStart: float | None = Field(default=None, ge=0, le=86400)
+    originalEnd: float | None = Field(default=None, ge=0, le=86400)
+
+
 class CutDraftRequest(BaseModel):
     revision: int = Field(default=0, ge=0)
     automaticNoSpeechInitialized: bool = False
@@ -36,7 +43,10 @@ class CutDraftRequest(BaseModel):
         default_factory=list,
         max_length=500,
     )
-    timelineRanges: list[DeleteRange] = Field(default_factory=list, max_length=500)
+    timelineRanges: list[CutDraftTimelineRange] = Field(
+        default_factory=list,
+        max_length=500,
+    )
 
 
 class JobCleanupRequest(BaseModel):
@@ -203,6 +213,7 @@ class PreviewCompositionRequest(BaseModel):
     # layer in one request.
     target: Literal["all", "art", "pip"] = "all"
     ranges: list[DeleteRange]
+    cutDraftRevision: int | None = Field(default=None, ge=0)
     artOverlays: list[TextOverlay] = Field(default_factory=list)
     artSource: Literal["original", "edited"] = "original"
     pictureInPictureOverlays: list[PictureInPictureOverlay] = Field(
@@ -246,6 +257,7 @@ __all__ = (
     "CutRequest",
     "CutDraftTextRange",
     "CutDraftNoSpeechRange",
+    "CutDraftTimelineRange",
     "CutDraftRequest",
     "JobCleanupRequest",
     "ModelProviderUpdate",

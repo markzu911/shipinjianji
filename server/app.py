@@ -40,6 +40,12 @@ from dotenv import load_dotenv, set_key, unset_key
 from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont, ImageStat
 from starlette.concurrency import run_in_threadpool
 
+from .acoustic_alignment import (
+    ALIGNER_NAME as ACOUSTIC_ALIGNER_NAME,
+    MODEL_REVISION as ACOUSTIC_ALIGNMENT_MODEL_REVISION,
+    AlignmentFailure,
+    ensure_acoustic_alignment_cache,
+)
 from .history_repository import (
     HISTORY_KINDS,
     HISTORY_LIBRARY_LOCK,
@@ -57,6 +63,7 @@ from .schemas import (
     CutDraftNoSpeechRange,
     CutDraftRequest,
     CutDraftTextRange,
+    CutDraftTimelineRange,
     CutRequest,
     DeleteRange,
     FontUpdate,
@@ -1855,6 +1862,66 @@ def protect_recognized_speech_from_quiet_ranges(
     )
 
 
+def resolve_generation_cut_ranges(
+    request_ranges: list[DeleteRange],
+    duration: float,
+    draft: dict[str, Any] | None,
+    suggestions: list[dict[str, Any]],
+    segments: list[dict[str, Any]],
+    *,
+    cut_draft_revision: int | None,
+    allow_empty_request: bool = False,
+) -> tuple[list[dict[str, float]], list[dict[str, float]]]:
+    if cut_draft_revision is not None:
+        if draft is None or int(draft.get("revision") or 0) != cut_draft_revision:
+            raise HTTPException(
+                status_code=409,
+                detail="剪辑草稿版本已变化，请等待草稿保存完成后重试。",
+            )
+        media_ranges = resolve_cut_draft_delete_ranges(
+            draft,
+            suggestions,
+            segments,
+            duration,
+        )
+        if not media_ranges and not allow_empty_request:
+            raise ValueError("请至少选择一个要删除的时间范围。")
+        return media_ranges, resolve_cut_draft_delete_ranges(
+            draft,
+            suggestions,
+            segments,
+            duration,
+            use_text_semantic_boundaries=True,
+        )
+
+    requested_ranges = (
+        []
+        if allow_empty_request and not request_ranges
+        else normalize_delete_ranges(request_ranges, duration)
+    )
+    transcript_delete_ranges = copy.deepcopy(requested_ranges)
+    draft_ranges = normalize_cut_draft_delete_ranges(draft, duration)
+    resolved_draft_ranges = resolve_cut_draft_delete_ranges(
+        draft,
+        suggestions,
+        segments,
+        duration,
+    )
+    if resolved_draft_ranges and (
+        delete_ranges_match(requested_ranges, draft_ranges)
+        or delete_ranges_match(requested_ranges, resolved_draft_ranges)
+    ):
+        requested_ranges = resolved_draft_ranges
+        transcript_delete_ranges = resolve_cut_draft_delete_ranges(
+            draft,
+            suggestions,
+            segments,
+            duration,
+            use_text_semantic_boundaries=True,
+        )
+    return requested_ranges, transcript_delete_ranges
+
+
 def resolve_cut_draft_delete_ranges(
     draft: dict[str, Any] | None,
     suggestions: list[dict[str, Any]],
@@ -1884,8 +1951,8 @@ def resolve_cut_draft_delete_ranges(
         *semantic_text_ranges,
         *(
             {
-                "start": float(item["start"]),
-                "end": float(item["end"]),
+                "start": float(item.get("originalStart", item["start"])),
+                "end": float(item.get("originalEnd", item["end"])),
             }
             for item in timeline_ranges
         ),
@@ -1928,7 +1995,18 @@ def resolve_cut_draft_delete_ranges(
         retained_media_ranges,
     )
     values.extend(
-        {"start": float(item["start"]), "end": float(item["end"])}
+        {
+            "start": float(
+                item.get("originalStart", item["start"])
+                if use_text_semantic_boundaries
+                else item["start"]
+            ),
+            "end": float(
+                item.get("originalEnd", item["end"])
+                if use_text_semantic_boundaries
+                else item["end"]
+            ),
+        }
         for item in timeline_ranges
     )
     if not values:
@@ -2379,6 +2457,7 @@ def snap_suggestion_ranges_to_audio(
     suggestions: list[dict[str, Any]],
     duration: float,
     samples: array,
+    alignment_cache: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Snap AI-suggestion delete ranges to nearby low-energy valleys.
 
@@ -2409,6 +2488,7 @@ def snap_suggestion_ranges_to_audio(
                 semantic_ranges,
                 duration,
                 samples=samples,
+                alignment_cache=alignment_cache,
             )
             snapped_ranges = []
             for semantic_range, limits in zip(
@@ -2528,10 +2608,20 @@ def split_timed_text_units(
 
 def transcript_acoustic_character_units(
     segments: list[dict[str, Any]],
+    alignment_cache: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Map natural character units to raw ASR tokens without changing semantics."""
     units: list[dict[str, Any]] = []
     seen: set[tuple[float, float, str]] = set()
+    alignment_records = {
+        int(item.get("segmentIndex")): item
+        for item in (alignment_cache or {}).get("segments") or []
+        if isinstance(item, dict)
+        and isinstance(item.get("segmentIndex"), int)
+        and isinstance(item.get("validation"), dict)
+        and item["validation"].get("valid") is True
+        and isinstance(item.get("characters"), list)
+    }
     for segment_index, segment in enumerate(segments):
         semantic_units = transcript_segment_character_units(segment)
         semantic_characters = [
@@ -2595,6 +2685,18 @@ def transcript_acoustic_character_units(
             and semantic_text
             == [str(item["text"]) for item in raw_character_units]
         )
+        alignment_record = alignment_records.get(segment_index)
+        aligned_characters = (
+            alignment_record.get("characters")
+            if alignment_record is not None
+            else []
+        )
+        forced_mapping_valid = bool(
+            alignment_record
+            and len(aligned_characters) == len(semantic_text)
+            and semantic_text
+            == [str(item.get("text") or "") for item in aligned_characters]
+        )
 
         for character_index, unit in enumerate(semantic_units):
             key = (
@@ -2619,6 +2721,16 @@ def transcript_acoustic_character_units(
                         "_tokenStart": float(raw_unit["tokenStart"]),
                         "_tokenEnd": float(raw_unit["tokenEnd"]),
                         "_tokenIndex": int(raw_unit["tokenIndex"]),
+                    }
+                )
+            if forced_mapping_valid:
+                aligned = aligned_characters[character_index]
+                enriched.update(
+                    {
+                        "_forcedStart": float(aligned["start"]),
+                        "_forcedEnd": float(aligned["end"]),
+                        "_alignmentSource": ACOUSTIC_ALIGNER_NAME,
+                        "_alignmentRevision": ACOUSTIC_ALIGNMENT_MODEL_REVISION,
                     }
                 )
             units.append(enriched)
@@ -2791,6 +2903,60 @@ def find_quiet_token_extension_boundary(
         corridor_end,
         deletion_on_left=deletion_on_left,
     )
+
+
+def load_job_acoustic_alignment(
+    media_path: Path | None,
+    segments: list[dict[str, Any]],
+    relevant_ranges: list[dict[str, float]] | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    if media_path is None or not media_path.is_file():
+        return None, {
+                "status": "unavailable",
+                "reason": "source_missing",
+                "aligner": ACOUSTIC_ALIGNER_NAME,
+                "modelRevision": ACOUSTIC_ALIGNMENT_MODEL_REVISION,
+            }
+    try:
+        segment_indexes = None
+        if relevant_ranges is not None:
+            segment_indexes = {
+                index
+                for index, segment in enumerate(segments)
+                if any(
+                    float(item["end"]) >= float(segment.get("start") or 0) - 0.20
+                    and float(item["start"])
+                    <= float(segment.get("end") or 0) + 0.20
+                    for item in relevant_ranges
+                )
+            }
+        payload = ensure_acoustic_alignment_cache(
+            media_path,
+            segments,
+            media_path.parent,
+            DATA_DIR / "models",
+            segment_indexes=segment_indexes,
+        )
+    except (AlignmentFailure, OSError, RuntimeError) as exc:
+        return None, {
+                "status": "unavailable",
+                "reason": getattr(exc, "reason", "alignment_cache_failed"),
+                "aligner": ACOUSTIC_ALIGNER_NAME,
+                "modelRevision": ACOUSTIC_ALIGNMENT_MODEL_REVISION,
+            }
+    return payload, {
+            **copy.deepcopy(payload.get("summary") or {}),
+            "aligner": ACOUSTIC_ALIGNER_NAME,
+            "modelRevision": ACOUSTIC_ALIGNMENT_MODEL_REVISION,
+        }
+
+
+def prepare_job_acoustic_alignment(
+    media_path: Path | None,
+    segments: list[dict[str, Any]],
+) -> dict[str, Any]:
+    _, summary = load_job_acoustic_alignment(media_path, segments)
+    return summary
 
 
 def refine_shared_character_boundary(
@@ -2970,14 +3136,152 @@ def refine_shared_character_boundary(
     )
 
 
+def forced_alignment_transition_boundary(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    fallback: float,
+    samples: array,
+    sample_rate: int,
+    *,
+    deletion_on_left: bool,
+) -> tuple[float | None, dict[str, Any]]:
+    direction = "delete_end" if deletion_on_left else "delete_start"
+    diagnostic = {
+        "direction": direction,
+        "fallback": round(fallback, 3),
+        "final": round(fallback, 3),
+        "alignmentSource": None,
+        "alignmentRevision": None,
+        "adjacentCharacters": [
+            str(left.get("text") or ""),
+            str(right.get("text") or ""),
+        ],
+        "retainedSpeechHardLimit": None,
+        "structureValid": False,
+        "confidence": None,
+        "pcmAdjustment": 0.0,
+        "fallbackReason": "alignment_missing",
+    }
+    required = {"_forcedStart", "_forcedEnd"}
+    if (
+        int(left.get("_segmentIndex", -1)) != int(right.get("_segmentIndex", -2))
+        or int(right.get("_characterIndex", -1))
+        != int(left.get("_characterIndex", -1)) + 1
+        or not required.issubset(left)
+        or not required.issubset(right)
+    ):
+        return None, diagnostic
+    left_end = float(left["_forcedEnd"])
+    right_start = float(right["_forcedStart"])
+    diagnostic.update(
+        {
+            "alignmentSource": str(left.get("_alignmentSource") or ""),
+            "alignmentRevision": str(left.get("_alignmentRevision") or ""),
+            "retainedSpeechHardLimit": round(
+                right_start if deletion_on_left else left_end,
+                3,
+            ),
+        }
+    )
+    if (
+        not math.isfinite(left_end)
+        or not math.isfinite(right_start)
+        or left_end > right_start + 0.001
+    ):
+        diagnostic["fallbackReason"] = "alignment_transition_overlap"
+        return None, diagnostic
+    candidate = left_end if deletion_on_left else right_start
+    if (
+        (deletion_on_left and candidate < fallback - 0.001)
+        or (not deletion_on_left and candidate > fallback + 0.001)
+    ):
+        diagnostic["fallbackReason"] = "alignment_wrong_direction"
+        return None, diagnostic
+    corridor_start = (
+        candidate
+        if deletion_on_left
+        else max(left_end, candidate - 0.003)
+    )
+    corridor_end = (
+        min(right_start, candidate + 0.003)
+        if deletion_on_left
+        else candidate
+    )
+    refined = candidate
+    if samples and corridor_end >= corridor_start:
+        refined = snap_to_low_amplitude_sample(
+            samples,
+            sample_rate,
+            candidate,
+            corridor_start,
+            corridor_end,
+        )
+    if deletion_on_left:
+        refined = max(candidate, min(refined, right_start))
+    else:
+        refined = min(candidate, max(refined, left_end))
+    refined = round(refined, 3)
+    diagnostic.update(
+        {
+            "final": refined,
+            "structureValid": True,
+            "pcmAdjustment": round(refined - candidate, 6),
+            "fallbackReason": None,
+        }
+    )
+    return refined, diagnostic
+
+
+def cached_forced_alignment_transition_boundary(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    fallback: float,
+    samples: array,
+    sample_rate: int,
+    *,
+    deletion_on_left: bool,
+    boundary_cache: dict[
+        tuple[int, int, bool, float],
+        tuple[float | None, dict[str, Any]],
+    ],
+) -> tuple[float | None, dict[str, Any]]:
+    key = (
+        int(left.get("_segmentIndex", -1)),
+        int(left.get("_characterIndex", -1)),
+        deletion_on_left,
+        round(fallback, 6),
+    )
+    cached = boundary_cache.get(key)
+    if cached is not None:
+        boundary, diagnostic = cached
+        return boundary, copy.deepcopy(diagnostic)
+    boundary, diagnostic = forced_alignment_transition_boundary(
+        left,
+        right,
+        fallback,
+        samples,
+        sample_rate,
+        deletion_on_left=deletion_on_left,
+    )
+    boundary_cache[key] = (boundary, copy.deepcopy(diagnostic))
+    return boundary, diagnostic
+
+
 def build_shared_acoustic_delete_boundaries(
     segments: list[dict[str, Any]],
     delete_ranges: list[dict[str, float]],
     duration: float,
     samples: array,
     sample_rate: int,
+    alignment_cache: dict[str, Any] | None = None,
+    diagnostics: list[dict[str, Any]] | None = None,
+    forced_boundary_cache: dict[
+        tuple[int, int, bool, float],
+        tuple[float | None, dict[str, Any]],
+    ] | None = None,
 ) -> list[dict[str, float]]:
-    units = transcript_acoustic_character_units(segments)
+    units = transcript_acoustic_character_units(segments, alignment_cache)
+    forced_boundary_cache = forced_boundary_cache if forced_boundary_cache is not None else {}
 
     def unit_is_deleted(unit: dict[str, Any]) -> bool:
         start = float(unit["start"])
@@ -3010,15 +3314,38 @@ def build_shared_acoustic_delete_boundaries(
             allow_token_extension = bool(
                 left_index == 0 or not deleted[left_index - 1]
             )
-        boundary_cache[left_index] = refine_shared_character_boundary(
+        forced, diagnostic = cached_forced_alignment_transition_boundary(
             left,
             right,
             fallback,
             samples,
             sample_rate,
             deletion_on_left=deletion_on_left,
-            allow_token_extension=allow_token_extension,
+            boundary_cache=forced_boundary_cache,
         )
+        if forced is not None:
+            resolved = forced
+        else:
+            resolved = refine_shared_character_boundary(
+                left,
+                right,
+                fallback,
+                samples,
+                sample_rate,
+                deletion_on_left=deletion_on_left,
+                allow_token_extension=allow_token_extension,
+            )
+            diagnostic.update(
+                {
+                    "final": round(resolved, 3),
+                    "alignmentSource": diagnostic["alignmentSource"] or "waveform",
+                    "fallbackReason": diagnostic["fallbackReason"]
+                    or "forced_alignment_invalid",
+                }
+            )
+        boundary_cache[left_index] = resolved
+        if diagnostics is not None:
+            diagnostics.append(diagnostic)
         return boundary_cache[left_index]
 
     targets: list[dict[str, float]] = []
@@ -3066,6 +3393,12 @@ def build_transcript_delete_boundary_limits(
     end_tail_guard_seconds: float = 0.0,
     samples: array | None = None,
     sample_rate: int = CUT_BOUNDARY_SAMPLE_RATE,
+    alignment_cache: dict[str, Any] | None = None,
+    diagnostics: list[dict[str, Any]] | None = None,
+    forced_boundary_cache: dict[
+        tuple[int, int, bool, float],
+        tuple[float | None, dict[str, Any]],
+    ] | None = None,
 ) -> list[dict[str, float]]:
     timed_units = transcript_character_units(segments)
 
@@ -3122,6 +3455,9 @@ def build_transcript_delete_boundary_limits(
             duration,
             samples,
             sample_rate,
+            alignment_cache,
+            diagnostics,
+            forced_boundary_cache,
         )
         for limits_item, shared in zip(limits, shared_boundaries):
             limits_item["start"] = shared["start"]
@@ -3136,6 +3472,14 @@ def align_cut_draft_text_ranges_to_audio(
     text_ranges: list[dict[str, Any]],
     segments: list[dict[str, Any]],
     duration: float,
+    *,
+    alignment_cache: dict[str, Any] | None = None,
+    samples: array | None = None,
+    diagnostics: list[dict[str, Any]] | None = None,
+    forced_boundary_cache: dict[
+        tuple[int, int, bool, float],
+        tuple[float | None, dict[str, Any]],
+    ] | None = None,
 ) -> list[dict[str, Any]]:
     """Align draft media cuts while preserving their exact text semantics."""
     if not text_ranges:
@@ -3179,17 +3523,29 @@ def align_cut_draft_text_ranges_to_audio(
         }
         for item, semantic_range in zip(text_ranges, semantic_ranges)
     ]
-    if media_path is None or not media_path.is_file():
+    if samples is None and (media_path is None or not media_path.is_file()):
         return safe_fallback_ranges
-    try:
-        samples = decode_cut_audio_samples(media_path)
-    except (OSError, RuntimeError, subprocess.SubprocessError):
-        return safe_fallback_ranges
+    if samples is None:
+        try:
+            samples = decode_cut_audio_samples(media_path)
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            if diagnostics is not None:
+                diagnostics.append(
+                    {
+                        "entryType": "text",
+                        "fallbackReason": "audio_decode_failed",
+                        "alignmentSource": None,
+                    }
+                )
+            return safe_fallback_ranges
     boundary_limits = build_transcript_delete_boundary_limits(
         segments,
         semantic_ranges,
         duration,
         samples=samples,
+        alignment_cache=alignment_cache,
+        diagnostics=diagnostics,
+        forced_boundary_cache=forced_boundary_cache,
     )
 
     aligned_ranges: list[dict[str, Any]] = []
@@ -3222,6 +3578,235 @@ def align_cut_draft_text_ranges_to_audio(
             }
         )
     return aligned_ranges
+
+
+def align_cut_draft_timeline_ranges_to_audio(
+    timeline_ranges: list[dict[str, Any]],
+    segments: list[dict[str, Any]],
+    duration: float,
+    *,
+    alignment_cache: dict[str, Any] | None,
+    samples: array | None,
+    diagnostics: list[dict[str, Any]],
+    forced_boundary_cache: dict[
+        tuple[int, int, bool, float],
+        tuple[float | None, dict[str, Any]],
+    ] | None = None,
+) -> list[dict[str, Any]]:
+    forced_boundary_cache = forced_boundary_cache if forced_boundary_cache is not None else {}
+    units = transcript_acoustic_character_units(segments, alignment_cache)
+    aligned_ranges: list[dict[str, Any]] = []
+    for item in timeline_ranges:
+        original_start = max(
+            0.0,
+            min(float(item.get("originalStart", item["start"])), duration),
+        )
+        original_end = max(
+            original_start,
+            min(float(item.get("originalEnd", item["end"])), duration),
+        )
+        if original_end <= original_start:
+            original_start = float(item["start"])
+            original_end = float(item["end"])
+        final_start = original_start
+        final_end = original_end
+        acoustic_units = [
+            unit
+            for unit in units
+            if "_forcedStart" in unit and "_forcedEnd" in unit
+        ]
+        intersects_acoustic_core = any(
+            original_start < float(unit["_forcedEnd"]) - 0.001
+            and original_end > float(unit["_forcedStart"]) + 0.001
+            for unit in acoustic_units
+        )
+        entirely_in_non_speech_gap = any(
+            int(left.get("_segmentIndex", -1))
+            == int(right.get("_segmentIndex", -2))
+            and float(left["_forcedEnd"]) < float(right["_forcedStart"])
+            and original_start >= float(left["_forcedEnd"]) - 0.001
+            and original_end <= float(right["_forcedStart"]) + 0.001
+            for left, right in zip(acoustic_units, acoustic_units[1:])
+        )
+        preserve_exact_reason = (
+            "non_speech_range_exact"
+            if entirely_in_non_speech_gap or not intersects_acoustic_core
+            else None
+        )
+        deleted_units = [
+            original_start - 0.001
+            <= (float(unit["start"]) + float(unit["end"])) / 2
+            <= original_end + 0.001
+            for unit in units
+        ]
+        start_candidates: list[tuple[float, dict[str, Any]]] = []
+        end_candidates: list[tuple[float, dict[str, Any]]] = []
+        for index in range(len(units) - 1):
+            if preserve_exact_reason is not None:
+                break
+            if deleted_units[index] == deleted_units[index + 1]:
+                continue
+            left = units[index]
+            right = units[index + 1]
+            if "_forcedEnd" not in left or "_forcedStart" not in right:
+                continue
+            if not deleted_units[index] and deleted_units[index + 1]:
+                boundary, diagnostic = cached_forced_alignment_transition_boundary(
+                    left,
+                    right,
+                    float(right["start"]),
+                    samples or array("h"),
+                    CUT_BOUNDARY_SAMPLE_RATE,
+                    deletion_on_left=False,
+                    boundary_cache=forced_boundary_cache,
+                )
+                if boundary is not None:
+                    start_candidates.append((boundary, diagnostic))
+            elif deleted_units[index] and not deleted_units[index + 1]:
+                boundary, diagnostic = cached_forced_alignment_transition_boundary(
+                    left,
+                    right,
+                    float(left["end"]),
+                    samples or array("h"),
+                    CUT_BOUNDARY_SAMPLE_RATE,
+                    deletion_on_left=True,
+                    boundary_cache=forced_boundary_cache,
+                )
+                if boundary is not None:
+                    end_candidates.append((boundary, diagnostic))
+        endpoint_diagnostics: list[dict[str, Any]] = []
+        for endpoint, requested, candidates in (
+            ("start", original_start, start_candidates),
+            ("end", original_end, end_candidates),
+        ):
+            nearest = min(
+                candidates,
+                key=lambda candidate: abs(candidate[0] - requested),
+                default=None,
+            )
+            if (
+                preserve_exact_reason is not None
+                or nearest is None
+                or abs(nearest[0] - requested) > 0.20 + 0.001
+            ):
+                endpoint_diagnostics.append(
+                    {
+                        "entryType": "timeline",
+                        "rangeKey": item.get("key"),
+                        "endpoint": endpoint,
+                        "direction": f"delete_{endpoint}",
+                        "requested": round(requested, 3),
+                        "fallback": round(requested, 3),
+                        "final": round(requested, 3),
+                        "alignmentSource": None,
+                        "alignmentRevision": None,
+                        "adjacentCharacters": None,
+                        "retainedSpeechHardLimit": None,
+                        "structureValid": False,
+                        "confidence": None,
+                        "pcmAdjustment": 0.0,
+                        "fallbackReason": preserve_exact_reason
+                        or "no_transition_within_snap_distance",
+                    }
+                )
+                continue
+            resolved, source_diagnostic = nearest
+            if endpoint == "start":
+                final_start = resolved
+            else:
+                final_end = resolved
+            endpoint_diagnostics.append(
+                {
+                    **source_diagnostic,
+                    "entryType": "timeline",
+                    "rangeKey": item.get("key"),
+                    "endpoint": endpoint,
+                    "requested": round(requested, 3),
+                    "fallback": round(requested, 3),
+                    "final": round(resolved, 3),
+                }
+            )
+        if final_end <= final_start + 0.01:
+            final_start = original_start
+            final_end = original_end
+            for diagnostic in endpoint_diagnostics:
+                diagnostic["final"] = round(
+                    original_start
+                    if diagnostic["endpoint"] == "start"
+                    else original_end,
+                    3,
+                )
+                diagnostic["fallbackReason"] = "snapped_range_would_be_empty"
+        diagnostics.extend(endpoint_diagnostics)
+        aligned_ranges.append(
+            {
+                **copy.deepcopy(item),
+                "start": round(final_start, 3),
+                "end": round(final_end, 3),
+                "originalStart": round(original_start, 3),
+                "originalEnd": round(original_end, 3),
+            }
+        )
+    return aligned_ranges
+
+
+def resolve_cut_draft_acoustic_boundaries(
+    media_path: Path | None,
+    text_ranges: list[dict[str, Any]],
+    timeline_ranges: list[dict[str, Any]],
+    segments: list[dict[str, Any]],
+    duration: float,
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    dict[str, Any],
+]:
+    diagnostics: list[dict[str, Any]] = []
+    forced_boundary_cache: dict[
+        tuple[int, int, bool, float],
+        tuple[float | None, dict[str, Any]],
+    ] = {}
+    relevant_ranges = [
+        {
+            "start": float(item.get("originalStart", item["start"])),
+            "end": float(item.get("originalEnd", item["end"])),
+        }
+        for item in [*text_ranges, *timeline_ranges]
+    ]
+    alignment_cache, alignment_summary = load_job_acoustic_alignment(
+        media_path,
+        segments,
+        relevant_ranges,
+    )
+    samples: array | None = None
+    if media_path is not None and media_path.is_file():
+        try:
+            samples = decode_cut_audio_samples(media_path)
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            samples = None
+    aligned_text = align_cut_draft_text_ranges_to_audio(
+        media_path,
+        text_ranges,
+        segments,
+        duration,
+        alignment_cache=alignment_cache,
+        samples=samples,
+        diagnostics=diagnostics,
+        forced_boundary_cache=forced_boundary_cache,
+    )
+    aligned_timeline = align_cut_draft_timeline_ranges_to_audio(
+        timeline_ranges,
+        segments,
+        duration,
+        alignment_cache=alignment_cache,
+        samples=samples,
+        diagnostics=diagnostics,
+        forced_boundary_cache=forced_boundary_cache,
+    )
+    for diagnostic in diagnostics:
+        diagnostic.setdefault("entryType", "text")
+    return aligned_text, aligned_timeline, diagnostics, alignment_summary
 
 
 def build_retained_transcript(
@@ -9179,6 +9764,17 @@ def process_job(job_id: str) -> None:
         update_job(
             job_id,
             status="transcribing",
+            stage="正在校准文字声学边界",
+            progress=96,
+        )
+        alignment_cache, alignment_summary = load_job_acoustic_alignment(
+            video_path,
+            result["segments"],
+        )
+        result["acousticAlignment"] = alignment_summary
+        update_job(
+            job_id,
+            status="transcribing",
             stage=f"正在使用 {SUGGESTION_MODEL} 分析口误",
             progress=97,
         )
@@ -9192,6 +9788,7 @@ def process_job(job_id: str) -> None:
                 suggestions,
                 media_duration,
                 audio_samples,
+                alignment_cache,
             )
         result["suggestions"] = suggestions
         result["suggestionStatus"] = suggestion_status
@@ -10630,12 +11227,6 @@ def update_cut_draft(
                     **normalized,
                 }
             )
-        text_ranges = align_cut_draft_text_ranges_to_audio(
-            video_path,
-            text_ranges,
-            source_segments,
-            duration,
-        )
         no_speech_ranges = []
         for item in request.noSpeechRanges:
             normalized = normalize_cut_draft_range(item, duration)
@@ -10645,10 +11236,48 @@ def update_cut_draft(
                     **normalized,
                 }
             )
-        timeline_ranges = [
-            normalize_cut_draft_range(item, duration)
-            for item in request.timelineRanges
-        ]
+        timeline_ranges = []
+        for item in request.timelineRanges:
+            normalized = normalize_cut_draft_range(item, duration)
+            original_start = float(
+                item.originalStart
+                if item.originalStart is not None
+                else normalized["start"]
+            )
+            original_end = float(
+                item.originalEnd
+                if item.originalEnd is not None
+                else normalized["end"]
+            )
+            if not math.isfinite(original_start) or not math.isfinite(original_end):
+                raise ValueError("剪辑草稿包含无效时间。")
+            original_start = max(0.0, min(original_start, duration))
+            original_end = max(0.0, min(original_end, duration))
+            if original_end <= original_start:
+                raise ValueError("剪辑草稿区间的结束时间必须晚于开始时间。")
+            timeline_ranges.append(
+                {
+                    **item.model_dump(
+                        exclude={"start", "end", "originalStart", "originalEnd"},
+                        exclude_none=True,
+                    ),
+                    **normalized,
+                    "originalStart": round(original_start, 3),
+                    "originalEnd": round(original_end, 3),
+                }
+            )
+        (
+            text_ranges,
+            timeline_ranges,
+            boundary_diagnostics,
+            acoustic_alignment,
+        ) = resolve_cut_draft_acoustic_boundaries(
+            video_path,
+            text_ranges,
+            timeline_ranges,
+            source_segments,
+            duration,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -10675,6 +11304,8 @@ def update_cut_draft(
             "textRanges": text_ranges,
             "noSpeechRanges": no_speech_ranges,
             "timelineRanges": timeline_ranges,
+            "boundaryDiagnostics": boundary_diagnostics,
+            "acousticAlignment": acoustic_alignment,
             "updatedAt": utc_now(),
         }
         try:
@@ -10925,31 +11556,22 @@ def create_cut(
         if existing_edit.get("status") in {"queued", "processing"}:
             raise HTTPException(status_code=409, detail="已有视频剪辑任务正在处理。")
         duration = float(job["duration"])
+        draft = job.get("cutDraft")
+        if draft is None:
+            draft = load_cut_draft(job_id)
+            job["cutDraft"] = draft
+        source_result = job.get("result") or {}
         try:
-            requested_ranges = normalize_delete_ranges(request.ranges, duration)
-            transcript_delete_ranges = copy.deepcopy(requested_ranges)
-            draft_ranges = normalize_cut_draft_delete_ranges(
-                job.get("cutDraft"),
-                duration,
-            )
-            resolved_draft_ranges = resolve_cut_draft_delete_ranges(
-                job.get("cutDraft"),
-                (job.get("result") or {}).get("suggestions") or [],
-                (job.get("result") or {}).get("segments") or [],
-                duration,
-            )
-            if resolved_draft_ranges and (
-                delete_ranges_match(requested_ranges, draft_ranges)
-                or delete_ranges_match(requested_ranges, resolved_draft_ranges)
-            ):
-                requested_ranges = resolved_draft_ranges
-                transcript_delete_ranges = resolve_cut_draft_delete_ranges(
-                    job.get("cutDraft"),
-                    (job.get("result") or {}).get("suggestions") or [],
-                    (job.get("result") or {}).get("segments") or [],
+            requested_ranges, transcript_delete_ranges = (
+                resolve_generation_cut_ranges(
+                    request.ranges,
                     duration,
-                    use_text_semantic_boundaries=True,
+                    draft,
+                    source_result.get("suggestions") or [],
+                    source_result.get("segments") or [],
+                    cut_draft_revision=request.cutDraftRevision,
                 )
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -11738,7 +12360,11 @@ def create_preview_composition(
                     detail="当前预览已有生成任务正在处理，请稍候。",
                 )
         duration = float(job.get("duration") or 0)
-        draft = copy.deepcopy(job.get("cutDraft"))
+        draft = job.get("cutDraft")
+        if draft is None:
+            draft = load_cut_draft(job_id)
+            job["cutDraft"] = draft
+        draft = copy.deepcopy(draft)
         source_result = copy.deepcopy(job.get("result") or {})
         asset_records = copy.deepcopy(
             [
@@ -11748,32 +12374,15 @@ def create_preview_composition(
         )
 
     try:
-        requested_ranges = (
-            normalize_delete_ranges(request.ranges, duration)
-            if request.ranges
-            else []
+        requested_ranges, transcript_delete_ranges = resolve_generation_cut_ranges(
+            request.ranges,
+            duration,
+            draft,
+            source_result.get("suggestions") or [],
+            source_result.get("segments") or [],
+            cut_draft_revision=request.cutDraftRevision,
+            allow_empty_request=True,
         )
-        transcript_delete_ranges = copy.deepcopy(requested_ranges)
-        if requested_ranges:
-            draft_ranges = normalize_cut_draft_delete_ranges(draft, duration)
-            resolved_draft_ranges = resolve_cut_draft_delete_ranges(
-                draft,
-                source_result.get("suggestions") or [],
-                source_result.get("segments") or [],
-                duration,
-            )
-            if resolved_draft_ranges and (
-                delete_ranges_match(requested_ranges, draft_ranges)
-                or delete_ranges_match(requested_ranges, resolved_draft_ranges)
-            ):
-                requested_ranges = resolved_draft_ranges
-                transcript_delete_ranges = resolve_cut_draft_delete_ranges(
-                    draft,
-                    source_result.get("suggestions") or [],
-                    source_result.get("segments") or [],
-                    duration,
-                    use_text_semantic_boundaries=True,
-                )
         preview_duration = round(
             duration
             - sum(item["end"] - item["start"] for item in requested_ranges),

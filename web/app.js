@@ -845,7 +845,7 @@ function renderCutSegments() {
   activeTranscriptSegmentIndex = -1;
   activeTranscriptSegmentKey = "";
   activeTranscriptItem = null;
-  const deletedRanges = getCommittedTimelineDeleteRanges();
+  const deletedRanges = getCommittedTimelineSemanticDeleteRanges();
   const displayItems = [];
   currentEditableSegments.forEach((segment, segmentIndex) => {
     for (const run of buildSegmentTextRuns(segment, deletedRanges)) {
@@ -1652,6 +1652,21 @@ function getCommittedTimelineDeleteRanges() {
   );
 }
 
+function timelineSemanticDeleteRange(range) {
+  const start = Number(range?.start);
+  const end = Number(range?.end);
+  const originalStart = Number(range?.originalStart);
+  const originalEnd = Number(range?.originalEnd);
+  return {
+    start: Number.isFinite(originalStart) ? originalStart : start,
+    end: Number.isFinite(originalEnd) ? originalEnd : end,
+  };
+}
+
+function getCommittedTimelineSemanticDeleteRanges() {
+  return getCommittedTimelineDeleteRanges().map(timelineSemanticDeleteRange);
+}
+
 function protectRecognizedSpeechFromQuietRanges(quietRanges) {
   return subtractProtectedRanges(
     quietRanges,
@@ -1736,7 +1751,7 @@ function getRetainedTranscriptRanges(textRanges, timelineRanges) {
       start: range.originalStart,
       end: range.originalEnd,
     })),
-    ...timelineRanges,
+    ...timelineRanges.map(timelineSemanticDeleteRange),
   ];
   return subtractProtectedRanges(
     getRecognizedCharacterRanges(),
@@ -1905,25 +1920,71 @@ function getRetainedSegmentParts(
   segment,
   spans = getEditedTimelineSpans(),
   coverageEnd = Number(segment.end) || Number(segment.start) || 0,
+  semanticDeleteRanges = [
+    ...[...selectedRanges.values()].map(canonicalizeTextDeleteRange).map(
+      (range) => ({
+        start: range.originalStart,
+        end: range.originalEnd,
+      }),
+    ),
+    ...getCommittedTimelineSemanticDeleteRanges(),
+  ],
 ) {
   const segmentStart = Number(segment.start) || 0;
   const segmentEnd = Number(segment.end) || segmentStart;
   const displayEnd = Math.max(segmentEnd, Number(coverageEnd) || segmentEnd);
-  const words = Array.isArray(segment.words) ? segment.words : [];
+  const tokens = getSegmentTokens(segment);
   const parts = [];
   for (const span of spans) {
     const sourceStart = Math.max(segmentStart, span.sourceStart);
     const sourceEnd = Math.min(displayEnd, span.sourceEnd);
     if (sourceEnd <= sourceStart) continue;
-    const retainedWords = words.filter((word) => {
-      const start = Number(word.start) || 0;
-      const end = Number(word.end) || start;
+    const retainedWords = [];
+    for (const token of tokens) {
+      const start = Number(token.start) || 0;
+      const end = Number(token.end) || start;
       const midpoint = start + (end - start) / 2;
-      return midpoint >= sourceStart && midpoint < sourceEnd;
-    });
+      const semanticallyDeleted = semanticDeleteRanges.some(
+        (range) =>
+          midpoint >= Number(range.start) && midpoint < Number(range.end),
+      );
+      if (
+        semanticallyDeleted ||
+        end <= sourceStart + CUT_SPEECH_BOUNDARY_EPSILON ||
+        start >= sourceEnd - CUT_SPEECH_BOUNDARY_EPSILON
+      ) {
+        continue;
+      }
+      const wordStart = Math.max(start, sourceStart);
+      const wordEnd = Math.min(end, sourceEnd);
+      const parentStart = Number(token.parentWordStart);
+      const parentEnd = Number(token.parentWordEnd);
+      const previous = retainedWords.at(-1);
+      if (
+        previous &&
+        Number.isFinite(parentStart) &&
+        Number.isFinite(parentEnd) &&
+        previous.parentWordStart === parentStart &&
+        previous.parentWordEnd === parentEnd &&
+        wordStart <= previous.end + CUT_SPEECH_BOUNDARY_EPSILON
+      ) {
+        previous.text += String(token.text || "");
+        previous.end = wordEnd;
+      } else {
+        retainedWords.push({
+          text: String(token.text || ""),
+          start: wordStart,
+          end: wordEnd,
+          parentWordStart: Number.isFinite(parentStart) ? parentStart : start,
+          parentWordEnd: Number.isFinite(parentEnd) ? parentEnd : end,
+        });
+      }
+    }
     const text = retainedWords.length
       ? retainedWords.map((word) => String(word.text || "")).join("")
-      : sourceStart <= segmentStart + 0.001 && sourceEnd >= segmentEnd - 0.001
+      : tokens.length === 0 &&
+          sourceStart <= segmentStart + 0.001 &&
+          sourceEnd >= segmentEnd - 0.001
         ? String(segment.text || "")
         : "";
     if (!text.trim()) continue;
@@ -2046,11 +2107,21 @@ function hasUncommittedCutSelection() {
 
 function buildLiveCutDraftState() {
   const spans = getEditedTimelineSpans();
+  const semanticDeleteRanges = [
+    ...[...selectedRanges.values()].map(canonicalizeTextDeleteRange).map(
+      (range) => ({
+        start: range.originalStart,
+        end: range.originalEnd,
+      }),
+    ),
+    ...getCommittedTimelineSemanticDeleteRanges(),
+  ];
   const segments = currentEditableSegments.flatMap((segment, segmentIndex) =>
     getRetainedSegmentParts(
       segment,
       spans,
       getEditableSegmentCoverageEnd(segmentIndex),
+      semanticDeleteRanges,
     ).map((part, partIndex) => ({
       id: `cut-draft-${segmentIndex}-${partIndex}`,
       text: String(part.text || ""),
@@ -2063,6 +2134,7 @@ function buildLiveCutDraftState() {
   );
   return {
     active: hasUncommittedCutSelection(),
+    cutDraftRevision,
     ranges: getMergedSelection().map(({ start, end }) => ({ start, end })),
     sourceDuration: cutTimelineDuration(),
     duration: editedCutTimelineDuration(spans),
@@ -2196,6 +2268,26 @@ function serializableCutDraftRange(range) {
   return { start, end };
 }
 
+function serializableTimelineCutDraftRange(range, fallbackKey = "") {
+  const normalized = serializableCutDraftRange(range);
+  if (!normalized) return null;
+  const semantic = timelineSemanticDeleteRange(range);
+  if (
+    !Number.isFinite(semantic.start) ||
+    !Number.isFinite(semantic.end) ||
+    semantic.end <= semantic.start
+  ) {
+    return null;
+  }
+  const defaultKey = `timeline-${rangeKey(semantic.start, semantic.end)}`;
+  return {
+    key: String(range?.key || fallbackKey || range?.id || defaultKey),
+    ...normalized,
+    originalStart: semantic.start,
+    originalEnd: semantic.end,
+  };
+}
+
 function normalizeRestoredTextDeleteRange(item) {
   const normalized = serializableCutDraftRange(item);
   if (!normalized) return null;
@@ -2252,7 +2344,7 @@ function buildPersistedCutDraftPayload() {
     },
   );
   const timelineRanges = getCommittedTimelineDeleteRanges().flatMap((range) => {
-    const normalized = serializableCutDraftRange(range);
+    const normalized = serializableTimelineCutDraftRange(range);
     return normalized ? [normalized] : [];
   });
   return {
@@ -2300,9 +2392,13 @@ function restorePersistedCutDraft(draft) {
   timelineDeleteRanges = (
     Array.isArray(draft?.timelineRanges) ? draft.timelineRanges : []
   ).flatMap((item) => {
-    const normalized = serializableCutDraftRange(item);
+    const id = nextTimelineRangeId++;
+    const normalized = serializableTimelineCutDraftRange(
+      item,
+      `timeline-${id}`,
+    );
     if (!normalized) return [];
-    return [{ id: nextTimelineRangeId++, ...normalized }];
+    return [{ id, ...normalized }];
   });
   const payload = buildPersistedCutDraftPayload();
   cutDraftLastSignature = cutDraftSelectionSignature(payload);
@@ -2339,7 +2435,7 @@ function applyPersistedCutDraftAlignment(draft, expectedSignature) {
     return false;
   }
 
-  const serverRanges = new Map(
+  const serverTextRanges = new Map(
     (Array.isArray(draft.textRanges) ? draft.textRanges : []).flatMap((item) => {
       const key = String(item?.key || "");
       const normalized = serializableCutDraftRange(item);
@@ -2347,15 +2443,34 @@ function applyPersistedCutDraftAlignment(draft, expectedSignature) {
     }),
   );
   if (
-    serverRanges.size !== selectedRanges.size ||
-    [...selectedRanges.keys()].some((key) => !serverRanges.has(key))
+    serverTextRanges.size !== selectedRanges.size ||
+    [...selectedRanges.keys()].some((key) => !serverTextRanges.has(key))
   ) {
     return false;
   }
 
-  let changed = false;
+  const currentTimelineRanges = getCommittedTimelineDeleteRanges();
+  const serverTimelineRanges = new Map(
+    (Array.isArray(draft.timelineRanges) ? draft.timelineRanges : []).flatMap(
+      (item) => {
+        const key = String(item?.key || "");
+        const normalized = serializableTimelineCutDraftRange(item);
+        return key && normalized ? [[key, normalized]] : [];
+      },
+    ),
+  );
+  if (
+    serverTimelineRanges.size !== currentTimelineRanges.length ||
+    currentTimelineRanges.some(
+      (range) => !serverTimelineRanges.has(String(range.key || "")),
+    )
+  ) {
+    return false;
+  }
+
+  const alignedTextRanges = new Map();
   for (const [key, currentRange] of selectedRanges.entries()) {
-    const { item, normalized } = serverRanges.get(key);
+    const { item, normalized } = serverTextRanges.get(key);
     const aligned = {
       ...currentRange,
       ...normalized,
@@ -2375,10 +2490,41 @@ function applyPersistedCutDraftAlignment(draft, expectedSignature) {
         Number(item.adjacentSilenceAfter) || 0,
       ),
     };
-    changed ||= cutDraftSelectionSignature({ textRanges: [currentRange] }) !==
-      cutDraftSelectionSignature({ textRanges: [aligned] });
-    selectedRanges.set(key, aligned);
+    alignedTextRanges.set(key, aligned);
   }
+
+  const alignedTimelineRanges = currentTimelineRanges.map((currentRange) => ({
+    ...currentRange,
+    ...serverTimelineRanges.get(String(currentRange.key)),
+  }));
+  const rangeChanged = (left, right, fields) =>
+    fields.some((field) => left?.[field] !== right?.[field]);
+  const changed =
+    [...selectedRanges.entries()].some(([key, currentRange]) =>
+      rangeChanged(currentRange, alignedTextRanges.get(key), [
+        "start",
+        "end",
+        "originalStart",
+        "originalEnd",
+        "adjacentSilenceBefore",
+        "adjacentSilenceAfter",
+        "text",
+      ]),
+    ) ||
+    currentTimelineRanges.some((currentRange, index) =>
+      rangeChanged(currentRange, alignedTimelineRanges[index], [
+        "start",
+        "end",
+        "originalStart",
+        "originalEnd",
+      ]),
+    );
+
+  selectedRanges.clear();
+  for (const [key, range] of alignedTextRanges) {
+    selectedRanges.set(key, range);
+  }
+  timelineDeleteRanges = alignedTimelineRanges;
 
   cutDraftLastSignature = cutDraftSelectionSignature(
     buildPersistedCutDraftPayload(),
@@ -2447,6 +2593,7 @@ async function persistCutDraft() {
     }
     cutDraftNeedsServerSync = false;
     saveLocalCutDraft(result.cutDraft, jobId);
+    syncEditorSuiteCutDraftState();
     setCutDraftSaveStatus("剪辑草稿已保存", "success");
   } catch (error) {
     if (currentJobId !== jobId) return;
@@ -2474,6 +2621,38 @@ function scheduleCutDraftSave() {
     persistCutDraft,
     persistCutDraft,
   );
+}
+
+async function flushCutDraftSave() {
+  if (!cutDraftReady || !currentJobId) {
+    throw new Error("剪辑草稿尚未准备完成。请稍后重试。");
+  }
+  const jobId = currentJobId;
+  while (currentJobId === jobId) {
+    const requestedSignature = cutDraftSelectionSignature(
+      buildPersistedCutDraftPayload(),
+    );
+    scheduleCutDraftSave();
+    const pendingQueue = cutDraftSaveQueue;
+    await pendingQueue;
+    if (currentJobId !== jobId) {
+      throw new Error("当前视频任务已变化，请重新确认剪辑范围。");
+    }
+    if (pendingQueue !== cutDraftSaveQueue) continue;
+    const currentSignature = cutDraftSelectionSignature(
+      buildPersistedCutDraftPayload(),
+    );
+    if (currentSignature !== requestedSignature) continue;
+    if (
+      currentSignature !== cutDraftLastSignature ||
+      cutDraftNeedsServerSync ||
+      cutDraftRevision <= 0
+    ) {
+      throw new Error("剪辑草稿尚未同步到服务器。请稍后重试。");
+    }
+    return cutDraftRevision;
+  }
+  throw new Error("当前视频任务已变化，请重新确认剪辑范围。");
 }
 
 async function clearPersistedCutDraft(jobId) {
@@ -2532,8 +2711,11 @@ function cloneCutHistorySnapshot(source = buildPersistedCutDraftPayload()) {
   });
   const timelineRanges = (
     Array.isArray(source?.timelineRanges) ? source.timelineRanges : []
-  ).flatMap((item) => {
-    const normalized = serializableCutDraftRange(item);
+  ).flatMap((item, index) => {
+    const normalized = serializableTimelineCutDraftRange(
+      item,
+      `timeline-history-${index + 1}`,
+    );
     return normalized ? [normalized] : [];
   });
   return { textRanges, noSpeechRanges, timelineRanges };
@@ -2735,8 +2917,7 @@ function applyCutHistorySnapshot(snapshot) {
   }
   timelineDeleteRanges = normalized.timelineRanges.map((range) => ({
     id: nextTimelineRangeId++,
-    start: range.start,
-    end: range.end,
+    ...range,
   }));
   selectedTimelineRangeId = null;
   timelineRangeInProgress = false;
@@ -3228,6 +3409,8 @@ function applySharedTimelineRange(transaction) {
   try {
     range.start = start;
     range.end = end;
+    range.originalStart = start;
+    range.originalEnd = end;
     selectedTimelineRangeId = range.id;
     updateSelectionSummary();
   } finally {
@@ -3579,8 +3762,10 @@ function beginCutTimelineSelection(event) {
     }
     const current = cutTimelineSecondsFromClientX(moveEvent.clientX);
     if (!draftRange) {
+      const id = nextTimelineRangeId++;
       draftRange = {
-        id: nextTimelineRangeId++,
+        id,
+        key: `timeline-${id}`,
         start: anchorSeconds,
         end: anchorSeconds,
       };
@@ -3601,7 +3786,7 @@ function beginCutTimelineSelection(event) {
     renderCutTimelineRanges();
     updateCutTimelineStatus(
       safeRange
-        ? `将按精确时间范围删除 ${formatCutRange(draftRange.start, draftRange.end)}；覆盖文字时不会自动扩大`
+        ? `将删除 ${formatCutRange(draftRange.start, draftRange.end)}；确认后语音附近会对齐安全剪辑点`
         : "当前拖动范围无效，松开后不会删除。",
       safeRange ? "neutral" : "error",
       "selection",
@@ -3801,7 +3986,7 @@ async function requestTimelineRangeConfirmation(range) {
       title: "删除这个时间轴区间？",
       message:
         `将删除 ${formatCutRange(range.start, range.end)}，并自动拼接前后画面。` +
-        "删除后可通过全局撤销恢复，原视频仍会保留。",
+        "语音附近会对齐安全剪辑点；删除后可通过全局撤销恢复，原视频仍会保留。",
       confirmText: "确认删除",
       cancelText: "取消",
       tone: "danger",
@@ -3877,6 +4062,8 @@ function adjustTimelineRangeWithKeyboard(event) {
     range.end = range.start + length;
     seekCutPreview(range.start);
   }
+  const semanticRange = alignManualRangeToTranscript(range);
+  if (semanticRange) Object.assign(range, semanticRange);
   renderCutTimelineRanges();
   updateTimelineRangeConfirmation();
   window.requestAnimationFrame(() => {
@@ -4916,9 +5103,9 @@ async function cancelEditGeneration() {
 }
 
 async function generateCut() {
-  const ranges = getMergedSelection();
-  if (!currentJobId || ranges.length === 0) return;
-  const deletedDuration = ranges.reduce(
+  const previewRanges = getMergedSelection();
+  if (!currentJobId || previewRanges.length === 0) return;
+  const deletedDuration = previewRanges.reduce(
     (total, range) => total + range.end - range.start,
     0,
   );
@@ -4931,8 +5118,6 @@ async function generateCut() {
   });
   if (!confirmed) return;
 
-  pendingCutSelectionSignature = cutSelectionSignature(ranges);
-
   cutError.hidden = true;
   cutResult.hidden = true;
   cutProgress.hidden = false;
@@ -4942,6 +5127,12 @@ async function generateCut() {
   setCutProgress(5, "正在创建剪辑任务…");
 
   try {
+    const revision = await flushCutDraftSave();
+    const ranges = getMergedSelection();
+    if (ranges.length === 0) {
+      throw new Error("当前没有可生成的剪辑范围。");
+    }
+    pendingCutSelectionSignature = cutSelectionSignature(ranges);
     const response = await fetch(
       `/api/transcriptions/${encodeURIComponent(currentJobId)}/cuts`,
       {
@@ -4949,6 +5140,7 @@ async function generateCut() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ranges,
+          cutDraftRevision: revision,
         }),
       },
     );
@@ -5350,6 +5542,7 @@ window.addEventListener("editor-suite:job-state", acceptEditorSuiteJobState);
 window.EditorSuite?.registerCutTimelineAdapter?.({
   applyRange: applySharedTimelineRange,
   deleteRange: deleteSharedTimelineRange,
+  flushDraft: flushCutDraftSave,
 });
 setupCutPreviewControls();
 window.addEventListener("resize", scheduleCutTimelineResize);
