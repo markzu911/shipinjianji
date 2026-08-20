@@ -354,3 +354,25 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 17: 修复文案删除声学边界
+
+**Date**: 2026-08-20
+**Task**: 修复文案删除声学边界
+**Branch**: `develop`
+
+### Summary
+
+用增益稳定的相对能量与持续谷底约束统一文字删除边界，完整去除被删文案尾音，并保护相邻保留语音；补齐跨增益、双向端点、token 扩展和跨入口一致性测试。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `7807717` | (see git log) |
+| `373042c` | (see git log) |
+
+### Status
+
+[OK] **Completed**

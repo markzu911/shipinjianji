@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 16
-- **Last Active**: 2026-08-19
+- **Total Sessions**: 17
+- **Last Active**: 2026-08-20
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~356 | Active |
+| `journal-1.md` | ~378 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 17 | 2026-08-20 | 修复文案删除声学边界 | `7807717`, `373042c` | `develop` |
 | 16 | 2026-08-19 | 合并文案艺术字轨道设置 | `67a06e5`, `a46d68c` | `develop` |
 | 15 | 2026-08-19 | 修复实时艺术字同步与面板回归 | `5e1a593`, `4c27fca` | `develop` |
 | 14 | 2026-08-19 | 修复转写后预览加载 | `5d20067` | `develop` |
