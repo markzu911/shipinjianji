@@ -75,8 +75,19 @@ composition.element.style.transform =
 - 待确认时间轴选区打开确认弹窗后，弹窗“取消”只关闭弹窗并保留选区；删除选区应由 Delete/Backspace 或独立的取消选区动作负责，不能混用两种取消语义。
 - 手动时间轴拖拽只将范围 clamp 到媒体时长，不吸附或扩大到文字字符边界；它与文案点击删除的字符级语义相互独立，并继续使用二次确认。
 - 播放、seek、selection、drag/resize 后同步顶层和嵌入工具，但避免反馈循环。
+- 点击公共效果片段主体时，必须按完整时间轴中的实际鼠标位置 seek，不能固定跳到片段起点；横向滚动后继续使用 track rect 坐标，选择接受后只 seek 一次。resize handle 未拖动、程序化选择及超过阈值的 move/resize 保持各自边界语义。
 - 撤销/重做记录语义操作，但文字剪辑检查器不提供“操作记录”页签、历史列表或可见的撤销/重做按钮。历史栈与本地持久化属于内部能力，只通过 `Ctrl/Cmd+Z`、`Ctrl/Cmd+Shift+Z` 和 `Ctrl/Cmd+Y` 访问。
 - 全局剪辑快捷键处理器必须忽略 `input`、`textarea`、`select` 和 `contenteditable` 目标，保留浏览器原生编辑撤销；快捷键执行后仍要刷新预览、时间轴、统计和草稿保存状态。
+
+### 公共效果时间轴重叠 lane
+
+公共效果时间轴中的逻辑轨和可视 lane 语义必须分离。手动艺术字共用 `art:manual`，视频文案艺术字继续使用 `art:transcript:<trackId>`；同轨 clip 重叠时由 TimelineController 临时分 lane，不新增持久轨道。
+
+- 同逻辑轨 clip 的 `data-timeline-track-index` 相同，不同临时行使用 `data-timeline-lane-index`。
+- `laneEnd <= clip.start` 的相邻 clip 必须复用最早可用 lane；真正重叠才增加高度，下一逻辑轨从全部已有 lane 下方开始。
+- 每个 clip 仍是独立 `<button>`，必须保持可见焦点、键盘微调和 resize handle；不得用 z-index 叠放到只剩一个可点击目标。
+- lane 重排只能改变按钮 `top` 和容器高度，不能改变 clip ID、selection、Store revision、preview 或 compose。
+- 浏览器验收同时检查重叠按钮矩形不相交、`tabIndex >= 0`、单 clip 调时/删除，以及桌面和 375px 无横向溢出。
 
 ### 艺术字手动坐标契约
 

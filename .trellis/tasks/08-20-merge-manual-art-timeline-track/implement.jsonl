@@ -1,0 +1,5 @@
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"复用 ArtModel 轨道派生、顶层 Store 和公共时间轴所有者，不建立新状态副本。"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"遵守 ArtTool、EditorArtModel、Store、selection 与统一 frame 的现有边界。"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"保证重叠 clip 的可见、可选、可聚焦布局和响应式高度。"}
+{"file":".trellis/spec/testing/index.md","reason":"按前端模型、Store、静态资源、浏览器和全量层级安排回归。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"验证公共时间轴、单页唯一运行时、revision、草稿恢复和窄屏行为。"}

@@ -1,0 +1,5 @@
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"检查轨道身份和布局是否仍由现有共享所有者派生。"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"核对 overlays、timeline、selection、preview 和 compose 的单一权威数据流。"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"检查重叠 lane、聚焦目标、时间轴高度和 375px 无溢出。"}
+{"file":".trellis/spec/testing/index.md","reason":"执行任务风险匹配的 Node、Store、静态、浏览器和全量测试。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"检查真实 Chromium 中单 clip 交互、revision、草稿恢复、统一 frame 和错误捕获。"}
