@@ -225,6 +225,111 @@ def test_preview_composition_renders_cut_art_and_pip_in_one_request(
     assert history_response.json()["versions"][0]["kind"] == "composed"
 
 
+def test_preview_composition_revision_uses_authoritative_cut_draft(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    job_id = "79797979-7979-4979-8979-797979797979"
+    job_dir = app_module.jobs_directory() / job_id
+    job_dir.mkdir(parents=True)
+    video_path = job_dir / "source.mp4"
+    video_path.write_bytes(b"source")
+    draft = {
+        "schemaVersion": 1,
+        "revision": 5,
+        "textRanges": [
+            {
+                "key": "delete-text",
+                "start": 0.82,
+                "end": 2.14,
+                "originalStart": 1.0,
+                "originalEnd": 2.0,
+            }
+        ],
+        "noSpeechRanges": [],
+        "timelineRanges": [],
+    }
+    segments = [
+        {
+            "start": 0.0,
+            "end": 3.0,
+            "text": "保留删除保留",
+            "words": [
+                {"text": "保留", "start": 0.0, "end": 1.0},
+                {"text": "删除", "start": 1.0, "end": 2.0},
+                {"text": "保留", "start": 2.0, "end": 3.0},
+            ],
+        }
+    ]
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "filename": "source.mp4",
+            "duration": 3.0,
+            "status": "completed",
+            "result": {"segments": segments, "suggestions": []},
+            "cutDraft": draft,
+            "edit": None,
+            "art": None,
+            "pictureInPicture": None,
+            "composition": None,
+        }
+        app_module.JOB_FILES[job_id] = video_path
+
+    captured: list[tuple[list[dict[str, float]], list[dict[str, float]]]] = []
+
+    def capture_composition(
+        _job_id: str,
+        media: list[dict[str, float]],
+        semantic: list[dict[str, float]],
+        *_args,
+    ) -> None:
+        captured.append((media, semantic))
+
+    monkeypatch.setattr(
+        app_module,
+        "process_preview_composition_job",
+        capture_composition,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "resolve_cut_draft_acoustic_boundaries",
+        lambda *_args, **_kwargs: pytest.fail("生成阶段不得重新执行声学对齐"),
+    )
+
+    with TestClient(app_module.app) as client:
+        stale = client.post(
+            f"/api/transcriptions/{job_id}/compose",
+            json={
+                "target": "all",
+                "ranges": [{"start": 0.95, "end": 2.05}],
+                "cutDraftRevision": 4,
+            },
+        )
+        current = client.post(
+            f"/api/transcriptions/{job_id}/compose",
+            json={
+                "target": "all",
+                "ranges": [{"start": 0.95, "end": 2.05}],
+                "cutDraftRevision": 5,
+            },
+        )
+
+    assert stale.status_code == 409
+    assert "草稿版本" in stale.json()["detail"]
+    assert current.status_code == 202
+    assert captured == [
+        (
+            [{"start": 0.82, "end": 2.14}],
+            [{"start": 1.0, "end": 2.0}],
+        )
+    ]
+    with app_module.JOBS_LOCK:
+        edit = app_module.JOBS[job_id]["edit"]
+    assert edit["ranges"] == [{"start": 0.82, "end": 2.14}]
+    assert edit["transcriptRanges"] == [{"start": 1.0, "end": 2.0}]
+
+
 def test_preview_composition_allows_unchanged_timeline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -90,6 +90,51 @@ console.log(JSON.stringify({ first, same, second }));
     }
 
 
+def test_editor_project_store_updates_cut_draft_revision_without_visual_revision() -> None:
+    result = run_store_script(
+        r"""
+const store = projectStore.createStore({}, { timeline });
+store.dispatch({ type: 'projectHydrated', payload: { job: {
+  id: 'job-cut-draft', status: 'completed', duration: 10,
+  result: { text: '原文', segments: [], editableSegments: [] },
+} } });
+const before = store.getState();
+const accepted = store.dispatch({ type: 'cutTimingChanged', payload: {
+  active: false,
+  ranges: [],
+  cutDraftRevision: 4,
+  sourceDuration: 10,
+  duration: 10,
+  transcript: before.project.cut.transcript,
+} });
+const after = store.getState();
+console.log(JSON.stringify({
+  accepted,
+  beforeRevision: before.revision,
+  afterRevision: after.revision,
+  beforeTimingRevision: before.timingRevision,
+  afterTimingRevision: after.timingRevision,
+  cutDraftRevision: after.project.cut.cutDraftRevision,
+  compositionRevision: projectStore.selectCompositionRequest(after).cutDraftRevision,
+}));
+"""
+    )
+
+    assert result == {
+        "accepted": {
+            "accepted": True,
+            "revision": 1,
+            "timingRevision": 1,
+        },
+        "beforeRevision": 1,
+        "afterRevision": 1,
+        "beforeTimingRevision": 1,
+        "afterTimingRevision": 1,
+        "cutDraftRevision": 4,
+        "compositionRevision": 4,
+    }
+
+
 def test_editor_project_store_only_selects_media_after_transcription_completes() -> None:
     result = run_store_script(
         r"""
@@ -246,7 +291,8 @@ store.dispatch({ type: 'pipStateChanged', payload: {
   source: 'art', overlays: [{ assetId: 'asset-1', start: 2, end: 3, width: 0.5 }]
 } });
 store.dispatch({ type: 'cutTimingChanged', payload: {
-  active: true, ranges: [{ start: 4, end: 5 }], sourceDuration: 10, duration: 9,
+  active: true, ranges: [{ start: 4, end: 5 }], cutDraftRevision: 7,
+  sourceDuration: 10, duration: 9,
   transcript: { text: '原文', segments: [{ id: 'one', text: '原文', start: 0, end: 1 }] },
 } });
 store.dispatch({ type: 'projectHydrated', payload: { job: {
@@ -280,6 +326,7 @@ console.log(JSON.stringify({
 
     assert result["currentRevision"] == result["snapshotRevision"] + 1
     assert result["request"]["ranges"] == [{"start": 4, "end": 5}]
+    assert result["request"]["cutDraftRevision"] == 7
     assert result["request"]["artOverlays"][0]["text"] == "本地艺术字"
     assert result["request"]["pictureInPictureOverlays"][0]["width"] == 0.5
     assert result["localArt"]["start"] == 1

@@ -9,6 +9,7 @@ SCHEMA_NAMES = (
     "CutRequest",
     "CutDraftTextRange",
     "CutDraftNoSpeechRange",
+    "CutDraftTimelineRange",
     "CutDraftRequest",
     "JobCleanupRequest",
     "ModelProviderUpdate",
@@ -41,3 +42,19 @@ def test_app_reexports_schema_classes():
     assert schemas.__all__ == SCHEMA_NAMES
     for name in SCHEMA_NAMES:
         assert getattr(app_module, name) is getattr(schemas, name)
+
+
+def test_generation_requests_accept_optional_cut_draft_revision():
+    cut_request = schemas.CutRequest(
+        ranges=[],
+        cutDraftRevision=4,
+    )
+    composition_request = schemas.PreviewCompositionRequest(
+        ranges=[],
+        cutDraftRevision=4,
+    )
+
+    assert cut_request.cutDraftRevision == 4
+    assert composition_request.cutDraftRevision == 4
+    assert schemas.CutRequest(ranges=[]).cutDraftRevision is None
+    assert schemas.PreviewCompositionRequest(ranges=[]).cutDraftRevision is None

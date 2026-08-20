@@ -236,7 +236,14 @@ def test_cut_draft_is_persisted_versioned_restored_and_cleared():
     assert draft["noSpeechRanges"] == [
         {"key": "silence-1", "start": 4.0, "end": 5.5}
     ]
-    assert draft["timelineRanges"] == [{"start": 7.0, "end": 8.0}]
+    assert draft["timelineRanges"] == [
+        {
+            "start": 7.0,
+            "end": 8.0,
+            "originalStart": 7.0,
+            "originalEnd": 8.0,
+        }
+    ]
     assert draft_file_exists_after_save is True
     assert stale.status_code == 409
     assert "其他页面更新" in stale.json()["detail"]
@@ -409,6 +416,177 @@ def test_cut_draft_aligns_text_media_ranges_before_preview_and_is_idempotent(
     assert second.json()["cutDraft"]["textRanges"] == first_draft["textRanges"]
 
 
+def test_cut_draft_put_persists_shared_forced_alignment_for_text_and_timeline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    job_id = "38383838-3838-4838-8838-383838383838"
+    video_path = tmp_path / "source.mp4"
+    video_path.write_bytes(b"source")
+    segments = [
+        {
+            "start": 0.0,
+            "end": 1.0,
+            "text": "觉得你",
+            "words": [
+                {"text": "觉得", "start": 0.0, "end": 0.4},
+                {"text": "你", "start": 0.4, "end": 0.6},
+            ],
+            "asrWords": [
+                {"text": "觉", "start": 0.0, "end": 0.18},
+                {"text": "得你", "start": 0.18, "end": 0.6},
+            ],
+        }
+    ]
+    alignment_calls: list[Path] = []
+
+    def cached_alignment(
+        media_path: Path,
+        _segments: list[dict[str, object]],
+        _job_dir: Path,
+        _model_dir: Path,
+        **_kwargs,
+    ) -> dict[str, object]:
+        alignment_calls.append(media_path)
+        return {
+            "segments": [
+                {
+                    "segmentIndex": 0,
+                    "validation": {"valid": True},
+                    "characters": [
+                        {"text": "觉", "start": 0.05, "end": 0.18},
+                        {"text": "得", "start": 0.2, "end": 0.5},
+                        {"text": "你", "start": 0.8, "end": 0.98},
+                    ],
+                }
+            ],
+            "summary": {
+                "status": "completed",
+                "reusedSegmentCount": int(len(alignment_calls) > 1),
+            },
+        }
+
+    forced_boundary_calls: list[tuple[str, str]] = []
+    original_forced_boundary = app_module.forced_alignment_transition_boundary
+
+    def count_forced_boundary(
+        left: dict[str, object],
+        right: dict[str, object],
+        *args,
+        **kwargs,
+    ):
+        forced_boundary_calls.append((str(left["text"]), str(right["text"])))
+        return original_forced_boundary(left, right, *args, **kwargs)
+
+    monkeypatch.setattr(
+        app_module,
+        "ensure_acoustic_alignment_cache",
+        cached_alignment,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "forced_alignment_transition_boundary",
+        count_forced_boundary,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "decode_cut_audio_samples",
+        lambda _path: array("h", [4_000]) * app_module.CUT_BOUNDARY_SAMPLE_RATE,
+    )
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "status": "completed",
+            "duration": 1.0,
+            "result": {"segments": segments},
+            "cutDraft": None,
+        }
+        app_module.JOB_FILES[job_id] = video_path
+
+    payload = {
+        "revision": 0,
+        "textRanges": [
+            {
+                "key": "delete-jue-de",
+                "start": 0.0,
+                "end": 0.4,
+                "originalStart": 0.0,
+                "originalEnd": 0.4,
+            }
+        ],
+        "noSpeechRanges": [],
+        "timelineRanges": [
+            {
+                "key": "manual-speech",
+                "start": 0.0,
+                "end": 0.42,
+            },
+            {
+                "key": "manual-quiet",
+                "start": 0.56,
+                "end": 0.7,
+            },
+        ],
+    }
+    with TestClient(app_module.app) as client:
+        first = client.put(
+            f"/api/transcriptions/{job_id}/cut-draft",
+            json=payload,
+        )
+        first_draft = first.json()["cutDraft"]
+        restored = client.get(f"/api/transcriptions/{job_id}/cut-draft")
+        second = client.put(
+            f"/api/transcriptions/{job_id}/cut-draft",
+            json={
+                **payload,
+                "revision": first_draft["revision"],
+                "textRanges": first_draft["textRanges"],
+                "timelineRanges": first_draft["timelineRanges"],
+            },
+        )
+
+    assert first.status_code == 200
+    assert first_draft["textRanges"][0]["end"] == 0.5
+    assert first_draft["textRanges"][0]["originalEnd"] == 0.4
+    assert first_draft["timelineRanges"] == [
+        {
+            "key": "manual-speech",
+            "start": 0.0,
+            "end": 0.5,
+            "originalStart": 0.0,
+            "originalEnd": 0.42,
+        },
+        {
+            "key": "manual-quiet",
+            "start": 0.56,
+            "end": 0.7,
+            "originalStart": 0.56,
+            "originalEnd": 0.7,
+        },
+    ]
+    assert restored.json()["cutDraft"] == first_draft
+    assert any(
+        diagnostic["entryType"] == "text"
+        and diagnostic["final"] == 0.5
+        and diagnostic["retainedSpeechHardLimit"] == 0.8
+        for diagnostic in first_draft["boundaryDiagnostics"]
+    )
+    assert any(
+        diagnostic["entryType"] == "timeline"
+        and diagnostic["rangeKey"] == "manual-quiet"
+        and diagnostic["fallbackReason"] == "non_speech_range_exact"
+        for diagnostic in first_draft["boundaryDiagnostics"]
+    )
+    assert first_draft["acousticAlignment"]["reusedSegmentCount"] == 0
+    assert second.status_code == 200
+    second_draft = second.json()["cutDraft"]
+    assert second_draft["textRanges"] == first_draft["textRanges"]
+    assert second_draft["timelineRanges"] == first_draft["timelineRanges"]
+    assert second_draft["acousticAlignment"]["reusedSegmentCount"] == 1
+    assert alignment_calls == [video_path, video_path]
+    assert forced_boundary_calls == [("得", "你"), ("得", "你")]
+
+
 def test_cut_draft_put_uses_natural_character_boundaries_not_raw_asr_tokens():
     job_id = "37373737-3737-4737-8737-373737373737"
     (app_module.jobs_directory() / job_id).mkdir(parents=True)
@@ -490,7 +668,14 @@ def test_cut_draft_put_uses_natural_character_boundaries_not_raw_asr_tokens():
     assert draft["textRanges"][1]["end"] == 1.8
     assert draft["textRanges"][1]["originalStart"] == 1.4
     assert draft["textRanges"][1]["originalEnd"] == 1.8
-    assert draft["timelineRanges"] == [{"start": 2.05, "end": 2.1}]
+    assert draft["timelineRanges"] == [
+        {
+            "start": 2.05,
+            "end": 2.1,
+            "originalStart": 2.05,
+            "originalEnd": 2.1,
+        }
+    ]
 
     media_ranges = app_module.resolve_cut_draft_delete_ranges(
         draft,

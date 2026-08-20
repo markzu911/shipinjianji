@@ -297,7 +297,24 @@ def browser_session(
 
 
 @pytest.fixture
-def seeded_editor_job(sample_video: Path) -> SeededEditorJob:
+def seeded_editor_job(
+    sample_video: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> SeededEditorJob:
+    monkeypatch.setattr(
+        app_module,
+        "ensure_acoustic_alignment_cache",
+        lambda *_args, **_kwargs: {
+            "segments": [],
+            "summary": {
+                "status": "unavailable",
+                "segmentCount": 0,
+                "totalSegmentCount": 0,
+                "validSegmentCount": 0,
+                "reusedSegmentCount": 0,
+            },
+        },
+    )
     job_id = "81818181-8181-4181-8181-818181818181"
     job_dir = app_module.jobs_directory() / job_id
     job_dir.mkdir(parents=True, exist_ok=True)

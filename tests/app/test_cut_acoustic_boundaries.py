@@ -1217,3 +1217,153 @@ def test_retained_transcript_maps_audio_quiet_ranges_to_edited_timeline():
     )
 
     assert transcript["audioQuietRanges"] == [{"start": 1.0, "end": 2.5}]
+
+
+def _forced_de_ni_alignment_cache() -> dict[str, object]:
+    return {
+        "segments": [
+            {
+                "segmentIndex": 0,
+                "validation": {"valid": True},
+                "characters": [
+                    {"text": "觉", "start": 0.05, "end": 0.18},
+                    {"text": "得", "start": 0.2, "end": 0.5},
+                    {"text": "你", "start": 0.8, "end": 0.98},
+                ],
+            }
+        ]
+    }
+
+
+def _de_ni_segments() -> list[dict[str, object]]:
+    return [
+        {
+            "start": 0.0,
+            "end": 1.0,
+            "text": "觉得你",
+            "words": [
+                {"text": "觉得", "start": 0.0, "end": 0.4},
+                {"text": "你", "start": 0.4, "end": 0.6},
+            ],
+            "asrWords": [
+                {"text": "觉", "start": 0.0, "end": 0.18},
+                {"text": "得你", "start": 0.18, "end": 0.6},
+            ],
+        }
+    ]
+
+
+def test_forced_alignment_uses_deleted_tail_without_consuming_quiet_gap():
+    samples = array("h", [4_000]) * app_module.CUT_BOUNDARY_SAMPLE_RATE
+    diagnostics: list[dict[str, object]] = []
+    aligned = app_module.align_cut_draft_text_ranges_to_audio(
+        Path("unused.mp4"),
+        [
+            {
+                "key": "deleted-ge-de",
+                "start": 0.0,
+                "end": 0.4,
+                "originalStart": 0.0,
+                "originalEnd": 0.4,
+            }
+        ],
+        _de_ni_segments(),
+        1.0,
+        alignment_cache=_forced_de_ni_alignment_cache(),
+        samples=samples,
+        diagnostics=diagnostics,
+    )[0]
+
+    assert aligned["end"] == 0.5
+    assert aligned["end"] < 0.8
+    assert diagnostics[0]["alignmentSource"] == "funasr-fa-zh"
+    assert diagnostics[0]["retainedSpeechHardLimit"] == 0.8
+    assert diagnostics[0]["fallbackReason"] is None
+
+
+def test_timeline_range_near_speech_snaps_but_preserves_original_semantics():
+    diagnostics: list[dict[str, object]] = []
+    aligned = app_module.align_cut_draft_timeline_ranges_to_audio(
+        [
+            {
+                "key": "manual-1",
+                "start": 0.0,
+                "end": 0.42,
+                "originalStart": 0.0,
+                "originalEnd": 0.42,
+            }
+        ],
+        _de_ni_segments(),
+        1.0,
+        alignment_cache=_forced_de_ni_alignment_cache(),
+        samples=array("h", [4_000]) * app_module.CUT_BOUNDARY_SAMPLE_RATE,
+        diagnostics=diagnostics,
+    )[0]
+
+    assert aligned == {
+        "key": "manual-1",
+        "start": 0.0,
+        "end": 0.5,
+        "originalStart": 0.0,
+        "originalEnd": 0.42,
+    }
+    assert diagnostics[-1]["endpoint"] == "end"
+    assert diagnostics[-1]["alignmentSource"] == "funasr-fa-zh"
+
+
+def test_timeline_range_entirely_inside_forced_quiet_gap_stays_exact():
+    diagnostics: list[dict[str, object]] = []
+    aligned = app_module.align_cut_draft_timeline_ranges_to_audio(
+        [
+            {
+                "key": "quiet-only",
+                "start": 0.56,
+                "end": 0.7,
+                "originalStart": 0.56,
+                "originalEnd": 0.7,
+            }
+        ],
+        _de_ni_segments(),
+        1.0,
+        alignment_cache=_forced_de_ni_alignment_cache(),
+        samples=array("h", [0]) * app_module.CUT_BOUNDARY_SAMPLE_RATE,
+        diagnostics=diagnostics,
+    )[0]
+
+    assert aligned["start"] == 0.56
+    assert aligned["end"] == 0.7
+    assert {item["fallbackReason"] for item in diagnostics} == {
+        "non_speech_range_exact"
+    }
+
+
+def test_timeline_physical_range_and_semantic_range_are_projected_separately():
+    draft = {
+        "textRanges": [],
+        "noSpeechRanges": [],
+        "timelineRanges": [
+            {
+                "start": 0.0,
+                "end": 0.5,
+                "originalStart": 0.0,
+                "originalEnd": 0.42,
+            }
+        ],
+    }
+
+    media = app_module.resolve_cut_draft_delete_ranges(
+        draft,
+        [],
+        _de_ni_segments(),
+        1.0,
+    )
+    semantic = app_module.resolve_cut_draft_delete_ranges(
+        draft,
+        [],
+        _de_ni_segments(),
+        1.0,
+        use_text_semantic_boundaries=True,
+    )
+
+    assert media == [{"start": 0.0, "end": 0.5}]
+    assert semantic == [{"start": 0.0, "end": 0.42}]

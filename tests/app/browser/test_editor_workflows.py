@@ -1058,6 +1058,9 @@ def test_top_level_pip_prompt_image_controls_and_schema_v2_recovery(
     seeded_editor_job,
 ):
     page = open_editor(browser_session, seeded_editor_job)
+    page.locator("#cutDraftSaveStatus").filter(
+        has_text="剪辑草稿已保存"
+    ).wait_for()
     job_url = (
         f"{browser_session.base_url}/api/transcriptions/"
         f"{seeded_editor_job.job_id}"
@@ -1779,6 +1782,7 @@ def test_unified_generate_posts_current_cut_art_and_pip_state(
             "end": draft["textRanges"][0]["end"],
         }
     ]
+    assert payload["cutDraftRevision"] == draft["revision"]
     assert payload["artSource"] == "original"
     assert len(payload["artOverlays"]) == 1
     for key in seeded_editor_job.art_overlay.keys() - {

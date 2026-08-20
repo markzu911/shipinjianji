@@ -51,13 +51,13 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
 
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
-    assert "/app.js?v=20260819-01" in page_response.text
+    assert "/app.js?v=20260820-01" in page_response.text
     assert "/styles.css?v=20260820-01" in page_response.text
     assert "/transcript-follow-scroll.js?v=20260818-03" in page_response.text
     assert "/ui-feedback.js?v=20260807-03" in page_response.text
     assert "/timeline-model.js?v=20260810-01" in page_response.text
     assert "/editor-pip-model.js?v=20260819-01" in page_response.text
-    assert "/editor-project-store.js?v=20260819-05" in page_response.text
+    assert "/editor-project-store.js?v=20260820-01" in page_response.text
     assert "/editor-media-controller.js?v=20260819-01" in page_response.text
     assert "/editor-art-model.js?v=20260820-01" in page_response.text
     assert "/editor-art-renderer.js?v=20260819-01" in page_response.text
@@ -65,7 +65,7 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     assert "/editor-timeline-controller.js?v=20260820-02" in page_response.text
     assert "/editor-art-tool.js?v=20260819-07" in page_response.text
     assert "/editor-pip-tool.js?v=20260819-02" in page_response.text
-    assert "/editor-suite.js?v=20260820-01" in page_response.text
+    assert "/editor-suite.js?v=20260820-02" in page_response.text
     assert timeline_script_response.status_code == 200
     assert timeline_script_response.headers["cache-control"] == "no-store, max-age=0"
     assert "function createStore" in timeline_script_response.text
@@ -401,9 +401,8 @@ def test_cut_timeline_and_draft_frontend_contracts():
     assert 'id="cancelTimelineRangeButton"' not in page_response.text
     assert 'id="confirmTimelineRangeButton"' not in page_response.text
     assert "松开后弹窗确认" not in page_response.text
-    assert "选区保持精确范围，可微调，再次点击确认删除" in page_response.text
-    assert "选区保持精确范围" in page_response.text
-    assert "触碰文字时仅吸附完整文字边界" not in page_response.text
+    assert "语音附近确认后会对齐安全边界，可微调并再次点击确认删除" in page_response.text
+    assert "选区保持精确范围" not in page_response.text
     assert 'id="clearSelectionButton" class="secondary-button" type="button" disabled hidden' in page_response.text
     assert 'clearSelectionButton.addEventListener("click"' not in script_response.text
     assert 'id="textEditorPreviewPane"' in page_response.text
@@ -509,6 +508,7 @@ def test_cut_timeline_and_draft_frontend_contracts():
     assert "function applyPersistedCutDraftAlignment" in script_response.text
     assert "function reconcileCurrentCutHistorySnapshot" in script_response.text
     assert "function scheduleCutDraftSave" in script_response.text
+    assert "async function flushCutDraftSave" in script_response.text
     assert "function clearPersistedCutDraft" in script_response.text
     assert "function resolvePersistedCutDraft" in script_response.text
     assert "window.localStorage.setItem(key" in script_response.text
@@ -548,6 +548,24 @@ def test_cut_timeline_and_draft_frontend_contracts():
     assert "正在左侧预览裁剪衔接" in script_response.text
     assert script_response.text.count("previewSelectedCutRange(") >= 4
 
+    generate_start = script_response.text.index("async function generateCut()")
+    generate_end = script_response.text.index("function startUpload", generate_start)
+    generate_source = script_response.text[generate_start:generate_end]
+    assert generate_source.index("await flushCutDraftSave()") < generate_source.index(
+        "const ranges = getMergedSelection()"
+    ) < generate_source.index("/cuts`")
+
+    compose_start = editor_suite_script_response.text.index(
+        "async function generateCurrentPreview()"
+    )
+    compose_end = editor_suite_script_response.text.index(
+        "async function cancelComposition()", compose_start
+    )
+    compose_source = editor_suite_script_response.text[compose_start:compose_end]
+    assert compose_source.index("await cutTimelineAdapter.flushDraft()") < (
+        compose_source.index("const frame = selectCurrentProjectFrame()")
+    ) < compose_source.index("/compose`")
+
 
 def test_cut_range_and_segment_frontend_contracts():
     responses = _fetch_frontend_assets(
@@ -565,7 +583,16 @@ def test_cut_range_and_segment_frontend_contracts():
     assert "function alignManualRangeToTranscript" in script_response.text
     assert "当前拖动范围落在文字内部" not in script_response.text
     assert "边界落在无法安全裁剪的文字内部" not in script_response.text
-    assert "覆盖文字时不会自动扩大" in script_response.text
+    assert "确认后语音附近会对齐安全剪辑点" in script_response.text
+    keyboard_start = script_response.text.index(
+        "function adjustTimelineRangeWithKeyboard"
+    )
+    keyboard_end = script_response.text.index(
+        "function resetCutPlaybackCursors", keyboard_start
+    )
+    keyboard_source = script_response.text[keyboard_start:keyboard_end]
+    assert "const semanticRange = alignManualRangeToTranscript(range);" in keyboard_source
+    assert "Object.assign(range, semanticRange);" in keyboard_source
     assert "getEditableSegmentCoverageEnd" in script_response.text
     assert "adjacentSilenceBefore" in script_response.text
     manual_align_start = script_response.text.index(
@@ -737,7 +764,7 @@ def test_cut_range_and_segment_frontend_contracts():
     render_segments_end = script_response.text.index(
         "function noSpeechKindLabel", render_segments_start
     )
-    assert "const deletedRanges = getCommittedTimelineDeleteRanges();" in (
+    assert "const deletedRanges = getCommittedTimelineSemanticDeleteRanges();" in (
         script_response.text[render_segments_start:render_segments_end]
     )
 
@@ -1274,6 +1301,7 @@ const rangeKey = (start, end) =>
   Number(start).toFixed(3) + "-" + Number(end).toFixed(3);
 const getSuggestionRanges = (suggestion) => suggestion.ranges || [];
 const getCommittedTimelineDeleteRanges = () => [];
+const getCommittedTimelineSemanticDeleteRanges = () => [];
 const getNoSpeechRange = (suggestion) => suggestion;
 const stageCutHistoryOperation = (label) => historyActions.push(label);
 const updateSelectionSummary = () => {{ selectionUpdateCount += 1; }};
@@ -1542,6 +1570,262 @@ console.log(JSON.stringify({{ tail, head }}));
     payload = json.loads(result.stdout)
     assert payload["tail"] == [{"start": 0.0, "end": 0.44}]
     assert payload["head"] == [{"start": 0.04, "end": 0.4}]
+
+
+def test_frontend_applies_text_and_timeline_alignment_atomically():
+    app_source = (Path(__file__).resolve().parents[2] / "web" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    timeline_start = app_source.index("function getCommittedTimelineDeleteRanges")
+    timeline_end = app_source.index(
+        "function protectRecognizedSpeechFromQuietRanges", timeline_start
+    )
+    serialization_start = app_source.index("function serializableCutDraftRange")
+    serialization_end = app_source.index(
+        "function normalizeRestoredTextDeleteRange", serialization_start
+    )
+    payload_start = app_source.index("function buildPersistedCutDraftPayload")
+    payload_end = app_source.index("function restorePersistedCutDraft", payload_start)
+    apply_start = app_source.index("function applyPersistedCutDraftAlignment")
+    apply_end = app_source.index("async function persistCutDraft", apply_start)
+    source = "\n".join(
+        [
+            app_source[timeline_start:timeline_end],
+            app_source[serialization_start:serialization_end],
+            app_source[payload_start:payload_end],
+            app_source[apply_start:apply_end],
+        ]
+    )
+    script = f"""
+const source = {json.dumps(source)};
+const functions = new Function(`
+const selectedRanges = new Map([["text-a", {{
+  start: 0.0, end: 0.35, originalStart: 0.0, originalEnd: 0.35,
+  text: "得", adjacentSilenceBefore: 0, adjacentSilenceAfter: 0,
+}}]]);
+const selectedNoSpeechRanges = new Map();
+let timelineDeleteRanges = [{{
+  id: 1, key: "timeline-1", start: 0.35, end: 0.5,
+  originalStart: 0.35, originalEnd: 0.42,
+}}];
+let timelineRangeInProgress = false;
+let selectedTimelineRangeId = null;
+let cutDraftRevision = 3;
+let automaticNoSpeechInitialized = true;
+let cutDraftLastSignature = "";
+let cutHistoryReplaying = false;
+let selectionUpdates = 0;
+let historyReconciles = 0;
+const rangeKey = (start, end) =>
+  Number(start).toFixed(3) + ":" + Number(end).toFixed(3);
+const updateSelectionSummary = () => {{ selectionUpdates += 1; }};
+const reconcileCurrentCutHistorySnapshot = () => {{ historyReconciles += 1; }};
+${{source}}
+return {{
+  expectedSignature: () => cutDraftSelectionSignature(buildPersistedCutDraftPayload()),
+  applyPersistedCutDraftAlignment,
+  snapshot: () => ({{
+    text: [...selectedRanges.entries()],
+    timeline: timelineDeleteRanges,
+    selectionUpdates,
+    historyReconciles,
+  }}),
+}};
+`)();
+const expected = functions.expectedSignature();
+const before = functions.snapshot();
+const rejected = functions.applyPersistedCutDraftAlignment({{
+  textRanges: [{{
+    key: "text-a", start: 0, end: 0.4,
+    originalStart: 0, originalEnd: 0.35, text: "得",
+  }}],
+  timelineRanges: [{{
+    key: "wrong-key", start: 0.4, end: 0.5,
+    originalStart: 0.35, originalEnd: 0.42,
+  }}],
+}}, expected);
+const afterRejected = functions.snapshot();
+const applied = functions.applyPersistedCutDraftAlignment({{
+  textRanges: [{{
+    key: "text-a", start: 0, end: 0.4,
+    originalStart: 0, originalEnd: 0.35, text: "得",
+  }}],
+  timelineRanges: [{{
+    key: "timeline-1", start: 0.4, end: 0.5,
+    originalStart: 0.35, originalEnd: 0.42,
+  }}],
+}}, expected);
+console.log(JSON.stringify({{
+  rejected,
+  unchangedAfterRejected: JSON.stringify(before) === JSON.stringify(afterRejected),
+  applied,
+  afterApplied: functions.snapshot(),
+}}));
+"""
+
+    try:
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[2],
+            check=True,
+            capture_output=True,
+            encoding="utf-8",
+            timeout=20,
+        )
+    except FileNotFoundError:
+        pytest.skip("Node.js is required for the frontend cut-draft unit test.")
+    except subprocess.CalledProcessError as exc:
+        pytest.fail(exc.stderr)
+
+    payload = json.loads(result.stdout)
+    assert payload["rejected"] is False
+    assert payload["unchangedAfterRejected"] is True
+    assert payload["applied"] is True
+    assert payload["afterApplied"]["text"][0][1]["end"] == 0.4
+    assert payload["afterApplied"]["timeline"][0] == {
+        "id": 1,
+        "key": "timeline-1",
+        "start": 0.4,
+        "end": 0.5,
+        "originalStart": 0.35,
+        "originalEnd": 0.42,
+    }
+    assert payload["afterApplied"]["selectionUpdates"] == 1
+    assert payload["afterApplied"]["historyReconciles"] == 1
+
+
+def test_frontend_live_transcript_uses_semantic_range_and_physical_retiming():
+    app_source = (Path(__file__).resolve().parents[2] / "web" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    token_start = app_source.index("function splitTextIntoCharacterTokens")
+    token_end = app_source.index("function getTranscriptCharacterUnits", token_start)
+    retained_start = app_source.index("function getRetainedSegmentParts")
+    retained_end = app_source.index(
+        "function getActiveTranscriptSegmentIndex", retained_start
+    )
+    source = "\n".join(
+        [app_source[token_start:token_end], app_source[retained_start:retained_end]]
+    )
+    script = f"""
+const source = {json.dumps(source)};
+const functions = new Function(`
+const CUT_SPEECH_BOUNDARY_EPSILON = 0.001;
+const selectedRanges = new Map();
+const canonicalizeTextDeleteRange = (range) => range;
+const getCommittedTimelineSemanticDeleteRanges = () => [];
+${{source}}
+return {{ getRetainedSegmentParts }};
+`)();
+const parts = functions.getRetainedSegmentParts(
+  {{
+    start: 0.2,
+    end: 0.6,
+    text: "得你",
+    words: [
+      {{ text: "得", start: 0.2, end: 0.4 }},
+      {{ text: "你", start: 0.4, end: 0.6 }},
+    ],
+  }},
+  [{{ sourceStart: 0.5, sourceEnd: 0.6, editedStart: 0 }}],
+  0.6,
+  [{{ start: 0.2, end: 0.42 }}],
+);
+console.log(JSON.stringify(parts));
+"""
+
+    try:
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[2],
+            check=True,
+            capture_output=True,
+            encoding="utf-8",
+            timeout=20,
+        )
+    except FileNotFoundError:
+        pytest.skip("Node.js is required for the frontend transcript unit test.")
+    except subprocess.CalledProcessError as exc:
+        pytest.fail(exc.stderr)
+
+    assert json.loads(result.stdout) == [
+        {
+            "sourceStart": 0.5,
+            "sourceEnd": 0.6,
+            "editedStart": 0,
+            "editedEnd": pytest.approx(0.1),
+            "text": "你",
+            "words": [
+                {
+                    "text": "你",
+                    "start": 0,
+                    "end": pytest.approx(0.1),
+                    "sourceStart": 0.5,
+                    "sourceEnd": 0.6,
+                }
+            ],
+        }
+    ]
+
+
+def test_frontend_cut_draft_flush_fails_once_when_server_sync_does_not_commit():
+    app_source = (Path(__file__).resolve().parents[2] / "web" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    flush_start = app_source.index("async function flushCutDraftSave")
+    flush_end = app_source.index("async function clearPersistedCutDraft", flush_start)
+    source = app_source[flush_start:flush_end]
+    script = f"""
+const source = {json.dumps(source)};
+const functions = new Function(`
+let cutDraftReady = true;
+let currentJobId = "job-1";
+let cutDraftSaveQueue = Promise.resolve();
+let cutDraftLastSignature = "stale";
+let cutDraftNeedsServerSync = true;
+let cutDraftRevision = 3;
+let scheduleCount = 0;
+const buildPersistedCutDraftPayload = () => ({{
+  textRanges: [{{ key: "text-a", start: 0, end: 0.4 }}],
+}});
+const cutDraftSelectionSignature = (payload) => JSON.stringify(payload);
+const scheduleCutDraftSave = () => {{ scheduleCount += 1; }};
+${{source}}
+return {{
+  flushCutDraftSave,
+  scheduleCount: () => scheduleCount,
+}};
+`)();
+functions.flushCutDraftSave().then(
+  () => console.log(JSON.stringify({{ resolved: true }})),
+  (error) => console.log(JSON.stringify({{
+    resolved: false,
+    message: error.message,
+    scheduleCount: functions.scheduleCount(),
+  }})),
+);
+"""
+
+    try:
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[2],
+            check=True,
+            capture_output=True,
+            encoding="utf-8",
+            timeout=20,
+        )
+    except FileNotFoundError:
+        pytest.skip("Node.js is required for the frontend cut-draft unit test.")
+    except subprocess.CalledProcessError as exc:
+        pytest.fail(exc.stderr)
+
+    payload = json.loads(result.stdout)
+    assert payload == {
+        "resolved": False,
+        "message": "剪辑草稿尚未同步到服务器。请稍后重试。",
+        "scheduleCount": 1,
+    }
 
 
 def test_frontend_transcript_now_playing_layer_has_one_real_row_owner():
