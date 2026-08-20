@@ -137,7 +137,7 @@ class NodeStub {{
       ? Number.parseFloat(value) * size / 100
       : Number.parseFloat(value) || fallback;
     const width = percent(this.style.width, parentWidth, this.clientWidth || this.offsetWidth);
-    const height = this.clientHeight || this.offsetHeight;
+    const height = percent(this.style.height, parentHeight, this.clientHeight || this.offsetHeight);
     const centerX = percent(this.style.left, parentWidth, parentWidth / 2);
     const centerY = percent(this.style.top, parentHeight, parentHeight / 2);
     return {{ left: centerX - width / 2, top: centerY - height / 2, width, height }};
@@ -186,7 +186,7 @@ const host = new NodeStub('div');
 host.ownerDocument = documentStub;
 host.clientWidth = 1000;
 host.clientHeight = 500;
-const baseVideo = { paused: false, ended: false, videoWidth: 1000 };
+const baseVideo = { paused: false, ended: false, videoWidth: 1000, videoHeight: 500 };
 let currentTime = 0.5;
 const frameListeners = new Set();
 const stateListeners = new Set();
@@ -260,8 +260,9 @@ function makeFrame(revision, selected = 'art:headline') {
 }
 
 compositor.render(makeFrame(1));
-const artLayer = host.children[0];
-const pipLayer = host.children[1];
+const canvas = host.children[0];
+const artLayer = canvas.children[0];
+const pipLayer = canvas.children[1];
 const headline = artLayer.children.find((node) => node.dataset.overlayId === 'headline');
 const later = artLayer.children.find((node) => node.dataset.overlayId === 'later');
 const still = pipLayer.children.find((node) => node.dataset.pictureId === 'still');
@@ -366,7 +367,7 @@ const host = new NodeStub('div');
 host.ownerDocument = documentStub;
 host.clientWidth = 1000;
 host.clientHeight = 500;
-const baseVideo = { paused: true, ended: false, videoWidth: 1000 };
+const baseVideo = { paused: true, ended: false, videoWidth: 1000, videoHeight: 500 };
 let currentTime = 0.5;
 const frameListeners = new Set();
 const stateListeners = new Set();
@@ -403,8 +404,9 @@ const frame = {
   },
 };
 compositor.render(frame);
-const art = host.children[0].children[0];
-const pip = host.children[1].children[0];
+const canvas = host.children[0];
+const art = canvas.children[0].children[0];
+const pip = canvas.children[1].children[0];
 const pointer = (pointerId, clientX, clientY, target) => ({
   pointerId, clientX, clientY, button: 0, target,
   preventDefault() {}, stopPropagation() {},
@@ -462,7 +464,7 @@ console.log(JSON.stringify({
     assert result["calls"]["resize"][0]["kind"] == "pip"
     assert result["calls"]["resize"][0]["width"] > 1
     assert result["liveWidth"] > 1
-    assert result["resizedFont"] == "20px"
+    assert result["resizedFont"] == "40px"
     assert result["listenersBeforeDestroy"] == 3
     assert result["listenersAfterDestroy"] == 0
     assert result["observerDisconnected"] is True
@@ -471,6 +473,153 @@ console.log(JSON.stringify({
     assert result["layersAfterDestroy"] == 0
     assert result["revisionRemoved"] is True
     assert result["renderAfterDestroy"] is False
+
+
+def test_preview_compositor_uses_video_canvas_for_fit_and_pointer_coordinates() -> None:
+    result = run_preview_script(
+        r"""
+const stage = new NodeStub('div');
+const host = new NodeStub('div');
+stage.append(host);
+host.ownerDocument = documentStub;
+host.clientWidth = 900;
+host.clientHeight = 600;
+const baseVideo = {
+  paused: true,
+  ended: false,
+  videoWidth: 0,
+  videoHeight: 0,
+};
+const stateListeners = new Set();
+const moves = [];
+const mediaController = {
+  currentEditedTime: () => 0.5,
+  video: () => baseVideo,
+  subscribeFrame() { return () => {}; },
+  subscribeState(listener) {
+    stateListeners.add(listener);
+    return () => stateListeners.delete(listener);
+  },
+};
+const compositor = preview.createCompositor({
+  root: host,
+  mediaController,
+  onMove: payload => moves.push(payload),
+});
+const frame = {
+  revision: 1,
+  timingRevision: 1,
+  preview: {
+    art: { overlays: [{
+      id: 'portrait-art', text: '竖屏预览', start: 0, end: 1,
+      x: 0.5, y: 0.5, fontSize: 54,
+    }] },
+    pip: {
+      overlays: [{
+        id: 'portrait-pip', assetId: 'asset', start: 0, end: 1,
+        x: 0.25, y: 0.75, width: 0.3,
+      }],
+      assets: [{ id: 'asset', type: 'image', assetUrl: '/asset.png' }],
+    },
+  },
+  timeline: { tracks: [
+    { kind: 'art', clips: [{ id: 'art:portrait-art', sourceId: 'portrait-art' }] },
+    { kind: 'pip', clips: [{ id: 'pip:portrait-pip', sourceId: 'portrait-pip' }] },
+  ] },
+};
+compositor.render(frame);
+const canvas = host.children[0];
+const art = canvas.children[0].children[0];
+const pip = canvas.children[1].children[0];
+const beforeMetadata = {
+  width: canvas.style.width,
+  height: canvas.style.height,
+  transform: canvas.style.transform,
+};
+
+baseVideo.videoWidth = 720;
+baseVideo.videoHeight = 1280;
+for (const listener of stateListeners) listener({ type: 'metadata' });
+const contain = {
+  width: canvas.style.width,
+  height: canvas.style.height,
+  transform: canvas.style.transform,
+  fit: canvas.dataset.previewFit,
+  scale: Number(canvas.dataset.previewScale),
+  left: Number(canvas.dataset.previewLeft),
+  top: Number(canvas.dataset.previewTop),
+  fontSize: art.style.fontSize,
+  artLeft: art.style.left,
+  artTop: art.style.top,
+  pipWidth: pip.style.width,
+};
+
+canvas.getBoundingClientRect = () => ({
+  left: 281.25, top: 0, width: 337.5, height: 600,
+});
+art.getBoundingClientRect = () => ({
+  left: 430, top: 280, width: 40, height: 40,
+});
+const pointer = (pointerId, clientX, clientY, target) => ({
+  pointerId, clientX, clientY, button: 0, target,
+  preventDefault() {}, stopPropagation() {},
+});
+art.emit('pointerdown', pointer(3, 450, 300, art));
+emitGlobal('pointermove', pointer(3, 534.375, 150, art));
+emitGlobal('pointerup', pointer(3, 534.375, 150, art));
+
+stage.classList.add('is-douyin-preview');
+host.clientWidth = 440;
+host.clientHeight = 860;
+resizeObservers[0].trigger();
+const cover = {
+  fit: canvas.dataset.previewFit,
+  scale: Number(canvas.dataset.previewScale),
+  left: Number(canvas.dataset.previewLeft),
+  top: Number(canvas.dataset.previewTop),
+  width: canvas.style.width,
+  height: canvas.style.height,
+};
+
+console.log(JSON.stringify({ beforeMetadata, contain, cover, moves }));
+"""
+    )
+
+    assert result["beforeMetadata"] == {
+        "width": "900px",
+        "height": "600px",
+        "transform": "translate(0px, 0px) scale(1)",
+    }
+    assert result["contain"] == {
+        "width": "720px",
+        "height": "1280px",
+        "transform": "translate(281.25px, 0px) scale(0.46875)",
+        "fit": "contain",
+        "scale": pytest.approx(0.46875),
+        "left": pytest.approx(281.25),
+        "top": 0,
+        "fontSize": "54px",
+        "artLeft": "360px",
+        "artTop": "640px",
+        "pipWidth": "30%",
+    }
+    assert result["moves"] == [
+        {
+            "kind": "art",
+            "id": "portrait-art",
+            "clipId": "art:portrait-art",
+            "x": 0.75,
+            "y": 0.25,
+        }
+    ]
+    assert result["cover"] == {
+        "fit": "cover",
+        "scale": pytest.approx(0.671875),
+        "left": pytest.approx(-21.875),
+        "top": 0,
+        "width": "720px",
+        "height": "1280px",
+    }
 
 
 def test_preview_compositor_does_not_consume_html_snapshots_or_mutate_store() -> None:

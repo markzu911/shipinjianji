@@ -85,12 +85,17 @@
         if (visibleKinds && !visibleKinds.has(String(timelineTrack.kind))) continue;
         const laneEnds = [];
         for (const clip of timelineTrack.clips) {
-          let laneIndex = laneEnds.findIndex((laneEnd) => laneEnd <= clip.start);
-          if (laneIndex < 0) {
-            laneIndex = laneEnds.length;
-            laneEnds.push(clip.end);
+          let laneIndex = 0;
+          if (timelineTrack.kind === "art") {
+            laneEnds[0] = Math.max(finiteNumber(laneEnds[0]), clip.end);
           } else {
-            laneEnds[laneIndex] = clip.end;
+            laneIndex = laneEnds.findIndex((laneEnd) => laneEnd <= clip.start);
+            if (laneIndex < 0) {
+              laneIndex = laneEnds.length;
+              laneEnds.push(clip.end);
+            } else {
+              laneEnds[laneIndex] = clip.end;
+            }
           }
           const segment = root.document.createElement("button");
           segment.type = "button";
@@ -110,6 +115,7 @@
           segment.style.width = `${
             duration > 0 ? Math.max(0.25, ((clip.end - clip.start) / duration) * 100) : 0
           }%`;
+          segment.style.zIndex = clip.id === selectedClipId ? "3" : "1";
           segment.classList.toggle("is-selected", clip.id === selectedClipId);
           segment.setAttribute("aria-pressed", String(clip.id === selectedClipId));
           segment.setAttribute(

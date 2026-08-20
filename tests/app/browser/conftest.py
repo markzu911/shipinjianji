@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import shutil
 import socket
+import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
@@ -446,6 +447,48 @@ def seeded_editor_job(sample_video: Path) -> SeededEditorJob:
         pip_overlay=pip_overlay,
         pip_asset_id=asset_id,
     )
+
+
+@pytest.fixture
+def seeded_portrait_editor_job(
+    seeded_editor_job: SeededEditorJob,
+) -> SeededEditorJob:
+    portrait_path = seeded_editor_job.video_path.with_name("browser-portrait.mp4")
+    subprocess.run(
+        [
+            app_module.get_ffmpeg_binary("ffmpeg"),
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=#152433:s=720x1280:d=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=1",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-shortest",
+            str(portrait_path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    for target in (
+        seeded_editor_job.video_path,
+        seeded_editor_job.video_path.parent / "art-text.mp4",
+        seeded_editor_job.video_path.parent / "picture-in-picture.mp4",
+    ):
+        shutil.copyfile(portrait_path, target)
+    return seeded_editor_job
 
 
 @pytest.fixture

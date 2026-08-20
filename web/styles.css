@@ -11645,11 +11645,13 @@ input[type="range"] {
 }
 
 .editor-layer-timeline .frame-timeline-segment.is-dragging {
+  z-index: 4 !important;
   cursor: grabbing;
 }
 
 .editor-layer-timeline .frame-timeline-segment:focus-visible,
 .editor-layer-timeline .pip-timeline-segment:focus-visible {
+  z-index: 4 !important;
   outline: 2px solid #fff;
   outline-offset: -3px;
 }
@@ -11977,8 +11979,8 @@ input[type="range"] {
   pointer-events: none;
 }
 
-.editor-suite-preview-overlay > .editor-preview-art-layer,
-.editor-suite-preview-overlay > .editor-preview-pip-layer {
+.editor-suite-preview-canvas > .editor-preview-art-layer,
+.editor-suite-preview-canvas > .editor-preview-pip-layer {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -12178,16 +12180,7 @@ input[type="range"] {
   inset: 0 0 var(--douyin-video-bottom);
 }
 
-.cut-video-stage.is-douyin-preview .editor-suite-preview-canvas .preview-overlay,
-.cut-video-stage.is-douyin-preview .editor-suite-preview-canvas .pip-preview-item {
-  pointer-events: none;
-  cursor: default;
-  outline: 0;
-  box-shadow: none;
-}
-
 .cut-video-stage.is-douyin-preview .editor-suite-preview-canvas [class*="toolbar"],
-.cut-video-stage.is-douyin-preview .editor-suite-preview-canvas [class*="handle"],
 .cut-video-stage.is-douyin-preview .editor-suite-preview-canvas .overlay-coordinate-readout {
   display: none !important;
 }

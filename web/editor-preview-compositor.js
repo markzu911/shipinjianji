@@ -343,13 +343,16 @@
         throw new Error("EditorPreview requires DOM creation APIs.");
       }
 
+      const canvas = document.createElement("div");
+      canvas.className = "editor-suite-preview-canvas";
       const artLayer = document.createElement("div");
       artLayer.className = "editor-preview-art-layer overlay-layer is-art";
       artLayer.dataset.effectKind = "art";
       const pipLayer = document.createElement("div");
       pipLayer.className = "editor-preview-pip-layer pip-overlay-layer is-pip";
       pipLayer.dataset.effectKind = "pip";
-      host.append(artLayer, pipLayer);
+      canvas.append(artLayer, pipLayer);
+      host.append(canvas);
 
       const artRecords = new Map();
       const pipRecords = new Map();
@@ -359,16 +362,70 @@
       let modelSignature = "";
       let activePointer = null;
       let destroyed = false;
+      let geometrySignature = "";
+      let canvasGeometry = {
+        sourceWidth: 0,
+        sourceHeight: 0,
+        scale: 1,
+        left: 0,
+        top: 0,
+        fit: "contain",
+      };
 
       function isPlaying() {
         const video = mediaController.video?.();
         return video ? !video.paused && !video.ended : false;
       }
 
-      function previewScale() {
-        const videoWidth = finiteNumber(mediaController.video?.()?.videoWidth);
-        const layerWidth = finiteNumber(artLayer.clientWidth || host.clientWidth);
-        return videoWidth > 0 && layerWidth > 0 ? layerWidth / videoWidth : 1;
+      function usesCoverFit() {
+        const stage = host.closest?.(".cut-video-stage") || host.parentElement || host.parentNode;
+        return Boolean(stage?.classList?.contains("is-douyin-preview"));
+      }
+
+      function syncCanvasGeometry() {
+        if (destroyed) return false;
+        const hostRect = host.getBoundingClientRect?.();
+        const viewportWidth = finiteNumber(host.clientWidth || hostRect?.width);
+        const viewportHeight = finiteNumber(host.clientHeight || hostRect?.height);
+        if (viewportWidth <= 0 || viewportHeight <= 0) return false;
+        const video = mediaController.video?.();
+        const nativeWidth = finiteNumber(video?.videoWidth);
+        const nativeHeight = finiteNumber(video?.videoHeight);
+        const hasMetadata = nativeWidth > 0 && nativeHeight > 0;
+        const sourceWidth = hasMetadata ? nativeWidth : viewportWidth;
+        const sourceHeight = hasMetadata ? nativeHeight : viewportHeight;
+        const fit = usesCoverFit() ? "cover" : "contain";
+        const widthScale = viewportWidth / sourceWidth;
+        const heightScale = viewportHeight / sourceHeight;
+        const scale = fit === "cover"
+          ? Math.max(widthScale, heightScale)
+          : Math.min(widthScale, heightScale);
+        const renderedWidth = sourceWidth * scale;
+        const renderedHeight = sourceHeight * scale;
+        const left = Math.abs(viewportWidth - renderedWidth) < 0.000001
+          ? 0
+          : (viewportWidth - renderedWidth) / 2;
+        const top = Math.abs(viewportHeight - renderedHeight) < 0.000001
+          ? 0
+          : (viewportHeight - renderedHeight) / 2;
+        const nextSignature = [
+          sourceWidth,
+          sourceHeight,
+          viewportWidth,
+          viewportHeight,
+          fit,
+        ].join(":");
+        canvasGeometry = { sourceWidth, sourceHeight, scale, left, top, fit };
+        if (geometrySignature === nextSignature) return false;
+        geometrySignature = nextSignature;
+        canvas.style.width = `${sourceWidth}px`;
+        canvas.style.height = `${sourceHeight}px`;
+        canvas.style.transform = `translate(${left}px, ${top}px) scale(${scale})`;
+        canvas.dataset.previewFit = fit;
+        canvas.dataset.previewScale = String(scale);
+        canvas.dataset.previewLeft = String(left);
+        canvas.dataset.previewTop = String(top);
+        return true;
       }
 
       function renderArtCharacters(record, currentTime, playing) {
@@ -452,7 +509,7 @@
 
       function applyArtStyle(record) {
         const { node, overlay } = record;
-        const scale = previewScale();
+        const scale = 1;
         if (root.EditorArtRenderer?.applyStyle) {
           root.EditorArtRenderer.applyStyle(node, overlay, {
             scale,
@@ -551,8 +608,8 @@
 
       function positionArt(record) {
         const { node, overlay } = record;
-        const width = finiteNumber(artLayer.clientWidth || host.clientWidth);
-        const height = finiteNumber(artLayer.clientHeight || host.clientHeight);
+        const width = canvasGeometry.sourceWidth;
+        const height = canvasGeometry.sourceHeight;
         if (!width || !height || node.hidden) {
           node.style.left = `${overlay.x * 100}%`;
           node.style.top = `${overlay.y * 100}%`;
@@ -865,6 +922,7 @@
       function render(frame = {}) {
         if (destroyed) return false;
         currentFrame = frame;
+        syncCanvasGeometry();
         host.dataset.projectRevision = String(frame.revision ?? "");
         host.dataset.timingRevision = String(frame.timingRevision ?? "");
         artLayer.dataset.projectRevision = host.dataset.projectRevision;
@@ -946,7 +1004,7 @@
         const id = String(node.dataset.overlayId || node.dataset.pictureId || "");
         const record = kind === "art" ? artRecords.get(id) : pipRecords.get(id);
         if (!record) return;
-        const bounds = host.getBoundingClientRect();
+        const bounds = canvas.getBoundingClientRect();
         if (!bounds?.width || !bounds?.height) return;
         const nodeRect = node.getBoundingClientRect();
         const direction = kind === "pip" ? pointerResizeDirection(event.target, node) : "";
@@ -1086,14 +1144,23 @@
 
       function handleResize() {
         if (destroyed) return;
+        syncCanvasGeometry();
         for (const record of artRecords.values()) {
           applyArtStyle(record);
           positionArt(record);
         }
       }
 
+      function handleMediaState() {
+        handleResize();
+        syncTime();
+      }
+
       const unsubscribeFrame = mediaController.subscribeFrame?.(syncTime) || (() => {});
-      const unsubscribeState = mediaController.subscribeState?.(syncTime) || (() => {});
+      const unsubscribeState = mediaController.subscribeState?.(handleMediaState) || (() => {});
+      const video = mediaController.video?.();
+      video?.addEventListener?.("loadedmetadata", handleMediaState);
+      video?.addEventListener?.("resize", handleMediaState);
       const resizeObserver =
         typeof root.ResizeObserver === "function"
           ? new root.ResizeObserver(handleResize)
@@ -1106,6 +1173,8 @@
         endPointer(null, true);
         unsubscribeFrame();
         unsubscribeState();
+        video?.removeEventListener?.("loadedmetadata", handleMediaState);
+        video?.removeEventListener?.("resize", handleMediaState);
         resizeObserver?.disconnect();
         for (const record of artRecords.values()) {
           record.node.removeEventListener("pointerdown", beginPointer);
@@ -1116,8 +1185,7 @@
         }
         artRecords.clear();
         pipRecords.clear();
-        artLayer.remove();
-        pipLayer.remove();
+        canvas.remove();
         delete host.dataset.projectRevision;
         delete host.dataset.timingRevision;
       }

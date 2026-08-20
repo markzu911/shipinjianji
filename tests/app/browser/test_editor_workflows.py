@@ -351,6 +351,203 @@ def test_tool_switch_keeps_selection_preview_and_playback_position(
     assert base_media_mutations(page) == {"srcWrites": 0, "loadCalls": 0}
 
 
+def test_portrait_preview_canvas_matches_video_fit_and_pointer_geometry(
+    browser_session,
+    seeded_portrait_editor_job,
+):
+    page = open_editor(browser_session, seeded_portrait_editor_job)
+    page.locator("#cutPreviewVideo").evaluate(
+        """video => {
+          video.pause();
+          video.currentTime = 0.5;
+          video.dispatchEvent(new Event('seeking'));
+          video.dispatchEvent(new Event('timeupdate'));
+        }"""
+    )
+    page.locator('[data-editor-tool="art"]').click()
+    art = page.locator(
+        "#editorSuitePreviewOverlay .preview-overlay:not(.is-ai-draft)"
+    ).first
+    art.wait_for(state="visible")
+    stage = page.locator("#cutVideoStage")
+    stage.evaluate(
+        """node => {
+          node.style.setProperty('width', '600px', 'important');
+          node.style.setProperty('height', '400px', 'important');
+          node.style.setProperty('max-width', 'none', 'important');
+          node.style.setProperty('max-height', 'none', 'important');
+          node.style.setProperty('aspect-ratio', 'auto', 'important');
+        }"""
+    )
+    page.evaluate("window.dispatchEvent(new Event('resize'))")
+    page.locator(".editor-suite-preview-canvas").evaluate(
+        """node => new Promise(resolve => requestAnimationFrame(
+          () => requestAnimationFrame(() => resolve(node.dataset.previewFit))
+        ))"""
+    )
+
+    contain = page.evaluate(
+        """() => {
+          const video = document.querySelector('#cutPreviewVideo');
+          const host = document.querySelector('#editorSuitePreviewOverlay');
+          const canvas = host.querySelector('.editor-suite-preview-canvas');
+          const art = canvas.querySelector('.preview-overlay:not(.is-ai-draft)');
+          const hostRect = host.getBoundingClientRect();
+          const canvasRect = canvas.getBoundingClientRect();
+          const artRect = art.getBoundingClientRect();
+          return {
+            videoWidth: video.videoWidth,
+            videoHeight: video.videoHeight,
+            objectFit: getComputedStyle(video).objectFit,
+            host: { left: hostRect.left, top: hostRect.top, width: hostRect.width, height: hostRect.height },
+            canvas: { left: canvasRect.left, top: canvasRect.top, width: canvasRect.width, height: canvasRect.height },
+            artX: (artRect.left + artRect.width / 2 - canvasRect.left) / canvasRect.width,
+            artY: (artRect.top + artRect.height / 2 - canvasRect.top) / canvasRect.height,
+            fontSize: art.style.fontSize,
+            canvasWidth: canvas.style.width,
+            canvasHeight: canvas.style.height,
+          };
+        }"""
+    )
+    assert (contain["videoWidth"], contain["videoHeight"]) == (720, 1280)
+    assert contain["objectFit"] == "contain"
+    assert contain["canvasWidth"] == "720px"
+    assert contain["canvasHeight"] == "1280px"
+    contain_scale = min(
+        contain["host"]["width"] / contain["videoWidth"],
+        contain["host"]["height"] / contain["videoHeight"],
+    )
+    assert contain["canvas"]["width"] == pytest.approx(
+        contain["videoWidth"] * contain_scale,
+        abs=1,
+    )
+    assert contain["canvas"]["height"] == pytest.approx(
+        contain["videoHeight"] * contain_scale,
+        abs=1,
+    )
+    assert contain["canvas"]["left"] == pytest.approx(
+        contain["host"]["left"]
+        + (contain["host"]["width"] - contain["canvas"]["width"]) / 2,
+        abs=1,
+    )
+    assert contain["canvas"]["top"] == pytest.approx(contain["host"]["top"], abs=1)
+    assert contain["artX"] == pytest.approx(0.5, abs=0.01)
+    assert contain["artY"] == pytest.approx(0.78, abs=0.01)
+    assert contain["fontSize"] == "48px"
+
+    def drag_art_to(x: float, y: float) -> None:
+        geometry = page.evaluate(
+            """({ x, y }) => {
+              const canvas = document.querySelector('.editor-suite-preview-canvas');
+              const art = canvas.querySelector('.preview-overlay:not(.is-ai-draft)');
+              const canvasRect = canvas.getBoundingClientRect();
+              const artRect = art.getBoundingClientRect();
+              return {
+                startX: artRect.left + artRect.width / 2,
+                startY: artRect.top + artRect.height / 2,
+                endX: canvasRect.left + canvasRect.width * x,
+                endY: canvasRect.top + canvasRect.height * y,
+              };
+            }""",
+            {"x": x, "y": y},
+        )
+        page.mouse.move(geometry["startX"], geometry["startY"])
+        page.mouse.down()
+        page.mouse.move(geometry["endX"], geometry["endY"], steps=4)
+        page.mouse.up()
+        page.wait_for_function(
+            """({ x, y }) => {
+              const overlay = window.EditorSuite.projectSnapshot().project.art.overlays[0];
+              return Math.abs(overlay.x - x) <= 0.01 && Math.abs(overlay.y - y) <= 0.01;
+            }""",
+            arg={"x": x, "y": y},
+        )
+
+    drag_art_to(0.55, 0.45)
+
+    stage.evaluate(
+        """node => {
+          for (const name of ['width', 'height', 'max-width', 'max-height', 'aspect-ratio']) {
+            node.style.removeProperty(name);
+          }
+        }"""
+    )
+    page.locator("[data-douyin-preview-toggle]").click()
+    page.wait_for_function(
+        """() => document.querySelector('.editor-suite-preview-canvas')
+          ?.dataset.previewFit === 'cover'"""
+    )
+    cover = page.evaluate(
+        """() => {
+          const host = document.querySelector('#editorSuitePreviewOverlay');
+          const canvas = host.querySelector('.editor-suite-preview-canvas');
+          const art = canvas.querySelector('.preview-overlay:not(.is-ai-draft)');
+          const chrome = document.querySelector('.editor-suite-douyin-chrome');
+          const hostRect = host.getBoundingClientRect();
+          const canvasRect = canvas.getBoundingClientRect();
+          return {
+            host: { left: hostRect.left, top: hostRect.top, width: hostRect.width, height: hostRect.height },
+            canvas: { left: canvasRect.left, top: canvasRect.top, width: canvasRect.width, height: canvasRect.height },
+            pointerEvents: getComputedStyle(art).pointerEvents,
+            chromeIsCanvasChild: canvas.contains(chrome),
+          };
+        }"""
+    )
+    cover_scale = max(
+        cover["host"]["width"] / 720,
+        cover["host"]["height"] / 1280,
+    )
+    assert cover["canvas"]["width"] == pytest.approx(720 * cover_scale, abs=1)
+    assert cover["canvas"]["height"] == pytest.approx(1280 * cover_scale, abs=1)
+    assert cover["canvas"]["left"] == pytest.approx(
+        cover["host"]["left"]
+        + (cover["host"]["width"] - cover["canvas"]["width"]) / 2,
+        abs=1,
+    )
+    assert cover["canvas"]["top"] == pytest.approx(
+        cover["host"]["top"]
+        + (cover["host"]["height"] - cover["canvas"]["height"]) / 2,
+        abs=1,
+    )
+    assert cover["pointerEvents"] == "auto"
+    assert cover["chromeIsCanvasChild"] is False
+    drag_art_to(0.48, 0.6)
+
+    pip = page.locator("#editorSuitePreviewOverlay .pip-preview-item").first
+    pip.wait_for(state="visible")
+    pip.click()
+    handle = pip.locator('[data-pip-resize="e"]')
+    handle.wait_for(state="visible")
+    handle_state = handle.evaluate(
+        """node => ({
+          display: getComputedStyle(node).display,
+          pointerEvents: getComputedStyle(node).pointerEvents,
+        })"""
+    )
+    assert handle_state == {"display": "block", "pointerEvents": "auto"}
+    width_before = page.evaluate(
+        "window.EditorSuite.projectSnapshot().project.pip.overlays[0].width"
+    )
+    handle_box = handle.bounding_box()
+    assert handle_box is not None
+    page.mouse.move(
+        handle_box["x"] + handle_box["width"] / 2,
+        handle_box["y"] + handle_box["height"] / 2,
+    )
+    page.mouse.down()
+    page.mouse.move(
+        handle_box["x"] + handle_box["width"] / 2 + 20,
+        handle_box["y"] + handle_box["height"] / 2,
+        steps=4,
+    )
+    page.mouse.up()
+    page.wait_for_function(
+        """width => window.EditorSuite.projectSnapshot()
+          .project.pip.overlays[0].width > width""",
+        arg=width_before,
+    )
+
+
 def test_top_level_art_panel_edits_once_and_recovers_versioned_draft(
     browser_session,
     seeded_editor_job,
@@ -2370,7 +2567,7 @@ def test_art_panel_groups_transcript_track_and_updates_shared_settings(
     }
 
 
-def test_manual_art_overlays_share_one_timeline_track_and_independent_lanes(
+def test_manual_and_transcript_art_each_use_one_distinct_timeline_row(
     browser_session,
     seeded_two_cue_transcript_track_editor_job,
 ):
@@ -2404,6 +2601,9 @@ def test_manual_art_overlays_share_one_timeline_track_and_independent_lanes(
           const manualSegments = [...document.querySelectorAll(
             '#editorSuiteTimelineLayer [data-effect-kind="art"]'
           )].filter(item => manualIdSet.has(String(item.dataset.sourceId)));
+          const transcriptSegments = [...document.querySelectorAll(
+            '#editorSuiteTimelineLayer [data-effect-kind="art"]'
+          )].filter(item => !manualIdSet.has(String(item.dataset.sourceId)));
           return {
             revision: snapshot.revision,
             timingRevision: snapshot.timingRevision,
@@ -2426,6 +2626,11 @@ def test_manual_art_overlays_share_one_timeline_track_and_independent_lanes(
                 bottom: rect.bottom,
               };
             }),
+            transcriptSegments: transcriptSegments.map(item => ({
+              sourceId: item.dataset.sourceId,
+              trackIndex: item.dataset.timelineTrackIndex,
+              laneIndex: item.dataset.timelineLaneIndex,
+            })),
             overlays: snapshot.project.art.overlays.map(invariant),
             preview: frame.preview.art.overlays.map(invariant),
             composition: frame.composition.artOverlays.map(invariant),
@@ -2446,12 +2651,23 @@ def test_manual_art_overlays_share_one_timeline_track_and_independent_lanes(
     assert layout["composition"] == layout["overlays"]
     assert len(layout["manualSegments"]) == 2
     assert len({item["trackIndex"] for item in layout["manualSegments"]}) == 1
-    assert {item["laneIndex"] for item in layout["manualSegments"]} == {"0", "1"}
+    assert {item["laneIndex"] for item in layout["manualSegments"]} == {"0"}
     assert all(item["tabIndex"] >= 0 for item in layout["manualSegments"])
     first_segment, second_segment = layout["manualSegments"]
-    assert first_segment["bottom"] <= second_segment["top"] or (
-        second_segment["bottom"] <= first_segment["top"]
+    assert first_segment["top"] == pytest.approx(second_segment["top"], abs=1)
+    assert first_segment["bottom"] == pytest.approx(second_segment["bottom"], abs=1)
+    assert {item["laneIndex"] for item in layout["transcriptSegments"]} == {"0"}
+    assert len({item["trackIndex"] for item in layout["transcriptSegments"]}) == 1
+    assert layout["transcriptSegments"][0]["trackIndex"] != (
+        layout["manualSegments"][0]["trackIndex"]
     )
+    for manual_id in layout["manualIds"]:
+        panel.locator(f'[data-art-select="{manual_id}"]').click()
+        page.wait_for_function(
+            """id => window.EditorSuite.projectSnapshot().project.timeline.selection
+              ?.clipId === `art:${id}`""",
+            arg=manual_id,
+        )
 
     def click_clip_and_assert_playhead(segment, clip_id: str, ratio: float) -> None:
         geometry = segment.evaluate(
@@ -2503,6 +2719,7 @@ def test_manual_art_overlays_share_one_timeline_track_and_independent_lanes(
     manual_segment = page.locator(
         f'#editorSuiteTimelineLayer [data-source-id="{selected_id}"]'
     )
+    panel.locator(f'[data-art-select="{selected_id}"]').click()
     click_clip_and_assert_playhead(manual_segment, f"art:{selected_id}", 0.68)
     transcript_segment = page.locator(
         '#editorSuiteTimelineLayer [data-source-id="browser-transcript-cue-2"]'
@@ -2512,7 +2729,7 @@ def test_manual_art_overlays_share_one_timeline_track_and_independent_lanes(
         "art:browser-transcript-cue-2",
         0.65,
     )
-    manual_segment.click()
+    panel.locator(f'[data-art-select="{selected_id}"]').click()
     page.wait_for_function(
         """id => window.EditorSuite.projectSnapshot().project.timeline.selection?.clipId
           === `art:${id}`""",

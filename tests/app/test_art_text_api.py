@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 
 import pytest
@@ -149,6 +150,99 @@ def test_transcript_art_text_overlap_ends_at_next_real_start_time():
     assert normalized[0]["end"] == 0.75
     assert normalized[1]["start"] == 0.75
     assert normalized[0]["end"] <= normalized[1]["start"]
+
+
+def test_transcript_art_text_clamps_sub_millisecond_overlap_without_moving_next_cue():
+    timing_items = [
+        {
+            "text": "上一句",
+            "start": 0.4,
+            "end": 0.8006,
+            "sourceStart": 10.0,
+            "sourceEnd": 10.4006,
+            "characterTimings": [
+                {"start": 0.4, "end": 0.55},
+                {"start": 0.55, "end": 0.7},
+                {"start": 0.7, "end": 0.8006},
+            ],
+        },
+        {
+            "text": "下一句",
+            "start": 0.8004,
+            "end": 1.2,
+            "sourceStart": 11.0,
+            "sourceEnd": 11.4,
+            "characterTimings": [
+                {"start": 0.8004, "end": 0.9},
+                {"start": 0.9, "end": 1.05},
+                {"start": 1.05, "end": 1.2},
+            ],
+        },
+    ]
+    next_cue_before = copy.deepcopy(timing_items[1])
+
+    app_module.normalize_transcript_timing_group(timing_items)
+
+    assert timing_items[0]["end"] == timing_items[1]["start"] == 0.8004
+    assert timing_items[0]["characterTimings"][-1]["end"] <= 0.8004
+    assert timing_items[1] == next_cue_before
+
+    shared = {
+        "font": "modern",
+        "fontSize": 48,
+        "color": "#FFFFFF",
+        "strokeColor": "#000000",
+        "strokeWidth": 2,
+        "shadow": True,
+        "x": 0.5,
+        "y": 0.9,
+        "direction": "horizontal",
+        "textAlign": "center",
+        "charsPerLine": 0,
+        "lineSpacing": 0,
+        "artStyle": "impact",
+        "trackId": "transcript-full",
+        "trackType": "transcript",
+    }
+    overlays = [
+        app_module.TextOverlay(
+            text="上一句",
+            start=0.4,
+            end=0.8006,
+            sourceStart=10.0,
+            sourceEnd=10.4006,
+            characterTimings=[
+                {"start": 0.4, "end": 0.55},
+                {"start": 0.55, "end": 0.7},
+                {"start": 0.7, "end": 0.8006},
+            ],
+            **shared,
+        ),
+        app_module.TextOverlay(
+            text="下一句",
+            start=0.8004,
+            end=1.2,
+            sourceStart=11.0,
+            sourceEnd=11.4,
+            characterTimings=[
+                {"start": 0.8004, "end": 0.9},
+                {"start": 0.9, "end": 1.05},
+                {"start": 1.05, "end": 1.2},
+            ],
+            **shared,
+        ),
+    ]
+
+    normalized = app_module.normalize_text_overlays(overlays, 2.0)
+    previous, current = normalized
+
+    assert previous["end"] == current["start"] == 0.8
+    assert previous["characterTimings"][-1]["end"] <= previous["end"]
+    assert current["text"] == "下一句"
+    assert current["start"] == 0.8
+    assert current["characterTimings"][0]["start"] == 0.8004
+    assert current["sourceStart"] == 11.0
+    assert current["sourceEnd"] == 11.4
 
 
 def test_ai_art_suggestions_are_normalized_and_filled_to_requested_count():

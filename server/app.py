@@ -3596,10 +3596,71 @@ def render_cut_video(
     temporary_path.replace(output_path)
 
 
+def normalize_transcript_timing_group(
+    track_items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep one transcript track and all of its character times non-overlapping."""
+    ordered_items = sorted(
+        track_items,
+        key=lambda item: (float(item["start"]), float(item["end"])),
+    )
+    minimum_duration = 0.02
+    for previous, current in zip(ordered_items, ordered_items[1:]):
+        current_start = float(current["start"])
+        if current_start >= float(previous["end"]):
+            continue
+        boundary = current_start
+        if round(boundary - float(previous["start"]), 10) < minimum_duration:
+            raise ValueError(
+                "全文艺术字的剪后词级时间过密，无法生成有效字幕片段。"
+            )
+        previous["end"] = boundary
+
+    for item in ordered_items:
+        timings = item.get("characterTimings") or []
+        if not timings:
+            continue
+        cue_start_tick = math.ceil(float(item["start"]) * 10000 - 1e-9)
+        cue_end_tick = math.floor(float(item["end"]) * 10000 + 1e-9)
+        available_ticks = cue_end_tick - cue_start_tick
+        if available_ticks < len(timings):
+            raise ValueError(
+                "全文艺术字的逐字时间过密，无法保留完整文案。"
+            )
+        minimum_ticks = max(
+            1,
+            min(10, available_ticks // max(2, len(timings) * 2)),
+        )
+        cursor_tick = cue_start_tick
+        normalized_timings: list[dict[str, float]] = []
+        for index, timing in enumerate(timings):
+            remaining = len(timings) - index
+            latest_end_tick = cue_end_tick - minimum_ticks * (remaining - 1)
+            raw_start_tick = round(float(timing["start"]) * 10000)
+            raw_end_tick = round(float(timing["end"]) * 10000)
+            start_tick = max(
+                cursor_tick,
+                min(raw_start_tick, latest_end_tick - minimum_ticks),
+            )
+            end_tick = min(
+                latest_end_tick,
+                max(raw_end_tick, start_tick + minimum_ticks),
+            )
+            normalized_timings.append(
+                {
+                    "start": round(start_tick / 10000, 4),
+                    "end": round(end_tick / 10000, 4),
+                }
+            )
+            cursor_tick = end_tick
+        item["characterTimings"] = normalized_timings
+    return track_items
+
+
 def normalize_transcript_overlay_timing(
     overlays: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """End each subtitle at the next cue's real word-level start time."""
+    """Apply the transcript timing invariant independently to every track."""
     track_groups: dict[str, list[dict[str, Any]]] = {}
     for overlay in overlays:
         if overlay.get("trackType") != TRANSCRIPT_ART_TEXT_TRACK_TYPE:
@@ -3608,21 +3669,8 @@ def normalize_transcript_overlay_timing(
         if track_id:
             track_groups.setdefault(track_id, []).append(overlay)
 
-    minimum_duration = 0.02
     for track_items in track_groups.values():
-        ordered_items = sorted(
-            track_items,
-            key=lambda item: (float(item["start"]), float(item["end"])),
-        )
-        for previous, current in zip(ordered_items, ordered_items[1:]):
-            if float(current["start"]) >= float(previous["end"]) - 0.001:
-                continue
-            boundary = round(float(current["start"]), 3)
-            if boundary - float(previous["start"]) < minimum_duration - 0.001:
-                raise ValueError(
-                    "全文艺术字的剪后词级时间过密，无法生成有效字幕片段。"
-                )
-            previous["end"] = boundary
+        normalize_transcript_timing_group(track_items)
     return overlays
 
 
@@ -5064,13 +5112,7 @@ def build_transcript_art_text_track(
         cues.append(cue)
         cue_groups.append(group)
 
-    for previous, current in zip(cues, cues[1:]):
-        if float(current["start"]) >= float(previous["end"]) - 0.001:
-            continue
-        boundary = round(float(current["start"]), 3)
-        if boundary - float(previous["start"]) < 0.019:
-            raise ValueError("剪后词级时间戳过密，无法生成完整的全文艺术字。")
-        previous["end"] = boundary
+    normalize_transcript_timing_group(cues)
 
     for cue, group in zip(cues, cue_groups):
         cue["characterTimings"] = transcript_art_text_character_timings(
@@ -5082,6 +5124,7 @@ def build_transcript_art_text_track(
         if cue["characterTimings"]:
             cue["start"] = cue["characterTimings"][0]["start"]
             cue["end"] = cue["characterTimings"][-1]["end"]
+    normalize_transcript_timing_group(cues)
 
     if len(cues) > MAX_TRANSCRIPT_ART_TEXT_CUES:
         raise ValueError(

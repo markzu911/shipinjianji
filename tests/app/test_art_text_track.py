@@ -130,6 +130,70 @@ def test_full_transcript_art_track_uses_word_times_and_single_line_cues():
     )
 
 
+def test_full_transcript_track_reclamps_supplied_character_times_after_split():
+    words = [
+        {
+            "text": "第一段话。",
+            "start": 0.0,
+            "end": 1.1,
+            "sourceStart": 10.0,
+            "sourceEnd": 11.1,
+        },
+        {
+            "text": "第二段话。",
+            "start": 1.0,
+            "end": 2.0,
+            "sourceStart": 12.0,
+            "sourceEnd": 13.0,
+        },
+    ]
+    transcript = {
+        "text": "".join(word["text"] for word in words),
+        "segments": [
+            {
+                "text": "".join(word["text"] for word in words),
+                "start": 0.0,
+                "end": 2.0,
+                "sourceStart": 10.0,
+                "sourceEnd": 13.0,
+                "words": words,
+            }
+        ],
+    }
+
+    result = app_module.build_transcript_art_text_track(
+        transcript,
+        2.0,
+        1080,
+        font_id="bold",
+        font_size=54,
+        letter_spacing=0,
+        stroke_width=3,
+        semantic_breaks=[0, 1],
+    )
+
+    first, second = result["cues"]
+    assert first["end"] == second["start"] == 1.0
+    assert first["sourceStart"] == 10.0
+    assert first["sourceEnd"] == 11.1
+    assert second["sourceStart"] == 12.0
+    assert second["sourceEnd"] == 13.0
+    assert len(first["characterTimings"]) == len(
+        app_module.content_characters(first["text"])
+    )
+    assert all(
+        first["start"] <= timing["start"] < timing["end"] <= first["end"]
+        for timing in first["characterTimings"]
+    )
+    assert all(
+        left["end"] <= right["start"]
+        for left, right in zip(
+            first["characterTimings"], first["characterTimings"][1:]
+        )
+    )
+    assert second["characterTimings"][0]["start"] == 1.0
+
+
 def test_full_transcript_art_track_keeps_complete_sentences_and_avoids_orphans():
     words = [
         {"text": "人生", "start": 0.0, "end": 0.8},

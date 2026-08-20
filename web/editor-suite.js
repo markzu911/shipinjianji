@@ -1252,10 +1252,15 @@
     if (!details.clipId || !["cut", "art", "pip"].includes(details.kind)) {
       return false;
     }
-    const result = projectStore.dispatch({
-      type: window.EditorProjectStore.ACTIONS.SELECTION_CHANGED,
-      payload: { selection: { clipId: details.clipId } },
-    });
+    const selectedClipId = String(
+      projectSnapshot().project.timeline.selection?.clipId || "",
+    );
+    const result = selectedClipId === details.clipId
+      ? { accepted: true }
+      : projectStore.dispatch({
+          type: window.EditorProjectStore.ACTIONS.SELECTION_CHANGED,
+          payload: { selection: { clipId: details.clipId } },
+        });
     if (["art", "pip"].includes(details.kind)) {
       openTool(details.kind);
     }
