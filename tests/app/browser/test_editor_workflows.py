@@ -2370,6 +2370,248 @@ def test_art_panel_groups_transcript_track_and_updates_shared_settings(
     }
 
 
+def test_manual_art_overlays_share_one_timeline_track_and_independent_lanes(
+    browser_session,
+    seeded_two_cue_transcript_track_editor_job,
+):
+    page = open_editor(browser_session, seeded_two_cue_transcript_track_editor_job)
+    page.locator('[data-editor-tool="art"]').click()
+    panel = page.locator("#editorArtPanelRoot")
+    panel.wait_for(state="visible")
+
+    for text in ("手动标题一", "手动标题二"):
+        panel.locator("[data-art-add-text]").fill(text)
+        panel.locator("[data-art-add]").click()
+    page.wait_for_function(
+        """() => window.EditorSuite.projectSnapshot().project.art.overlays.length === 4"""
+    )
+
+    layout = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          const frame = window.EditorProjectStore.selectEditorFrame(snapshot);
+          const manualIds = snapshot.project.art.overlays
+            .filter(item => item.trackType !== 'transcript')
+            .map(item => String(item.id));
+          const manualIdSet = new Set(manualIds);
+          const invariant = item => ({
+            text: item.text,
+            start: item.start,
+            end: item.end,
+            sourceStart: item.sourceStart ?? null,
+            sourceEnd: item.sourceEnd ?? null,
+          });
+          const manualSegments = [...document.querySelectorAll(
+            '#editorSuiteTimelineLayer [data-effect-kind="art"]'
+          )].filter(item => manualIdSet.has(String(item.dataset.sourceId)));
+          return {
+            revision: snapshot.revision,
+            timingRevision: snapshot.timingRevision,
+            manualIds,
+            artTracks: frame.timeline.tracks
+              .filter(track => track.kind === 'art')
+              .map(track => ({
+                id: track.id,
+                name: track.name,
+                sourceIds: track.clips.map(clip => clip.sourceId),
+              })),
+            manualSegments: manualSegments.map(item => {
+              const rect = item.getBoundingClientRect();
+              return {
+                sourceId: item.dataset.sourceId,
+                trackIndex: item.dataset.timelineTrackIndex,
+                laneIndex: item.dataset.timelineLaneIndex,
+                tabIndex: item.tabIndex,
+                top: rect.top,
+                bottom: rect.bottom,
+              };
+            }),
+            overlays: snapshot.project.art.overlays.map(invariant),
+            preview: frame.preview.art.overlays.map(invariant),
+            composition: frame.composition.artOverlays.map(invariant),
+          };
+        }"""
+    )
+
+    assert [(track["id"], track["name"]) for track in layout["artTracks"]] == [
+        ("art:transcript:browser-transcript-track", "视频文案艺术字"),
+        ("art:manual", "手动艺术字"),
+    ]
+    assert layout["artTracks"][0]["sourceIds"] == [
+        "browser-transcript-cue-1",
+        "browser-transcript-cue-2",
+    ]
+    assert layout["artTracks"][1]["sourceIds"] == layout["manualIds"]
+    assert layout["preview"] == layout["overlays"]
+    assert layout["composition"] == layout["overlays"]
+    assert len(layout["manualSegments"]) == 2
+    assert len({item["trackIndex"] for item in layout["manualSegments"]}) == 1
+    assert {item["laneIndex"] for item in layout["manualSegments"]} == {"0", "1"}
+    assert all(item["tabIndex"] >= 0 for item in layout["manualSegments"])
+    first_segment, second_segment = layout["manualSegments"]
+    assert first_segment["bottom"] <= second_segment["top"] or (
+        second_segment["bottom"] <= first_segment["top"]
+    )
+
+    def click_clip_and_assert_playhead(segment, clip_id: str, ratio: float) -> None:
+        geometry = segment.evaluate(
+            """(item, ratio) => {
+              const itemRect = item.getBoundingClientRect();
+              const track = document.querySelector('#cutFrameTimelineTrack');
+              const trackRect = track.getBoundingClientRect();
+              const frame = window.EditorProjectStore.selectEditorFrame(
+                window.EditorSuite.projectSnapshot()
+              );
+              const relativeX = itemRect.width * ratio;
+              const clientX = itemRect.left + relativeX;
+              return {
+                relativeX,
+                relativeY: itemRect.height / 2,
+                clientX,
+                expectedTime: Math.min(1, Math.max(
+                  0,
+                  (clientX - trackRect.left) / trackRect.width,
+                )) * frame.timeline.duration,
+                clipStart: Number(item.dataset.effectStart),
+              };
+            }""",
+            ratio,
+        )
+        assert geometry["expectedTime"] - geometry["clipStart"] > 0.1
+        segment.click(
+            position={"x": geometry["relativeX"], "y": geometry["relativeY"]}
+        )
+        page.wait_for_function(
+            """({ clipId, expectedTime, clientX }) => {
+              const video = document.querySelector('#cutPreviewVideo');
+              const playhead = document.querySelector('#cutFrameTimelinePlayhead');
+              const playheadRect = playhead.getBoundingClientRect();
+              const selection = window.EditorSuite.projectSnapshot()
+                .project.timeline.selection?.clipId;
+              return selection === clipId
+                && Math.abs(video.currentTime - expectedTime) <= 0.06
+                && Math.abs(playheadRect.left + playheadRect.width / 2 - clientX) <= 3;
+            }""",
+            arg={
+                "clipId": clip_id,
+                "expectedTime": geometry["expectedTime"],
+                "clientX": geometry["clientX"],
+            },
+        )
+
+    selected_id = layout["manualIds"][0]
+    manual_segment = page.locator(
+        f'#editorSuiteTimelineLayer [data-source-id="{selected_id}"]'
+    )
+    click_clip_and_assert_playhead(manual_segment, f"art:{selected_id}", 0.68)
+    transcript_segment = page.locator(
+        '#editorSuiteTimelineLayer [data-source-id="browser-transcript-cue-2"]'
+    )
+    click_clip_and_assert_playhead(
+        transcript_segment,
+        "art:browser-transcript-cue-2",
+        0.65,
+    )
+    manual_segment.click()
+    page.wait_for_function(
+        """id => window.EditorSuite.projectSnapshot().project.timeline.selection?.clipId
+          === `art:${id}`""",
+        arg=selected_id,
+    )
+    before_change = page.evaluate(
+        """ids => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          return {
+            revision: snapshot.revision,
+            timingRevision: snapshot.timingRevision,
+            ranges: ids.map(id => {
+              const item = snapshot.project.art.overlays.find(
+                overlay => String(overlay.id) === id
+              );
+              return { id, start: item.start, end: item.end };
+            }),
+          };
+        }""",
+        layout["manualIds"],
+    )
+    panel.locator('[data-art-range="start"]').fill("0.12")
+    panel.locator('[data-art-range="start"]').press("Tab")
+    page.wait_for_function(
+        """id => {
+          const item = window.EditorSuite.projectSnapshot().project.art.overlays
+            .find(overlay => String(overlay.id) === id);
+          return Math.abs(Number(item?.start) - 0.12) < 0.001;
+        }""",
+        arg=selected_id,
+    )
+    after_change = page.evaluate(
+        """ids => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          return {
+            revision: snapshot.revision,
+            timingRevision: snapshot.timingRevision,
+            ranges: ids.map(id => {
+              const item = snapshot.project.art.overlays.find(
+                overlay => String(overlay.id) === id
+              );
+              return { id, start: item.start, end: item.end };
+            }),
+          };
+        }""",
+        layout["manualIds"],
+    )
+    assert after_change["revision"] == before_change["revision"] + 1
+    assert after_change["timingRevision"] == before_change["timingRevision"] + 1
+    assert after_change["ranges"][0]["start"] == pytest.approx(0.12)
+    assert after_change["ranges"][0]["end"] == before_change["ranges"][0]["end"]
+    assert after_change["ranges"][1] == before_change["ranges"][1]
+
+    panel.locator("[data-art-delete]").click()
+    page.locator("#appDialogConfirm").click()
+    page.wait_for_function(
+        """id => !window.EditorSuite.projectSnapshot().project.art.overlays
+          .some(item => String(item.id) === id)""",
+        arg=selected_id,
+    )
+    remaining = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          const frame = window.EditorProjectStore.selectEditorFrame(snapshot);
+          const manual = snapshot.project.art.overlays.filter(
+            item => item.trackType !== 'transcript'
+          );
+          const transcript = snapshot.project.art.overlays.filter(
+            item => item.trackType === 'transcript'
+          );
+          return {
+            manualIds: manual.map(item => item.id),
+            transcriptIds: transcript.map(item => item.id),
+            manualTracks: frame.timeline.tracks
+              .filter(track => track.id === 'art:manual')
+              .map(track => track.clips.map(clip => clip.sourceId)),
+            transcriptTracks: frame.timeline.tracks
+              .filter(track => track.id === 'art:transcript:browser-transcript-track')
+              .map(track => track.clips.map(clip => clip.sourceId)),
+            previewTexts: frame.preview.art.overlays.map(item => item.text),
+            compositionTexts: frame.composition.artOverlays.map(item => item.text),
+          };
+        }"""
+    )
+    assert remaining["manualIds"] == [layout["manualIds"][1]]
+    assert remaining["transcriptIds"] == [
+        "browser-transcript-cue-2",
+        "browser-transcript-cue-1",
+    ]
+    assert remaining["manualTracks"] == [[layout["manualIds"][1]]]
+    assert remaining["transcriptTracks"] == [[
+        "browser-transcript-cue-1",
+        "browser-transcript-cue-2",
+    ]]
+    assert remaining["previewTexts"] == remaining["compositionTexts"]
+    assert "手动标题一" not in remaining["previewTexts"]
+    assert "手动标题二" in remaining["previewTexts"]
+
+
 def test_deleting_only_transcript_track_resets_empty_selection_copy(
     browser_session,
     seeded_two_cue_transcript_track_editor_job,

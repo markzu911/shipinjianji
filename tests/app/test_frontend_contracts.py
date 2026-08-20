@@ -59,10 +59,10 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     assert "/editor-pip-model.js?v=20260819-01" in page_response.text
     assert "/editor-project-store.js?v=20260819-05" in page_response.text
     assert "/editor-media-controller.js?v=20260819-01" in page_response.text
-    assert "/editor-art-model.js?v=20260819-04" in page_response.text
+    assert "/editor-art-model.js?v=20260820-01" in page_response.text
     assert "/editor-art-renderer.js?v=20260819-01" in page_response.text
     assert "/editor-preview-compositor.js?v=20260819-02" in page_response.text
-    assert "/editor-timeline-controller.js?v=20260819-01" in page_response.text
+    assert "/editor-timeline-controller.js?v=20260820-01" in page_response.text
     assert "/editor-art-tool.js?v=20260819-07" in page_response.text
     assert "/editor-pip-tool.js?v=20260819-02" in page_response.text
     assert "/editor-suite.js?v=20260819-05" in page_response.text

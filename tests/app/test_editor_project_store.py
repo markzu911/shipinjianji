@@ -670,6 +670,7 @@ console.log(JSON.stringify({
 def test_editor_project_store_restores_art_and_pip_draft_atomically() -> None:
     result = run_store_script(
         r"""
+global.EditorArtModel = require('./web/editor-art-model.js');
 global.EditorPipModel = require('./web/editor-pip-model.js');
 const store = projectStore.createStore({}, { timeline });
 store.dispatch({ type: 'projectHydrated', payload: { job: {
@@ -710,6 +711,7 @@ console.log(JSON.stringify({
   pipWidth: after.project.pip.overlays[0].width,
   selection: after.project.timeline.selection,
   composeWidth: frame.composition.pictureInPictureOverlays[0].width,
+  timelineTrackIds: frame.timeline.tracks.map(track => track.id),
   timelineKinds: frame.timeline.tracks.map(track => track.kind),
 }));
 """
@@ -725,6 +727,7 @@ console.log(JSON.stringify({
         "clipId": "pip:wide-asset",
         "trackId": "pip:overlay:wide-asset",
     }
+    assert result["timelineTrackIds"] == ["art:manual", "pip:overlay:wide-asset"]
     assert result["timelineKinds"] == ["art", "pip"]
 
 
@@ -890,6 +893,7 @@ console.log(JSON.stringify({
 def test_editor_project_store_restores_versioned_art_draft_atomically() -> None:
     result = run_store_script(
         r"""
+global.EditorArtModel = require('./web/editor-art-model.js');
 const store = projectStore.createStore({}, { timeline });
 store.dispatch({ type: 'projectHydrated', payload: { job: {
   id: 'job-draft', status: 'completed', duration: 10, updatedAt: 'server-v1',
@@ -942,5 +946,5 @@ console.log(JSON.stringify({
     assert result["source"] == "edited"
     assert result["overlay"]["id"] == "stable-one"
     assert result["selection"]["clipId"] == "art:stable-one"
-    assert result["selection"]["trackId"] == "art:overlay:stable-one"
+    assert result["selection"]["trackId"] == "art:manual"
     assert result["echo"]["accepted"] is False

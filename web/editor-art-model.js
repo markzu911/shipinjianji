@@ -768,14 +768,15 @@
     function buildTimelineTracks(overlays) {
       const groups = new Map();
       for (const overlay of Array.isArray(overlays) ? overlays : []) {
-        const groupId = isTranscriptOverlay(overlay)
+        const transcriptOverlay = isTranscriptOverlay(overlay);
+        const groupId = transcriptOverlay
           ? `art:transcript:${overlay.trackId}`
-          : `art:overlay:${overlay.id}`;
+          : "art:manual";
         if (!groups.has(groupId)) {
           groups.set(groupId, {
             id: groupId,
             kind: "art",
-            name: isTranscriptOverlay(overlay) ? "全文艺术字" : String(overlay.text || "艺术字"),
+            name: transcriptOverlay ? "视频文案艺术字" : "手动艺术字",
             clips: [],
           });
         }
@@ -786,7 +787,7 @@
           name: String(overlay.text || "艺术字"),
           start: finiteNumber(overlay.start),
           end: finiteNumber(overlay.end),
-          minDuration: isTranscriptOverlay(overlay) ? 0.02 : 0.05,
+          minDuration: transcriptOverlay ? 0.02 : 0.05,
           payload: {
             text: String(overlay.text || ""),
             trackId: overlay.trackId || null,

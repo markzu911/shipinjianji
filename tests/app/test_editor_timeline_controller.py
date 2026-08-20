@@ -248,29 +248,323 @@ function element() {
 global.document = { createElement: () => element() };
 const timelineController = require('./web/editor-timeline-controller.js');
 const layer = element();
+const track = element();
+const selected = [];
+const commits = [];
 const controller = timelineController.createController({
-  timeline, root: layer, keyboardTarget: null, visibleKinds: ['art', 'pip'],
+  timeline, root: layer, track, keyboardTarget: null, visibleKinds: ['art', 'pip'],
+  onSelect: transaction => { selected.push(transaction.clip.id); return true; },
+  onCommit: transaction => { commits.push(transaction); return true; },
 });
 const documentState = controller.render({
   revision: 3, timingRevision: 2,
   timeline: { duration: 10, tracks: [
     { id: 'cut', kind: 'cut', clips: [{ id: 'cut:1', sourceId: 'c', start: 0, end: 1 }] },
-    { id: 'art', kind: 'art', clips: [{ id: 'art:1', sourceId: 'a', start: 1, end: 2 }] },
+    { id: 'art:manual', kind: 'art', clips: [
+      { id: 'art:1', sourceId: 'a1', start: 1, end: 4 },
+      { id: 'art:2', sourceId: 'a2', start: 2, end: 3 },
+      { id: 'art:3', sourceId: 'a3', start: 4, end: 5 },
+    ] },
+    { id: 'art:transcript:full', kind: 'art', clips: [
+      { id: 'art:cue', sourceId: 'cue', start: 1, end: 2 },
+    ] },
     { id: 'pip', kind: 'pip', clips: [{ id: 'pip:1', sourceId: 'p', start: 2, end: 3 }] },
   ] },
 });
-console.log(JSON.stringify({
+const layout = {
   kinds: layer.children.map(item => item.dataset.effectKind),
-  rows: layer.children.map(item => item.dataset.timelineTrackIndex),
-  authoritativeKinds: documentState.tracks.map(track => track.kind),
+  tracks: layer.children.map(item => item.dataset.timelineTrackIndex),
+  lanes: layer.children.map(item => item.dataset.timelineLaneIndex),
+  tops: layer.children.map(item => item.style.top),
   height: layer.style.height,
+  trackHeight: track.style.values['--editor-timeline-track-height'],
+};
+controller.selectClip('art:2');
+controller.submitRange('art:2', 2.5, 3.5, { reason: 'move-overlap' });
+console.log(JSON.stringify({
+  layout,
+  selected,
+  commits: commits.map(item => ({ clipId: item.clipId, sourceId: item.sourceId })),
+  ranges: controller.currentDocument().tracks
+    .find(item => item.id === 'art:manual').clips
+    .map(item => ({ id: item.id, start: item.start, end: item.end })),
+  authoritativeKinds: documentState.tracks.map(track => track.kind),
 }));
 """
     )
 
     assert payload == {
-        "kinds": ["art", "pip"],
-        "rows": ["0", "1"],
-        "authoritativeKinds": ["cut", "art", "pip"],
-        "height": "60px",
+        "layout": {
+            "kinds": ["art", "art", "art", "art", "pip"],
+            "tracks": ["0", "0", "0", "1", "2"],
+            "lanes": ["0", "1", "0", "0", "0"],
+            "tops": ["2px", "32px", "2px", "62px", "92px"],
+            "height": "120px",
+            "trackHeight": "194px",
+        },
+        "selected": ["art:2"],
+        "commits": [{"clipId": "art:2", "sourceId": "a2"}],
+        "ranges": [
+            {"id": "art:1", "start": 1, "end": 4},
+            {"id": "art:2", "start": 2.5, "end": 3.5},
+            {"id": "art:3", "start": 4, "end": 5},
+        ],
+        "authoritativeKinds": ["cut", "art", "art", "pip"],
+    }
+
+
+def test_timeline_clip_click_seek_semantics_cover_scroll_fallback_and_drag():
+    payload = run_node(
+        r"""
+const timeline = require('./web/timeline-model.js');
+global.EditorTimeline = timeline;
+
+const rootListeners = new Map();
+global.addEventListener = (type, callback) => {
+  if (!rootListeners.has(type)) rootListeners.set(type, new Set());
+  rootListeners.get(type).add(callback);
+};
+global.removeEventListener = (type, callback) => {
+  rootListeners.get(type)?.delete(callback);
+};
+function emitRoot(type, event = {}) {
+  for (const callback of [...(rootListeners.get(type) || [])]) {
+    callback({ type, ...event });
+  }
+}
+
+function element() {
+  const listeners = new Map();
+  const classes = new Set();
+  return {
+    dataset: {}, attributes: {}, children: [], hidden: false, parentElement: null,
+    style: {
+      values: {},
+      setProperty(key, value) { this.values[key] = value; },
+      removeProperty(key) { delete this.values[key]; },
+    },
+    classList: {
+      toggle(name, force) {
+        if (force === false) classes.delete(name);
+        else if (force === true || !classes.has(name)) classes.add(name);
+        else classes.delete(name);
+      },
+      contains(name) { return classes.has(name); },
+    },
+    setAttribute(name, value) { this.attributes[name] = String(value); },
+    addEventListener(type, callback) {
+      if (!listeners.has(type)) listeners.set(type, new Set());
+      listeners.get(type).add(callback);
+    },
+    removeEventListener(type, callback) { listeners.get(type)?.delete(callback); },
+    emit(type, event) {
+      for (const callback of [...(listeners.get(type) || [])]) callback(event);
+    },
+    append(...items) {
+      for (const item of items) item.parentElement = this;
+      this.children.push(...items);
+    },
+    replaceChildren(...items) {
+      for (const item of items) item.parentElement = this;
+      this.children = items;
+    },
+    closest(selector) {
+      let current = this;
+      while (current) {
+        if (selector === '[data-timeline-clip-id]' && current.dataset.timelineClipId) {
+          return current;
+        }
+        if (selector === '[data-timeline-resize]' && current.dataset.timelineResize) {
+          return current;
+        }
+        current = current.parentElement;
+      }
+      return null;
+    },
+  };
+}
+
+global.document = { createElement: () => element() };
+const timelineController = require('./web/editor-timeline-controller.js');
+const layer = element();
+const track = element();
+track.getBoundingClientRect = () => ({ left: -200, width: 1000 });
+const selections = [];
+const seeks = [];
+const previews = [];
+const commits = [];
+const controller = timelineController.createController({
+  timeline,
+  root: layer,
+  track,
+  keyboardTarget: null,
+  visibleKinds: ['art', 'pip'],
+  onSelect: transaction => {
+    selections.push({ id: transaction.clip.id, source: transaction.source });
+    return transaction.clip.id !== 'art:reject';
+  },
+  onSeek: (seconds, clip) => seeks.push({ id: clip.id, seconds }),
+  onPreview: transaction => previews.push({
+    id: transaction.clip.id,
+    mode: transaction.mode,
+    start: transaction.clip.start,
+    end: transaction.clip.end,
+  }),
+  onCommit: transaction => {
+    commits.push({
+      id: transaction.clipId,
+      reason: transaction.reason,
+      start: transaction.start,
+      end: transaction.end,
+    });
+    return true;
+  },
+});
+controller.render({
+  revision: 1,
+  timingRevision: 1,
+  timeline: { duration: 20, tracks: [
+    { id: 'art:manual', kind: 'art', clips: [
+      { id: 'art:manual-1', sourceId: 'manual-1', start: 4, end: 8 },
+      { id: 'art:reject', sourceId: 'reject', start: 8, end: 10 },
+    ] },
+    { id: 'art:transcript:full', kind: 'art', clips: [
+      { id: 'art:cue-1', sourceId: 'cue-1', start: 12, end: 16 },
+    ] },
+    { id: 'pip', kind: 'pip', clips: [
+      { id: 'pip:1', sourceId: 'pip-1', start: 2, end: 6, editable: false },
+    ] },
+  ] },
+});
+
+function pointerTarget(segment, mode) {
+  if (mode === 'move') return segment;
+  return segment.children.find(item => item.dataset.timelineResize === mode);
+}
+
+function pointerDownClip(clipId, clientX, mode = 'move') {
+  const segment = layer.children.find(item => item.dataset.timelineClipId === clipId);
+  const target = pointerTarget(segment, mode);
+  const effects = { prevented: false, stopped: false };
+  layer.emit('pointerdown', {
+    target,
+    button: 0,
+    clientX,
+    preventDefault() { effects.prevented = true; },
+    stopPropagation() { effects.stopped = true; },
+  });
+  return { effects, target };
+}
+
+function clickClip(clipId, clientX, mode = 'move') {
+  const { effects, target } = pointerDownClip(clipId, clientX, mode);
+  emitRoot('pointerup', { target, button: 0, clientX });
+  return effects;
+}
+
+function dragClip(clipId, startClientX, endClientX, mode = 'move') {
+  const { effects, target } = pointerDownClip(clipId, startClientX, mode);
+  emitRoot('pointermove', { target, button: 0, clientX: endClientX });
+  emitRoot('pointerup', { target, button: 0, clientX: endClientX });
+  return effects;
+}
+
+const effects = [
+  clickClip('art:manual-1', 100),
+  clickClip('art:cue-1', 500),
+  clickClip('pip:1', 0),
+];
+controller.selectClip('art:manual-1');
+
+track.getBoundingClientRect = () => ({ left: Number.NaN, width: 1000 });
+effects.push(clickClip('art:cue-1', 500));
+track.getBoundingClientRect = () => ({ left: -200, width: 1000 });
+
+const seekCountBeforeReject = seeks.length;
+effects.push(clickClip('art:reject', 250));
+const rejection = {
+  seekCount: seeks.length - seekCountBeforeReject,
+  selectedIds: layer.children
+    .filter(item => item.attributes['aria-pressed'] === 'true')
+    .map(item => item.dataset.timelineClipId),
+};
+
+effects.push(clickClip('art:manual-1', 200, 'end'));
+effects.push(dragClip('art:manual-1', 100, 150));
+effects.push(dragClip('art:manual-1', 300, 350, 'end'));
+
+controller.render({
+  revision: 2,
+  timingRevision: 2,
+  timeline: { duration: 0, tracks: [
+    { id: 'art:manual', kind: 'art', clips: [
+      { id: 'art:manual-1', sourceId: 'manual-1', start: 4, end: 8 },
+    ] },
+  ] },
+});
+effects.push(clickClip('art:manual-1', 100));
+
+console.log(JSON.stringify({
+  effects,
+  selections,
+  seeks,
+  rejection,
+  previews,
+  commits,
+}));
+"""
+    )
+
+    assert payload == {
+        "effects": [
+            {"prevented": True, "stopped": True},
+            {"prevented": True, "stopped": True},
+            {"prevented": True, "stopped": True},
+            {"prevented": True, "stopped": True},
+            {"prevented": True, "stopped": True},
+            {"prevented": True, "stopped": True},
+            {"prevented": True, "stopped": True},
+            {"prevented": True, "stopped": True},
+            {"prevented": True, "stopped": True},
+        ],
+        "selections": [
+            {"id": "art:manual-1", "source": "pointer"},
+            {"id": "art:cue-1", "source": "pointer"},
+            {"id": "pip:1", "source": "pointer"},
+            {"id": "art:manual-1", "source": "timeline"},
+            {"id": "art:cue-1", "source": "pointer"},
+            {"id": "art:reject", "source": "pointer"},
+            {"id": "art:manual-1", "source": "pointer"},
+            {"id": "art:manual-1", "source": "pointer"},
+        ],
+        "seeks": [
+            {"id": "art:manual-1", "seconds": 6},
+            {"id": "art:cue-1", "seconds": 14},
+            {"id": "pip:1", "seconds": 4},
+            {"id": "art:manual-1", "seconds": 4},
+            {"id": "art:cue-1", "seconds": 12},
+            {"id": "art:manual-1", "seconds": 4},
+            {"id": "art:manual-1", "seconds": 5},
+            {"id": "art:manual-1", "seconds": 10},
+            {"id": "art:manual-1", "seconds": 4},
+        ],
+        "rejection": {"seekCount": 0, "selectedIds": ["art:cue-1"]},
+        "previews": [
+            {"id": "art:manual-1", "mode": "move", "start": 5, "end": 9},
+            {"id": "art:manual-1", "mode": "end", "start": 5, "end": 10},
+        ],
+        "commits": [
+            {
+                "id": "art:manual-1",
+                "reason": "pointer-move",
+                "start": 5,
+                "end": 9,
+            },
+            {
+                "id": "art:manual-1",
+                "reason": "pointer-end",
+                "start": 5,
+                "end": 10,
+            },
+        ],
     }

@@ -150,6 +150,72 @@ console.log(JSON.stringify({
     assert payload["error"] == ""
 
 
+def test_editor_art_model_groups_manual_and_ai_overlays_separately_from_transcript():
+    payload = run_node(
+        r"""
+const model = require('./web/editor-art-model.js');
+const manualOne = model.normalizeOverlay({
+  id: 'manual-one', text: '手动一', start: 2, end: 4,
+  sourceStart: 12, sourceEnd: 14, x: 0.2, y: 0.3,
+}, { duration: 8 });
+const confirmed = model.overlayFromSuggestion({
+  draftId: 'ai-draft', accepted: true, position: 'top',
+  text: 'AI 普通', start: 1, end: 3,
+  sourceStart: 11, sourceEnd: 13, x: 0.4, y: 0.2,
+}, [manualOne], { duration: 8 });
+const manualTwo = model.normalizeOverlay({
+  id: 'manual-two', text: '手动二', start: 4, end: 5,
+  sourceStart: 14, sourceEnd: 15, x: 0.7, y: 0.8,
+}, { duration: 8 });
+const transcript = model.buildTranscriptTrack({
+  trackId: 'full', cues: [
+    { text: '文案一', start: 0, end: 1, sourceStart: 10, sourceEnd: 11 },
+    { text: '文案二', start: 5, end: 6, sourceStart: 15, sourceEnd: 16 },
+  ],
+}, {}, [], { duration: 8 });
+const overlays = [manualOne, transcript[0], confirmed, transcript[1], manualTwo];
+const before = JSON.stringify(overlays);
+const tracks = model.buildTimelineTracks(overlays);
+console.log(JSON.stringify({
+  before,
+  after: JSON.stringify(overlays),
+  confirmedId: confirmed.id,
+  tracks,
+}));
+"""
+    )
+
+    assert payload["after"] == payload["before"]
+    assert [(track["id"], track["name"]) for track in payload["tracks"]] == [
+        ("art:manual", "手动艺术字"),
+        ("art:transcript:full", "视频文案艺术字"),
+    ]
+    manual_track, transcript_track = payload["tracks"]
+    assert [clip["sourceId"] for clip in manual_track["clips"]] == [
+        payload["confirmedId"],
+        "manual-one",
+        "manual-two",
+    ]
+    assert [clip["id"] for clip in manual_track["clips"]] == [
+        f"art:{payload['confirmedId']}",
+        "art:manual-one",
+        "art:manual-two",
+    ]
+    assert [clip["sourceId"] for clip in transcript_track["clips"]] == [
+        "art-full-1",
+        "art-full-2",
+    ]
+    assert all(
+        clip["payload"]["trackType"] == "transcript"
+        and clip["payload"]["trackId"] == "full"
+        for clip in transcript_track["clips"]
+    )
+    assert [
+        (clip["payload"]["sourceStart"], clip["payload"]["sourceEnd"])
+        for clip in manual_track["clips"]
+    ] == [(11, 13), (12, 14), (14, 15)]
+
+
 def test_editor_art_model_matches_compose_constraints_and_strips_ai_draft_state():
     payload = run_node(
         r"""

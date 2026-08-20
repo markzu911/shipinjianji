@@ -78,11 +78,20 @@
       const selectedClipId = String(documentState.selection?.clipId || "");
       const duration = Math.max(0, finiteNumber(documentState.duration));
       const fragments = [];
-      let rowIndex = 0;
+      let trackIndex = 0;
+      let rowCount = 0;
 
       for (const timelineTrack of documentState.tracks) {
         if (visibleKinds && !visibleKinds.has(String(timelineTrack.kind))) continue;
+        const laneEnds = [];
         for (const clip of timelineTrack.clips) {
+          let laneIndex = laneEnds.findIndex((laneEnd) => laneEnd <= clip.start);
+          if (laneIndex < 0) {
+            laneIndex = laneEnds.length;
+            laneEnds.push(clip.end);
+          } else {
+            laneEnds[laneIndex] = clip.end;
+          }
           const segment = root.document.createElement("button");
           segment.type = "button";
           segment.className = trackClass(clip.kind);
@@ -93,9 +102,10 @@
           if (clip.kind === "pip") segment.dataset.pictureId = clip.sourceId;
           segment.dataset.effectStart = String(clip.start);
           segment.dataset.effectEnd = String(clip.end);
-          segment.dataset.timelineTrackIndex = String(rowIndex);
+          segment.dataset.timelineTrackIndex = String(trackIndex);
+          segment.dataset.timelineLaneIndex = String(laneIndex);
           segment.dataset.timelineEditable = String(Boolean(clip.editable));
-          segment.style.top = `${rowIndex * 30 + 2}px`;
+          segment.style.top = `${(rowCount + laneIndex) * 30 + 2}px`;
           segment.style.left = `${duration > 0 ? (clip.start / duration) * 100 : 0}%`;
           segment.style.width = `${
             duration > 0 ? Math.max(0.25, ((clip.end - clip.start) / duration) * 100) : 0
@@ -127,19 +137,20 @@
           }
           fragments.push(segment);
         }
-        rowIndex += 1;
+        rowCount += laneEnds.length;
+        trackIndex += 1;
       }
 
       layer.replaceChildren(...fragments);
       layer.hidden = fragments.length === 0;
-      layer.style.height = fragments.length ? `${rowIndex * 30}px` : "";
+      layer.style.height = fragments.length ? `${rowCount * 30}px` : "";
       layer.dataset.projectRevision = String(frame.revision);
       layer.dataset.timingRevision = String(frame.timingRevision);
       track?.classList?.toggle("has-effect-track", fragments.length > 0);
       if (track?.style) {
         if (fragments.length) {
-          track.style.setProperty("--editor-layer-timeline-height", `${rowIndex * 30}px`);
-          track.style.setProperty("--editor-timeline-track-height", `${74 + rowIndex * 30}px`);
+          track.style.setProperty("--editor-layer-timeline-height", `${rowCount * 30}px`);
+          track.style.setProperty("--editor-timeline-track-height", `${74 + rowCount * 30}px`);
         } else {
           track.style.removeProperty("--editor-layer-timeline-height");
           track.style.removeProperty("--editor-timeline-track-height");
@@ -179,6 +190,28 @@
       });
     }
 
+    function timelineSecondsFromClientX(clientX) {
+      const duration = frame.timeline.duration;
+      const rect = track?.getBoundingClientRect?.();
+      const width = rect?.width;
+      const left = rect?.left;
+      if (
+        !Number.isFinite(duration) ||
+        duration <= 0 ||
+        !Number.isFinite(width) ||
+        width <= 0 ||
+        !Number.isFinite(left) ||
+        !Number.isFinite(clientX)
+      ) {
+        return null;
+      }
+      const progress = Math.min(
+        1,
+        Math.max(0, (clientX - left) / width),
+      );
+      return progress * duration;
+    }
+
     function selectClip(clipId, settings = {}) {
       if (destroyed) return null;
       const found = findClip(clipId, frame.timeline);
@@ -192,7 +225,15 @@
       if (!accepted(result)) return null;
       previewDocument = selectionDocument(found.clip.id);
       renderDocument(previewDocument);
-      options.onSeek?.(found.clip.start, clone(found.clip));
+      const hasSeekTime = Object.prototype.hasOwnProperty.call(settings, "seekTime");
+      const duration = Math.max(0, finiteNumber(frame.timeline.duration));
+      const requestedSeekTime = hasSeekTime
+        ? Math.max(0, finiteNumber(settings.seekTime, found.clip.start))
+        : found.clip.start;
+      const seekTime = duration > 0
+        ? Math.min(duration, requestedSeekTime)
+        : found.clip.start;
+      options.onSeek?.(seekTime, clone(found.clip));
       return clone(found.clip);
     }
 
@@ -285,15 +326,13 @@
       if (!found) return;
       event.preventDefault();
       event.stopPropagation();
+      const clickSeekTime = timelineSecondsFromClientX(event.clientX) ?? found.clip.start;
       if (!found.clip.editable) {
-        selectClip(clipId, { source: "pointer" });
+        selectClip(clipId, { source: "pointer", seekTime: clickSeekTime });
         return;
       }
 
-      previewDocument = selectionDocument(clipId);
-      renderDocument(previewDocument);
-      options.onSeek?.(found.clip.start, clone(found.clip));
-
+      const documentBeforePointer = currentDocument();
       const mode = event.target.closest?.("[data-timeline-resize]")?.dataset
         .timelineResize || "move";
       const width = Math.max(1, finiteNumber(track?.getBoundingClientRect?.().width, 1));
@@ -306,6 +345,8 @@
         duration: frame.timeline.duration,
       });
       if (!session) return;
+      previewDocument = selectionDocument(clipId);
+      renderDocument(previewDocument);
 
       let moved = false;
       const move = (moveEvent) => {
@@ -329,7 +370,14 @@
         }
         if (!moved) {
           previewDocument = null;
-          selectClip(clipId, { source: "pointer" });
+          const selected = selectClip(clipId, {
+            source: "pointer",
+            seekTime: mode === "move" ? clickSeekTime : found.clip.start,
+          });
+          if (!selected) {
+            previewDocument = documentBeforePointer;
+            renderDocument(previewDocument);
+          }
           return;
         }
         submitRange(clip.id, clip.start, clip.end, {
