@@ -376,3 +376,25 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 18: 合并艺术字轨道并修复点击定位
+
+**Date**: 2026-08-20
+**Task**: 合并艺术字轨道并修复点击定位
+**Branch**: `develop`
+
+### Summary
+
+将非文案艺术字合并到独立手动轨道，以可视 lane 展示重叠片段；修复公共效果片段点击时播放头固定跳到片段起点的问题，并补齐滚动、拒绝选择、几何回退、拖拽及真实浏览器回归。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `38a302a` | (see git log) |
+| `76e2773` | (see git log) |
+
+### Status
+
+[OK] **Completed**
