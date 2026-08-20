@@ -2646,6 +2646,49 @@ def multiscale_boundary_rms(
     return sum(values) / len(values) if values else float("inf")
 
 
+def boundary_rms_is_meaningfully_lower(
+    candidate_rms: float,
+    reference_rms: float,
+) -> bool:
+    return (
+        math.isfinite(candidate_rms)
+        and math.isfinite(reference_rms)
+        and candidate_rms
+        < reference_rms * CUT_CHARACTER_BOUNDARY_MIN_IMPROVEMENT
+    )
+
+
+def boundary_rms_is_on_valley_floor(
+    candidate_rms: float,
+    energy_curve: list[tuple[int, float]],
+) -> bool:
+    finite_values = [rms for _, rms in energy_curve if math.isfinite(rms)]
+    return bool(
+        math.isfinite(candidate_rms)
+        and finite_values
+        and candidate_rms <= min(finite_values) * CUT_VALLEY_TOLERANCE
+    )
+
+
+def validate_directional_boundary(
+    candidate: float,
+    fallback: float,
+    corridor_start: float,
+    corridor_end: float,
+    *,
+    deletion_on_left: bool,
+) -> float:
+    if (
+        not math.isfinite(candidate)
+        or candidate < corridor_start - 0.001
+        or candidate > corridor_end + 0.001
+        or (deletion_on_left and candidate < fallback - 0.001)
+        or (not deletion_on_left and candidate > fallback + 0.001)
+    ):
+        return fallback
+    return round(max(corridor_start, min(candidate, corridor_end)), 3)
+
+
 def snap_to_low_amplitude_sample(
     samples: array,
     sample_rate: int,
@@ -2676,7 +2719,7 @@ def find_quiet_token_extension_boundary(
     deletion_on_left: bool,
     enabled: bool,
 ) -> float:
-    """Move a delete start into absolute quiet inside the previous raw token."""
+    """Move a delete start into a sustained valley in the previous raw token."""
     if not enabled or deletion_on_left:
         return fallback
     reference_rms = multiscale_boundary_rms(
@@ -2684,10 +2727,7 @@ def find_quiet_token_extension_boundary(
         sample_rate,
         fallback,
     )
-    if (
-        not math.isfinite(reference_rms)
-        or reference_rms <= CUT_LOW_ENERGY_RMS_THRESHOLD
-    ):
+    if not math.isfinite(reference_rms):
         return fallback
 
     left_center = (
@@ -2701,18 +2741,37 @@ def find_quiet_token_extension_boundary(
     step = max(1, round(CUT_BOUNDARY_STEP_SECONDS * sample_rate))
     first = math.ceil(corridor_start * sample_rate / step) * step
     last = math.floor(corridor_end * sample_rate / step) * step
-    candidates: list[tuple[float, float, float]] = []
-    for position in {
+    sample_positions = {
         round(corridor_start * sample_rate),
         round(corridor_end * sample_rate),
         *range(first, last + 1, step),
-    }:
-        candidate = position / sample_rate
-        rms = multiscale_boundary_rms(samples, sample_rate, candidate)
+    }
+    energy_curve = [
+        (position, multiscale_boundary_rms(samples, sample_rate, position / sample_rate))
+        for position in sorted(sample_positions)
+    ]
+    floor_flags = [
+        boundary_rms_is_on_valley_floor(rms, energy_curve)
+        for _, rms in energy_curve
+    ]
+    sustained_floor_positions: set[int] = set()
+    for index in range(len(energy_curve) - 1):
+        current_position = energy_curve[index][0]
+        next_position = energy_curve[index + 1][0]
         if (
-            math.isfinite(rms)
-            and rms <= CUT_LOW_ENERGY_RMS_THRESHOLD
-            and rms < reference_rms * CUT_CHARACTER_BOUNDARY_MIN_IMPROVEMENT
+            floor_flags[index]
+            and floor_flags[index + 1]
+            and next_position - current_position <= step + 1
+        ):
+            sustained_floor_positions.update((current_position, next_position))
+    if not sustained_floor_positions:
+        return fallback
+    candidates: list[tuple[float, float, float]] = []
+    for position, rms in energy_curve:
+        candidate = position / sample_rate
+        if (
+            boundary_rms_is_meaningfully_lower(rms, reference_rms)
+            and position in sustained_floor_positions
         ):
             candidates.append((abs(candidate - fallback), rms, candidate))
     if not candidates:
@@ -2725,7 +2784,13 @@ def find_quiet_token_extension_boundary(
         corridor_start,
         corridor_end,
     )
-    return round(max(corridor_start, min(best, corridor_end)), 3)
+    return validate_directional_boundary(
+        best,
+        fallback,
+        corridor_start,
+        corridor_end,
+        deletion_on_left=deletion_on_left,
+    )
 
 
 def refine_shared_character_boundary(
@@ -2783,10 +2848,7 @@ def refine_shared_character_boundary(
     acoustic_prior = max(corridor_start, min(acoustic_prior, corridor_end))
     reference = max(corridor_start, min(fallback, corridor_end))
     reference_rms = multiscale_boundary_rms(samples, sample_rate, reference)
-    if (
-        not math.isfinite(reference_rms)
-        or reference_rms <= CUT_LOW_ENERGY_RMS_THRESHOLD
-    ):
+    if not math.isfinite(reference_rms):
         return fallback
 
     step = max(1, round(CUT_BOUNDARY_STEP_SECONDS * sample_rate))
@@ -2814,15 +2876,13 @@ def refine_shared_character_boundary(
         directional_endpoint,
     )
     if (
-        math.isfinite(endpoint_rms)
-        and endpoint_rms <= CUT_LOW_ENERGY_RMS_THRESHOLD
-        and endpoint_rms
-        < reference_rms * CUT_CHARACTER_BOUNDARY_MIN_IMPROVEMENT
+        boundary_rms_is_meaningfully_lower(endpoint_rms, reference_rms)
+        and boundary_rms_is_on_valley_floor(endpoint_rms, energy_curve)
     ):
         endpoint_distance = abs(directional_endpoint - acoustic_prior)
         candidates.append(
             (
-                endpoint_rms / max(reference_rms, 1.0)
+                endpoint_rms / reference_rms
                 + endpoint_distance
                 / corridor_width
                 * CUT_CHARACTER_BOUNDARY_DISTANCE_PENALTY,
@@ -2849,12 +2909,14 @@ def refine_shared_character_boundary(
             or rms > next_rms
         ):
             continue
+        if not boundary_rms_is_meaningfully_lower(rms, reference_rms):
+            continue
         distance_penalty = (
             abs(candidate - acoustic_prior)
             / corridor_width
             * CUT_CHARACTER_BOUNDARY_DISTANCE_PENALTY
         )
-        score = rms / max(reference_rms, 1.0) + distance_penalty
+        score = rms / reference_rms + distance_penalty
         candidates.append((score, abs(candidate - acoustic_prior), candidate))
     if not candidates:
         return find_quiet_token_extension_boundary(
@@ -2869,7 +2931,7 @@ def refine_shared_character_boundary(
 
     _, _, best = min(candidates)
     best_rms = multiscale_boundary_rms(samples, sample_rate, best)
-    if best_rms >= reference_rms * CUT_CHARACTER_BOUNDARY_MIN_IMPROVEMENT:
+    if not boundary_rms_is_meaningfully_lower(best_rms, reference_rms):
         return find_quiet_token_extension_boundary(
             left,
             right,
@@ -2879,17 +2941,18 @@ def refine_shared_character_boundary(
             deletion_on_left=deletion_on_left,
             enabled=allow_token_extension,
         )
-    if best_rms > CUT_LOW_ENERGY_RMS_THRESHOLD:
-        extended = find_quiet_token_extension_boundary(
-            left,
-            right,
-            fallback,
-            samples,
-            sample_rate,
-            deletion_on_left=deletion_on_left,
-            enabled=allow_token_extension,
-        )
-        if extended != fallback:
+    extended = find_quiet_token_extension_boundary(
+        left,
+        right,
+        fallback,
+        samples,
+        sample_rate,
+        deletion_on_left=deletion_on_left,
+        enabled=allow_token_extension,
+    )
+    if extended != fallback:
+        extended_rms = multiscale_boundary_rms(samples, sample_rate, extended)
+        if boundary_rms_is_meaningfully_lower(extended_rms, best_rms):
             return extended
     best = snap_to_low_amplitude_sample(
         samples,
@@ -2898,7 +2961,13 @@ def refine_shared_character_boundary(
         corridor_start,
         corridor_end,
     )
-    return round(max(corridor_start, min(best, corridor_end)), 3)
+    return validate_directional_boundary(
+        best,
+        fallback,
+        corridor_start,
+        corridor_end,
+        deletion_on_left=deletion_on_left,
+    )
 
 
 def build_shared_acoustic_delete_boundaries(

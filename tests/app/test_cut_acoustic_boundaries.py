@@ -126,7 +126,7 @@ def test_shared_acoustic_boundary_removes_tail_inside_raw_de_ni_token(
     assert aligned["originalEnd"] == 0.4
 
 
-@pytest.mark.parametrize("amplitude", [0, 4_000])
+@pytest.mark.parametrize("amplitude", [0, 240, 4_000])
 def test_shared_acoustic_boundary_requires_a_meaningful_valley(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -281,6 +281,124 @@ def test_shared_acoustic_boundary_only_moves_in_the_deletion_direction():
     assert start_target["start"] <= 0.4
 
 
+@pytest.mark.parametrize(
+    ("delete_range", "boundary_key", "valley_start", "valley_end"),
+    [
+        ({"start": 0.0, "end": 0.4}, "end", 0.47, 0.53),
+        ({"start": 0.4, "end": 0.8}, "start", 0.27, 0.33),
+    ],
+)
+def test_shared_acoustic_boundary_is_stable_across_non_clipping_gain(
+    delete_range: dict[str, float],
+    boundary_key: str,
+    valley_start: float,
+    valley_end: float,
+):
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    segments = [
+        {
+            "start": 0.0,
+            "end": 0.8,
+            "text": "删留",
+            "words": [
+                {"text": "删", "start": 0.0, "end": 0.4},
+                {"text": "留", "start": 0.4, "end": 0.8},
+            ],
+            "asrWords": [{"text": "删留", "start": 0.0, "end": 0.8}],
+        }
+    ]
+
+    boundaries = []
+    for gain in (1, 2, 4):
+        samples = array("h", [240 * gain]) * sample_rate
+        first = round(valley_start * sample_rate)
+        last = round(valley_end * sample_rate)
+        samples[first:last] = array("h", [20 * gain]) * (last - first)
+        target = app_module.build_shared_acoustic_delete_boundaries(
+            segments,
+            [delete_range],
+            1.0,
+            samples,
+            sample_rate,
+        )[0]
+        boundaries.append(target[boundary_key])
+
+    assert max(boundaries) - min(boundaries) <= (
+        app_module.CUT_BOUNDARY_STEP_SECONDS + 0.001
+    )
+    if boundary_key == "end":
+        assert 0.47 <= boundaries[0] <= 0.53
+        assert all(0.4 <= boundary <= 0.6 for boundary in boundaries)
+    else:
+        assert 0.27 <= boundaries[0] <= 0.33
+        assert all(0.2 <= boundary <= 0.4 for boundary in boundaries)
+
+
+def test_ai_suggestion_and_cut_draft_share_low_volume_acoustic_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    media_path = tmp_path / "source.mp4"
+    media_path.write_bytes(b"source")
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    samples = array("h", [240]) * sample_rate
+    first = round(0.54 * sample_rate)
+    last = round(0.66 * sample_rate)
+    samples[first:last] = array("h", [20]) * (last - first)
+    monkeypatch.setattr(
+        app_module,
+        "decode_cut_audio_samples",
+        lambda _path: samples,
+    )
+    segments = [
+        {
+            "start": 0.0,
+            "end": 0.8,
+            "text": "删留",
+            "words": [
+                {"text": "删", "start": 0.0, "end": 0.4},
+                {"text": "留", "start": 0.4, "end": 0.8},
+            ],
+            "asrWords": [{"text": "删留", "start": 0.0, "end": 0.8}],
+        }
+    ]
+    suggestions = [
+        {
+            "id": "delete-first-character",
+            "type": "口误",
+            "text": "删",
+            "start": 0.0,
+            "end": 0.4,
+            "ranges": [{"start": 0.0, "end": 0.4}],
+        }
+    ]
+
+    suggestion_range = app_module.snap_suggestion_ranges_to_audio(
+        segments,
+        suggestions,
+        1.0,
+        samples,
+    )[0]["ranges"][0]
+    draft_range = app_module.align_cut_draft_text_ranges_to_audio(
+        media_path,
+        [
+            {
+                "start": 0.0,
+                "end": 0.4,
+                "originalStart": 0.0,
+                "originalEnd": 0.4,
+            }
+        ],
+        segments,
+        1.0,
+    )[0]
+
+    assert suggestion_range["start"] == draft_range["start"] == 0.0
+    assert suggestion_range["end"] == draft_range["end"]
+    assert draft_range["end"] == 0.6
+    assert suggestion_range["originalEnd"] == draft_range["originalEnd"] == 0.4
+
+
 def test_shared_acoustic_boundary_rejects_character_center_on_monotonic_slope():
     sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
     segments = [
@@ -296,47 +414,66 @@ def test_shared_acoustic_boundary_rejects_character_center_on_monotonic_slope():
         }
     ]
 
-    end_samples = array("h", [6_000]) * sample_rate
     first = round(0.4 * sample_rate)
     last = round(0.6 * sample_rate)
-    end_samples[first:last] = array(
-        "h",
-        (
-            round(6_000 - 5_500 * index / (last - first - 1))
-            for index in range(last - first)
-        ),
-    )
-    end_target = app_module.build_shared_acoustic_delete_boundaries(
-        segments,
-        [{"start": 0.0, "end": 0.4}],
-        1.0,
-        end_samples,
-        sample_rate,
-    )[0]
-
-    start_samples = array("h", [6_000]) * sample_rate
+    falling = [
+        round(300 - 275 * index / (last - first - 1))
+        for index in range(last - first)
+    ]
     first = round(0.2 * sample_rate)
     last = round(0.4 * sample_rate)
-    start_samples[first:last] = array(
-        "h",
-        (
-            round(500 + 5_500 * index / (last - first - 1))
-            for index in range(last - first)
-        ),
-    )
-    start_target = app_module.build_shared_acoustic_delete_boundaries(
-        segments,
-        [{"start": 0.4, "end": 0.8}],
-        1.0,
-        start_samples,
-        sample_rate,
-    )[0]
+    rising = [
+        round(25 + 275 * index / (last - first - 1))
+        for index in range(last - first)
+    ]
 
-    assert end_target["end"] == 0.4
-    assert start_target["start"] == 0.4
+    for gain in (1, 4, 16, 64):
+        end_samples = array("h", [300 * gain]) * sample_rate
+        first = round(0.4 * sample_rate)
+        last = round(0.6 * sample_rate)
+        end_samples[first:last] = array(
+            "h", (amplitude * gain for amplitude in falling)
+        )
+        end_target = app_module.build_shared_acoustic_delete_boundaries(
+            segments,
+            [{"start": 0.0, "end": 0.4}],
+            1.0,
+            end_samples,
+            sample_rate,
+        )[0]
+
+        start_samples = array("h", [300 * gain]) * sample_rate
+        first = round(0.2 * sample_rate)
+        last = round(0.4 * sample_rate)
+        start_samples[first:last] = array(
+            "h", (amplitude * gain for amplitude in rising)
+        )
+        start_target = app_module.build_shared_acoustic_delete_boundaries(
+            segments,
+            [{"start": 0.4, "end": 0.8}],
+            1.0,
+            start_samples,
+            sample_rate,
+        )[0]
+
+        assert end_target["end"] == 0.4
+        assert start_target["start"] == 0.4
 
 
-def test_shared_acoustic_boundary_accepts_only_a_quiet_directional_endpoint():
+@pytest.mark.parametrize(
+    ("delete_range", "boundary_key", "quiet_start", "quiet_end", "expected"),
+    [
+        ({"start": 0.0, "end": 0.4}, "end", 0.54, 0.66, 0.6),
+        ({"start": 0.4, "end": 0.8}, "start", 0.14, 0.26, 0.2),
+    ],
+)
+def test_shared_acoustic_directional_endpoint_is_stable_across_gain(
+    delete_range: dict[str, float],
+    boundary_key: str,
+    quiet_start: float,
+    quiet_end: float,
+    expected: float,
+):
     sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
     segments = [
         {
@@ -351,47 +488,26 @@ def test_shared_acoustic_boundary_accepts_only_a_quiet_directional_endpoint():
         }
     ]
 
-    end_samples = array("h", [6_000]) * sample_rate
-    first = round(0.54 * sample_rate)
-    last = round(0.66 * sample_rate)
-    end_samples[first:last] = array("h", [0]) * (last - first)
-    end_target = app_module.build_shared_acoustic_delete_boundaries(
-        segments,
-        [{"start": 0.0, "end": 0.4}],
-        1.0,
-        end_samples,
-        sample_rate,
-    )[0]
+    boundaries = []
+    for gain in (1, 4, 16, 32, 64):
+        samples = array("h", [240 * gain]) * sample_rate
+        first = round(quiet_start * sample_rate)
+        last = round(quiet_end * sample_rate)
+        samples[first:last] = array("h", [20 * gain]) * (last - first)
+        target = app_module.build_shared_acoustic_delete_boundaries(
+            segments,
+            [delete_range],
+            1.0,
+            samples,
+            sample_rate,
+        )[0]
+        boundaries.append(target[boundary_key])
 
-    start_samples = array("h", [6_000]) * sample_rate
-    first = round(0.14 * sample_rate)
-    last = round(0.26 * sample_rate)
-    start_samples[first:last] = array("h", [0]) * (last - first)
-    start_target = app_module.build_shared_acoustic_delete_boundaries(
-        segments,
-        [{"start": 0.4, "end": 0.8}],
-        1.0,
-        start_samples,
-        sample_rate,
-    )[0]
-
-    assert end_target["end"] == 0.6
-    assert start_target["start"] == 0.2
+    assert boundaries == [expected] * len(boundaries)
 
 
 def test_shared_acoustic_boundary_reaches_true_pause_inside_adjacent_token():
     sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
-    samples = array("h", [6_000]) * sample_rate
-    quiet_start = round(0.28 * sample_rate)
-    quiet_end = round(0.40 * sample_rate)
-    samples[quiet_start:quiet_end] = array("h", [0]) * (
-        quiet_end - quiet_start
-    )
-    relative_valley_start = round(0.48 * sample_rate)
-    relative_valley_end = round(0.54 * sample_rate)
-    samples[relative_valley_start:relative_valley_end] = array("h", [1_200]) * (
-        relative_valley_end - relative_valley_start
-    )
     segments = [
         {
             "start": 0.2,
@@ -408,17 +524,34 @@ def test_shared_acoustic_boundary_reaches_true_pause_inside_adjacent_token():
         }
     ]
 
-    target = app_module.build_shared_acoustic_delete_boundaries(
-        segments,
-        [{"start": 0.6, "end": 0.9}],
-        1.0,
-        samples,
-        sample_rate,
-    )[0]
+    boundaries = []
+    for gain in (1, 4, 16, 64):
+        samples = array("h", [240 * gain]) * sample_rate
+        quiet_start = round(0.28 * sample_rate)
+        quiet_end = round(0.40 * sample_rate)
+        samples[quiet_start:quiet_end] = array("h", [10 * gain]) * (
+            quiet_end - quiet_start
+        )
+        relative_valley_start = round(0.48 * sample_rate)
+        relative_valley_end = round(0.54 * sample_rate)
+        samples[relative_valley_start:relative_valley_end] = array(
+            "h", [80 * gain]
+        ) * (relative_valley_end - relative_valley_start)
 
-    assert 0.32 <= target["start"] <= 0.40
-    assert target["start"] > 0.2
-    assert target["end"] == 0.9
+        target = app_module.build_shared_acoustic_delete_boundaries(
+            segments,
+            [{"start": 0.6, "end": 0.9}],
+            1.0,
+            samples,
+            sample_rate,
+        )[0]
+        boundaries.append(target["start"])
+        assert target["end"] == 0.9
+
+    assert max(boundaries) - min(boundaries) <= (
+        app_module.CUT_BOUNDARY_STEP_SECONDS + 0.001
+    )
+    assert all(0.32 <= boundary <= 0.40 for boundary in boundaries)
 
 
 def test_shared_acoustic_token_extension_requires_quiet_inside_token():
