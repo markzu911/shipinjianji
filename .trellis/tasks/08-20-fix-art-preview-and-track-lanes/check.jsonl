@@ -1,0 +1,6 @@
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"检查 UI 几何、Store 数据、API timing 与最终 compose 的完整链路是否一致。"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"核对轨道身份、overlay 保真、selection、草稿和 revision 无回归。"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"检查普通/设备预览变换、指针坐标、两类单行轨道和窄屏可用性。"}
+{"file":".trellis/spec/backend/media-and-timeline.md","reason":"检查 cue/character timing 不重叠、下一段边界保真和音频不受影响。"}
+{"file":".trellis/spec/testing/index.md","reason":"执行任务风险对应的 Node、后端、compose、浏览器和全量测试。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"检查真实媒体尺寸、公共预览/时间轴/compose 一致性及浏览器错误。"}

@@ -1,0 +1,7 @@
+{"file":".trellis/spec/guides/project-overview.md","reason":"保持原生多页面应用、共享 window 模块和统一顶层编辑器的既有结构。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"预览、Store、服务端归一化和 compose 跨层修改需要端到端追踪同一坐标与时间契约。"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"遵守 overlays、timeline、selection、preview 和 compose 的单一权威数据流及艺术字轨道身份。"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"实现 contain/cover 内容画布、指针坐标、分类单行轨道和响应式交互。"}
+{"file":".trellis/spec/backend/media-and-timeline.md","reason":"保证 transcript cue、character timing、源锚点和 compose 使用同一时间边界且不修改音频。"}
+{"file":".trellis/spec/testing/index.md","reason":"按预览、时间轴、艺术字、compose、浏览器和全量层级安排回归。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"验证公共预览、统一 frame、真实 Chromium 几何、草稿恢复和 375px 行为。"}

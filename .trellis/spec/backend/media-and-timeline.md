@@ -9,6 +9,7 @@
 - 剪后 transcript、艺术字和画中画需要使用 retained transcript/source anchor 映射，不能凭相同秒数猜测。
 - 预览和最终合成必须消费同一组归一化 overlay 数据。
 - 有效 word 或已有 character timing 是全文艺术字的语义时间权威；音频 quiet range 不得压缩、重排或覆盖这些边界。静音只允许在缺少可靠文字时间时作为降级参考。
+- 全文艺术字在逐字时间写回 cue 后必须再次按 `trackId` 规范边界：任何正值重叠（包括小于 `1ms` 的误差）都必须只把前一 cue 的 `end` 严格收紧到后一 cue 的真实 `start`，并把前一 cue 的全部 `characterTimings` 按原顺序约束在新范围内。不得后移后一 cue、删除字符、改写 `sourceStart/sourceEnd` 或触碰基础视频和音频。`normalize_text_overlays()` 必须复用同一规范化入口，避免预览与 compose 产生两套时间。
 - 实时艺术字 AI 草稿的 `start/end/duration` 属于剪后时间，`sourceStart/sourceEnd` 属于原片时间。关键帧样本必须显式携带 `{mediaTime, displayTime}`：FFmpeg seek 使用 `mediaTime`，联系表标签和模型提示使用 `displayTime`。
 
 任何跨剪辑边界功能都应明确输入时间轴、输出时间轴和转换函数，并增加往返测试。

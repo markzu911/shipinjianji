@@ -251,7 +251,7 @@ onCommit(transaction);
 
 ### 1. Scope / Trigger
 
-修改 `EditorArtModel.buildTimelineTracks()`、公共效果时间轴布局、艺术字草稿恢复或艺术字 clip 选择/调时时适用。`project.art.overlays` 始终是权威状态；轨道分组和重叠 lane 都只能是派生结果。
+修改 `EditorArtModel.buildTimelineTracks()`、公共效果时间轴布局、艺术字草稿恢复或艺术字 clip 选择/调时时适用。`project.art.overlays` 始终是权威状态；轨道分组和单行堆叠顺序都只能是派生结果。
 
 ### 2. Signatures
 
@@ -274,17 +274,17 @@ overlay clip -> art:<overlayId>
 - 文案 cue 继续按 `trackId` 进入 `art:transcript:<trackId>`，名称为“视频文案艺术字”；不得与手动轨混合。
 - 分组只改变 Timeline track；overlay 数量、顺序、ID、文字、样式、坐标、编辑/源时间、preview 顺序和 compose DTO 不变。空集合不生成手动轨。
 - 每个 overlay 仍使用唯一 `art:<overlayId>` clip，单项选择、调时、删除和撤销/重做不得批量修改同轨其他手动 clip。
-- `TimelineController` 对每条已规范化逻辑轨按 `start/end` 顺序分 lane：放入第一个满足 `laneEnd <= clip.start` 的 lane，否则新增 lane。lane 只写 DOM 的 `data-timeline-lane-index` 和 `top`，不得写回 Store、Timeline schema 或草稿。
-- 同一逻辑轨的 clip 共用 `data-timeline-track-index`；下一逻辑轨的顶部偏移和时间轴高度使用前面全部可视 lane 数。
-- 公共效果片段主体点击必须用完整 track rect 将 `clientX` 映射为剪后时间，横向滚动后的负 `left` 也必须参与换算；只有 selection 被接受后才 seek 一次。无效 duration/width/left/clientX 回退片段起点，程序化 `selectClip()` 继续默认 seek 起点，resize handle 和超过阈值的 move/resize 不改为主体点击语义。
+- `TimelineController` 对每条 art 逻辑轨固定使用一个可视行；所有同轨 clip 的 `data-timeline-lane-index` 为 `0`，时间重叠也不得增加高度。
+- 同一逻辑轨的 clip 共用 `data-timeline-track-index`；下一逻辑轨固定从上一逻辑轨下一行开始。当前 selection、focus 或 drag 项只在派生 DOM 中置顶，不写回 Store、Timeline schema 或草稿。
+- 公共效果片段主体点击必须用完整 track rect 将 `clientX` 映射为剪后时间，横向滚动后的负 `left` 也必须参与换算；只有 selection 被接受后才 seek 一次。重复点击当前 selection 属于有效点击，应 seek 但保持 Store no-op、不增加 revision。无效 duration/width/left/clientX 回退片段起点，程序化 `selectClip()` 继续默认 seek 起点，resize handle 和超过阈值的 move/resize 不改为主体点击语义。
 
 ### 4. Validation & Error Matrix
 
 | 条件 | 结果 |
 | --- | --- |
 | 没有普通艺术字 | 不生成 `art:manual` |
-| 多个普通/AI overlay 不重叠或首尾相接 | 共用 `art:manual` 和同一 lane |
-| 多个普通 overlay 时间重叠 | 共用 `art:manual`，但分配不同可视 lane |
+| 多个普通/AI overlay 不重叠或首尾相接 | 共用 `art:manual` 和同一可视行 |
+| 多个普通 overlay 时间重叠 | 仍共用 `art:manual` 的同一可视行，当前项置顶 |
 | 同时存在普通与 transcript overlay | 生成不同轨道 ID 和名称，clip ID 各自保持稳定 |
 | 历史草稿携带 `art:overlay:<id>` | 从恢复后的 overlays 重新派生为 `art:manual`；selection 的 `art:<id>` 保持 |
 | 删除最后一个普通 overlay | `art:manual` 自然消失；文案轨不变 |
@@ -293,16 +293,16 @@ overlay clip -> art:<overlayId>
 
 ### 5. Good / Base / Bad Cases
 
-- Good：两个时间重叠的手动艺术字在一个 `art:manual` 轨中占两个 lane，两个按钮都可聚焦，调时其中一个只产生一次语义提交。
+- Good：两个时间重叠的手动艺术字在一个 `art:manual` 轨的一行中堆叠，两个按钮和列表入口都保留，选中后置顶，调时其中一个只产生一次语义提交。
 - Base：一个手动艺术字和同一 `trackId` 的两个文案 cue 派生为两条逻辑轨，preview/compose 仍包含三个独立 overlay。
-- Bad：按 overlay ID 创建 `art:overlay:<id>`，或为了显示重叠项把 lane 写入 overlay/草稿；前者重新产生一项一轨，后者制造第二份布局权威。
+- Bad：按 overlay ID 创建 `art:overlay:<id>`，或为了避开重叠创建额外可视行并写入 overlay/草稿；前者重新产生一项一轨，后者制造第二份布局权威。
 
 ### 6. Tests Required
 
 - ArtModel Node：至少两个手动项、一个 AI 普通项和两个 transcript cue，只生成一条手动轨和一条文案轨；输入 overlays 前后深比较相等。
 - ProjectStore Node：旧 `art:overlay:<id>` 草稿恢复后轨道为 `art:manual`，clip selection 保持 `art:<id>`。
-- TimelineController Node：重叠分 lane、相邻复用 lane、后续轨偏移、DOM/track 高度、滚动坐标点击、无效几何/时长回退、选择拒绝、单次 seek、程序化选择，以及 move/resize 提交语义。
-- 真实浏览器：连续新增两个重叠手动艺术字，断言按钮矩形不重叠且可聚焦；点击手动和文案 clip 内部后，视频时间与指示条中心均对齐实际点击位置；调时、删除后，剩余手动项、文案轨、preview 和 compose 一致。
+- TimelineController Node：重叠手动项固定 lane 0、手动/文案各一行、后续轨偏移、DOM/track 高度、置顶、滚动坐标点击、无效几何/时长回退、选择拒绝、单次 seek、程序化选择，以及 move/resize 提交语义。
+- 真实浏览器：连续新增两个重叠手动艺术字，断言按钮矩形位于同一行且可从列表分别选中；点击手动和文案 clip 内部后，视频时间与指示条中心均对齐实际点击位置；调时、删除后，剩余手动项、文案轨、preview 和 compose 一致。
 
 ### 7. Wrong vs Correct
 
@@ -310,12 +310,12 @@ overlay clip -> art:<overlayId>
 // Wrong: every manual overlay becomes a logical track.
 const groupId = `art:overlay:${overlay.id}`;
 
-// Correct: semantic tracks stay stable; visual lanes handle overlap locally.
+// Correct: semantic art tracks stay stable and each one owns one visual row.
 const groupId = isTranscriptOverlay(overlay)
   ? `art:transcript:${overlay.trackId}`
   : "art:manual";
 segment.dataset.timelineTrackIndex = String(trackIndex);
-segment.dataset.timelineLaneIndex = String(laneIndex);
+segment.dataset.timelineLaneIndex = "0";
 ```
 
 ## Scenario：顶层艺术字面板与版本化草稿恢复

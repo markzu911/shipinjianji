@@ -35,7 +35,8 @@
     "08-19-single-page-editor-pip-panel",
     "08-19-single-page-editor-legacy-cleanup",
     "08-19-fix-preview-load-after-transcription",
-    "08-20-merge-manual-art-timeline-track"
+    "08-20-merge-manual-art-timeline-track",
+    "08-20-fix-art-preview-and-track-lanes"
   ],
   "parent": null,
   "relatedFiles": [],

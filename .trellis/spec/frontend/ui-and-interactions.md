@@ -28,6 +28,8 @@
 
 设备预览的内容合成层必须共享同一个适配模式：基础视频使用 `cover` 时，艺术字和画中画画布也必须按 `cover` 缩放并居中裁切；普通预览则继续使用 `contain` 完整展示。抖音顶部、侧边和底部 UI 属于设备视口层，不参与内容画布缩放。否则视频会被放大裁切，而艺术字和画中画仍按窄视口缩小，造成相对尺寸与导出画面不一致。
 
+`PreviewCompositor` 只创建一个 `.editor-suite-preview-canvas`，其未变换宽高等于 `videoWidth/videoHeight`，艺术字和画中画 layer 都是该 canvas 的子层。字号、描边、阴影、安全边距和 PiP 尺寸先按源视频像素计算，再由 canvas 整体执行 contain/cover 变换；不得按外层舞台宽度预缩放样式。拖动和缩放使用 canvas 的 `getBoundingClientRect()` 换算归一化坐标，普通预览黑边不参与坐标，cover 的负偏移必须保留。视频 metadata、预览容器 resize 和模式切换都要幂等重算几何。
+
 抖音右侧操作栏按 440×956 逻辑画布使用固定节奏，不能用上下边界配合 `space-between` 自动拉伸。参考基线为：操作栏顶部 `468 / 956`、相邻项间距 `25 / 440 cqw`、头像和唱片直径 `42 / 440 cqw`、主图标 `34 / 440 cqw`、唱片底部 `93 / 956`。这样头像、四个操作项和唱片在不同预览尺寸下保持同一视觉密度，分享与唱片之间不会出现额外断层。
 
 ```javascript
@@ -79,15 +81,15 @@ composition.element.style.transform =
 - 撤销/重做记录语义操作，但文字剪辑检查器不提供“操作记录”页签、历史列表或可见的撤销/重做按钮。历史栈与本地持久化属于内部能力，只通过 `Ctrl/Cmd+Z`、`Ctrl/Cmd+Shift+Z` 和 `Ctrl/Cmd+Y` 访问。
 - 全局剪辑快捷键处理器必须忽略 `input`、`textarea`、`select` 和 `contenteditable` 目标，保留浏览器原生编辑撤销；快捷键执行后仍要刷新预览、时间轴、统计和草稿保存状态。
 
-### 公共效果时间轴重叠 lane
+### 公共效果时间轴艺术字分类单行
 
-公共效果时间轴中的逻辑轨和可视 lane 语义必须分离。手动艺术字共用 `art:manual`，视频文案艺术字继续使用 `art:transcript:<trackId>`；同轨 clip 重叠时由 TimelineController 临时分 lane，不新增持久轨道。
+公共效果时间轴中的逻辑轨和可视行语义必须一致。手动及 AI 确认的非 transcript 艺术字共用 `art:manual`，视频文案艺术字继续使用 `art:transcript:<trackId>`；每条艺术字逻辑轨固定占一条可视行，同轨 clip 重叠不得增加第二行。
 
-- 同逻辑轨 clip 的 `data-timeline-track-index` 相同，不同临时行使用 `data-timeline-lane-index`。
-- `laneEnd <= clip.start` 的相邻 clip 必须复用最早可用 lane；真正重叠才增加高度，下一逻辑轨从全部已有 lane 下方开始。
-- 每个 clip 仍是独立 `<button>`，必须保持可见焦点、键盘微调和 resize handle；不得用 z-index 叠放到只剩一个可点击目标。
-- lane 重排只能改变按钮 `top` 和容器高度，不能改变 clip ID、selection、Store revision、preview 或 compose。
-- 浏览器验收同时检查重叠按钮矩形不相交、`tabIndex >= 0`、单 clip 调时/删除，以及桌面和 375px 无横向溢出。
+- 同一艺术字逻辑轨的 clip 使用相同 `data-timeline-track-index`，且 `data-timeline-lane-index` 恒为 `0`；手动轨和文案轨的 track index 必须不同。
+- 每个 clip 仍是独立 `<button>`，保留唯一 ID、可见焦点、键盘微调和 resize handle；当前 selection、focus 或 drag 项提高堆叠层级，艺术字列表继续提供所有单项入口。
+- 单行堆叠只能改变派生 DOM 的 `top/z-index` 和容器高度，不能改变 clip ID、时间、selection、Store revision、preview 或 compose。
+- 其他允许多 lane 的效果轨可继续使用通用 lane 分配；不得把其策略套回艺术字轨。
+- 浏览器验收检查重叠手动艺术字的矩形处于同一行、当前项可操作、单 clip 调时/删除，以及手动/文案两行在桌面和 375px 均无横向溢出。
 
 ### 艺术字手动坐标契约
 

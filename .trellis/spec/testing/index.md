@@ -53,7 +53,7 @@
 - 打包/数据目录：`tests/test_build_mac_package.py`，确认不包含本机 jobs/history/秘密。
 - HTML/CSS/JS 行为变更：Python 静态契约测试之外，用浏览器验证桌面和 375px 窄屏的核心工作流。
 - 编辑器加载、保存、工具切换、公共预览或 compose 变更：运行 `\.venv\Scripts\python.exe -m pytest -q tests/app/browser`；首次运行先执行 `python -m playwright install chromium`。
-- 艺术字轨道分组或公共时间轴布局：同时运行 ArtModel、ProjectStore、TimelineController 和浏览器回归；断言手动 `art:manual` 与文案 `art:transcript:<trackId>` 分离、旧草稿重新派生、重叠 lane 按实际矩形可见且 preview/compose 不漂移。片段点击还要覆盖横向滚动后的 track rect 换算、无效几何回退、拒绝选择不 seek、单次 seek、程序化起点 seek，以及浏览器中实际点击点与指示条中心对齐。
+- 艺术字轨道分组或公共时间轴布局：同时运行 ArtModel、ProjectStore、TimelineController 和浏览器回归；断言手动 `art:manual` 与文案 `art:transcript:<trackId>` 分离且各固定一行、旧草稿重新派生、重叠手动项仍保留独立 ID/选择入口且 preview/compose 不漂移。片段点击还要覆盖横向滚动后的 track rect 换算、无效几何回退、拒绝选择不 seek、单次 seek、程序化起点 seek，以及浏览器中实际点击点与指示条中心对齐。
 
 播放跟随等涉及 reparent、占位和展示层的动效，不能只验证最终坐标或与实现同构的几何公式。Node 行为回归必须检查真实行/按钮唯一、占位无交互和 data、原索引恢复、重渲染前清理、同 key 中断、迟到动画完成、reduced-motion、单次目标 `scrollTop` 写入、列表 FLIP keyframe、尾部晚于列表阶段，以及工具栏尚未吸顶时首行从原位置连续进入最终 sticky 锚点。连续尾部行必须检查展示层从上一视觉位置到新余量单调下移，不能途经锚点；浏览器还要在中间帧检查按钮数量、列表 `scrollHeight`、锚点误差、尾部位移和横向溢出。
 
