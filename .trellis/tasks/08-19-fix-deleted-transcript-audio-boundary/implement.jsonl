@@ -1,0 +1,5 @@
+{"file":".trellis/spec/backend/index.md","reason":"后端规范导航与开发前检查入口"}
+{"file":".trellis/spec/backend/media-and-timeline.md","reason":"共享声学边界、文字语义与物理媒体范围契约"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"时间区间不变量、媒体回退和验证要求"}
+{"file":".trellis/spec/testing/index.md","reason":"声学边界、草稿、渲染与全量回归测试要求"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"确认草稿、预览与生成消费同一持久化边界"}

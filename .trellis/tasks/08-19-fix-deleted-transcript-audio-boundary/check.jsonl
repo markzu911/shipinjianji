@@ -1,0 +1,4 @@
+{"file":".trellis/spec/backend/media-and-timeline.md","reason":"复核低音量尾音修复仍遵守下一保留字符保护"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"复核区间不变量、失败回退和完整验证"}
+{"file":".trellis/spec/testing/index.md","reason":"复核定向、跨层与全量测试覆盖"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"复核保存边界在预览和生成链路中保持一致"}

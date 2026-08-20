@@ -1,0 +1,30 @@
+{
+  "id": "fix-deleted-transcript-audio-boundary",
+  "name": "fix-deleted-transcript-audio-boundary",
+  "title": "修复删除文案的音频边界",
+  "description": "建立通用、增益稳定的文字删除共享声学边界，消除残音并保护所有相邻保留语音。",
+  "status": "in_progress",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "541",
+  "assignee": "541",
+  "createdAt": "2026-08-19",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [
+    "server/app.py",
+    "tests/app/test_cut_acoustic_boundaries.py",
+    ".trellis/spec/backend/media-and-timeline.md"
+  ],
+  "notes": "真实 data/jobs 与历史转写仅用于只读边界诊断，不得改写或固化为测试 fixture。",
+  "meta": {}
+}
