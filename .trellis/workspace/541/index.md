@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 19
+- **Total Sessions**: 20
 - **Last Active**: 2026-08-20
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~422 | Active |
+| `journal-1.md` | ~445 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 20 | 2026-08-20 | 消除裁剪尾音并保护下一段语音 | `7305368`, `37b383a`, `ab81735` | `develop` |
 | 19 | 2026-08-20 | 修复艺术字预览与轨道布局 | `97eddff`, `ea5e72a` | `develop` |
 | 18 | 2026-08-20 | 合并艺术字轨道并修复点击定位 | `38a302a`, `76e2773` | `develop` |
 | 17 | 2026-08-20 | 修复文案删除声学边界 | `7807717`, `373042c` | `develop` |

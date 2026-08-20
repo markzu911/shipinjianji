@@ -420,3 +420,26 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 20: 消除裁剪尾音并保护下一段语音
+
+**Date**: 2026-08-20
+**Task**: 消除裁剪尾音并保护下一段语音
+**Branch**: `develop`
+
+### Summary
+
+接入完整句段 FunASR 强制对齐与缓存，统一文案/时间轴双范围和草稿 revision 权威生成；完成跨层回归、Chromium、真实媒体 ASR/PCM gate，并固化防复发规范。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `7305368` | (see git log) |
+| `37b383a` | (see git log) |
+| `ab81735` | (see git log) |
+
+### Status
+
+[OK] **Completed**
