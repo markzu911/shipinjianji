@@ -237,13 +237,22 @@ def test_tool_switch_keeps_selection_preview_and_playback_position(
     art_panel = page.locator("#editorArtPanelRoot")
     art_panel.wait_for(state="visible")
     assert art_panel.locator("[data-art-tab]").all_inner_texts() == [
+        "选择艺术字",
         "艺术字设置",
         "AI 推荐",
     ]
+    assert art_panel.locator('[data-art-tab="settings"]').get_attribute(
+        "aria-selected"
+    ) == "true"
+    assert art_panel.locator('[data-art-panel="selection"]').is_hidden()
     assert art_panel.locator('[data-art-tab="transcript"]').count() == 0
     assert art_panel.locator(
+        '[data-art-panel="selection"] [data-art-transcript-section]'
+    ).count() == 1
+    assert art_panel.locator(
         '[data-art-panel="settings"] [data-art-transcript-section]'
-    ).is_visible()
+    ).count() == 0
+    art_panel.locator('[data-art-tab="selection"]').click()
     transcript_action = art_panel.locator("[data-art-transcript-section]")
     assert transcript_action.get_by_role(
         "button", name="一键添加视频文案", exact=True
@@ -252,14 +261,17 @@ def test_tool_switch_keeps_selection_preview_and_playback_position(
     assert transcript_action.locator("[data-art-transcript-save]").count() == 0
     assert transcript_action.locator("[data-art-transcript-list]").count() == 0
     assert transcript_action.locator("[data-art-add-selected]").count() == 0
-    for tab_name in ("settings", "ai"):
+    for tab_name in ("selection", "settings", "ai"):
         tab = art_panel.locator(f'[data-art-tab="{tab_name}"]')
         panel = art_panel.locator(f'[data-art-panel="{tab_name}"]')
         assert tab.get_attribute("aria-controls") == panel.get_attribute("id")
         assert panel.get_attribute("aria-labelledby") == tab.get_attribute("id")
+    selection_tab = art_panel.locator('[data-art-tab="selection"]')
     settings_tab = art_panel.locator('[data-art-tab="settings"]')
     ai_tab = art_panel.locator('[data-art-tab="ai"]')
-    settings_tab.focus()
+    selection_tab.focus()
+    selection_tab.press("ArrowRight")
+    assert settings_tab.get_attribute("aria-selected") == "true"
     settings_tab.press("ArrowRight")
     assert ai_tab.get_attribute("aria-selected") == "true"
     assert art_panel.locator('[data-art-panel="settings"]').is_hidden()
@@ -267,8 +279,8 @@ def test_tool_switch_keeps_selection_preview_and_playback_position(
     ai_tab.press("End")
     assert ai_tab.get_attribute("aria-selected") == "true"
     ai_tab.press("Home")
-    assert settings_tab.get_attribute("aria-selected") == "true"
-    settings_tab.press("ArrowLeft")
+    assert selection_tab.get_attribute("aria-selected") == "true"
+    selection_tab.press("ArrowLeft")
     assert ai_tab.get_attribute("aria-selected") == "true"
     ai_tab.press("Home")
     assert art_panel.locator('[data-art-panel="ai"]').is_hidden()
@@ -284,7 +296,7 @@ def test_tool_switch_keeps_selection_preview_and_playback_position(
     assert art_panel.locator(".editor-art-tool").evaluate(
         "panel => panel.scrollTop"
     ) == 0
-    art_panel.locator('[data-art-tab="settings"]').click()
+    selection_tab.click()
     assert page.locator('iframe[title="艺术字设置"]').count() == 0
     selected_art = art_panel.locator(
         "[data-art-list] .overlay-list-item.is-selected"
@@ -349,6 +361,39 @@ def test_tool_switch_keeps_selection_preview_and_playback_position(
     assert page.locator("#editorSuitePreviewOverlay .is-pip").count() == 1
     assert "tool=pip" in page.url
     assert base_media_mutations(page) == {"srcWrites": 0, "loadCalls": 0}
+
+
+def test_empty_art_settings_survives_unrelated_project_updates(
+    browser_session,
+    seeded_editor_job_without_art,
+):
+    page = open_editor(browser_session, seeded_editor_job_without_art)
+    page.locator('[data-editor-tool="art"]').click()
+    panel = page.locator("#editorArtPanelRoot")
+    panel.wait_for(state="visible")
+
+    selection_tab = panel.locator('[data-art-tab="selection"]')
+    settings_tab = panel.locator('[data-art-tab="settings"]')
+    assert selection_tab.get_attribute("aria-selected") == "true"
+    settings_tab.click()
+    before_revision = page.evaluate("window.EditorSuite.projectSnapshot().revision")
+    page.evaluate(
+        """() => {
+          const cut = window.EditorSuite.projectSnapshot().project.cut;
+          window.EditorSuite.setCutDraft({
+            ...cut,
+            cutDraftRevision: Number(cut.cutDraftRevision || 0) + 1,
+          });
+        }"""
+    )
+    page.wait_for_function(
+        "revision => window.EditorSuite.projectSnapshot().revision > revision",
+        arg=before_revision,
+    )
+
+    assert settings_tab.get_attribute("aria-selected") == "true"
+    assert panel.locator('[data-art-panel="settings"]').is_visible()
+    assert panel.locator("[data-art-selection-empty]").is_visible()
 
 
 def test_portrait_preview_canvas_matches_video_fit_and_pointer_geometry(
@@ -716,6 +761,7 @@ def test_top_level_art_track_and_ai_draft_commit_atomically(
           });
         }"""
     )
+    panel.locator('[data-art-tab="selection"]').click()
     with page.expect_response(track_url) as track_response:
         panel.locator("[data-art-full-track]").click()
     assert track_response.value.status == 200
@@ -723,6 +769,9 @@ def test_top_level_art_track_and_ai_draft_commit_atomically(
         """() => window.EditorSuite.projectSnapshot().project.art.overlays
           .filter(item => item.trackType === 'transcript').length === 2"""
     )
+    assert panel.locator('[data-art-tab="settings"]').get_attribute(
+        "aria-selected"
+    ) == "true"
     track_state = page.evaluate(
         """() => {
           const snapshot = window.EditorSuite.projectSnapshot();
@@ -1003,11 +1052,13 @@ def test_top_level_art_deactivation_rejects_late_track_response(
           };
         }"""
     )
+    panel.locator('[data-art-tab="selection"]').click()
     panel.locator("[data-art-full-track]").click()
     page.wait_for_function("() => window.__b2LateTrackRequests.length === 1")
     page.locator('[data-editor-tool="pip"]').click()
     page.locator('[data-editor-tool="art"]').click()
     panel.wait_for(state="visible")
+    panel.locator('[data-art-tab="selection"]').click()
     panel.locator("[data-art-full-track]").click()
     page.wait_for_function("() => window.__b2LateTrackRequests.length === 2")
     before_old_resolution = page.evaluate(
@@ -2361,6 +2412,205 @@ def test_template_deep_link_updates_selected_transcript_track_once(
         assert overlay["fontSize"] == 66
 
 
+def test_art_template_dropdown_supports_keyboard_mouse_and_narrow_layout(
+    browser_session,
+    seeded_editor_job,
+):
+    page = open_editor(browser_session, seeded_editor_job)
+    page.locator('[data-editor-tool="art"]').click()
+    panel = page.locator("#editorArtPanelRoot")
+    panel.wait_for(state="visible")
+    page.wait_for_load_state("networkidle")
+
+    trigger = panel.locator("[data-art-template-trigger]")
+    listbox = panel.locator("[data-art-templates]")
+    assert trigger.is_visible()
+    assert "热血立体" in trigger.inner_text()
+    assert trigger.get_attribute("aria-haspopup") == "listbox"
+    assert trigger.get_attribute("aria-expanded") == "false"
+    assert listbox.is_hidden()
+
+    trigger.press("Enter")
+    assert trigger.get_attribute("aria-expanded") == "true"
+    assert listbox.is_visible()
+    options = listbox.locator('[role="option"]')
+    assert options.count() >= 3
+    assert listbox.locator("small, p").count() == 0
+    assert options.locator(":scope > .art-style-sample").count() == options.count()
+    assert options.locator(":scope > strong").count() == options.count()
+    assert "双层描边与厚重投影" not in listbox.inner_text()
+    assert page.locator(":focus").get_attribute("data-art-template") == "impact"
+
+    page.locator(":focus").press("ArrowDown")
+    assert page.locator(":focus").get_attribute("data-art-template") == "neon"
+    page.locator(":focus").press("ArrowUp")
+    assert page.locator(":focus").get_attribute("data-art-template") == "impact"
+    page.locator(":focus").press("End")
+    assert page.locator(":focus").get_attribute("data-art-template") == (
+        options.last.get_attribute("data-art-template")
+    )
+    page.locator(":focus").press("Home")
+    assert page.locator(":focus").get_attribute("data-art-template") == "impact"
+    page.locator(":focus").press("Escape")
+    assert listbox.is_hidden()
+    assert trigger.get_attribute("aria-expanded") == "false"
+    assert trigger.evaluate("node => document.activeElement === node") is True
+
+    trigger.click()
+    assert listbox.is_visible()
+    panel.locator("[data-art-detail-title]").click()
+    assert listbox.is_hidden()
+    assert trigger.get_attribute("aria-expanded") == "false"
+
+    trigger.press("Space")
+    page.locator(":focus").press("Tab")
+    assert listbox.is_hidden()
+    assert listbox.locator(":focus").count() == 0
+    assert panel.locator('[data-art-field="text"]').evaluate(
+        "node => document.activeElement === node"
+    ) is True
+
+    before = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          const overlay = snapshot.project.art.overlays[0];
+          return {
+            revision: snapshot.revision,
+            timingRevision: snapshot.timingRevision,
+            range: {
+              start: overlay.start,
+              end: overlay.end,
+              sourceStart: overlay.sourceStart ?? null,
+              sourceEnd: overlay.sourceEnd ?? null,
+            },
+          };
+        }"""
+    )
+    trigger.press("ArrowDown")
+    page.locator(":focus").press("ArrowDown")
+    assert page.locator(":focus").get_attribute("data-art-template") == "neon"
+    page.locator(":focus").press("Enter")
+    page.wait_for_function(
+        """() => window.EditorSuite.projectSnapshot().project.art.overlays[0]
+          ?.artStyle === 'neon'"""
+    )
+    after = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          const overlay = snapshot.project.art.overlays[0];
+          return {
+            revision: snapshot.revision,
+            timingRevision: snapshot.timingRevision,
+            range: {
+              start: overlay.start,
+              end: overlay.end,
+              sourceStart: overlay.sourceStart ?? null,
+              sourceEnd: overlay.sourceEnd ?? null,
+            },
+          };
+        }"""
+    )
+    assert after["revision"] == before["revision"] + 1
+    assert after["timingRevision"] == before["timingRevision"]
+    assert after["range"] == before["range"]
+    assert "霓虹发光" in trigger.inner_text()
+    assert listbox.is_hidden()
+
+    mouse_revision = after["revision"]
+    trigger.click()
+    listbox.locator('[data-art-template="clean"]').click()
+    page.wait_for_function(
+        """() => window.EditorSuite.projectSnapshot().project.art.overlays[0]
+          ?.artStyle === 'clean'"""
+    )
+    assert page.evaluate(
+        "window.EditorSuite.projectSnapshot().revision"
+    ) == mouse_revision + 1
+    assert "清爽描边" in trigger.inner_text()
+
+    page.set_viewport_size({"width": 375, "height": 812})
+    trigger.click()
+    layout = page.evaluate(
+        """() => {
+          const root = document.querySelector('#editorArtPanelRoot .editor-art-tool');
+          const trigger = document.querySelector('[data-art-template-trigger]');
+          const option = document.querySelector('[data-art-template]');
+          return {
+            documentOverflow: document.documentElement.scrollWidth -
+              document.documentElement.clientWidth,
+            panelOverflow: root.scrollWidth - root.clientWidth,
+            triggerWidth: trigger.getBoundingClientRect().width,
+            panelWidth: root.getBoundingClientRect().width,
+            optionHeight: option.getBoundingClientRect().height,
+          };
+        }"""
+    )
+    assert layout["documentOverflow"] <= 0
+    assert layout["panelOverflow"] <= 0
+    assert layout["triggerWidth"] <= layout["panelWidth"]
+    assert layout["optionHeight"] >= 44
+
+
+def test_art_template_dropdown_updates_transcript_track_once(
+    browser_session,
+    seeded_two_cue_transcript_track_editor_job,
+):
+    page = open_editor(browser_session, seeded_two_cue_transcript_track_editor_job)
+    page.locator('[data-editor-tool="art"]').click()
+    panel = page.locator("#editorArtPanelRoot")
+    panel.wait_for(state="visible")
+    page.wait_for_load_state("networkidle")
+
+    before = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          return {
+            revision: snapshot.revision,
+            timingRevision: snapshot.timingRevision,
+            cues: snapshot.project.art.overlays.map(item => ({
+              id: item.id,
+              text: item.text,
+              start: item.start,
+              end: item.end,
+              sourceStart: item.sourceStart ?? null,
+              sourceEnd: item.sourceEnd ?? null,
+              characterTimings: item.characterTimings,
+              timingRevision: item.timingRevision ?? null,
+            })),
+          };
+        }"""
+    )
+    panel.locator("[data-art-template-trigger]").click()
+    panel.locator('[data-art-template="clean"]').click()
+    page.wait_for_function(
+        """() => window.EditorSuite.projectSnapshot().project.art.overlays
+          .every(item => item.artStyle === 'clean')"""
+    )
+    after = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          return {
+            revision: snapshot.revision,
+            timingRevision: snapshot.timingRevision,
+            cues: snapshot.project.art.overlays.map(item => ({
+              id: item.id,
+              text: item.text,
+              start: item.start,
+              end: item.end,
+              sourceStart: item.sourceStart ?? null,
+              sourceEnd: item.sourceEnd ?? null,
+              characterTimings: item.characterTimings,
+              timingRevision: item.timingRevision ?? null,
+            })),
+          };
+        }"""
+    )
+    assert after["revision"] == before["revision"] + 1
+    assert after["timingRevision"] == before["timingRevision"]
+    assert after["cues"] == before["cues"]
+    assert "清爽描边" in panel.locator("[data-art-template-trigger]").inner_text()
+
+
 def test_art_panel_groups_transcript_track_and_updates_shared_settings(
     browser_session,
     seeded_two_cue_transcript_track_editor_job,
@@ -2372,12 +2622,17 @@ def test_art_panel_groups_transcript_track_and_updates_shared_settings(
     panel.wait_for(state="visible")
 
     for text in ("手动标题一", "手动标题二"):
+        panel.locator('[data-art-tab="selection"]').click()
         panel.locator("[data-art-add-text]").fill(text)
         panel.locator("[data-art-add]").click()
+        assert panel.locator('[data-art-tab="settings"]').get_attribute(
+            "aria-selected"
+        ) == "true"
     page.wait_for_function(
         """() => window.EditorSuite.projectSnapshot().project.art.overlays.length === 4"""
     )
 
+    panel.locator('[data-art-tab="selection"]').click()
     track_button = panel.locator(
         '[data-art-track-select="browser-transcript-track"]'
     )
@@ -2513,6 +2768,7 @@ def test_art_panel_groups_transcript_track_and_updates_shared_settings(
     assert track_button.get_attribute("aria-pressed") == "true"
 
     page.set_viewport_size({"width": 375, "height": 812})
+    panel.locator('[data-art-tab="selection"]').click()
     layout = page.evaluate(
         """() => {
           const root = document.querySelector('#editorArtPanelRoot .editor-art-tool');
@@ -2535,6 +2791,7 @@ def test_art_panel_groups_transcript_track_and_updates_shared_settings(
     assert panel.locator("[data-art-detail-title]").inner_text() == "详细设置"
     assert panel.locator("[data-art-delete]").inner_text() == "删除当前艺术字"
 
+    panel.locator('[data-art-tab="selection"]').click()
     track_button.click()
     panel.locator("[data-art-delete]").click()
     assert page.locator("#appDialogTitle").inner_text() == "删除视频文案艺术字？"
@@ -2581,6 +2838,7 @@ def test_manual_and_transcript_art_each_use_one_distinct_timeline_row(
     panel.wait_for(state="visible")
 
     for text in ("手动标题一", "手动标题二"):
+        panel.locator('[data-art-tab="selection"]').click()
         panel.locator("[data-art-add-text]").fill(text)
         panel.locator("[data-art-add]").click()
     page.wait_for_function(
@@ -2666,6 +2924,7 @@ def test_manual_and_transcript_art_each_use_one_distinct_timeline_row(
         layout["manualSegments"][0]["trackIndex"]
     )
     for manual_id in layout["manualIds"]:
+        panel.locator('[data-art-tab="selection"]').click()
         panel.locator(f'[data-art-select="{manual_id}"]').click()
         page.wait_for_function(
             """id => window.EditorSuite.projectSnapshot().project.timeline.selection
@@ -2723,6 +2982,7 @@ def test_manual_and_transcript_art_each_use_one_distinct_timeline_row(
     manual_segment = page.locator(
         f'#editorSuiteTimelineLayer [data-source-id="{selected_id}"]'
     )
+    panel.locator('[data-art-tab="selection"]').click()
     panel.locator(f'[data-art-select="{selected_id}"]').click()
     click_clip_and_assert_playhead(manual_segment, f"art:{selected_id}", 0.68)
     transcript_segment = page.locator(
@@ -2733,6 +2993,7 @@ def test_manual_and_transcript_art_each_use_one_distinct_timeline_row(
         "art:browser-transcript-cue-2",
         0.65,
     )
+    panel.locator('[data-art-tab="selection"]').click()
     panel.locator(f'[data-art-select="{selected_id}"]').click()
     page.wait_for_function(
         """id => window.EditorSuite.projectSnapshot().project.timeline.selection?.clipId
@@ -2842,6 +3103,7 @@ def test_deleting_only_transcript_track_resets_empty_selection_copy(
     panel = page.locator("#editorArtPanelRoot")
     panel.wait_for(state="visible")
 
+    panel.locator('[data-art-tab="selection"]').click()
     panel.locator('[data-art-track-select="browser-transcript-track"]').click()
     panel.locator("[data-art-delete]").click()
     page.locator("#appDialogConfirm").click()
@@ -2850,6 +3112,12 @@ def test_deleting_only_transcript_track_resets_empty_selection_copy(
     )
 
     assert panel.locator("[data-art-track-select]").count() == 0
+    assert panel.locator('[data-art-tab="selection"]').get_attribute(
+        "aria-selected"
+    ) == "true"
+    assert panel.locator('[data-art-panel="selection"]').is_visible()
+    assert panel.locator('[data-art-panel="settings"]').is_hidden()
+    panel.locator('[data-art-tab="settings"]').click()
     assert panel.locator("[data-art-selection-empty]").is_visible()
     assert panel.locator("[data-art-controls]").is_hidden()
     assert panel.locator("[data-art-detail-title]").inner_text() == "详细设置"
@@ -2876,6 +3144,10 @@ def test_template_preference_applies_to_new_manual_and_full_track_without_select
     panel = page.locator("#editorArtPanelRoot")
     panel.wait_for(state="visible")
     page.wait_for_load_state("networkidle")
+    assert panel.locator('[data-art-tab="selection"]').get_attribute(
+        "aria-selected"
+    ) == "true"
+    assert panel.locator('[data-art-panel="selection"]').is_visible()
 
     preferred_only = page.evaluate(
         """() => {
@@ -2900,6 +3172,9 @@ def test_template_preference_applies_to_new_manual_and_full_track_without_select
         """() => window.EditorSuite.projectSnapshot().project.art.overlays[0]
           ?.artStyle === 'neon'"""
     )
+    assert panel.locator('[data-art-tab="settings"]').get_attribute(
+        "aria-selected"
+    ) == "true"
     manual = page.evaluate(
         "window.EditorSuite.projectSnapshot().project.art.overlays[0]"
     )
@@ -2917,7 +3192,9 @@ def test_template_preference_applies_to_new_manual_and_full_track_without_select
             snapshot.project.timeline.selection === null;
         }"""
     )
-    assert panel.locator("[data-art-selection-empty]").is_visible()
+    assert panel.locator('[data-art-tab="selection"]').get_attribute(
+        "aria-selected"
+    ) == "true"
     assert panel.locator("[data-art-controls]").is_hidden()
     panel.locator("[data-art-full-track]").click()
     page.wait_for_function(
@@ -2928,6 +3205,9 @@ def test_template_preference_applies_to_new_manual_and_full_track_without_select
           );
         }"""
     )
+    assert panel.locator('[data-art-tab="settings"]').get_attribute(
+        "aria-selected"
+    ) == "true"
     track = page.evaluate(
         "window.EditorSuite.projectSnapshot().project.art.overlays"
     )
@@ -3054,6 +3334,9 @@ def test_legacy_art_url_redirects_to_narrow_single_page_runtime(
           transcriptInSettings: Boolean(document.querySelector(
             '#editorArtPanelRoot [data-art-panel="settings"] [data-art-transcript-section]'
           )),
+          transcriptInSelection: Boolean(document.querySelector(
+            '#editorArtPanelRoot [data-art-panel="selection"] [data-art-transcript-section]'
+          )),
         })"""
     )
     assert result == {
@@ -3069,8 +3352,9 @@ def test_legacy_art_url_redirects_to_narrow_single_page_runtime(
         "pipInert": True,
         "cutInert": True,
         "overflow": 0,
-        "artTabs": ["艺术字设置", "AI 推荐"],
-        "transcriptInSettings": True,
+        "artTabs": ["选择艺术字", "艺术字设置", "AI 推荐"],
+        "transcriptInSettings": False,
+        "transcriptInSelection": True,
     }
 
 

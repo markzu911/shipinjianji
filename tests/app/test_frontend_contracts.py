@@ -52,7 +52,7 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
     assert "/app.js?v=20260821-02" in page_response.text
-    assert "/styles.css?v=20260820-01" in page_response.text
+    assert "/styles.css?v=20260821-02" in page_response.text
     assert "/transcript-follow-scroll.js?v=20260818-03" in page_response.text
     assert "/ui-feedback.js?v=20260807-03" in page_response.text
     assert "/timeline-model.js?v=20260810-01" in page_response.text
@@ -63,7 +63,7 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     assert "/editor-art-renderer.js?v=20260819-01" in page_response.text
     assert "/editor-preview-compositor.js?v=20260820-01" in page_response.text
     assert "/editor-timeline-controller.js?v=20260820-02" in page_response.text
-    assert "/editor-art-tool.js?v=20260819-07" in page_response.text
+    assert "/editor-art-tool.js?v=20260821-02" in page_response.text
     assert "/editor-pip-tool.js?v=20260819-02" in page_response.text
     assert "/editor-suite.js?v=20260820-02" in page_response.text
     assert timeline_script_response.status_code == 200
@@ -817,10 +817,14 @@ def test_top_level_art_and_pip_tools_are_the_only_editor_runtime():
     assert "data-art-ai-request" in tool
     assert "一键添加视频文案" in tool
     assert "按剪后词级时间自动生成全文艺术字，默认使用“热血立体”。" in tool
-    assert tool.count('role="tab" data-art-tab=') == 2
+    assert tool.count('role="tab" data-art-tab=') == 3
     assert 'data-art-tab="transcript"' not in tool
     assert 'data-art-panel="transcript"' not in tool
-    for tab, panel in (("settings", "settings"), ("ai", "ai")):
+    for tab, panel in (
+        ("selection", "selection"),
+        ("settings", "settings"),
+        ("ai", "ai"),
+    ):
         assert (
             f'id="editor-art-{tab}-tab" role="tab" data-art-tab="{tab}" '
             f'aria-controls="editor-art-{panel}-panel"'
@@ -829,14 +833,34 @@ def test_top_level_art_and_pip_tools_are_the_only_editor_runtime():
             f'id="editor-art-{panel}-panel" data-art-panel="{panel}" '
             f'role="tabpanel" aria-labelledby="editor-art-{tab}-tab"'
         ) in tool
+    selection_panel = tool[
+        tool.index('data-art-panel="selection"') :
+        tool.index('data-art-panel="settings"')
+    ]
     settings_panel = tool[
         tool.index('data-art-panel="settings"') :
         tool.index('data-art-panel="ai"')
     ]
-    assert "data-art-full-track" in settings_panel
+    for selection_control in (
+        "data-art-list",
+        "data-art-add-text",
+        "data-art-add",
+        "data-art-full-track",
+        "data-art-transcript-section",
+        "data-art-selection-error",
+    ):
+        assert selection_control in selection_panel
+        assert selection_control not in settings_panel
     assert "data-art-detail-title" in settings_panel
     assert "data-art-detail-help" in settings_panel
     assert "data-art-controls-legend" in settings_panel
+    assert "data-art-settings-error" in settings_panel
+    assert 'data-art-template-trigger aria-haspopup="listbox"' in settings_panel
+    assert 'data-art-templates role="listbox"' in settings_panel
+    assert 'role="radiogroup"' not in settings_panel
+    assert "template.description" not in tool
+    assert "点击应用到当前艺术字" not in tool
+    assert "点击应用到整轨文案艺术字" not in tool
     assert settings_panel.count("data-art-manual-only") == 7
     for duplicate_transcript_control in (
         "data-art-transcript-text",
@@ -3366,6 +3390,6 @@ def test_realtime_effect_timeline_and_inspector_contracts():
     assert ".editor-art-selection-empty" in styles
     art_tabs_start = styles.index(".editor-art-tool-tabs {")
     art_tabs_end = styles.index("}", art_tabs_start)
-    assert "grid-template-columns" not in styles[
+    assert "grid-template-columns: repeat(3, minmax(0, 1fr))" in styles[
         art_tabs_start:art_tabs_end
     ]

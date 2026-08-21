@@ -48,14 +48,15 @@
       ownedRoot.className = "editor-art-tool";
       ownedRoot.innerHTML = `
         <div class="workbench-tabbar editor-art-tool-tabs" role="tablist" aria-label="艺术字编辑功能">
-          <button type="button" class="workbench-tab" id="editor-art-settings-tab" role="tab" data-art-tab="settings" aria-controls="editor-art-settings-panel" aria-selected="true">艺术字设置</button>
+          <button type="button" class="workbench-tab" id="editor-art-selection-tab" role="tab" data-art-tab="selection" aria-controls="editor-art-selection-panel" aria-selected="true">选择艺术字</button>
+          <button type="button" class="workbench-tab" id="editor-art-settings-tab" role="tab" data-art-tab="settings" aria-controls="editor-art-settings-panel" aria-selected="false">艺术字设置</button>
           <button type="button" class="workbench-tab" id="editor-art-ai-tab" role="tab" data-art-tab="ai" aria-controls="editor-art-ai-panel" aria-selected="false">AI 推荐</button>
         </div>
-        <section class="editor-art-tool-panel" id="editor-art-settings-panel" data-art-panel="settings" role="tabpanel" aria-labelledby="editor-art-settings-tab">
-          <div class="art-section-heading"><div><p class="step-label">艺术字设置</p><h2>选择并调整艺术字</h2></div><span class="result-chip" data-art-count>0 / 20</span></div>
+        <section class="editor-art-tool-panel" id="editor-art-selection-panel" data-art-panel="selection" role="tabpanel" aria-labelledby="editor-art-selection-tab">
+          <div class="art-section-heading"><div><p class="step-label">选择艺术字</p><h2>新增或选择艺术字</h2></div><span class="result-chip" data-art-count>0 / 20</span></div>
           <ol class="overlay-list editor-art-overlay-list" data-art-list></ol>
           <label class="field full-field"><span>自定义文字</span><span class="inline-input-action"><input data-art-add-text maxlength="60" placeholder="例如：今天分享三个重点" /><button type="button" class="secondary-button" data-art-add>添加</button></span></label>
-          <p class="form-error" data-art-error role="alert" hidden></p>
+          <p class="form-error" data-art-error data-art-selection-error role="alert" hidden></p>
           <section class="editor-art-transcript-section" data-art-transcript-section aria-labelledby="editor-art-transcript-title">
             <div class="transcript-quick-action">
               <div>
@@ -66,11 +67,18 @@
               <p class="retained-bulk-message" data-art-transcript-status role="status" hidden></p>
             </div>
           </section>
+        </section>
+        <section class="editor-art-tool-panel" id="editor-art-settings-panel" data-art-panel="settings" role="tabpanel" aria-labelledby="editor-art-settings-tab" hidden>
           <div class="art-detail-heading"><strong data-art-detail-title>详细设置</strong><span data-art-detail-help>修改当前选中的艺术字</span></div>
+          <p class="form-error" data-art-settings-error role="alert" hidden></p>
           <div class="editor-art-selection-empty" data-art-selection-empty role="status">选择一条艺术字后可调整样式和时间。</div>
           <fieldset class="overlay-controls editor-art-controls" data-art-controls hidden disabled>
             <legend class="sr-only" data-art-controls-legend>当前艺术字设置</legend>
-            <div class="art-style-picker full-field"><span class="field-label">艺术字模板</span><div class="art-style-grid" data-art-templates role="radiogroup"></div></div>
+            <div class="art-style-picker art-template-select full-field" data-art-template-select>
+              <span class="field-label">艺术字模板</span>
+              <button type="button" class="art-template-trigger" data-art-template-trigger aria-haspopup="listbox" aria-expanded="false" aria-controls="editor-art-template-listbox"></button>
+              <div class="art-template-listbox" id="editor-art-template-listbox" data-art-templates role="listbox" aria-label="艺术字模板" hidden></div>
+            </div>
             <label class="field full-field" data-art-manual-only><span>文字内容</span><textarea rows="2" maxlength="60" data-art-field="text"></textarea></label>
             <label class="field"><span>字体</span><select data-art-field="font"></select></label>
             <label class="field"><span>字号</span><input type="number" min="20" max="180" step="1" data-art-field="fontSize" /></label>
@@ -110,7 +118,9 @@
       const state = {
         active: false,
         destroyed: false,
-        activeTab: "settings",
+        activeTab: "selection",
+        templateMenuOpen: false,
+        templateActiveIndex: 0,
         frame: null,
         aiDraftSuggestions: [],
         previewDraftId: null,
@@ -151,10 +161,17 @@
         ].filter((overlay) => !model.isTranscriptOverlay(overlay)).length;
       }
 
-      function selectedOverlay() {
-        const clipId = String(snapshot()?.project?.timeline?.selection?.clipId || "");
+      function selectedOverlayFromSnapshot(value) {
+        const clipId = String(value?.project?.timeline?.selection?.clipId || "");
+        if (!clipId.startsWith("art:")) return null;
         const sourceId = clipId.replace(/^art:/, "");
-        return art().overlays.find((overlay) => String(overlay.id) === sourceId) || null;
+        return (value?.project?.art?.overlays || []).find(
+          (overlay) => String(overlay.id) === sourceId,
+        ) || null;
+      }
+
+      function selectedOverlay() {
+        return selectedOverlayFromSnapshot(snapshot());
       }
 
       function sortedTranscriptCues(cues) {
@@ -310,36 +327,122 @@
 
       function setActiveTab(tab) {
         if (!query(`[data-art-tab="${tab}"]`)) return false;
+        closeTemplateMenu();
         state.activeTab = tab;
         renderTabs();
         ownedRoot.scrollTop = 0;
         return true;
       }
 
+      function selectedTemplateIndex(selected = selectedOverlay()) {
+        const index = state.templates.findIndex(
+          (template) => String(template.id) === String(selected?.artStyle || ""),
+        );
+        return index >= 0 ? index : 0;
+      }
+
+      function templateName(template) {
+        return template?.name || TEMPLATE_NAMES[template?.id] || template?.id || "未选择模板";
+      }
+
+      function renderTemplateSample(element, template) {
+        element.className = `art-style-sample style-${template?.baseStyle || template?.id || "impact"}`;
+        element.setAttribute("aria-hidden", "true");
+        renderer.renderCharacters(
+          element,
+          String(template?.sample || templateName(template) || "艺字").slice(0, 2),
+          template || {},
+        );
+      }
+
+      function syncTemplateMenuVisibility() {
+        const trigger = query("[data-art-template-trigger]");
+        const listbox = query("[data-art-templates]");
+        if (!trigger || !listbox) return;
+        trigger.setAttribute("aria-expanded", String(state.templateMenuOpen));
+        listbox.hidden = !state.templateMenuOpen;
+        const options = queryAll("[data-art-template]");
+        options.forEach((option, index) => {
+          option.tabIndex = state.templateMenuOpen && index === state.templateActiveIndex
+            ? 0
+            : -1;
+        });
+      }
+
+      function closeTemplateMenu(options = {}) {
+        if (!state.templateMenuOpen) return false;
+        state.templateMenuOpen = false;
+        syncTemplateMenuVisibility();
+        if (options.focusTrigger) query("[data-art-template-trigger]")?.focus();
+        return true;
+      }
+
+      function focusTemplateOption(index) {
+        const options = queryAll("[data-art-template]");
+        if (!options.length) return;
+        state.templateActiveIndex = Math.min(options.length - 1, Math.max(0, index));
+        options.forEach((option, optionIndex) => {
+          option.tabIndex = optionIndex === state.templateActiveIndex ? 0 : -1;
+        });
+        options[state.templateActiveIndex].focus();
+      }
+
+      function openTemplateMenu() {
+        if (!selectedOverlay() || !state.templates.length) return false;
+        state.templateMenuOpen = true;
+        state.templateActiveIndex = selectedTemplateIndex();
+        renderTemplates(selectedOverlay());
+        focusTemplateOption(state.templateActiveIndex);
+        return true;
+      }
+
       function renderTemplates(selected) {
         const container = query("[data-art-templates]");
+        const trigger = query("[data-art-template-trigger]");
+        const focusedTemplateId = host.ownerDocument.activeElement?.dataset?.artTemplate;
         container.replaceChildren();
-        for (const template of state.templates) {
+        const selectedIndex = selected ? selectedTemplateIndex(selected) : -1;
+        const selectedTemplate = selectedIndex >= 0
+          ? state.templates[selectedIndex]
+          : null;
+        trigger.replaceChildren();
+        trigger.disabled = !selected || !selectedTemplate;
+        if (selectedTemplate) {
+          const sample = host.ownerDocument.createElement("span");
+          renderTemplateSample(sample, selectedTemplate);
+          const name = host.ownerDocument.createElement("strong");
+          name.textContent = templateName(selectedTemplate);
+          const icon = host.ownerDocument.createElement("iconify-icon");
+          icon.setAttribute("icon", "lucide:chevron-down");
+          icon.setAttribute("aria-hidden", "true");
+          trigger.append(sample, name, icon);
+        }
+        state.templateActiveIndex = Math.min(
+          Math.max(0, state.templateActiveIndex),
+          Math.max(0, state.templates.length - 1),
+        );
+        state.templates.forEach((template, index) => {
           const button = host.ownerDocument.createElement("button");
           button.type = "button";
-          button.className = "art-style-option";
+          button.className = "art-template-option";
           button.dataset.artTemplate = template.id;
-          button.setAttribute("aria-pressed", String(selected?.artStyle === template.id));
+          button.id = `editor-art-template-option-${index}`;
+          button.setAttribute("role", "option");
+          button.setAttribute("aria-selected", String(selectedIndex === index));
+          button.tabIndex = state.templateMenuOpen && index === state.templateActiveIndex ? 0 : -1;
           const sample = host.ownerDocument.createElement("span");
-          sample.className = `art-style-sample style-${template.baseStyle || template.id}`;
-          renderer.renderCharacters(sample, String(template.sample || template.name || "艺字").slice(0, 2), template);
-          const copy = host.ownerDocument.createElement("span");
+          renderTemplateSample(sample, template);
           const strong = host.ownerDocument.createElement("strong");
-          strong.textContent = template.name || TEMPLATE_NAMES[template.id] || template.id;
-          const small = host.ownerDocument.createElement("small");
-          small.textContent = template.description || (
-            model.isTranscriptOverlay(selected)
-              ? "点击应用到整轨文案艺术字"
-              : "点击应用到当前艺术字"
-          );
-          copy.append(strong, small);
-          button.append(sample, copy);
+          strong.textContent = templateName(template);
+          button.append(sample, strong);
           container.append(button);
+        });
+        syncTemplateMenuVisibility();
+        if (state.templateMenuOpen && focusedTemplateId) {
+          const focusedIndex = state.templates.findIndex(
+            (template) => String(template.id) === String(focusedTemplateId),
+          );
+          focusTemplateOption(focusedIndex >= 0 ? focusedIndex : state.templateActiveIndex);
         }
       }
 
@@ -406,7 +509,11 @@
         query("[data-art-delete]").textContent = transcriptTrack
           ? "删除视频文案艺术字"
           : "删除当前艺术字";
-        if (!selected) return;
+        if (!selected) {
+          closeTemplateMenu();
+          renderTemplates(null);
+          return;
+        }
         for (const field of queryAll("[data-art-field]")) setField(`[data-art-field="${field.dataset.artField}"]`, selected[field.dataset.artField]);
         setField('[data-art-range="start"]', Number(selected.start).toFixed(2));
         setField('[data-art-range="end"]', Number(selected.end).toFixed(2));
@@ -520,6 +627,22 @@
         replaceArt(overlays, { selection: `art:${selected.id}` });
       }
 
+      function selectTemplate(templateId) {
+        const template = state.templates.find(
+          (item) => String(item.id) === String(templateId),
+        );
+        if (!template || !selectedOverlay()) return false;
+        state.templateMenuOpen = false;
+        commitSelectedPatch({
+          artStyle: template.id,
+          color: template.color,
+          strokeColor: template.strokeColor,
+          ...model.normalizeTemplateEffects(template),
+        });
+        query("[data-art-template-trigger]")?.focus();
+        return true;
+      }
+
       function normalizedTemplateSettings(selection, selected = selectedOverlay()) {
         const template = state.templates.find(
           (item) => String(item.id) === String(selection?.id || ""),
@@ -584,12 +707,12 @@
       function addManual(text, range = null, extra = {}) {
         const current = art().overlays;
         if (manualOverlayCount() >= model.MANUAL_OVERLAY_LIMIT) {
-          setMessage("[data-art-error]", `一个视频最多添加 ${model.MANUAL_OVERLAY_LIMIT} 条自定义艺术字。`);
+          setMessage("[data-art-selection-error]", `一个视频最多添加 ${model.MANUAL_OVERLAY_LIMIT} 条自定义艺术字。`);
           return null;
         }
         const value = String(text || "").trim();
         if (!value) {
-          setMessage("[data-art-error]", "请输入要添加的艺术字文案。");
+          setMessage("[data-art-selection-error]", "请输入要添加的艺术字文案。");
           return null;
         }
         const start = range?.start ?? services.media.currentEditedTime();
@@ -602,7 +725,7 @@
         }, { duration: duration() });
         replaceArt([...current, overlay], { selection: `art:${overlay.id}` });
         services.media.seekEdited(overlay.start);
-        setMessage("[data-art-error]", "");
+        setMessage("[data-art-selection-error]", "");
         return overlay;
       }
 
@@ -658,7 +781,7 @@
           renderPresets();
         } catch (error) {
           if (error.name !== "AbortError" && ownsRequest("preset-save", request)) {
-            setMessage("[data-art-error]", error.message);
+            setMessage("[data-art-settings-error]", error.message);
           }
         } finally {
           finishRequest("preset-save", request);
@@ -692,7 +815,7 @@
             error.name !== "AbortError" &&
             ownsRequest("preset-delete", request)
           ) {
-            setMessage("[data-art-error]", error.message);
+            setMessage("[data-art-settings-error]", error.message);
           }
         } finally {
           finishRequest("preset-delete", request);
@@ -747,7 +870,10 @@
             token: request.token,
             dropSuppressedTranscriptTracks: true,
           });
-          if (replaced?.accepted) setMessage("[data-art-transcript-status]", `已生成 ${track.length} 个全文艺术字片段。`, "success");
+          if (replaced?.accepted) {
+            setMessage("[data-art-transcript-status]", `已生成 ${track.length} 个全文艺术字片段。`, "success");
+            if (track[0]) setActiveTab("settings");
+          }
         } catch (error) {
           if (error.name !== "AbortError" && ownsRequest("track", request)) {
             setMessage("[data-art-transcript-status]", error.message);
@@ -908,24 +1034,28 @@
         if (!target || !ownedRoot.contains(target)) return;
         if (target.dataset.artTab) {
           setActiveTab(target.dataset.artTab);
+        } else if (target.hasAttribute("data-art-template-trigger")) {
+          if (state.templateMenuOpen) closeTemplateMenu({ focusTrigger: true });
+          else openTemplateMenu();
         } else if (target.hasAttribute("data-art-add")) {
           const input = query("[data-art-add-text]");
-          if (addManual(input.value)) input.value = "";
+          if (addManual(input.value)) {
+            input.value = "";
+            setActiveTab("settings");
+          }
         } else if (target.dataset.artTrackSelect) {
           const representative = transcriptRepresentative(target.dataset.artTrackSelect);
           if (representative) {
             services.commands.selectArt(representative.id);
             services.media.seekEdited(representative.start);
+            setActiveTab("settings");
           }
         } else if (target.dataset.artSelect) {
           services.commands.selectArt(target.dataset.artSelect);
           services.media.seekEdited(art().overlays.find((item) => String(item.id) === target.dataset.artSelect)?.start || 0);
+          setActiveTab("settings");
         } else if (target.dataset.artTemplate) {
-          const template = state.templates.find((item) => item.id === target.dataset.artTemplate);
-          commitSelectedPatch({
-            artStyle: template.id, color: template.color, strokeColor: template.strokeColor,
-            ...model.normalizeTemplateEffects(template),
-          });
+          selectTemplate(target.dataset.artTemplate);
         } else if (target.hasAttribute("data-art-delete")) deleteSelected();
         else if (target.hasAttribute("data-art-apply-all")) {
           const selected = selectedOverlay();
@@ -998,9 +1128,43 @@
           const index = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : (current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
           setActiveTab(tabs[index].dataset.artTab);
           tabs[index].focus();
+        } else if (event.target.matches("[data-art-template-trigger]")) {
+          if (["Enter", " ", "ArrowDown", "ArrowUp"].includes(event.key)) {
+            event.preventDefault();
+            openTemplateMenu();
+          }
+        } else if (event.target.matches("[data-art-template]")) {
+          const options = queryAll("[data-art-template]");
+          const optionIndex = options.indexOf(event.target);
+          if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+            event.preventDefault();
+            const nextIndex = event.key === "Home"
+              ? 0
+              : event.key === "End"
+                ? options.length - 1
+                : (optionIndex + (event.key === "ArrowDown" ? 1 : -1) + options.length) % options.length;
+            focusTemplateOption(nextIndex);
+          } else if (["Enter", " "].includes(event.key)) {
+            event.preventDefault();
+            selectTemplate(event.target.dataset.artTemplate);
+          } else if (event.key === "Escape") {
+            event.preventDefault();
+            closeTemplateMenu({ focusTrigger: true });
+          } else if (event.key === "Tab") {
+            closeTemplateMenu();
+          }
         } else if (event.key === "Enter" && event.target.matches("[data-art-add-text]")) {
           event.preventDefault();
           query("[data-art-add]").click();
+        }
+      }
+
+      function handleDocumentPointerDown(event) {
+        if (
+          state.templateMenuOpen &&
+          !query("[data-art-template-select]")?.contains(event.target)
+        ) {
+          closeTemplateMenu();
         }
       }
 
@@ -1022,6 +1186,7 @@
       ownedRoot.addEventListener("change", handleChange);
       ownedRoot.addEventListener("input", handleInput);
       ownedRoot.addEventListener("keydown", handleKeydown);
+      host.ownerDocument.addEventListener("pointerdown", handleDocumentPointerDown);
       const unsubscribeProject = services.project.subscribe((next, previous) => {
         if (next.jobId !== previous.jobId) {
           for (const scope of [...state.requests.keys()]) abortEffect(scope);
@@ -1029,13 +1194,24 @@
           state.previewDraftId = null;
           syncAiPreview();
         }
-        if (state.active) renderAll();
+        if (state.active) {
+          if (
+            state.activeTab === "settings" &&
+            selectedOverlayFromSnapshot(previous) &&
+            !selectedOverlayFromSnapshot(next)
+          ) {
+            setActiveTab("selection");
+          }
+          renderAll();
+        }
       });
       const unsubscribeFrame = services.media.subscribeFrame(() => {});
 
       function activate() {
         if (state.destroyed || state.active) return;
         state.active = true;
+        state.activeTab = selectedOverlay() ? "settings" : "selection";
+        closeTemplateMenu();
         host.hidden = false;
         host.removeAttribute("inert");
         renderAll();
@@ -1046,6 +1222,7 @@
       function deactivate() {
         if (state.destroyed || !state.active) return;
         state.active = false;
+        closeTemplateMenu();
         services.preview?.setArtDraft?.(null);
         for (const scope of [...state.requests.keys()]) abortEffect(scope);
         state.busyEffect = "";
@@ -1073,6 +1250,7 @@
         ownedRoot.removeEventListener("change", handleChange);
         ownedRoot.removeEventListener("input", handleInput);
         ownedRoot.removeEventListener("keydown", handleKeydown);
+        host.ownerDocument.removeEventListener("pointerdown", handleDocumentPointerDown);
         if (ownedRoot.parentNode === host) ownedRoot.remove();
         if (mountedTools.get(host) === api) mountedTools.delete(host);
       }
