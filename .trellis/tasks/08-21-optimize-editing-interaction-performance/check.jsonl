@@ -1,0 +1,9 @@
+{"file":".trellis/spec/frontend/index.md","reason":"定位前端状态、交互和媒体完整规格；检查前按索引读取相关章节"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"核对缩略图缓存不重载基础媒体、extractor 可取消且 flush 等待最新草稿"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"核对 cut frame 重绘不破坏艺术字三页签、模板 listbox 焦点/关闭状态或 selection 契约"}
+{"file":".trellis/spec/backend/index.md","reason":"定位后端媒体、持久化、错误和质量完整规格；检查前按索引读取相关章节"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"核对缓存并发、资源上限、兼容性、定向测试与完整质量门禁"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"核对确定性工作计数、代表性性能 fixture 和完整用户工作流覆盖"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"审计点击、Store、草稿保存、服务端 revision、预览与 compose 的端到端数据流"}
+{"file":".trellis/tasks/08-21-optimize-editing-interaction-performance/research/performance-investigation.md","reason":"对照优化前根因和测量，确认验收针对真实瓶颈且未扩大算法范围"}
+{"file":".trellis/tasks/08-21-optimize-editing-interaction-performance/research/current-contract-checklist.md","reason":"核对未截断的签名/revision、历史、声学和 ArtTool 当前契约检查点"}

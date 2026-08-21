@@ -1,0 +1,8 @@
+{"file":".trellis/spec/frontend/index.md","reason":"定位前端状态、交互和媒体完整规格；实施前按索引读取相关章节"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"约束基础 video 资源稳定、媒体加载/释放、草稿 API 与生成前 flush 行为"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"约束删除/恢复的即时反馈、撤销/重做和时间轴交互行为保持"}
+{"file":".trellis/spec/backend/index.md","reason":"定位后端媒体、持久化、错误和质量完整规格；实施前按索引读取相关章节"}
+{"file":".trellis/spec/backend/persistence-and-jobs.md","reason":"约束 cut-draft revision、原子持久化、并发保存和进程内缓存边界"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"建立真实浏览器 fixture、刷新恢复、工具切换、预览与生成回归"}
+{"file":".trellis/tasks/08-21-optimize-editing-interaction-performance/research/performance-investigation.md","reason":"提供当前调用链、Store/PCM/范围解析基准、根因排序与实施顺序"}
+{"file":".trellis/tasks/08-21-optimize-editing-interaction-performance/research/current-contract-checklist.md","reason":"集中注入未截断的签名/revision、历史、声学和 ArtTool 当前契约检查点"}
