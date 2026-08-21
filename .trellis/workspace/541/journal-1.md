@@ -488,3 +488,26 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 23: 优化剪辑交互卡顿
+
+**Date**: 2026-08-21
+**Task**: 优化剪辑交互卡顿
+**Branch**: `develop`
+
+### Summary
+
+完成剪辑高频交互按帧提交、source-time 缩略图复用、300ms latest-state 草稿队列、idle 历史持久化和指纹 PCM LRU；补齐并发、revision、声学等价与全量浏览器回归，P95 从 1960.5ms 降至 61.7ms。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9021a18` | (see git log) |
+| `5160e4c` | (see git log) |
+| `a104a5f` | (see git log) |
+
+### Status
+
+[OK] **Completed**
