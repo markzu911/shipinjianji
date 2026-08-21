@@ -550,9 +550,11 @@ function selectedTextRangeKeysAtTime(sourceTime) {
 function suggestionTextRangeKeysAtTime(sourceTime) {
   return currentSuggestions.flatMap((suggestion) =>
     getSuggestionRanges(suggestion).flatMap((range) => {
-      const start = Number(range.start);
-      const end = Number(range.end);
-      return sourceTime >= start && sourceTime < end
+      const start = Number(range.originalStart ?? range.start);
+      const end = Number(range.originalEnd ?? range.end);
+      return Number.isFinite(start) &&
+        Number.isFinite(end) &&
+        sourceTime >= start && sourceTime < end
         ? [rangeKey(start, end)]
         : [];
     }),

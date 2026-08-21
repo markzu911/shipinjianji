@@ -51,7 +51,7 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
 
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
-    assert "/app.js?v=20260820-01" in page_response.text
+    assert "/app.js?v=20260821-01" in page_response.text
     assert "/styles.css?v=20260820-01" in page_response.text
     assert "/transcript-follow-scroll.js?v=20260818-03" in page_response.text
     assert "/ui-feedback.js?v=20260807-03" in page_response.text
@@ -1476,6 +1476,126 @@ console.log(JSON.stringify({{
     assert payload["renderedItems"] == [
         {"type": "text", "text": "文案"},
         {"type": "no-speech", "id": "quiet"},
+    ]
+
+
+def test_frontend_suggestion_presentation_uses_semantic_original_ranges():
+    app_source = (Path(__file__).resolve().parents[2] / "web" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    run_start = app_source.index("function selectedTextRangeKeysAtTime")
+    run_end = app_source.index("function renderSegmentTextRun", run_start)
+    source = app_source[run_start:run_end]
+    script = f"""
+const source = {json.dumps(source)};
+const functions = new Function(`
+const selectedRanges = new Map();
+const currentSuggestions = [];
+const rangeKey = (start, end) =>
+  Number(start).toFixed(3) + "-" + Number(end).toFixed(3);
+const getSuggestionRanges = (suggestion) => suggestion.ranges || [];
+const getSegmentTokens = (segment) => segment.words || [];
+${{source}}
+return {{ selectedRanges, currentSuggestions, buildSegmentTextRuns }};
+`)();
+
+functions.selectedRanges.set("first", {{
+  start: 1.7,
+  end: 3,
+  originalStart: 2,
+  originalEnd: 3,
+}});
+functions.currentSuggestions.push({{ ranges: [{{
+  start: 1.7,
+  end: 3,
+  originalStart: 2,
+  originalEnd: 3,
+}}] }});
+const physicalStartCrossesPerson = functions.buildSegmentTextRuns({{
+  words: [
+    {{ text: "而是你身边所有", start: 0, end: 1.8 }},
+    {{ text: "人", start: 1.8, end: 2 }},
+    {{ text: "一起给", start: 2, end: 3 }},
+  ],
+}}, []);
+
+functions.selectedRanges.clear();
+functions.currentSuggestions.length = 0;
+functions.selectedRanges.set("second", {{
+  start: 0,
+  end: 1.7,
+  originalStart: 0,
+  originalEnd: 1,
+}});
+functions.currentSuggestions.push({{ ranges: [{{
+  start: 0,
+  end: 1.7,
+  originalStart: 0,
+  originalEnd: 1,
+}}] }});
+const physicalEndCrossesNiShen = functions.buildSegmentTextRuns({{
+  words: [
+    {{ text: "删除内容", start: 0, end: 1 }},
+    {{ text: "你", start: 1, end: 1.3 }},
+    {{ text: "身", start: 1.3, end: 1.6 }},
+    {{ text: "边", start: 1.6, end: 2 }},
+  ],
+}}, []);
+
+functions.selectedRanges.clear();
+functions.currentSuggestions.length = 0;
+functions.currentSuggestions.push({{ ranges: [{{ start: 1, end: 1.6 }}] }});
+const legacyPhysicalFallback = functions.buildSegmentTextRuns({{
+  words: [
+    {{ text: "前", start: 0, end: 1 }},
+    {{ text: "你", start: 1, end: 1.3 }},
+    {{ text: "身", start: 1.3, end: 1.6 }},
+    {{ text: "边", start: 1.6, end: 2 }},
+  ],
+}}, []);
+
+console.log(JSON.stringify({{
+  physicalStartCrossesPerson,
+  physicalEndCrossesNiShen,
+  legacyPhysicalFallback,
+}}));
+"""
+
+    try:
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[2],
+            check=True,
+            capture_output=True,
+            encoding="utf-8",
+            timeout=20,
+        )
+    except FileNotFoundError:
+        pytest.skip("Node.js is required for the semantic presentation test.")
+    except subprocess.CalledProcessError as exc:
+        pytest.fail(exc.stderr)
+
+    payload = json.loads(result.stdout)
+    assert [item["text"] for item in payload["physicalStartCrossesPerson"]] == [
+        "而是你身边所有人",
+        "一起给",
+    ]
+    assert [item["kind"] for item in payload["physicalStartCrossesPerson"]] == [
+        "edit",
+        "restore",
+    ]
+    assert [item["text"] for item in payload["physicalEndCrossesNiShen"]] == [
+        "删除内容",
+        "你身边",
+    ]
+    assert [item["kind"] for item in payload["physicalEndCrossesNiShen"]] == [
+        "restore",
+        "edit",
+    ]
+    assert [item["text"] for item in payload["legacyPhysicalFallback"]] == [
+        "前",
+        "你身",
+        "边",
     ]
 
 
