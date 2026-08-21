@@ -1,0 +1,5 @@
+{"file":".trellis/spec/backend/media-and-timeline.md","reason":"物理/语义范围、强制对齐、保留语音硬限和三入口共享解析契约"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"审计草稿、预览、生成与 retained transcript 的跨层权威数据流"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"文字删除展示边界、original 语义投影和物理范围不得改变文案样式的前端契约"}
+{"file":".trellis/tasks/archive/2026-08/08-20-eliminate-cut-tail-protect-retained-speech/research/cut-boundary-dataflow.md","reason":"上一轮边界数据流、真实媒体双向验证和已知降级约束"}
+{"file":".trellis/tasks/08-20-prevent-ambiguous-repeat-cut-boundaries/research/latest-repeat-residual-evidence.md","reason":"最新相邻重复短语的真实错位对齐、A/B 拼接和根因证据"}

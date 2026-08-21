@@ -84,6 +84,7 @@ if (shouldPersistAutomaticDefaults) scheduleCutDraftSave();
 - `selectedRanges` 与 `selectedNoSpeechRanges` 分别是文字和长空白删除的主状态；保存、生成和撤销/重做只消费这两个现有集合，不新增“自动删除”副本；
 - AI 建议的原始词级范围可以作为稳定展示边界，但不能作为第二套删除状态；
 - `buildSegmentTextRuns` 按单词中点投影删除状态和展示边界；普通文字与“时间轴已删除”只合并 `kind`、`presentationKey` 均相同的相邻词，连续“恢复”文字则允许跨 `presentationKey` 合并为一行并聚合全部 `rangeKeys`；“恢复”状态只来自 `selectedRanges` 的 `originalStart/originalEnd`，“时间轴已删除”只来自已提交的 `timelineRanges`，文字静音扩展和 `noSpeechRanges` 不得改变文案样式；
+- `suggestionTextRangeKeysAtTime()` 同样必须逐 range 优先读取 `originalStart/originalEnd`，只有历史 suggestion 缺少字段时才回退物理 `start/end`。声学扩展可以越过相邻未选字符的时间中点，但不得改变其 `presentationKey` 或把“人”“你身”拆成孤立行；
 - `currentNoSpeechSuggestions` 同样只提供稳定展示边界；文字片段与空白建议按源时间排序，每个片段独立渲染为 `li[data-display-key][data-display-start][data-display-end]`；
 - 空白行用 `data-no-speech-id` 连接 `selectedNoSpeechRanges`，不伪造可编辑文字段 index；播放高亮同时比较片段时间和稳定 key。
 

@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/media-and-timeline.md","reason":"核对转场可信度没有破坏现有物理/语义与生成期零次重算契约"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"执行后端不变量、兼容性和全量验证门禁"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"核对草稿 revision、预览/生成一致和真实浏览器覆盖要求"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"核对人/你身孤立行修复只改变展示投影且旧 suggestion 兼容"}
+{"file":".trellis/tasks/archive/2026-08/08-20-eliminate-cut-tail-protect-retained-speech/research/product-real-media-gate.md","reason":"对照上一轮得/你真实产品链 PCM、ASR 和保留起音基线"}
+{"file":".trellis/tasks/08-20-prevent-ambiguous-repeat-cut-boundaries/research/latest-repeat-residual-evidence.md","reason":"以最新所以说啊重复样本验证残音消失且保留实例完整"}

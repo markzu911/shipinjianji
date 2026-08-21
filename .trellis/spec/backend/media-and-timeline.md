@@ -262,6 +262,80 @@ segment = ensure_acoustic_alignment_cache(
 physical_end = resolve_cut_draft_acoustic_boundaries(...)[0][0]["end"]
 ```
 
+## 场景：相邻重复文案使用转场级可信度
+
+### 1. Scope / Trigger
+
+- 强制对齐字符参与删除/保留状态转换时适用，尤其是完整短语重复、删除 run 后缀与保留 run 前缀重叠、连续相同字符。
+- `validation.valid` 只证明完整句段字符数量、顺序和时间结构可解析，不能证明重复文本映射到了正确实例。
+
+### 2. Signatures
+
+- `build_acoustic_transition_context(units, deleted, left_index) -> transition context`
+- `forced_alignment_transition_boundary(..., transition_context=...) -> (boundary | None, diagnostic)`
+- `corroborate_repeated_transition_with_pcm(fallback, forced_candidate, samples, sample_rate, *, deletion_on_left) -> (boundary | None, evidence)`
+- `corroborate_forced_transition_quiet_gap(fallback, forced_candidate, retained_limit, samples, sample_rate, *, deletion_on_left) -> (boundary | None, evidence)`
+- `resolve_cut_draft_acoustic_boundaries(...)` 是文字和手动时间轴范围的共享入口。
+
+### 3. Contracts
+
+- 重复检测按同一 segment 内相邻 deleted/retained run 的规范化可发声字符计算最长“左侧后缀 = 右侧前缀”；多字符重叠和连续同字均为 `repeatAmbiguous=true`，不依赖 AI 建议类型。
+- 非重复且方向、相邻 forced 结构有效时维持 forced 主路径。`coarseTokenMaxBoundaryDeviationSeconds` 只进入诊断，禁止设置全局阈值拒绝“得/你”、长静音或其他合法大偏差。
+- 重复且 forced 结构有效时，只在 semantic fallback 与 forced candidate 的有向走廊内寻找持续 PCM 谷底。谷底必须至少覆盖两个 `5ms` 采样点，以 `20ms` floor 和 `20/40/80ms` 多尺度肩部做相对能量比较；谷底不得比 fallback 更高能，并且必须相对 forced candidate 与双肩显著更低。fallback 本身已经安静时不要求固定比例改善；均匀低能、单点尖谷和单调斜坡不授权 forced candidate。
+- 走廊内没有双肩谷底时，不能立即把所有重复转场退回 semantic fallback。若 forced candidate 与保留侧 forced limit 不重叠且其间存在独立 quiet gap，PCM 必须同时证明 gap 内持续低能、删除侧候选前持续高能、保留侧 limit 外持续高能，才可原样信任 forced candidate，记录 `trustReason=forced_pcm_gap`。最终边界不得推进到 quiet gap 尾部；gap 高能、缺少任一侧语音或 forced overlap 均拒绝。
+- 删除终点只向后、删除起点只向前。PCM 失败时 structurally valid 的歧义 forced candidate 回退 semantic/manual fallback；forced 缺失时仍允许既有受限 waveform 降级。
+- 文字和 timeline 必须传入同一 transition context 并复用同一 forced boundary cache。cache key 至少包含 segment/character、方向、fallback 和 repeat overlap，避免不同删除状态复用动态 trust。
+- 完整行/segment 删除形成的跨段转场必须按 units 列表中的物理邻接、相邻 segment index、前段最后字符和后段首字符共同确认。两段 forced 均有效且不重叠时使用删除侧 forced 边界并以保留侧 forced 边界为 hard limit；forced 缺失或 overlap 时复用同一个 sustained-valley helper，只在 semantic fallback 与 retained-side forced/acoustic/semantic 安全界限之间搜索。无谷底或保留语音立即起音时保持 fallback，禁止固定毫秒扩张。
+- timeline 的普通 `0.20s` snap 门槛判断 requested endpoint 到 diagnostic semantic `fallback` 的距离；`boundaryTrustworthy=true` 时 final 可因可信尾音延迟超过 `0.20s`。requested 远离 semantic transition 时仍拒绝，完全位于相邻字符或 segment quiet gap 的范围保持精确。
+- 诊断至少保留 `structureValid`、`boundaryTrustworthy`、`trustReason`、`repeatAmbiguous`、`repeatOverlapText/Length/Span`、`forcedCandidate`、`pcmCorroborated`、`pcmValleyStart/End`、`pcmGapCorroborated`、`pcmGapStart/End`、`retainedSpeechHardLimit` 和 `fallbackReason`。谷底路径的 `retainedSpeechHardLimit` 来自保留侧首次连续两个 `5ms` 点的显著能量回升；forced-gap 路径保留 forced retained limit。两者都必须位于最终切点的保留侧，失败的前置探测不得把已有 hard limit 覆盖为 null。动态 trust 不写回 alignment sidecar。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 结果 |
+| --- | --- |
+| forced 缺失或结构无效 | 既有受限 waveform/semantic 降级，`boundaryTrustworthy=false` |
+| 非重复、forced 结构与方向有效 | 使用 forced 转场，`trustReason=forced_transition` |
+| 重复、存在持续相对谷底 | 使用谷底内安全点，`trustReason=forced_pcm_valley` |
+| 重复、候选后存在独立低能 gap 且两侧持续有声 | 保留 forced candidate，`trustReason=forced_pcm_gap` |
+| forced gap 高能、缺少删除/保留侧持续语音或 forced overlap | 拒绝 gap 佐证，不把边界推进到 gap 尾部 |
+| 重复、只有单点/斜坡/均匀低能 | 拒绝 forced，`fallbackReason=repeat_pcm_not_corroborated` |
+| forced 候选方向错误 | 拒绝候选，不扩大搜索 |
+| timeline 命中已佐证的同一重复转场 | 复用同一 boundary，即使旧的 `0.20s` 普通吸附距离不足 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：第一次“所以说啊”被删、第二次保留；forced 候选进入第二次起音，但 `141.795-141.815s` 持续谷底把最终边界限制在约 `141.814s`。
+- Base：完整“你身边你身边人人都觉得 / 你身边人人都觉得…”上下文会形成重复重叠，但 forced candidate `37.790s` 到保留起音 `39.850s` 有约 `2.06s` 独立静音；PCM 两侧有声时继续使用 `37.790s`，不能退回 `37.120s` 留下“得”的尾音。
+- Bad：看到重复就统一退回 semantic fallback，或看到长静音就把边界推进到静音尾部；前者残留被删尾音，后者会删除下一段起音。
+
+### 6. Tests Required
+
+- 纯函数：完整重复、局部后缀/前缀、连续同字和非重复检测。
+- 合成 PCM：持续谷底在多组非削波增益下稳定；forced candidate 后独立 quiet gap 的删除终点/起点对称通过；gap 高能、缺少保留侧语音、forced overlap、单点、单调和均匀低能均回退。
+- 共享 resolver：文字与 timeline 得到同一物理点，`original*` 保持不变，diagnostic 字段完整。
+- 非回归：必须使用完整重复上下文的“得/你”fixture，不能用只含两个字的简化 fixture；断言大 coarse deviation 仍走 `forced_pcm_gap` 且 hard limit 保持为下一 forced 起音。
+- 真实媒体：同时证明被删尾音消失和下一次重复表达的起音未被削弱；用户媒体和 sidecar 全程只读。
+
+### 7. Wrong vs Correct
+
+```python
+# Wrong: 结构有效不等于重复实例归属正确。
+if alignment_record["validation"]["valid"]:
+    boundary = left_character["end"]
+
+# Correct: 动态删除状态先识别重复歧义，再要求局部 PCM 佐证。
+context = build_acoustic_transition_context(units, deleted, left_index)
+boundary, diagnostic = forced_alignment_transition_boundary(
+    left,
+    right,
+    fallback,
+    samples,
+    sample_rate,
+    deletion_on_left=True,
+    transition_context=context,
+)
+```
+
 ## 场景：ASR 原始 word 与展示分词使用双层时间契约
 
 ### 1. Scope / Trigger
