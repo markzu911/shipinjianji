@@ -465,3 +465,26 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 22: 拆分艺术字选择页面并准备生产发布
+
+**Date**: 2026-08-21
+**Task**: 拆分艺术字选择页面并准备生产发布
+**Branch**: `develop`
+
+### Summary
+
+完成艺术字选择、设置与 AI 推荐三页签拆分，将模板改为可访问的下拉列表，补齐桌面/移动端与浏览器回归并更新资源缓存版本；同步固化交互规范，保留剪辑性能优化任务为 planning。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `2fa6995` | (see git log) |
+| `770452a` | (see git log) |
+| `6aa692e` | (see git log) |
+
+### Status
+
+[OK] **Completed**

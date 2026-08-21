@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 21
+- **Total Sessions**: 22
 - **Last Active**: 2026-08-21
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~467 | Active |
+| `journal-1.md` | ~490 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 22 | 2026-08-21 | 拆分艺术字选择页面并准备生产发布 | `2fa6995`, `770452a`, `6aa692e` | `develop` |
 | 21 | 2026-08-21 | 修复重复文案裁剪尾音与时间显示 | `b923a81`, `30225d0` | `develop` |
 | 20 | 2026-08-20 | 消除裁剪尾音并保护下一段语音 | `7305368`, `37b383a`, `ab81735` | `develop` |
 | 19 | 2026-08-20 | 修复艺术字预览与轨道布局 | `97eddff`, `ea5e72a` | `develop` |
