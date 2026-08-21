@@ -2711,6 +2711,7 @@ def transcript_acoustic_character_units(
                 **copy.deepcopy(unit),
                 "_segmentIndex": segment_index,
                 "_characterIndex": character_index,
+                "_segmentCharacterCount": len(semantic_units),
             }
             if mapping_valid:
                 raw_unit = raw_character_units[character_index]
@@ -2731,6 +2732,9 @@ def transcript_acoustic_character_units(
                         "_forcedEnd": float(aligned["end"]),
                         "_alignmentSource": ACOUSTIC_ALIGNER_NAME,
                         "_alignmentRevision": ACOUSTIC_ALIGNMENT_MODEL_REVISION,
+                        "_alignmentValidation": copy.deepcopy(
+                            alignment_record.get("validation") or {}
+                        ),
                     }
                 )
             units.append(enriched)
@@ -2780,6 +2784,445 @@ def boundary_rms_is_on_valley_floor(
         and finite_values
         and candidate_rms <= min(finite_values) * CUT_VALLEY_TOLERANCE
     )
+
+
+def acoustic_transition_scope(
+    left: dict[str, Any],
+    right: dict[str, Any],
+) -> str | None:
+    left_segment = int(left.get("_segmentIndex", -1))
+    right_segment = int(right.get("_segmentIndex", -2))
+    left_character = int(left.get("_characterIndex", -1))
+    right_character = int(right.get("_characterIndex", -1))
+    if left_segment == right_segment and right_character == left_character + 1:
+        return "same_segment"
+    if (
+        right_segment == left_segment + 1
+        and right_character == 0
+        and left_character + 1 == int(left.get("_segmentCharacterCount", -1))
+    ):
+        return "cross_segment"
+    return None
+
+
+def longest_spoken_suffix_prefix_overlap(left_text: str, right_text: str) -> str:
+    """Return the longest suffix of left_text matching a prefix of right_text."""
+    maximum = min(len(left_text), len(right_text))
+    if maximum <= 0:
+        return ""
+    prefix = right_text[:maximum]
+    suffix = left_text[-maximum:]
+    combined = f"{prefix}\0{suffix}"
+    lengths = [0] * len(combined)
+    for index in range(1, len(combined)):
+        candidate = lengths[index - 1]
+        while candidate and combined[index] != combined[candidate]:
+            candidate = lengths[candidate - 1]
+        if combined[index] == combined[candidate]:
+            candidate += 1
+        lengths[index] = candidate
+    return prefix[: min(maximum, lengths[-1])]
+
+
+def build_acoustic_transition_context(
+    units: list[dict[str, Any]],
+    deleted: list[bool],
+    left_index: int,
+) -> dict[str, Any]:
+    context: dict[str, Any] = {
+        "repeatAmbiguous": False,
+        "repeatReason": None,
+        "repeatOverlapText": "",
+        "repeatOverlapLength": 0,
+        "repeatOverlapSpan": None,
+        "deletedContext": "",
+        "retainedContext": "",
+    }
+    if (
+        left_index < 0
+        or left_index + 1 >= len(units)
+        or left_index + 1 >= len(deleted)
+        or deleted[left_index] == deleted[left_index + 1]
+    ):
+        return context
+    transition_scope = acoustic_transition_scope(
+        units[left_index],
+        units[left_index + 1],
+    )
+    if transition_scope is None:
+        return context
+    left_segment_index = int(units[left_index].get("_segmentIndex", -1))
+    right_segment_index = int(units[left_index + 1].get("_segmentIndex", -2))
+
+    left_start = left_index
+    while (
+        left_start > 0
+        and deleted[left_start - 1] == deleted[left_index]
+        and int(units[left_start - 1].get("_segmentIndex", -2))
+        == left_segment_index
+    ):
+        left_start -= 1
+    right_end = left_index + 1
+    while (
+        right_end + 1 < len(units)
+        and deleted[right_end + 1] == deleted[left_index + 1]
+        and int(units[right_end + 1].get("_segmentIndex", -2))
+        == right_segment_index
+    ):
+        right_end += 1
+
+    def run_text(first: int, last: int) -> str:
+        return "".join(
+            spoken
+            for unit in units[first : last + 1]
+            for spoken in spoken_text_characters(str(unit.get("text") or ""))
+        )
+
+    left_text = run_text(left_start, left_index)
+    right_text = run_text(left_index + 1, right_end)
+    overlap = (
+        longest_spoken_suffix_prefix_overlap(left_text, right_text)
+        if transition_scope == "same_segment"
+        else ""
+    )
+    deletion_on_left = deleted[left_index]
+    deleted_text = left_text if deletion_on_left else right_text
+    retained_text = right_text if deletion_on_left else left_text
+    overlap_length = len(overlap)
+    context.update(
+        {
+            "transitionScope": transition_scope,
+            "repeatAmbiguous": overlap_length > 0,
+            "repeatReason": (
+                "adjacent_same_character"
+                if overlap_length == 1
+                else "suffix_prefix_overlap"
+                if overlap_length > 1
+                else None
+            ),
+            "repeatOverlapText": overlap,
+            "repeatOverlapLength": overlap_length,
+            "repeatOverlapSpan": (
+                {
+                    "leftStartCharacterIndex": left_index - overlap_length + 1,
+                    "leftEndCharacterIndex": left_index,
+                    "rightStartCharacterIndex": left_index + 1,
+                    "rightEndCharacterIndex": left_index + overlap_length,
+                }
+                if overlap_length
+                else None
+            ),
+            "deletedContext": deleted_text[-64:],
+            "retainedContext": retained_text[:64],
+        }
+    )
+    return context
+
+
+def corroborate_transition_with_pcm(
+    fallback: float,
+    corridor_limit: float,
+    samples: array,
+    sample_rate: int,
+    *,
+    deletion_on_left: bool,
+) -> tuple[float | None, dict[str, Any]]:
+    evidence: dict[str, Any] = {
+        "pcmCorroborated": False,
+        "pcmValleyStart": None,
+        "pcmValleyEnd": None,
+        "retainedSpeechHardLimit": None,
+    }
+    if not samples or sample_rate <= 0:
+        return None, evidence
+    corridor_start = max(0.0, min(fallback, corridor_limit))
+    corridor_end = min(
+        len(samples) / sample_rate,
+        max(fallback, corridor_limit),
+    )
+    if corridor_end <= corridor_start + CUT_BOUNDARY_STEP_SECONDS * 3:
+        return None, evidence
+
+    step = max(1, round(CUT_BOUNDARY_STEP_SECONDS * sample_rate))
+    first = math.ceil(corridor_start * sample_rate / step) * step
+    last = math.floor(corridor_end * sample_rate / step) * step
+    positions = sorted(
+        {
+            round(corridor_start * sample_rate),
+            round(corridor_end * sample_rate),
+            *range(first, last + 1, step),
+        }
+    )
+    curve = [
+        (position, multiscale_boundary_rms(samples, sample_rate, position / sample_rate))
+        for position in positions
+    ]
+    short_half_window = max(
+        1,
+        round(min(CUT_CHARACTER_BOUNDARY_WINDOWS_SECONDS) * sample_rate / 2),
+    )
+    floor_curve: list[tuple[int, float]] = []
+    for position in positions:
+        start = max(0, position - short_half_window)
+        end = min(len(samples), position + short_half_window)
+        if end <= start:
+            floor_curve.append((position, float("inf")))
+            continue
+        energy = sum(int(sample) * int(sample) for sample in samples[start:end])
+        floor_curve.append((position, math.sqrt(energy / (end - start))))
+    finite_values = [rms for _, rms in curve if math.isfinite(rms)]
+    finite_floor_values = [rms for _, rms in floor_curve if math.isfinite(rms)]
+    if len(finite_values) < 5 or len(finite_floor_values) < 5:
+        return None, evidence
+    floor_threshold = min(finite_floor_values) * CUT_VALLEY_TOLERANCE
+    floor_runs: list[tuple[int, int]] = []
+    run_start: int | None = None
+    for index, (_, rms) in enumerate(floor_curve):
+        on_floor = math.isfinite(rms) and rms <= floor_threshold
+        if on_floor and run_start is None:
+            run_start = index
+        if run_start is not None and (not on_floor or index == len(curve) - 1):
+            run_end = index if on_floor and index == len(curve) - 1 else index - 1
+            if run_end > run_start:
+                floor_runs.append((run_start, run_end))
+            run_start = None
+
+    fallback_rms = multiscale_boundary_rms(samples, sample_rate, fallback)
+    corridor_limit_rms = multiscale_boundary_rms(
+        samples,
+        sample_rate,
+        corridor_limit,
+    )
+    shoulder_steps = max(
+        2,
+        round(
+            max(CUT_CHARACTER_BOUNDARY_WINDOWS_SECONDS)
+            / CUT_BOUNDARY_STEP_SECONDS
+        ),
+    )
+    qualified: list[tuple[int, int]] = []
+    for start_index, end_index in floor_runs:
+        if start_index == 0 or end_index >= len(curve) - 1:
+            continue
+        floor_rms = min(rms for _, rms in curve[start_index : end_index + 1])
+        left_shoulder = max(
+            rms
+            for _, rms in curve[max(0, start_index - shoulder_steps) : start_index]
+        )
+        right_shoulder = max(
+            rms
+            for _, rms in curve[
+                end_index + 1 : min(len(curve), end_index + shoulder_steps + 1)
+            ]
+        )
+        fallback_not_worse = bool(
+            math.isfinite(fallback_rms) and floor_rms <= fallback_rms
+        )
+        if (
+            fallback_not_worse
+            and boundary_rms_is_meaningfully_lower(
+                floor_rms,
+                corridor_limit_rms,
+            )
+            and boundary_rms_is_meaningfully_lower(floor_rms, left_shoulder)
+            and boundary_rms_is_meaningfully_lower(floor_rms, right_shoulder)
+        ):
+            qualified.append((start_index, end_index))
+    if not qualified:
+        return None, evidence
+
+    start_index, end_index = (
+        max(qualified, key=lambda item: curve[item[1]][0])
+        if deletion_on_left
+        else min(qualified, key=lambda item: curve[item[0]][0])
+    )
+    valley_start = curve[start_index][0] / sample_rate
+    valley_end = curve[end_index][0] / sample_rate
+    valley_rms = min(rms for _, rms in curve[start_index : end_index + 1])
+    retained_speech_index: int | None = None
+    if deletion_on_left:
+        for index in range(end_index + 1, len(curve) - 1):
+            if boundary_rms_is_meaningfully_lower(
+                valley_rms,
+                curve[index][1],
+            ) and boundary_rms_is_meaningfully_lower(
+                valley_rms,
+                curve[index + 1][1],
+            ):
+                retained_speech_index = index
+                break
+    else:
+        for index in range(start_index - 1, 0, -1):
+            if boundary_rms_is_meaningfully_lower(
+                valley_rms,
+                curve[index][1],
+            ) and boundary_rms_is_meaningfully_lower(
+                valley_rms,
+                curve[index - 1][1],
+            ):
+                retained_speech_index = index
+                break
+    if retained_speech_index is None:
+        return None, evidence
+    retained_speech_hard_limit = (
+        curve[retained_speech_index][0] / sample_rate
+    )
+    boundary = valley_end if deletion_on_left else valley_start
+    boundary = snap_to_low_amplitude_sample(
+        samples,
+        sample_rate,
+        boundary,
+        valley_start,
+        valley_end,
+    )
+    boundary = validate_directional_boundary(
+        boundary,
+        fallback,
+        corridor_start,
+        corridor_end,
+        deletion_on_left=deletion_on_left,
+    )
+    if (
+        deletion_on_left
+        and boundary > retained_speech_hard_limit + 0.001
+    ) or (
+        not deletion_on_left
+        and boundary < retained_speech_hard_limit - 0.001
+    ):
+        return None, evidence
+    evidence.update(
+        {
+            "pcmCorroborated": True,
+            "pcmValleyStart": round(valley_start, 3),
+            "pcmValleyEnd": round(valley_end, 3),
+            "retainedSpeechHardLimit": round(retained_speech_hard_limit, 3),
+        }
+    )
+    return boundary, evidence
+
+
+def corroborate_repeated_transition_with_pcm(
+    fallback: float,
+    forced_candidate: float,
+    samples: array,
+    sample_rate: int,
+    *,
+    deletion_on_left: bool,
+) -> tuple[float | None, dict[str, Any]]:
+    return corroborate_transition_with_pcm(
+        fallback,
+        forced_candidate,
+        samples,
+        sample_rate,
+        deletion_on_left=deletion_on_left,
+    )
+
+
+def corroborate_forced_transition_quiet_gap(
+    fallback: float,
+    forced_candidate: float,
+    retained_limit: float,
+    samples: array,
+    sample_rate: int,
+    *,
+    deletion_on_left: bool,
+) -> tuple[float | None, dict[str, Any]]:
+    """Trust a forced edge only when PCM confirms its independent quiet gap."""
+    evidence: dict[str, Any] = {
+        "pcmGapCorroborated": False,
+        "pcmGapStart": None,
+        "pcmGapEnd": None,
+    }
+    if not samples or sample_rate <= 0:
+        return None, evidence
+    if (
+        (deletion_on_left and retained_limit <= forced_candidate)
+        or (not deletion_on_left and retained_limit >= forced_candidate)
+    ):
+        return None, evidence
+
+    step_seconds = CUT_BOUNDARY_STEP_SECONDS
+    edge_guard = max(CUT_CHARACTER_BOUNDARY_WINDOWS_SECONDS) / 2
+    gap_start = min(forced_candidate, retained_limit)
+    gap_end = max(forced_candidate, retained_limit)
+    quiet_start = gap_start + edge_guard
+    quiet_end = gap_end - edge_guard
+    if quiet_end <= quiet_start + step_seconds:
+        return None, evidence
+
+    media_end = len(samples) / sample_rate
+
+    def energy_curve(start: float, end: float) -> list[tuple[float, float]]:
+        start = max(0.0, min(start, media_end))
+        end = max(start, min(end, media_end))
+        if end <= start:
+            return []
+        step = max(1, round(step_seconds * sample_rate))
+        first = math.ceil(start * sample_rate / step) * step
+        last = math.floor(end * sample_rate / step) * step
+        positions = sorted(
+            {
+                round(start * sample_rate),
+                round(end * sample_rate),
+                *range(first, last + 1, step),
+            }
+        )
+        return [
+            (
+                position / sample_rate,
+                multiscale_boundary_rms(
+                    samples,
+                    sample_rate,
+                    position / sample_rate,
+                ),
+            )
+            for position in positions
+        ]
+
+    quiet_curve = energy_curve(quiet_start, quiet_end)
+    finite_quiet = [rms for _, rms in quiet_curve if math.isfinite(rms)]
+    if len(finite_quiet) < 2:
+        return None, evidence
+    quiet_ceiling = max(finite_quiet)
+
+    deleted_curve = energy_curve(
+        min(fallback, forced_candidate),
+        max(fallback, forced_candidate),
+    )
+    retained_probe_width = max(CUT_CHARACTER_BOUNDARY_WINDOWS_SECONDS)
+    retained_curve = energy_curve(
+        retained_limit,
+        retained_limit + retained_probe_width,
+    ) if deletion_on_left else energy_curve(
+        retained_limit - retained_probe_width,
+        retained_limit,
+    )
+
+    def has_sustained_speech(curve: list[tuple[float, float]]) -> bool:
+        for (_, first_rms), (_, second_rms) in zip(curve, curve[1:]):
+            if boundary_rms_is_meaningfully_lower(
+                quiet_ceiling,
+                first_rms,
+            ) and boundary_rms_is_meaningfully_lower(
+                quiet_ceiling,
+                second_rms,
+            ):
+                return True
+        return False
+
+    if not has_sustained_speech(deleted_curve) or not has_sustained_speech(
+        retained_curve
+    ):
+        return None, evidence
+
+    evidence.update(
+        {
+            "pcmGapCorroborated": True,
+            "pcmGapStart": round(gap_start, 3),
+            "pcmGapEnd": round(gap_end, 3),
+        }
+    )
+    return round(forced_candidate, 3), evidence
 
 
 def validate_directional_boundary(
@@ -3144,10 +3587,15 @@ def forced_alignment_transition_boundary(
     sample_rate: int,
     *,
     deletion_on_left: bool,
+    transition_context: dict[str, Any] | None = None,
 ) -> tuple[float | None, dict[str, Any]]:
     direction = "delete_end" if deletion_on_left else "delete_start"
+    transition_context = transition_context or {}
+    transition_scope = acoustic_transition_scope(left, right)
+    validation = left.get("_alignmentValidation") or {}
     diagnostic = {
         "direction": direction,
+        "transitionScope": transition_scope,
         "fallback": round(fallback, 3),
         "final": round(fallback, 3),
         "alignmentSource": None,
@@ -3158,18 +3606,84 @@ def forced_alignment_transition_boundary(
         ],
         "retainedSpeechHardLimit": None,
         "structureValid": False,
-        "confidence": None,
+        "boundaryTrustworthy": False,
+        "trustReason": "alignment_missing",
+        "repeatAmbiguous": bool(transition_context.get("repeatAmbiguous")),
+        "repeatReason": transition_context.get("repeatReason"),
+        "repeatOverlapText": str(transition_context.get("repeatOverlapText") or ""),
+        "repeatOverlapLength": int(transition_context.get("repeatOverlapLength") or 0),
+        "repeatOverlapSpan": copy.deepcopy(transition_context.get("repeatOverlapSpan")),
+        "deletedContext": str(transition_context.get("deletedContext") or ""),
+        "retainedContext": str(transition_context.get("retainedContext") or ""),
+        "forcedCandidate": None,
+        "pcmCorroborated": False,
+        "pcmValleyStart": None,
+        "pcmValleyEnd": None,
+        "pcmGapCorroborated": False,
+        "pcmGapStart": None,
+        "pcmGapEnd": None,
+        "confidence": validation.get("confidence"),
+        "coarseTokenMaxBoundaryDeviationSeconds": validation.get(
+            "coarseTokenMaxBoundaryDeviationSeconds"
+        ),
         "pcmAdjustment": 0.0,
+        "forcedFallbackReason": None,
         "fallbackReason": "alignment_missing",
     }
+
+    def cross_segment_pcm_fallback(
+        forced_fallback_reason: str,
+    ) -> tuple[float | None, dict[str, Any]]:
+        diagnostic["forcedFallbackReason"] = forced_fallback_reason
+        retained_unit = right if deletion_on_left else left
+        retained_keys = (
+            ("_forcedStart", "_acousticStart", "start")
+            if deletion_on_left
+            else ("_forcedEnd", "_acousticEnd", "end")
+        )
+        retained_limit: float | None = None
+        for key in retained_keys:
+            try:
+                candidate_limit = float(retained_unit[key])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if math.isfinite(candidate_limit):
+                retained_limit = candidate_limit
+                break
+        if retained_limit is None:
+            diagnostic["fallbackReason"] = "cross_segment_pcm_not_corroborated"
+            diagnostic["trustReason"] = "cross_segment_pcm_not_corroborated"
+            return None, diagnostic
+        corroborated, evidence = corroborate_transition_with_pcm(
+            fallback,
+            retained_limit,
+            samples,
+            sample_rate,
+            deletion_on_left=deletion_on_left,
+        )
+        diagnostic.update(evidence)
+        if corroborated is None:
+            diagnostic["fallbackReason"] = "cross_segment_pcm_not_corroborated"
+            diagnostic["trustReason"] = "cross_segment_pcm_not_corroborated"
+            return None, diagnostic
+        diagnostic.update(
+            {
+                "final": round(corroborated, 3),
+                "alignmentSource": "waveform",
+                "boundaryTrustworthy": True,
+                "trustReason": "cross_segment_pcm_valley",
+                "pcmAdjustment": round(corroborated - fallback, 6),
+                "fallbackReason": None,
+            }
+        )
+        return corroborated, diagnostic
+
     required = {"_forcedStart", "_forcedEnd"}
-    if (
-        int(left.get("_segmentIndex", -1)) != int(right.get("_segmentIndex", -2))
-        or int(right.get("_characterIndex", -1))
-        != int(left.get("_characterIndex", -1)) + 1
-        or not required.issubset(left)
-        or not required.issubset(right)
-    ):
+    if transition_scope is None:
+        return None, diagnostic
+    if not required.issubset(left) or not required.issubset(right):
+        if transition_scope == "cross_segment":
+            return cross_segment_pcm_fallback("alignment_missing")
         return None, diagnostic
     left_end = float(left["_forcedEnd"])
     right_start = float(right["_forcedStart"])
@@ -3189,14 +3703,64 @@ def forced_alignment_transition_boundary(
         or left_end > right_start + 0.001
     ):
         diagnostic["fallbackReason"] = "alignment_transition_overlap"
+        if transition_scope == "cross_segment":
+            return cross_segment_pcm_fallback("alignment_transition_overlap")
         return None, diagnostic
     candidate = left_end if deletion_on_left else right_start
+    diagnostic["structureValid"] = True
+    diagnostic["forcedCandidate"] = round(candidate, 3)
     if (
         (deletion_on_left and candidate < fallback - 0.001)
         or (not deletion_on_left and candidate > fallback + 0.001)
     ):
         diagnostic["fallbackReason"] = "alignment_wrong_direction"
+        diagnostic["trustReason"] = "alignment_wrong_direction"
+        if transition_scope == "cross_segment" and not diagnostic["repeatAmbiguous"]:
+            return cross_segment_pcm_fallback("alignment_wrong_direction")
         return None, diagnostic
+    if diagnostic["repeatAmbiguous"]:
+        corroborated, evidence = corroborate_repeated_transition_with_pcm(
+            fallback,
+            candidate,
+            samples,
+            sample_rate,
+            deletion_on_left=deletion_on_left,
+        )
+        diagnostic.update(evidence)
+        if diagnostic["retainedSpeechHardLimit"] is None:
+            diagnostic["retainedSpeechHardLimit"] = round(
+                right_start if deletion_on_left else left_end,
+                3,
+            )
+        if corroborated is None:
+            corroborated, gap_evidence = corroborate_forced_transition_quiet_gap(
+                fallback,
+                candidate,
+                right_start if deletion_on_left else left_end,
+                samples,
+                sample_rate,
+                deletion_on_left=deletion_on_left,
+            )
+            diagnostic.update(gap_evidence)
+        if corroborated is None:
+            diagnostic["fallbackReason"] = "repeat_pcm_not_corroborated"
+            diagnostic["trustReason"] = "repeat_pcm_not_corroborated"
+            return None, diagnostic
+        trust_reason = (
+            "forced_pcm_gap"
+            if diagnostic["pcmGapCorroborated"]
+            else "forced_pcm_valley"
+        )
+        diagnostic.update(
+            {
+                "final": round(corroborated, 3),
+                "boundaryTrustworthy": True,
+                "trustReason": trust_reason,
+                "pcmAdjustment": round(corroborated - candidate, 6),
+                "fallbackReason": None,
+            }
+        )
+        return corroborated, diagnostic
     corridor_start = (
         candidate
         if deletion_on_left
@@ -3224,7 +3788,8 @@ def forced_alignment_transition_boundary(
     diagnostic.update(
         {
             "final": refined,
-            "structureValid": True,
+            "boundaryTrustworthy": True,
+            "trustReason": "forced_transition",
             "pcmAdjustment": round(refined - candidate, 6),
             "fallbackReason": None,
         }
@@ -3240,16 +3805,21 @@ def cached_forced_alignment_transition_boundary(
     sample_rate: int,
     *,
     deletion_on_left: bool,
+    transition_context: dict[str, Any] | None = None,
     boundary_cache: dict[
-        tuple[int, int, bool, float],
+        tuple[Any, ...],
         tuple[float | None, dict[str, Any]],
     ],
 ) -> tuple[float | None, dict[str, Any]]:
+    transition_context = transition_context or {}
     key = (
         int(left.get("_segmentIndex", -1)),
         int(left.get("_characterIndex", -1)),
         deletion_on_left,
         round(fallback, 6),
+        bool(transition_context.get("repeatAmbiguous")),
+        str(transition_context.get("repeatOverlapText") or ""),
+        int(transition_context.get("repeatOverlapLength") or 0),
     )
     cached = boundary_cache.get(key)
     if cached is not None:
@@ -3262,6 +3832,7 @@ def cached_forced_alignment_transition_boundary(
         samples,
         sample_rate,
         deletion_on_left=deletion_on_left,
+        transition_context=transition_context,
     )
     boundary_cache[key] = (boundary, copy.deepcopy(diagnostic))
     return boundary, diagnostic
@@ -3276,7 +3847,7 @@ def build_shared_acoustic_delete_boundaries(
     alignment_cache: dict[str, Any] | None = None,
     diagnostics: list[dict[str, Any]] | None = None,
     forced_boundary_cache: dict[
-        tuple[int, int, bool, float],
+        tuple[Any, ...],
         tuple[float | None, dict[str, Any]],
     ] | None = None,
 ) -> list[dict[str, float]]:
@@ -3314,6 +3885,11 @@ def build_shared_acoustic_delete_boundaries(
             allow_token_extension = bool(
                 left_index == 0 or not deleted[left_index - 1]
             )
+        transition_context = build_acoustic_transition_context(
+            units,
+            deleted,
+            left_index,
+        )
         forced, diagnostic = cached_forced_alignment_transition_boundary(
             left,
             right,
@@ -3321,10 +3897,13 @@ def build_shared_acoustic_delete_boundaries(
             samples,
             sample_rate,
             deletion_on_left=deletion_on_left,
+            transition_context=transition_context,
             boundary_cache=forced_boundary_cache,
         )
         if forced is not None:
             resolved = forced
+        elif diagnostic.get("repeatAmbiguous") and diagnostic.get("structureValid"):
+            resolved = fallback
         else:
             resolved = refine_shared_character_boundary(
                 left,
@@ -3396,7 +3975,7 @@ def build_transcript_delete_boundary_limits(
     alignment_cache: dict[str, Any] | None = None,
     diagnostics: list[dict[str, Any]] | None = None,
     forced_boundary_cache: dict[
-        tuple[int, int, bool, float],
+        tuple[Any, ...],
         tuple[float | None, dict[str, Any]],
     ] | None = None,
 ) -> list[dict[str, float]]:
@@ -3477,7 +4056,7 @@ def align_cut_draft_text_ranges_to_audio(
     samples: array | None = None,
     diagnostics: list[dict[str, Any]] | None = None,
     forced_boundary_cache: dict[
-        tuple[int, int, bool, float],
+        tuple[Any, ...],
         tuple[float | None, dict[str, Any]],
     ] | None = None,
 ) -> list[dict[str, Any]]:
@@ -3589,7 +4168,7 @@ def align_cut_draft_timeline_ranges_to_audio(
     samples: array | None,
     diagnostics: list[dict[str, Any]],
     forced_boundary_cache: dict[
-        tuple[int, int, bool, float],
+        tuple[Any, ...],
         tuple[float | None, dict[str, Any]],
     ] | None = None,
 ) -> list[dict[str, Any]]:
@@ -3610,23 +4189,23 @@ def align_cut_draft_timeline_ranges_to_audio(
             original_end = float(item["end"])
         final_start = original_start
         final_end = original_end
-        acoustic_units = [
-            unit
-            for unit in units
-            if "_forcedStart" in unit and "_forcedEnd" in unit
-        ]
+        def acoustic_core_start(unit: dict[str, Any]) -> float:
+            return float(unit.get("_forcedStart", unit["start"]))
+
+        def acoustic_core_end(unit: dict[str, Any]) -> float:
+            return float(unit.get("_forcedEnd", unit["end"]))
+
         intersects_acoustic_core = any(
-            original_start < float(unit["_forcedEnd"]) - 0.001
-            and original_end > float(unit["_forcedStart"]) + 0.001
-            for unit in acoustic_units
+            original_start < acoustic_core_end(unit) - 0.001
+            and original_end > acoustic_core_start(unit) + 0.001
+            for unit in units
         )
         entirely_in_non_speech_gap = any(
-            int(left.get("_segmentIndex", -1))
-            == int(right.get("_segmentIndex", -2))
-            and float(left["_forcedEnd"]) < float(right["_forcedStart"])
-            and original_start >= float(left["_forcedEnd"]) - 0.001
-            and original_end <= float(right["_forcedStart"]) + 0.001
-            for left, right in zip(acoustic_units, acoustic_units[1:])
+            acoustic_transition_scope(left, right) is not None
+            and acoustic_core_end(left) < acoustic_core_start(right)
+            and original_start >= acoustic_core_end(left) - 0.001
+            and original_end <= acoustic_core_start(right) + 0.001
+            for left, right in zip(units, units[1:])
         )
         preserve_exact_reason = (
             "non_speech_range_exact"
@@ -3641,6 +4220,8 @@ def align_cut_draft_timeline_ranges_to_audio(
         ]
         start_candidates: list[tuple[float, dict[str, Any]]] = []
         end_candidates: list[tuple[float, dict[str, Any]]] = []
+        rejected_start_diagnostics: list[dict[str, Any]] = []
+        rejected_end_diagnostics: list[dict[str, Any]] = []
         for index in range(len(units) - 1):
             if preserve_exact_reason is not None:
                 break
@@ -3648,8 +4229,11 @@ def align_cut_draft_timeline_ranges_to_audio(
                 continue
             left = units[index]
             right = units[index + 1]
-            if "_forcedEnd" not in left or "_forcedStart" not in right:
-                continue
+            transition_context = build_acoustic_transition_context(
+                units,
+                deleted_units,
+                index,
+            )
             if not deleted_units[index] and deleted_units[index + 1]:
                 boundary, diagnostic = cached_forced_alignment_transition_boundary(
                     left,
@@ -3658,10 +4242,13 @@ def align_cut_draft_timeline_ranges_to_audio(
                     samples or array("h"),
                     CUT_BOUNDARY_SAMPLE_RATE,
                     deletion_on_left=False,
+                    transition_context=transition_context,
                     boundary_cache=forced_boundary_cache,
                 )
                 if boundary is not None:
                     start_candidates.append((boundary, diagnostic))
+                else:
+                    rejected_start_diagnostics.append(diagnostic)
             elif deleted_units[index] and not deleted_units[index + 1]:
                 boundary, diagnostic = cached_forced_alignment_transition_boundary(
                     left,
@@ -3670,27 +4257,66 @@ def align_cut_draft_timeline_ranges_to_audio(
                     samples or array("h"),
                     CUT_BOUNDARY_SAMPLE_RATE,
                     deletion_on_left=True,
+                    transition_context=transition_context,
                     boundary_cache=forced_boundary_cache,
                 )
                 if boundary is not None:
                     end_candidates.append((boundary, diagnostic))
+                else:
+                    rejected_end_diagnostics.append(diagnostic)
         endpoint_diagnostics: list[dict[str, Any]] = []
-        for endpoint, requested, candidates in (
-            ("start", original_start, start_candidates),
-            ("end", original_end, end_candidates),
+        for endpoint, requested, candidates, rejected_diagnostics in (
+            (
+                "start",
+                original_start,
+                start_candidates,
+                rejected_start_diagnostics,
+            ),
+            ("end", original_end, end_candidates, rejected_end_diagnostics),
         ):
-            nearest = min(
+            def transition_distance(candidate: tuple[float, dict[str, Any]]) -> float:
+                try:
+                    semantic_transition = float(candidate[1].get("fallback"))
+                except (TypeError, ValueError):
+                    return float("inf")
+                if not math.isfinite(semantic_transition):
+                    return float("inf")
+                return abs(semantic_transition - requested)
+
+            closest_candidate = min(
                 candidates,
-                key=lambda candidate: abs(candidate[0] - requested),
+                key=transition_distance,
+                default=None,
+            )
+            nearest = min(
+                (
+                    candidate
+                    for candidate in candidates
+                    if candidate[1].get("boundaryTrustworthy")
+                    and transition_distance(candidate) <= 0.20 + 0.001
+                ),
+                key=transition_distance,
                 default=None,
             )
             if (
                 preserve_exact_reason is not None
                 or nearest is None
-                or abs(nearest[0] - requested) > 0.20 + 0.001
             ):
+                rejected = min(
+                    rejected_diagnostics,
+                    key=lambda item: abs(
+                        float(item.get("forcedCandidate") or requested) - requested
+                    ),
+                    default=None,
+                )
+                source_diagnostic = (
+                    closest_candidate[1]
+                    if closest_candidate is not None
+                    else rejected
+                )
                 endpoint_diagnostics.append(
                     {
+                        **copy.deepcopy(source_diagnostic or {}),
                         "entryType": "timeline",
                         "rangeKey": item.get("key"),
                         "endpoint": endpoint,
@@ -3698,14 +4324,27 @@ def align_cut_draft_timeline_ranges_to_audio(
                         "requested": round(requested, 3),
                         "fallback": round(requested, 3),
                         "final": round(requested, 3),
-                        "alignmentSource": None,
-                        "alignmentRevision": None,
-                        "adjacentCharacters": None,
-                        "retainedSpeechHardLimit": None,
-                        "structureValid": False,
-                        "confidence": None,
-                        "pcmAdjustment": 0.0,
+                        "alignmentSource": (source_diagnostic or {}).get(
+                            "alignmentSource"
+                        ),
+                        "alignmentRevision": (source_diagnostic or {}).get(
+                            "alignmentRevision"
+                        ),
+                        "adjacentCharacters": (source_diagnostic or {}).get(
+                            "adjacentCharacters"
+                        ),
+                        "retainedSpeechHardLimit": (source_diagnostic or {}).get(
+                            "retainedSpeechHardLimit"
+                        ),
+                        "structureValid": bool(
+                            (source_diagnostic or {}).get("structureValid")
+                        ),
+                        "confidence": (source_diagnostic or {}).get("confidence"),
+                        "pcmAdjustment": float(
+                            (source_diagnostic or {}).get("pcmAdjustment") or 0.0
+                        ),
                         "fallbackReason": preserve_exact_reason
+                        or (source_diagnostic or {}).get("fallbackReason")
                         or "no_transition_within_snap_distance",
                     }
                 )
@@ -3764,7 +4403,7 @@ def resolve_cut_draft_acoustic_boundaries(
 ]:
     diagnostics: list[dict[str, Any]] = []
     forced_boundary_cache: dict[
-        tuple[int, int, bool, float],
+        tuple[Any, ...],
         tuple[float | None, dict[str, Any]],
     ] = {}
     relevant_ranges = [

@@ -1224,7 +1224,10 @@ def _forced_de_ni_alignment_cache() -> dict[str, object]:
         "segments": [
             {
                 "segmentIndex": 0,
-                "validation": {"valid": True},
+                "validation": {
+                    "valid": True,
+                    "coarseTokenMaxBoundaryDeviationSeconds": 2.4,
+                },
                 "characters": [
                     {"text": "觉", "start": 0.05, "end": 0.18},
                     {"text": "得", "start": 0.2, "end": 0.5},
@@ -1253,6 +1256,544 @@ def _de_ni_segments() -> list[dict[str, object]]:
     ]
 
 
+def _repeated_de_ni_segments() -> list[dict[str, object]]:
+    deleted_text = "你身边你身边人人都觉得"
+    retained_text = "你身边人人都觉得一个月赚一万"
+    return [
+        {
+            "start": 33.16,
+            "end": 47.12,
+            "text": deleted_text + retained_text,
+            "words": [
+                {"text": deleted_text, "start": 33.16, "end": 37.12},
+                {"text": retained_text, "start": 37.12, "end": 47.12},
+            ],
+            "asrWords": [
+                {"text": deleted_text, "start": 33.16, "end": 37.12},
+                {"text": retained_text, "start": 37.12, "end": 47.12},
+            ],
+        }
+    ]
+
+
+def _repeated_de_ni_alignment_cache() -> dict[str, object]:
+    text = "你身边你身边人人都觉得你身边人人都觉得一个月赚一万"
+    characters: list[dict[str, object]] = []
+    for index, character in enumerate(text):
+        if index < 10:
+            start = 33.20 + index * 0.435
+            end = start + 0.40
+        elif index == 10:
+            start, end = 37.55, 37.791
+        elif index == 11:
+            start, end = 39.85, 40.05
+        else:
+            start = 40.05 + (index - 12) * 0.30
+            end = start + 0.28
+        characters.append(
+            {"text": character, "start": round(start, 3), "end": round(end, 3)}
+        )
+    return {
+        "segments": [
+            {
+                "segmentIndex": 0,
+                "validation": {
+                    "valid": True,
+                    "coarseTokenMaxBoundaryDeviationSeconds": 2.4,
+                },
+                "characters": characters,
+            }
+        ]
+    }
+
+
+def _repeated_de_ni_gap_samples(gain: int = 1) -> array:
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    samples = array("h", [4_000 * gain]) * round(47.5 * sample_rate)
+    quiet_start = round(37.70 * sample_rate)
+    quiet_end = round(39.85 * sample_rate)
+    samples[quiet_start:quiet_end] = array("h", [20 * gain]) * (
+        quiet_end - quiet_start
+    )
+    return samples
+
+
+def _cross_segment_segments(
+    *,
+    deleted_end: float = 0.4,
+    retained_start: float = 0.8,
+    deleted_text: str = "删",
+    retained_text: str = "留",
+) -> list[dict[str, object]]:
+    return [
+        {
+            "start": 0.0,
+            "end": deleted_end,
+            "text": deleted_text,
+            "words": [{"text": deleted_text, "start": 0.0, "end": deleted_end}],
+            "asrWords": [{"text": deleted_text, "start": 0.0, "end": deleted_end}],
+        },
+        {
+            "start": retained_start,
+            "end": 1.2,
+            "text": retained_text,
+            "words": [
+                {"text": retained_text, "start": retained_start, "end": 1.2}
+            ],
+            "asrWords": [
+                {"text": retained_text, "start": retained_start, "end": 1.2}
+            ],
+        },
+    ]
+
+
+def _cross_segment_alignment_cache(
+    *,
+    deleted_end: float = 0.68,
+    retained_start: float = 0.74,
+    deleted_text: str = "删",
+    retained_text: str = "留",
+) -> dict[str, object]:
+    return {
+        "segments": [
+            {
+                "segmentIndex": 0,
+                "validation": {"valid": True},
+                "characters": [
+                    {"text": deleted_text, "start": 0.05, "end": deleted_end}
+                ],
+            },
+            {
+                "segmentIndex": 1,
+                "validation": {"valid": True},
+                "characters": [
+                    {"text": retained_text, "start": retained_start, "end": 1.1}
+                ],
+            },
+        ]
+    }
+
+
+def _cross_segment_delayed_tail_samples() -> array:
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    samples = array("h", [4_000]) * round(1.2 * sample_rate)
+    for start, end, amplitude in (
+        (0.32, 0.43, 100),
+        (0.43, 0.58, 3_000),
+        (0.58, 0.65, 100),
+    ):
+        start_index = round(start * sample_rate)
+        end_index = round(end * sample_rate)
+        samples[start_index:end_index] = array("h", [amplitude]) * (
+            end_index - start_index
+        )
+    return samples
+
+
+def _cross_segment_early_head_samples() -> array:
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    samples = array("h", [4_000]) * round(1.2 * sample_rate)
+    valley_start = round(0.55 * sample_rate)
+    valley_end = round(0.63 * sample_rate)
+    samples[valley_start:valley_end] = array("h", [100]) * (
+        valley_end - valley_start
+    )
+    return samples
+
+
+def test_full_segment_delete_uses_adjacent_segment_forced_boundary():
+    diagnostics: list[dict[str, object]] = []
+    aligned = app_module.align_cut_draft_text_ranges_to_audio(
+        Path("unused.mp4"),
+        [
+            {
+                "key": "whole-first-segment",
+                "start": 0.0,
+                "end": 0.4,
+                "originalStart": 0.0,
+                "originalEnd": 0.4,
+            }
+        ],
+        _cross_segment_segments(),
+        1.2,
+        alignment_cache=_cross_segment_alignment_cache(),
+        samples=array("h", [3_000])
+        * round(1.2 * app_module.CUT_BOUNDARY_SAMPLE_RATE),
+        diagnostics=diagnostics,
+    )[0]
+
+    assert aligned["end"] == 0.68
+    assert aligned["originalEnd"] == 0.4
+    diagnostic = diagnostics[0]
+    assert diagnostic["transitionScope"] == "cross_segment"
+    assert diagnostic["structureValid"] is True
+    assert diagnostic["boundaryTrustworthy"] is True
+    assert diagnostic["trustReason"] == "forced_transition"
+    assert diagnostic["retainedSpeechHardLimit"] == 0.74
+    assert aligned["end"] < diagnostic["retainedSpeechHardLimit"]
+
+
+def test_cross_segment_same_character_trusts_non_overlapping_forced_boundary():
+    diagnostics: list[dict[str, object]] = []
+    aligned = app_module.align_cut_draft_text_ranges_to_audio(
+        Path("unused.mp4"),
+        [
+            {
+                "key": "whole-first-segment-same-character",
+                "start": 0.0,
+                "end": 0.4,
+                "originalStart": 0.0,
+                "originalEnd": 0.4,
+            }
+        ],
+        _cross_segment_segments(deleted_text="啊", retained_text="啊"),
+        1.2,
+        alignment_cache=_cross_segment_alignment_cache(
+            deleted_text="啊",
+            retained_text="啊",
+        ),
+        samples=array("h", [3_000])
+        * round(1.2 * app_module.CUT_BOUNDARY_SAMPLE_RATE),
+        diagnostics=diagnostics,
+    )[0]
+
+    assert aligned["end"] == 0.68
+    diagnostic = diagnostics[0]
+    assert diagnostic["transitionScope"] == "cross_segment"
+    assert diagnostic["repeatAmbiguous"] is False
+    assert diagnostic["repeatOverlapText"] == ""
+    assert diagnostic["boundaryTrustworthy"] is True
+    assert diagnostic["trustReason"] == "forced_transition"
+
+
+def test_full_segment_delete_start_uses_adjacent_segment_forced_boundary():
+    diagnostics: list[dict[str, object]] = []
+    aligned = app_module.align_cut_draft_text_ranges_to_audio(
+        Path("unused.mp4"),
+        [
+            {
+                "key": "whole-second-segment",
+                "start": 0.8,
+                "end": 1.2,
+                "originalStart": 0.8,
+                "originalEnd": 1.2,
+            }
+        ],
+        _cross_segment_segments(),
+        1.2,
+        alignment_cache=_cross_segment_alignment_cache(),
+        samples=array("h", [3_000])
+        * round(1.2 * app_module.CUT_BOUNDARY_SAMPLE_RATE),
+        diagnostics=diagnostics,
+    )[0]
+
+    assert aligned["start"] == 0.74
+    assert aligned["originalStart"] == 0.8
+    diagnostic = diagnostics[0]
+    assert diagnostic["direction"] == "delete_start"
+    assert diagnostic["transitionScope"] == "cross_segment"
+    assert diagnostic["boundaryTrustworthy"] is True
+    assert diagnostic["trustReason"] == "forced_transition"
+    assert diagnostic["retainedSpeechHardLimit"] == 0.68
+    assert aligned["start"] > diagnostic["retainedSpeechHardLimit"]
+
+
+def test_full_segment_delete_uses_cross_segment_sustained_pcm_valley():
+    diagnostics: list[dict[str, object]] = []
+    aligned = app_module.align_cut_draft_text_ranges_to_audio(
+        Path("unused.mp4"),
+        [
+            {
+                "key": "whole-first-segment-waveform",
+                "start": 0.0,
+                "end": 0.4,
+                "originalStart": 0.0,
+                "originalEnd": 0.4,
+            }
+        ],
+        _cross_segment_segments(),
+        1.2,
+        alignment_cache=None,
+        samples=_cross_segment_delayed_tail_samples(),
+        diagnostics=diagnostics,
+    )[0]
+
+    assert 0.58 <= aligned["end"] <= 0.65
+    assert aligned["originalEnd"] == 0.4
+    diagnostic = diagnostics[0]
+    assert diagnostic["transitionScope"] == "cross_segment"
+    assert diagnostic["structureValid"] is False
+    assert diagnostic["boundaryTrustworthy"] is True
+    assert diagnostic["trustReason"] == "cross_segment_pcm_valley"
+    assert diagnostic["pcmCorroborated"] is True
+    assert aligned["end"] < diagnostic["retainedSpeechHardLimit"]
+
+
+def test_timeline_full_segment_delete_uses_cross_segment_pcm_without_forced():
+    diagnostics: list[dict[str, object]] = []
+    aligned = app_module.align_cut_draft_timeline_ranges_to_audio(
+        [
+            {
+                "key": "timeline-whole-first-segment-waveform",
+                "start": 0.0,
+                "end": 0.42,
+                "originalStart": 0.0,
+                "originalEnd": 0.42,
+            }
+        ],
+        _cross_segment_segments(),
+        1.2,
+        alignment_cache=None,
+        samples=_cross_segment_delayed_tail_samples(),
+        diagnostics=diagnostics,
+    )[0]
+
+    assert 0.58 <= aligned["end"] <= 0.65
+    assert aligned["originalEnd"] == 0.42
+    end_diagnostic = next(
+        item for item in diagnostics if item.get("endpoint") == "end"
+    )
+    assert end_diagnostic["transitionScope"] == "cross_segment"
+    assert end_diagnostic["boundaryTrustworthy"] is True
+    assert end_diagnostic["trustReason"] == "cross_segment_pcm_valley"
+
+
+def test_full_segment_delete_start_pcm_is_shared_by_text_and_timeline():
+    samples = _cross_segment_early_head_samples()
+    text_diagnostics: list[dict[str, object]] = []
+    aligned_text = app_module.align_cut_draft_text_ranges_to_audio(
+        Path("unused.mp4"),
+        [
+            {
+                "key": "whole-second-segment-waveform",
+                "start": 0.8,
+                "end": 1.2,
+                "originalStart": 0.8,
+                "originalEnd": 1.2,
+            }
+        ],
+        _cross_segment_segments(),
+        1.2,
+        alignment_cache=None,
+        samples=samples,
+        diagnostics=text_diagnostics,
+    )[0]
+    timeline_diagnostics: list[dict[str, object]] = []
+    aligned_timeline = app_module.align_cut_draft_timeline_ranges_to_audio(
+        [
+            {
+                "key": "timeline-whole-second-segment-waveform",
+                "start": 0.78,
+                "end": 1.2,
+                "originalStart": 0.78,
+                "originalEnd": 1.2,
+            }
+        ],
+        _cross_segment_segments(),
+        1.2,
+        alignment_cache=None,
+        samples=samples,
+        diagnostics=timeline_diagnostics,
+    )[0]
+
+    assert 0.55 <= aligned_text["start"] <= 0.63
+    assert aligned_text["originalStart"] == 0.8
+    assert aligned_timeline["start"] == aligned_text["start"]
+    assert aligned_timeline["originalStart"] == 0.78
+    text_start = next(
+        item for item in text_diagnostics if item.get("direction") == "delete_start"
+    )
+    timeline_start = next(
+        item for item in timeline_diagnostics if item.get("endpoint") == "start"
+    )
+    for diagnostic in (text_start, timeline_start):
+        assert diagnostic["transitionScope"] == "cross_segment"
+        assert diagnostic["boundaryTrustworthy"] is True
+        assert diagnostic["trustReason"] == "cross_segment_pcm_valley"
+        assert diagnostic["pcmCorroborated"] is True
+        assert aligned_text["start"] > diagnostic["retainedSpeechHardLimit"]
+
+
+def test_timeline_range_inside_unaligned_cross_segment_gap_stays_exact():
+    diagnostics: list[dict[str, object]] = []
+    aligned = app_module.align_cut_draft_timeline_ranges_to_audio(
+        [
+            {
+                "key": "timeline-cross-segment-gap",
+                "start": 0.5,
+                "end": 0.7,
+                "originalStart": 0.5,
+                "originalEnd": 0.7,
+            }
+        ],
+        _cross_segment_segments(),
+        1.2,
+        alignment_cache=None,
+        samples=_cross_segment_delayed_tail_samples(),
+        diagnostics=diagnostics,
+    )[0]
+
+    assert aligned["start"] == aligned["originalStart"] == 0.5
+    assert aligned["end"] == aligned["originalEnd"] == 0.7
+    assert {item["fallbackReason"] for item in diagnostics} == {
+        "non_speech_range_exact"
+    }
+
+
+def test_full_segment_delete_without_cross_segment_valley_stays_semantic():
+    diagnostics: list[dict[str, object]] = []
+    aligned = app_module.align_cut_draft_text_ranges_to_audio(
+        Path("unused.mp4"),
+        [
+            {
+                "key": "whole-first-segment-no-valley",
+                "start": 0.0,
+                "end": 0.4,
+                "originalStart": 0.0,
+                "originalEnd": 0.4,
+            }
+        ],
+        _cross_segment_segments(),
+        1.2,
+        alignment_cache=None,
+        samples=array("h", [300])
+        * round(1.2 * app_module.CUT_BOUNDARY_SAMPLE_RATE),
+        diagnostics=diagnostics,
+    )[0]
+
+    assert aligned["end"] == aligned["originalEnd"] == 0.4
+    diagnostic = diagnostics[0]
+    assert diagnostic["transitionScope"] == "cross_segment"
+    assert diagnostic["boundaryTrustworthy"] is False
+    assert diagnostic["pcmCorroborated"] is False
+    assert diagnostic["fallbackReason"] == "cross_segment_pcm_not_corroborated"
+
+
+def test_full_segment_delete_does_not_cross_immediate_retained_speech():
+    diagnostics: list[dict[str, object]] = []
+    aligned = app_module.align_cut_draft_text_ranges_to_audio(
+        Path("unused.mp4"),
+        [
+            {
+                "key": "whole-first-segment-overlap",
+                "start": 0.0,
+                "end": 0.4,
+                "originalStart": 0.0,
+                "originalEnd": 0.4,
+            }
+        ],
+        _cross_segment_segments(retained_start=0.42),
+        1.2,
+        alignment_cache=_cross_segment_alignment_cache(
+            deleted_end=0.58,
+            retained_start=0.44,
+        ),
+        samples=array("h", [4_000])
+        * round(1.2 * app_module.CUT_BOUNDARY_SAMPLE_RATE),
+        diagnostics=diagnostics,
+    )[0]
+
+    assert aligned["end"] == aligned["originalEnd"] == 0.4
+    assert aligned["end"] <= 0.44
+    diagnostic = diagnostics[0]
+    assert diagnostic["transitionScope"] == "cross_segment"
+    assert diagnostic["boundaryTrustworthy"] is False
+    assert diagnostic["forcedFallbackReason"] == "alignment_transition_overlap"
+    assert diagnostic["fallbackReason"] == "cross_segment_pcm_not_corroborated"
+
+
+def test_timeline_cross_segment_snap_uses_trusted_transition_not_final_distance():
+    segments = _cross_segment_segments(deleted_end=0.6, retained_start=0.9)
+    alignment_cache = _cross_segment_alignment_cache(
+        deleted_end=0.85,
+        retained_start=0.9,
+    )
+    samples = array("h", [3_000]) * round(
+        1.2 * app_module.CUT_BOUNDARY_SAMPLE_RATE
+    )
+
+    near_diagnostics: list[dict[str, object]] = []
+    near = app_module.align_cut_draft_timeline_ranges_to_audio(
+        [
+            {
+                "key": "near-semantic-transition",
+                "start": 0.0,
+                "end": 0.42,
+                "originalStart": 0.0,
+                "originalEnd": 0.42,
+            }
+        ],
+        segments,
+        1.2,
+        alignment_cache=alignment_cache,
+        samples=samples,
+        diagnostics=near_diagnostics,
+    )[0]
+    far_diagnostics: list[dict[str, object]] = []
+    far = app_module.align_cut_draft_timeline_ranges_to_audio(
+        [
+            {
+                "key": "far-from-semantic-transition",
+                "start": 0.0,
+                "end": 0.31,
+                "originalStart": 0.0,
+                "originalEnd": 0.31,
+            }
+        ],
+        segments,
+        1.2,
+        alignment_cache=alignment_cache,
+        samples=samples,
+        diagnostics=far_diagnostics,
+    )[0]
+
+    assert near["end"] == 0.85
+    assert near["end"] - near["originalEnd"] > 0.20
+    assert far["end"] == far["originalEnd"] == 0.31
+    near_end = next(
+        item for item in near_diagnostics if item.get("endpoint") == "end"
+    )
+    far_end = next(item for item in far_diagnostics if item.get("endpoint") == "end")
+    assert near_end["boundaryTrustworthy"] is True
+    assert near_end["transitionScope"] == "cross_segment"
+    assert near_end["fallbackReason"] is None
+    assert far_end["fallbackReason"] == "no_transition_within_snap_distance"
+
+
+def test_timeline_does_not_snap_when_only_physical_final_is_nearby():
+    diagnostics: list[dict[str, object]] = []
+    aligned = app_module.align_cut_draft_timeline_ranges_to_audio(
+        [
+            {
+                "key": "near-physical-far-semantic",
+                "start": 0.0,
+                "end": 0.82,
+                "originalStart": 0.0,
+                "originalEnd": 0.82,
+            }
+        ],
+        _cross_segment_segments(deleted_end=0.6, retained_start=0.9),
+        1.2,
+        alignment_cache=_cross_segment_alignment_cache(
+            deleted_end=0.85,
+            retained_start=0.9,
+        ),
+        samples=array("h", [3_000])
+        * round(1.2 * app_module.CUT_BOUNDARY_SAMPLE_RATE),
+        diagnostics=diagnostics,
+    )[0]
+
+    assert aligned["end"] == aligned["originalEnd"] == 0.82
+    end_diagnostic = next(
+        item for item in diagnostics if item.get("endpoint") == "end"
+    )
+    assert end_diagnostic["boundaryTrustworthy"] is True
+    assert end_diagnostic["forcedCandidate"] == 0.85
+    assert end_diagnostic["fallback"] == 0.82
+    assert end_diagnostic["final"] == 0.82
+    assert end_diagnostic["fallbackReason"] == "no_transition_within_snap_distance"
+
+
 def test_forced_alignment_uses_deleted_tail_without_consuming_quiet_gap():
     samples = array("h", [4_000]) * app_module.CUT_BOUNDARY_SAMPLE_RATE
     diagnostics: list[dict[str, object]] = []
@@ -1278,7 +1819,457 @@ def test_forced_alignment_uses_deleted_tail_without_consuming_quiet_gap():
     assert aligned["end"] < 0.8
     assert diagnostics[0]["alignmentSource"] == "funasr-fa-zh"
     assert diagnostics[0]["retainedSpeechHardLimit"] == 0.8
+    assert diagnostics[0]["boundaryTrustworthy"] is True
+    assert diagnostics[0]["repeatAmbiguous"] is False
+    assert diagnostics[0]["coarseTokenMaxBoundaryDeviationSeconds"] == 2.4
     assert diagnostics[0]["fallbackReason"] is None
+
+
+def test_repeated_de_ni_forced_gap_is_trusted_by_text_and_timeline():
+    resolved_boundaries: list[float] = []
+    for gain in (1, 2, 4):
+        diagnostics: list[dict[str, object]] = []
+        forced_boundary_cache = {}
+        samples = _repeated_de_ni_gap_samples(gain)
+        text_range = {
+            "key": "real-repeat-de-ni-text",
+            "start": 33.16,
+            "end": 37.12,
+            "originalStart": 33.16,
+            "originalEnd": 37.12,
+        }
+        timeline_range = {
+            **text_range,
+            "key": "real-repeat-de-ni-timeline",
+        }
+
+        aligned_text = app_module.align_cut_draft_text_ranges_to_audio(
+            Path("unused.mp4"),
+            [text_range],
+            _repeated_de_ni_segments(),
+            47.5,
+            alignment_cache=_repeated_de_ni_alignment_cache(),
+            samples=samples,
+            diagnostics=diagnostics,
+            forced_boundary_cache=forced_boundary_cache,
+        )[0]
+        aligned_timeline = app_module.align_cut_draft_timeline_ranges_to_audio(
+            [timeline_range],
+            _repeated_de_ni_segments(),
+            47.5,
+            alignment_cache=_repeated_de_ni_alignment_cache(),
+            samples=samples,
+            diagnostics=diagnostics,
+            forced_boundary_cache=forced_boundary_cache,
+        )[0]
+
+        resolved_boundaries.append(aligned_text["end"])
+        assert aligned_text["end"] == pytest.approx(37.791, abs=0.001)
+        assert aligned_timeline["end"] == aligned_text["end"]
+        assert aligned_text["originalEnd"] == 37.12
+        assert aligned_timeline["originalEnd"] == 37.12
+        diagnostic = diagnostics[0]
+        assert diagnostic["structureValid"] is True
+        assert diagnostic["repeatAmbiguous"] is True
+        assert diagnostic["repeatOverlapText"] == "你身边人人都觉得"
+        assert diagnostic["forcedCandidate"] == 37.791
+        assert diagnostic["retainedSpeechHardLimit"] == 39.85
+        assert diagnostic["boundaryTrustworthy"] is True
+        assert diagnostic["trustReason"] == "forced_pcm_gap"
+        assert diagnostic["pcmCorroborated"] is False
+        assert diagnostic["pcmGapCorroborated"] is True
+        assert diagnostic["pcmGapStart"] == 37.791
+        assert diagnostic["pcmGapEnd"] == 39.85
+        timeline_diagnostic = next(
+            item
+            for item in diagnostics
+            if item.get("entryType") == "timeline" and item.get("endpoint") == "end"
+        )
+        assert timeline_diagnostic["trustReason"] == "forced_pcm_gap"
+        assert timeline_diagnostic["retainedSpeechHardLimit"] == 39.85
+
+    assert max(resolved_boundaries) - min(resolved_boundaries) <= 0.001
+
+
+def test_forced_quiet_gap_pcm_evidence_is_symmetric_and_gain_independent():
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    for gain in (1, 3):
+        samples = array("h", [4_000 * gain]) * (sample_rate * 3)
+        quiet_start = round(0.8 * sample_rate)
+        quiet_end = round(2.2 * sample_rate)
+        samples[quiet_start:quiet_end] = array("h", [20 * gain]) * (
+            quiet_end - quiet_start
+        )
+
+        delete_end, end_evidence = (
+            app_module.corroborate_forced_transition_quiet_gap(
+                0.3,
+                0.8,
+                2.2,
+                samples,
+                sample_rate,
+                deletion_on_left=True,
+            )
+        )
+        delete_start, start_evidence = (
+            app_module.corroborate_forced_transition_quiet_gap(
+                2.7,
+                2.2,
+                0.8,
+                samples,
+                sample_rate,
+                deletion_on_left=False,
+            )
+        )
+
+        assert delete_end == 0.8
+        assert delete_start == 2.2
+        assert end_evidence["pcmGapCorroborated"] is True
+        assert start_evidence["pcmGapCorroborated"] is True
+        assert end_evidence["pcmGapStart"] == start_evidence["pcmGapStart"] == 0.8
+        assert end_evidence["pcmGapEnd"] == start_evidence["pcmGapEnd"] == 2.2
+
+    uniform = array("h", [300]) * (sample_rate * 3)
+    rejected, evidence = app_module.corroborate_forced_transition_quiet_gap(
+        0.3,
+        0.8,
+        2.2,
+        uniform,
+        sample_rate,
+        deletion_on_left=True,
+    )
+    assert rejected is None
+    assert evidence["pcmGapCorroborated"] is False
+
+
+def _ambiguous_repeat_segments() -> list[dict[str, object]]:
+    return [
+        {
+            "start": 0.0,
+            "end": 2.0,
+            "text": "所以说啊所以说啊",
+            "words": [
+                {"text": "所以说啊", "start": 0.0, "end": 0.4},
+                {"text": "所以说啊", "start": 0.4, "end": 0.8},
+            ],
+            "asrWords": [
+                {"text": "所以说啊", "start": 0.0, "end": 0.4},
+                {"text": "所以说啊", "start": 0.4, "end": 0.8},
+            ],
+        }
+    ]
+
+
+def _ambiguous_repeat_alignment_cache() -> dict[str, object]:
+    return {
+        "segments": [
+            {
+                "segmentIndex": 0,
+                "validation": {
+                    "valid": True,
+                    "coarseTokenMaxBoundaryDeviationSeconds": 0.9,
+                },
+                "characters": [
+                    {"text": "所", "start": 0.05, "end": 0.12},
+                    {"text": "以", "start": 0.12, "end": 0.20},
+                    {"text": "说", "start": 0.20, "end": 0.30},
+                    {"text": "啊", "start": 1.05, "end": 1.30},
+                    {"text": "所", "start": 1.30, "end": 1.38},
+                    {"text": "以", "start": 1.38, "end": 1.46},
+                    {"text": "说", "start": 1.46, "end": 1.58},
+                    {"text": "啊", "start": 1.58, "end": 1.72},
+                ],
+            }
+        ]
+    }
+
+
+def _ambiguous_repeat_samples(gain: int = 1) -> array:
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    samples = array("h", [3_000 * gain]) * (sample_rate * 2)
+    valley_start = round(1.08 * sample_rate)
+    valley_end = round(1.16 * sample_rate)
+    samples[valley_start:valley_end] = array("h", [20 * gain]) * (
+        valley_end - valley_start
+    )
+    return samples
+
+
+@pytest.mark.parametrize(
+    ("left_text", "right_text", "expected_overlap"),
+    [
+        ("所以说啊", "所以说啊", "所以说啊"),
+        ("前面所以", "所以后面", "所以"),
+        ("啊", "啊", "啊"),
+        ("删除", "保留", ""),
+    ],
+)
+def test_repeat_transition_detection_uses_adjacent_semantic_runs(
+    left_text: str,
+    right_text: str,
+    expected_overlap: str,
+):
+    characters = [*left_text, *right_text]
+    units = [
+        {
+            "text": character,
+            "_segmentIndex": 0,
+            "_characterIndex": index,
+        }
+        for index, character in enumerate(characters)
+    ]
+    deleted = [True] * len(left_text) + [False] * len(right_text)
+
+    context = app_module.build_acoustic_transition_context(
+        units,
+        deleted,
+        len(left_text) - 1,
+    )
+
+    assert context["repeatAmbiguous"] is bool(expected_overlap)
+    assert context["repeatOverlapText"] == expected_overlap
+    assert context["repeatOverlapLength"] == len(expected_overlap)
+
+
+def test_ambiguous_repeat_transition_requires_pcm_and_is_shared_by_timeline():
+    text_boundaries: list[float] = []
+    for gain in (1, 2, 4):
+        diagnostics: list[dict[str, object]] = []
+        forced_boundary_cache = {}
+        aligned_text = app_module.align_cut_draft_text_ranges_to_audio(
+            Path("unused.mp4"),
+            [
+                {
+                    "key": "first-repeat",
+                    "start": 0.0,
+                    "end": 0.4,
+                    "originalStart": 0.0,
+                    "originalEnd": 0.4,
+                }
+            ],
+            _ambiguous_repeat_segments(),
+            2.0,
+            alignment_cache=_ambiguous_repeat_alignment_cache(),
+            samples=_ambiguous_repeat_samples(gain),
+            diagnostics=diagnostics,
+            forced_boundary_cache=forced_boundary_cache,
+        )[0]
+        aligned_timeline = app_module.align_cut_draft_timeline_ranges_to_audio(
+            [
+                {
+                    "key": "manual-first-repeat",
+                    "start": 0.0,
+                    "end": 0.4,
+                    "originalStart": 0.0,
+                    "originalEnd": 0.4,
+                }
+            ],
+            _ambiguous_repeat_segments(),
+            2.0,
+            alignment_cache=_ambiguous_repeat_alignment_cache(),
+            samples=_ambiguous_repeat_samples(gain),
+            diagnostics=diagnostics,
+            forced_boundary_cache=forced_boundary_cache,
+        )[0]
+
+        text_boundaries.append(aligned_text["end"])
+        assert 1.08 <= aligned_text["end"] <= 1.18
+        assert aligned_timeline["end"] == aligned_text["end"]
+        assert aligned_text["originalEnd"] == 0.4
+        assert aligned_timeline["originalEnd"] == 0.4
+        diagnostic = diagnostics[0]
+        assert diagnostic["structureValid"] is True
+        assert diagnostic["boundaryTrustworthy"] is True
+        assert diagnostic["trustReason"] == "forced_pcm_valley"
+        assert diagnostic["repeatAmbiguous"] is True
+        assert diagnostic["repeatOverlapText"] == "所以说啊"
+        assert diagnostic["repeatOverlapLength"] == 4
+        assert diagnostic["forcedCandidate"] == 1.3
+        assert diagnostic["pcmCorroborated"] is True
+        assert diagnostic["pcmValleyStart"] < diagnostic["pcmValleyEnd"]
+        assert aligned_text["end"] < diagnostic["retainedSpeechHardLimit"]
+        assert aligned_timeline["end"] - aligned_timeline["originalEnd"] > 0.20
+        timeline_diagnostic = next(
+            item
+            for item in diagnostics
+            if item.get("entryType") == "timeline" and item.get("endpoint") == "end"
+        )
+        assert timeline_diagnostic["boundaryTrustworthy"] is True
+        assert timeline_diagnostic["repeatAmbiguous"] is True
+        assert timeline_diagnostic["pcmCorroborated"] is True
+        assert timeline_diagnostic["fallbackReason"] is None
+
+    assert max(text_boundaries) - min(text_boundaries) <= 0.001
+
+
+@pytest.mark.parametrize("failure", ["no_retained_speech", "overlap"])
+def test_forced_quiet_gap_rejects_unprotected_candidates(failure: str):
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    samples = array("h", [4_000]) * (sample_rate * 2)
+    retained_limit = 1.4
+    quiet_start = round(0.85 * sample_rate)
+    quiet_end = round(1.4 * sample_rate)
+    samples[quiet_start:quiet_end] = array("h", [20]) * (
+        quiet_end - quiet_start
+    )
+    if failure == "no_retained_speech":
+        samples[round(1.4 * sample_rate) :] = array("h", [20]) * (
+            len(samples) - round(1.4 * sample_rate)
+        )
+    if failure == "overlap":
+        retained_limit = 0.84
+
+    boundary, evidence = app_module.corroborate_forced_transition_quiet_gap(
+        0.6,
+        0.85,
+        retained_limit,
+        samples,
+        sample_rate,
+        deletion_on_left=True,
+    )
+
+    assert boundary is None
+    assert evidence["pcmGapCorroborated"] is False
+
+
+def test_repeat_pcm_corroboration_tracks_retained_speech_limit_on_both_sides():
+    samples = _ambiguous_repeat_samples()
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+
+    delete_end, end_evidence = app_module.corroborate_repeated_transition_with_pcm(
+        0.4,
+        1.3,
+        samples,
+        sample_rate,
+        deletion_on_left=True,
+    )
+    delete_start, start_evidence = (
+        app_module.corroborate_repeated_transition_with_pcm(
+            1.3,
+            0.4,
+            samples,
+            sample_rate,
+            deletion_on_left=False,
+        )
+    )
+
+    assert delete_end is not None
+    assert delete_start is not None
+    assert end_evidence["retainedSpeechHardLimit"] > delete_end
+    assert start_evidence["retainedSpeechHardLimit"] < delete_start
+
+
+@pytest.mark.parametrize(
+    ("fallback_amplitude", "valley_amplitude", "expected_corroborated"),
+    [(100, 105, False), (105, 100, True)],
+)
+def test_ambiguous_repeat_valley_must_not_exceed_semantic_fallback_energy(
+    fallback_amplitude: int,
+    valley_amplitude: int,
+    expected_corroborated: bool,
+):
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    samples = array("h", [3_000]) * (sample_rate * 2)
+    for start, end, amplitude in (
+        (0.30, 0.50, fallback_amplitude),
+        (1.04, 1.20, valley_amplitude),
+    ):
+        start_index = round(start * sample_rate)
+        end_index = round(end * sample_rate)
+        samples[start_index:end_index] = array("h", [amplitude]) * (
+            end_index - start_index
+        )
+
+    boundary, evidence = app_module.corroborate_repeated_transition_with_pcm(
+        0.4,
+        1.3,
+        samples,
+        sample_rate,
+        deletion_on_left=True,
+    )
+
+    assert (boundary is not None) is expected_corroborated
+    assert evidence["pcmCorroborated"] is expected_corroborated
+    if expected_corroborated:
+        assert evidence["retainedSpeechHardLimit"] > boundary
+    else:
+        assert evidence["retainedSpeechHardLimit"] is None
+
+
+@pytest.mark.parametrize("shape", ["uniform", "single_point", "monotonic"])
+def test_ambiguous_repeat_transition_without_sustained_valley_falls_back(shape: str):
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    if shape == "uniform":
+        samples = array("h", [300]) * (sample_rate * 2)
+    elif shape == "single_point":
+        samples = array("h", [3_000]) * (sample_rate * 2)
+        samples[round(1.12 * sample_rate)] = 0
+    else:
+        samples = array(
+            "h",
+            (
+                max(100, 4_000 - round(3_000 * index / (sample_rate * 2)))
+                for index in range(sample_rate * 2)
+            ),
+        )
+    diagnostics: list[dict[str, object]] = []
+
+    aligned = app_module.align_cut_draft_text_ranges_to_audio(
+        Path("unused.mp4"),
+        [
+            {
+                "key": f"repeat-{shape}",
+                "start": 0.0,
+                "end": 0.4,
+                "originalStart": 0.0,
+                "originalEnd": 0.4,
+            }
+        ],
+        _ambiguous_repeat_segments(),
+        2.0,
+        alignment_cache=_ambiguous_repeat_alignment_cache(),
+        samples=samples,
+        diagnostics=diagnostics,
+    )[0]
+
+    assert aligned["end"] == 0.4
+    diagnostic = diagnostics[0]
+    assert diagnostic["structureValid"] is True
+    assert diagnostic["boundaryTrustworthy"] is False
+    assert diagnostic["repeatAmbiguous"] is True
+    assert diagnostic["pcmCorroborated"] is False
+    assert diagnostic["fallbackReason"] == "repeat_pcm_not_corroborated"
+
+
+def test_timeline_repeat_transition_over_snap_limit_requires_pcm_trust():
+    diagnostics: list[dict[str, object]] = []
+    aligned = app_module.align_cut_draft_timeline_ranges_to_audio(
+        [
+            {
+                "key": "manual-untrusted-repeat",
+                "start": 0.0,
+                "end": 0.4,
+                "originalStart": 0.0,
+                "originalEnd": 0.4,
+            }
+        ],
+        _ambiguous_repeat_segments(),
+        2.0,
+        alignment_cache=_ambiguous_repeat_alignment_cache(),
+        samples=array("h", [300]) * (app_module.CUT_BOUNDARY_SAMPLE_RATE * 2),
+        diagnostics=diagnostics,
+    )[0]
+
+    assert aligned["end"] == aligned["originalEnd"] == 0.4
+    end_diagnostic = next(
+        item
+        for item in diagnostics
+        if item.get("entryType") == "timeline" and item.get("endpoint") == "end"
+    )
+    assert end_diagnostic["repeatAmbiguous"] is True
+    assert end_diagnostic["pcmCorroborated"] is False
+    assert end_diagnostic["boundaryTrustworthy"] is False
+    assert end_diagnostic["fallbackReason"] == "repeat_pcm_not_corroborated"
 
 
 def test_timeline_range_near_speech_snaps_but_preserves_original_semantics():
