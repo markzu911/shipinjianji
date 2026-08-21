@@ -1,0 +1,4 @@
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"约束 tab/listbox 键盘语义、焦点状态、44px 目标和 375px 无横向溢出"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"提供唯一运行时、工具切换、模板应用、整轨入口、媒体 identity 和真实浏览器验收契约"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"约束 ArtTool 只能通过唯一 Store、公共预览、时间轴和 compose 数据流工作"}
+{"file":".trellis/tasks/08-21-split-art-selection-template-dropdown/research/current-art-selection-ui.md","reason":"提供当前 DOM、render/event 生命周期、测试锚点、已确认产品决策与旧契约冲突"}

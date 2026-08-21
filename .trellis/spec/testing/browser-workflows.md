@@ -85,6 +85,8 @@ window.EditorProjectStore.selectEditorFrame(snapshot) -> frame
 - `/art-text`、`/picture-in-picture` 保留有效 query、覆盖冲突 `tool`、删除 `embedded`；同名 `/api/transcriptions/...` 业务路由绝不重定向。
 - 旧 `art-text.html/js`、`picture-in-picture.html/js` 必须物理缺失；内部链接直接进入顶层 URL，不先命中 307。
 - 模板 query 由 EditorSuite 结构化解析并注入 ArtTool；ArtTool 等 font/template catalog 完成后只消费一次。
+- ArtTool 固定包含“选择艺术字 / 艺术字设置 / AI 推荐”三个同级 tab。选择页拥有实例/整轨列表、自定义文字新增和视频文案一键添加；设置页只拥有当前 selection 的详情、空状态、模板及参数字段。无 selection 激活时进入选择页，已有 selection 时进入设置页；新增/选择/AI 确认进入设置页，只有艺术字 selection 从有变无时自动返回选择页。
+- 模板控件使用 trigger + listbox，只显示模板名称和真实样式样例，不渲染说明。鼠标、外部点击及 Enter/Space/方向键/Home/End/Escape/Tab 都必须保持可预测的展开、选中、关闭和焦点状态；关闭后 option 不可聚焦。
 - manual selection 只更新目标；transcript selection 按 `trackId` 一次更新全轨；无 selection 保存为后续 manual/全文轨道首选。
 - ArtTool 中同 `trackId` 的 transcript cues 只显示一个带段数和整轨范围的“视频文案艺术字”入口，manual overlays 逐项显示。入口仍选择 `art:<cueId>`：优先当前同轨 cue，其次当前播放时间命中的 cue，最后最早 cue；render 和播放推进不能改写已有 selection。
 - transcript 入口只显示共享样式/坐标控件，隐藏文字、方向、分行、时间、匹配时间和 manual 批量按钮。共享样式交互最多增加一个 revision，并精确保留 cue ID、文字、编辑/源时间、`characterTimings` 和 `timingRevision`；删除入口移除同轨全部 cues。
@@ -101,7 +103,7 @@ window.EditorProjectStore.selectEditorFrame(snapshot) -> frame
 - 文字保存与三工具切换保持 document/video/tool root identity，基础媒体 probe 的 `srcWrites/loadCalls` 都为 0。
 - pointercancel 无 revision，pointerup 单 revision；undo/redo、preview/timeline/compose revision 保持一致。
 - 公共文案轨只出现一次，效果层没有 `data-effect-kind="cut"`，但 Store frame 仍包含 `cut/art/pip`；art/pip clip 继续可选择和调整。
-- 艺术字顶层只保留“艺术字设置”和“AI 推荐”两个 tab，桌面保持单行；设置面板只提供“一键添加视频文案”，不重复文案编辑、保存、分段列表或选段添加。tab 与 panel 必须通过 `id`、`aria-controls`、`aria-labelledby` 双向关联，方向键/Home/End 可在两个 tab 间切换，隐藏 panel 不可聚焦；切换后仅重置 ArtTool 自身滚动，无 selection 时隐藏设置矩阵。画中画重绘只调整文案列表 `scrollTop`，选中项可见且外层 inspector 不移动。
+- 艺术字三个 tab 在桌面保持单行；tab 与 panel 通过 `id`、`aria-controls`、`aria-labelledby` 双向关联，方向键/Home/End 可循环切换，隐藏 panel 不可聚焦，切换仅重置 ArtTool 自身滚动。选择页完整覆盖新增、普通实例和文案整轨入口及自动进入设置；设置页覆盖空状态和 selection 从有变无的返回规则。模板 listbox 覆盖鼠标、外部点击、Enter/Space、方向键、Home/End、Escape、Tab、键盘确认、单 revision 和 375px 无溢出。画中画重绘只调整文案列表 `scrollTop`，选中项可见且外层 inspector 不移动。
 - AI 建议请求携带实时剪后草稿，确认后的 overlay 同时具有 edited range 和 source anchors；重复短语命中离当前 overlay 最近的字符级范围。
 
 ### 5. Wrong vs Correct

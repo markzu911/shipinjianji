@@ -1,0 +1,5 @@
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"核对三 tab 与模板 listbox 的 ARIA、键盘、焦点、响应式和交互尺寸"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"核对 document/video/Store/preview/timeline identity、hidden panel、iframe、模板 handoff 和完整浏览器回归"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"审计 ArtTool 到 Store、公共预览、时间轴和 compose 的端到端一致性"}
+{"file":".trellis/spec/testing/index.md","reason":"核对前端静态契约、真实浏览器、完整测试与外部服务隔离要求"}
+{"file":".trellis/tasks/08-21-split-art-selection-template-dropdown/research/current-art-selection-ui.md","reason":"对照当前行为证据和产品决策，检查控件迁移完整且旧测试未被弱化"}

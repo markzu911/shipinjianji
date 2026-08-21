@@ -81,6 +81,15 @@ composition.element.style.transform =
 - 撤销/重做记录语义操作，但文字剪辑检查器不提供“操作记录”页签、历史列表或可见的撤销/重做按钮。历史栈与本地持久化属于内部能力，只通过 `Ctrl/Cmd+Z`、`Ctrl/Cmd+Shift+Z` 和 `Ctrl/Cmd+Y` 访问。
 - 全局剪辑快捷键处理器必须忽略 `input`、`textarea`、`select` 和 `contenteditable` 目标，保留浏览器原生编辑撤销；快捷键执行后仍要刷新预览、时间轴、统计和草稿保存状态。
 
+### 艺术字选择、设置与模板下拉
+
+顶层 ArtTool 固定使用“选择艺术字 / 艺术字设置 / AI 推荐”三个同级 tab。“选择艺术字”只拥有实例/整轨列表、自定义文字新增和视频文案一键添加；“艺术字设置”只拥有当前 selection 的详情、空状态与参数字段，不能把选择控件重新放回设置页。
+
+- 无艺术字 selection 时激活工具默认进入选择页，已有 selection 时默认进入设置页；从选择页新增或选择成功、或确认 AI 建议后进入设置页。只有设置页中的艺术字 selection 确实从有变无时才自动返回选择页，无 selection 下主动查看空设置页不能被无关 Store revision 打断。
+- 模板使用 trigger + listbox，自始至终从当前 overlay 的 `artStyle` 派生选中值；触发器和 option 只显示模板名称及 `EditorArtRenderer.renderCharacters()` 样式样例，不渲染模板介绍。
+- 触发器支持 Enter/Space/ArrowUp/ArrowDown；option 支持方向键、Home/End、Enter/Space、Escape 和 Tab。关闭、切换 tab、selection 消失、deactivate 或 destroy 后 listbox 必须隐藏且所有 option `tabIndex=-1`；Escape 将焦点还给 trigger，Tab 保持自然焦点顺序。
+- 桌面三个 tab 保持单行；375px 下 trigger、option 和名称受父级宽度约束，样例不压缩，名称可换行且页面、ArtTool 都不得横向溢出。
+
 ### 公共效果时间轴艺术字分类单行
 
 公共效果时间轴中的逻辑轨和可视行语义必须一致。手动及 AI 确认的非 transcript 艺术字共用 `art:manual`，视频文案艺术字继续使用 `art:transcript:<trackId>`；每条艺术字逻辑轨固定占一条可视行，同轨 clip 重叠不得增加第二行。
