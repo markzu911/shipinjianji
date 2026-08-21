@@ -51,7 +51,7 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
 
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
-    assert "/app.js?v=20260821-01" in page_response.text
+    assert "/app.js?v=20260821-02" in page_response.text
     assert "/styles.css?v=20260820-01" in page_response.text
     assert "/transcript-follow-scroll.js?v=20260818-03" in page_response.text
     assert "/ui-feedback.js?v=20260807-03" in page_response.text
@@ -1597,6 +1597,115 @@ console.log(JSON.stringify({{
         "你身",
         "边",
     ]
+
+
+def test_frontend_removed_rows_use_monotonic_edited_timestamps():
+    app_source = (Path(__file__).resolve().parents[2] / "web" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    timing_start = app_source.index("function getLiveEditedSegmentTiming")
+    timing_end = app_source.index("function setSegmentStructureStatus", timing_start)
+    mapping_start = app_source.index("function sourceTimeToEditedTime")
+    mapping_end = app_source.index("function editedTimeToSourceTime", mapping_start)
+    source = "\n".join(
+        [
+            app_source[timing_start:timing_end],
+            app_source[mapping_start:mapping_end],
+        ]
+    )
+    script = f"""
+const source = {json.dumps(source)};
+const functions = new Function(`
+const spans = [
+  {{ sourceStart: 0, sourceEnd: 18, editedStart: 0, editedEnd: 18 }},
+  {{ sourceStart: 29, sourceEnd: 33, editedStart: 18, editedEnd: 22 }},
+  {{ sourceStart: 35, sourceEnd: 40, editedStart: 22, editedEnd: 27 }},
+];
+const clamp = (value, minimum, maximum) =>
+  Math.min(maximum, Math.max(minimum, value));
+const cutTimelineDuration = () => 40;
+const editedCutTimelineDuration = (items) => items.at(-1)?.editedEnd || 0;
+const formatTime = (seconds) => Number(seconds).toFixed(3);
+const formatPreciseTime = formatTime;
+const makeItem = (start, end) => {{
+  const time = {{
+    textContent: "",
+    attributes: {{}},
+    setAttribute(name, value) {{ this.attributes[name] = value; }},
+  }};
+  const classes = {{}};
+  return {{
+    dataset: {{ displayStart: String(start), displayEnd: String(end) }},
+    matches() {{ return true; }},
+    querySelector(selector) {{ return selector === ".segment-time" ? time : null; }},
+    classList: {{ toggle(name, value) {{ classes[name] = value; }} }},
+    classes,
+    time,
+  }};
+}};
+const items = [
+  makeItem(17, 18),
+  makeItem(28, 29),
+  makeItem(29, 33),
+  makeItem(33, 35),
+  makeItem(34, 35),
+  makeItem(35, 40),
+];
+const getEditedTimelineSpans = () => spans;
+const transcriptDisplayItems = () => items;
+const rebuildTranscriptPlaybackEntries = () => {{}};
+const updateActiveTranscriptSegment = () => {{}};
+${{source}}
+return {{
+  run() {{
+    updateCutSegmentTimestamps();
+    return items.map((item) => ({{
+      displayStart: Number(item.dataset.displayStart),
+      displayEnd: Number(item.dataset.displayEnd),
+      label: item.time.attributes["aria-label"],
+      removed: item.classes["is-removed-from-timeline"],
+      time: Number(item.time.textContent),
+    }}));
+  }},
+}};
+`)();
+console.log(JSON.stringify(functions.run()));
+"""
+
+    try:
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[2],
+            check=True,
+            capture_output=True,
+            encoding="utf-8",
+            timeout=20,
+        )
+    except FileNotFoundError:
+        pytest.skip("Node.js is required for the edited timestamp test.")
+    except subprocess.CalledProcessError as exc:
+        pytest.fail(exc.stderr)
+
+    payload = json.loads(result.stdout)
+    assert [
+        (item["displayStart"], item["displayEnd"])
+        for item in payload
+    ] == [(17, 18), (28, 29), (29, 33), (33, 35), (34, 35), (35, 40)]
+    assert [item["time"] for item in payload] == [17, 18, 18, 22, 22, 22]
+    assert [item["removed"] for item in payload] == [
+        False,
+        True,
+        False,
+        True,
+        True,
+        False,
+    ]
+    assert all(
+        left["time"] <= right["time"]
+        for left, right in zip(payload, payload[1:])
+    )
+    assert "剪辑后位于 18.000 删除点" in payload[1]["label"]
+    assert "原片从 28.000 到 29.000，已删除" in payload[1]["label"]
 
 
 def test_frontend_merged_selection_preserves_shared_physical_boundaries():

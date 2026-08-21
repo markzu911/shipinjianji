@@ -3118,6 +3118,200 @@ def corroborate_repeated_transition_with_pcm(
     )
 
 
+def corroborate_repeat_retained_limit_with_pcm(
+    fallback: float,
+    retained_limit: float | None,
+    samples: array,
+    sample_rate: int,
+    *,
+    deletion_on_left: bool,
+) -> tuple[float | None, dict[str, Any]]:
+    """Use a trusted retained forced edge to clear an ambiguous deleted tail."""
+    evidence: dict[str, Any] = {
+        "pcmCorroborated": False,
+        "pcmValleyStart": None,
+        "pcmValleyEnd": None,
+        "retainedSpeechHardLimit": None,
+    }
+    if not samples or sample_rate <= 0 or retained_limit is None:
+        return None, evidence
+    try:
+        fallback = float(fallback)
+        retained_limit = float(retained_limit)
+    except (TypeError, ValueError):
+        return None, evidence
+    media_end = len(samples) / sample_rate
+    if (
+        not math.isfinite(fallback)
+        or not math.isfinite(retained_limit)
+        or retained_limit < 0.0
+        or retained_limit > media_end
+        or (deletion_on_left and retained_limit <= fallback)
+        or (not deletion_on_left and retained_limit >= fallback)
+    ):
+        return None, evidence
+
+    step = max(1, round(CUT_BOUNDARY_STEP_SECONDS * sample_rate))
+    block = max(
+        1,
+        round(min(CUT_CHARACTER_BOUNDARY_WINDOWS_SECONDS) * sample_rate),
+    )
+    terminal_width = max(CUT_CHARACTER_BOUNDARY_WINDOWS_SECONDS)
+    corridor_start = min(fallback, retained_limit)
+    corridor_end = max(fallback, retained_limit)
+    if corridor_end - corridor_start < terminal_width:
+        return None, evidence
+
+    def interval_rms(start: int, end: int) -> float:
+        start = max(0, start)
+        end = min(len(samples), end)
+        if end <= start:
+            return float("inf")
+        energy = sum(int(sample) * int(sample) for sample in samples[start:end])
+        return math.sqrt(energy / (end - start))
+
+    def sample_positions(start: float, end: float) -> list[int]:
+        first = math.ceil(start * sample_rate / step) * step
+        last = math.floor(end * sample_rate / step) * step
+        if last < first:
+            return []
+        return list(range(first, last + 1, step))
+
+    if deletion_on_left:
+        corridor_positions = sample_positions(
+            corridor_start + block / sample_rate,
+            retained_limit,
+        )
+        corridor_curve = [
+            (position, interval_rms(position - block, position))
+            for position in corridor_positions
+        ]
+        terminal_floor = retained_limit - terminal_width
+        terminal_curve = [
+            item
+            for item in corridor_curve
+            if item[0] / sample_rate >= terminal_floor + block / sample_rate
+        ]
+        probe_end = min(media_end, retained_limit + CUT_END_SEARCH_AFTER_SECONDS)
+        retained_positions = sample_positions(
+            retained_limit,
+            probe_end - block / sample_rate,
+        )
+        retained_curve = [
+            (position, interval_rms(position, position + block))
+            for position in retained_positions
+        ]
+    else:
+        corridor_positions = sample_positions(
+            retained_limit,
+            corridor_end - block / sample_rate,
+        )
+        corridor_curve = [
+            (position, interval_rms(position, position + block))
+            for position in corridor_positions
+        ]
+        terminal_ceiling_time = retained_limit + terminal_width
+        terminal_curve = [
+            item
+            for item in corridor_curve
+            if item[0] / sample_rate <= terminal_ceiling_time - block / sample_rate
+        ]
+        probe_start = max(0.0, retained_limit - CUT_START_SEARCH_BEFORE_SECONDS)
+        retained_positions = sample_positions(
+            probe_start + block / sample_rate,
+            retained_limit,
+        )
+        retained_curve = [
+            (position, interval_rms(position - block, position))
+            for position in retained_positions
+        ]
+
+    terminal_values = [rms for _, rms in terminal_curve if math.isfinite(rms)]
+    retained_values = [rms for _, rms in retained_curve if math.isfinite(rms)]
+    if len(terminal_values) < 2 or len(retained_values) < 2:
+        return None, evidence
+    terminal_ceiling = max(terminal_values)
+    retained_peak = max(retained_values)
+    if (
+        not math.isfinite(terminal_ceiling)
+        or not math.isfinite(retained_peak)
+        or terminal_ceiling
+        >= retained_peak * CUT_TAIL_VALLEY_IMPROVEMENT**2
+    ):
+        return None, evidence
+
+    speech_threshold = max(
+        math.sqrt(max(0.0, terminal_ceiling) * retained_peak),
+        retained_peak * 0.10,
+    )
+    retained_run_start: int | None = None
+    retained_speech_is_sustained = False
+    for position, rms in retained_curve:
+        if rms < speech_threshold:
+            retained_run_start = None
+            continue
+        if retained_run_start is None:
+            retained_run_start = position
+        if position - retained_run_start >= block:
+            retained_speech_is_sustained = True
+            break
+    if not retained_speech_is_sustained:
+        return None, evidence
+    if any(rms >= speech_threshold for _, rms in terminal_curve):
+        return None, evidence
+
+    if deletion_on_left:
+        run_start = len(corridor_curve) - 1
+        while run_start > 0 and corridor_curve[run_start - 1][1] < speech_threshold:
+            run_start -= 1
+        valley_start = max(
+            corridor_start,
+            (corridor_curve[run_start][0] - block) / sample_rate,
+        )
+        valley_end = retained_limit
+    else:
+        run_end = 0
+        while (
+            run_end + 1 < len(corridor_curve)
+            and corridor_curve[run_end + 1][1] < speech_threshold
+        ):
+            run_end += 1
+        valley_start = retained_limit
+        valley_end = min(
+            corridor_end,
+            (corridor_curve[run_end][0] + block) / sample_rate,
+        )
+
+    boundary = snap_to_low_amplitude_sample(
+        samples,
+        sample_rate,
+        retained_limit,
+        valley_start,
+        valley_end,
+    )
+    boundary = validate_directional_boundary(
+        boundary,
+        fallback,
+        corridor_start,
+        corridor_end,
+        deletion_on_left=deletion_on_left,
+    )
+    if (
+        (deletion_on_left and boundary > retained_limit + 0.001)
+        or (not deletion_on_left and boundary < retained_limit - 0.001)
+    ):
+        return None, evidence
+    evidence.update(
+        {
+            "pcmCorroborated": True,
+            "pcmValleyStart": round(valley_start, 3),
+            "pcmValleyEnd": round(valley_end, 3),
+            "retainedSpeechHardLimit": round(retained_limit, 3),
+        }
+    )
+    return boundary, evidence
+
+
 def corroborate_forced_transition_quiet_gap(
     fallback: float,
     forced_candidate: float,
@@ -3713,12 +3907,48 @@ def forced_alignment_transition_boundary(
         (deletion_on_left and candidate < fallback - 0.001)
         or (not deletion_on_left and candidate > fallback + 0.001)
     ):
+        diagnostic["forcedFallbackReason"] = "alignment_wrong_direction"
         diagnostic["fallbackReason"] = "alignment_wrong_direction"
         diagnostic["trustReason"] = "alignment_wrong_direction"
         if transition_scope == "cross_segment" and not diagnostic["repeatAmbiguous"]:
             return cross_segment_pcm_fallback("alignment_wrong_direction")
+        if transition_scope == "same_segment" and diagnostic["repeatAmbiguous"]:
+            retained_limit = right_start if deletion_on_left else left_end
+            corroborated, evidence = corroborate_repeat_retained_limit_with_pcm(
+                fallback,
+                retained_limit,
+                samples,
+                sample_rate,
+                deletion_on_left=deletion_on_left,
+            )
+            diagnostic.update(
+                {
+                    key: value
+                    for key, value in evidence.items()
+                    if key != "retainedSpeechHardLimit" or value is not None
+                }
+            )
+            if corroborated is None:
+                diagnostic["fallbackReason"] = (
+                    "repeat_retained_pcm_not_corroborated"
+                )
+                diagnostic["trustReason"] = (
+                    "repeat_retained_pcm_not_corroborated"
+                )
+                return None, diagnostic
+            diagnostic.update(
+                {
+                    "final": round(corroborated, 3),
+                    "boundaryTrustworthy": True,
+                    "trustReason": "repeat_retained_pcm_valley",
+                    "pcmAdjustment": round(corroborated - candidate, 6),
+                    "fallbackReason": None,
+                }
+            )
+            return corroborated, diagnostic
         return None, diagnostic
     if diagnostic["repeatAmbiguous"]:
+        retained_limit_corroborated = False
         corroborated, evidence = corroborate_repeated_transition_with_pcm(
             fallback,
             candidate,
@@ -3743,12 +3973,32 @@ def forced_alignment_transition_boundary(
             )
             diagnostic.update(gap_evidence)
         if corroborated is None:
+            corroborated, retained_evidence = (
+                corroborate_repeat_retained_limit_with_pcm(
+                    fallback,
+                    right_start if deletion_on_left else left_end,
+                    samples,
+                    sample_rate,
+                    deletion_on_left=deletion_on_left,
+                )
+            )
+            diagnostic.update(
+                {
+                    key: value
+                    for key, value in retained_evidence.items()
+                    if key != "retainedSpeechHardLimit" or value is not None
+                }
+            )
+            retained_limit_corroborated = corroborated is not None
+        if corroborated is None:
             diagnostic["fallbackReason"] = "repeat_pcm_not_corroborated"
             diagnostic["trustReason"] = "repeat_pcm_not_corroborated"
             return None, diagnostic
         trust_reason = (
             "forced_pcm_gap"
             if diagnostic["pcmGapCorroborated"]
+            else "repeat_retained_pcm_valley"
+            if retained_limit_corroborated
             else "forced_pcm_valley"
         )
         diagnostic.update(

@@ -1995,6 +1995,67 @@ def _ambiguous_repeat_samples(gain: int = 1) -> array:
     return samples
 
 
+def _wrong_direction_repeat_alignment_cache() -> dict[str, object]:
+    cache = _ambiguous_repeat_alignment_cache()
+    characters = cache["segments"][0]["characters"]
+    characters[3].update({"start": 0.24, "end": 0.32})
+    characters[4].update({"start": 1.30, "end": 1.38})
+    return cache
+
+
+def _fallback_repeat_alignment_cache() -> dict[str, object]:
+    cache = _wrong_direction_repeat_alignment_cache()
+    cache["segments"][0]["characters"][3]["end"] = 0.4
+    return cache
+
+
+def _wrong_direction_repeat_samples(
+    gain: int = 1,
+    *,
+    retained_speech: bool = True,
+) -> array:
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    samples = array("h", [20 * gain]) * (sample_rate * 2)
+    for start, end, amplitude in (
+        (0.00, 0.68, 3_000),
+        (0.82, 0.90, 1_500),
+    ):
+        first = round(start * sample_rate)
+        last = round(end * sample_rate)
+        samples[first:last] = array("h", [amplitude * gain]) * (last - first)
+    if retained_speech:
+        first = round(1.30 * sample_rate)
+        last = round(1.72 * sample_rate)
+        samples[first:last] = array("h", [3_000 * gain]) * (last - first)
+    return samples
+
+
+def _wrong_direction_repeat_start_alignment_cache() -> dict[str, object]:
+    cache = _ambiguous_repeat_alignment_cache()
+    characters = cache["segments"][0]["characters"]
+    characters[3].update({"start": 0.12, "end": 0.20})
+    characters[4].update({"start": 0.50, "end": 0.58})
+    return cache
+
+
+def _wrong_direction_repeat_start_samples(gain: int = 1) -> array:
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    samples = array("h", [20 * gain]) * (sample_rate * 2)
+    retained_end = round(0.20 * sample_rate)
+    samples[:retained_end] = array("h", [3_000 * gain]) * retained_end
+    burst_start = round(0.31 * sample_rate)
+    burst_end = round(0.37 * sample_rate)
+    samples[burst_start:burst_end] = array("h", [1_500 * gain]) * (
+        burst_end - burst_start
+    )
+    deleted_start = round(0.50 * sample_rate)
+    deleted_end = round(0.90 * sample_rate)
+    samples[deleted_start:deleted_end] = array("h", [3_000 * gain]) * (
+        deleted_end - deleted_start
+    )
+    return samples
+
+
 @pytest.mark.parametrize(
     ("left_text", "right_text", "expected_overlap"),
     [
@@ -2100,6 +2161,274 @@ def test_ambiguous_repeat_transition_requires_pcm_and_is_shared_by_timeline():
         assert timeline_diagnostic["fallbackReason"] is None
 
     assert max(text_boundaries) - min(text_boundaries) <= 0.001
+
+
+def test_wrong_direction_repeat_uses_terminal_retained_corridor_for_both_entries():
+    resolved_boundaries: list[float] = []
+    for gain in (1, 2, 4):
+        diagnostics: list[dict[str, object]] = []
+        forced_boundary_cache = {}
+        samples = _wrong_direction_repeat_samples(gain)
+        text_range = {
+            "key": f"wrong-direction-repeat-text-{gain}",
+            "start": 0.0,
+            "end": 0.4,
+            "originalStart": 0.0,
+            "originalEnd": 0.4,
+        }
+        timeline_range = {
+            **text_range,
+            "key": f"wrong-direction-repeat-timeline-{gain}",
+        }
+
+        aligned_text = app_module.align_cut_draft_text_ranges_to_audio(
+            Path("unused.mp4"),
+            [text_range],
+            _ambiguous_repeat_segments(),
+            2.0,
+            alignment_cache=_wrong_direction_repeat_alignment_cache(),
+            samples=samples,
+            diagnostics=diagnostics,
+            forced_boundary_cache=forced_boundary_cache,
+        )[0]
+        aligned_timeline = app_module.align_cut_draft_timeline_ranges_to_audio(
+            [timeline_range],
+            _ambiguous_repeat_segments(),
+            2.0,
+            alignment_cache=_wrong_direction_repeat_alignment_cache(),
+            samples=samples,
+            diagnostics=diagnostics,
+            forced_boundary_cache=forced_boundary_cache,
+        )[0]
+
+        resolved_boundaries.append(aligned_text["end"])
+        assert 1.295 <= aligned_text["end"] <= 1.30
+        assert aligned_timeline["end"] == aligned_text["end"]
+        assert aligned_text["originalEnd"] == 0.4
+        assert aligned_timeline["originalEnd"] == 0.4
+        diagnostic = diagnostics[0]
+        assert diagnostic["structureValid"] is True
+        assert diagnostic["repeatAmbiguous"] is True
+        assert diagnostic["forcedCandidate"] == 0.32
+        assert diagnostic["forcedFallbackReason"] == "alignment_wrong_direction"
+        assert diagnostic["boundaryTrustworthy"] is True
+        assert diagnostic["trustReason"] == "repeat_retained_pcm_valley"
+        assert diagnostic["pcmCorroborated"] is True
+        assert diagnostic["pcmValleyStart"] >= 0.90
+        assert diagnostic["pcmValleyEnd"] == 1.30
+        assert diagnostic["retainedSpeechHardLimit"] == 1.30
+        assert aligned_text["end"] <= diagnostic["retainedSpeechHardLimit"]
+        timeline_diagnostic = next(
+            item
+            for item in diagnostics
+            if item.get("entryType") == "timeline" and item.get("endpoint") == "end"
+        )
+        assert timeline_diagnostic["final"] == diagnostic["final"]
+        assert timeline_diagnostic["trustReason"] == "repeat_retained_pcm_valley"
+
+    assert max(resolved_boundaries) - min(resolved_boundaries) <= 0.001
+
+
+def test_repeat_candidate_at_fallback_uses_terminal_retained_corridor():
+    diagnostics: list[dict[str, object]] = []
+    forced_boundary_cache = {}
+    text_range = {
+        "key": "fallback-repeat-text",
+        "start": 0.0,
+        "end": 0.4,
+        "originalStart": 0.0,
+        "originalEnd": 0.4,
+    }
+    timeline_range = {**text_range, "key": "fallback-repeat-timeline"}
+    samples = _wrong_direction_repeat_samples()
+
+    aligned_text = app_module.align_cut_draft_text_ranges_to_audio(
+        Path("unused.mp4"),
+        [text_range],
+        _ambiguous_repeat_segments(),
+        2.0,
+        alignment_cache=_fallback_repeat_alignment_cache(),
+        samples=samples,
+        diagnostics=diagnostics,
+        forced_boundary_cache=forced_boundary_cache,
+    )[0]
+    aligned_timeline = app_module.align_cut_draft_timeline_ranges_to_audio(
+        [timeline_range],
+        _ambiguous_repeat_segments(),
+        2.0,
+        alignment_cache=_fallback_repeat_alignment_cache(),
+        samples=samples,
+        diagnostics=diagnostics,
+        forced_boundary_cache=forced_boundary_cache,
+    )[0]
+
+    assert 1.295 <= aligned_text["end"] <= 1.30
+    assert aligned_timeline["end"] == aligned_text["end"]
+    assert aligned_text["originalEnd"] == aligned_timeline["originalEnd"] == 0.4
+    diagnostic = diagnostics[0]
+    assert diagnostic["forcedCandidate"] == 0.4
+    assert diagnostic["pcmGapCorroborated"] is False
+    assert diagnostic["pcmCorroborated"] is True
+    assert diagnostic["pcmValleyStart"] >= 0.90
+    assert diagnostic["retainedSpeechHardLimit"] == 1.30
+    assert diagnostic["trustReason"] == "repeat_retained_pcm_valley"
+
+
+def test_wrong_direction_repeat_without_retained_speech_stays_semantic():
+    diagnostics: list[dict[str, object]] = []
+    aligned = app_module.align_cut_draft_text_ranges_to_audio(
+        Path("unused.mp4"),
+        [
+            {
+                "key": "wrong-direction-no-retained-speech",
+                "start": 0.0,
+                "end": 0.4,
+                "originalStart": 0.0,
+                "originalEnd": 0.4,
+            }
+        ],
+        _ambiguous_repeat_segments(),
+        2.0,
+        alignment_cache=_wrong_direction_repeat_alignment_cache(),
+        samples=_wrong_direction_repeat_samples(retained_speech=False),
+        diagnostics=diagnostics,
+    )[0]
+
+    assert aligned["end"] == aligned["originalEnd"] == 0.4
+    diagnostic = diagnostics[0]
+    assert diagnostic["structureValid"] is True
+    assert diagnostic["forcedCandidate"] == 0.32
+    assert diagnostic["forcedFallbackReason"] == "alignment_wrong_direction"
+    assert diagnostic["boundaryTrustworthy"] is False
+    assert diagnostic["pcmCorroborated"] is False
+    assert diagnostic["retainedSpeechHardLimit"] == 1.3
+    assert diagnostic["fallbackReason"] == "repeat_retained_pcm_not_corroborated"
+
+
+def test_repeat_terminal_probe_failure_preserves_retained_hard_limit():
+    diagnostics: list[dict[str, object]] = []
+    aligned = app_module.align_cut_draft_text_ranges_to_audio(
+        Path("unused.mp4"),
+        [
+            {
+                "key": "fallback-repeat-no-retained-speech",
+                "start": 0.0,
+                "end": 0.4,
+                "originalStart": 0.0,
+                "originalEnd": 0.4,
+            }
+        ],
+        _ambiguous_repeat_segments(),
+        2.0,
+        alignment_cache=_fallback_repeat_alignment_cache(),
+        samples=_wrong_direction_repeat_samples(retained_speech=False),
+        diagnostics=diagnostics,
+    )[0]
+
+    assert aligned["end"] == aligned["originalEnd"] == 0.4
+    diagnostic = diagnostics[0]
+    assert diagnostic["forcedCandidate"] == 0.4
+    assert diagnostic["boundaryTrustworthy"] is False
+    assert diagnostic["pcmCorroborated"] is False
+    assert diagnostic["retainedSpeechHardLimit"] == 1.3
+    assert diagnostic["fallbackReason"] == "repeat_pcm_not_corroborated"
+
+
+@pytest.mark.parametrize("retained_limit", [None, float("nan"), 0.3])
+def test_repeat_retained_corridor_rejects_missing_or_wrong_side_hard_limit(
+    retained_limit: float | None,
+):
+    boundary, evidence = app_module.corroborate_repeat_retained_limit_with_pcm(
+        0.4,
+        retained_limit,
+        _wrong_direction_repeat_samples(),
+        app_module.CUT_BOUNDARY_SAMPLE_RATE,
+        deletion_on_left=True,
+    )
+
+    assert boundary is None
+    assert evidence["pcmCorroborated"] is False
+    assert evidence["retainedSpeechHardLimit"] is None
+
+
+@pytest.mark.parametrize(
+    ("deletion_on_left", "fallback", "retained_limit", "impulse_time"),
+    [
+        (True, 0.4, 1.3, 1.4),
+        (False, 0.4, 0.2, 0.1),
+    ],
+)
+def test_repeat_retained_corridor_rejects_one_sample_impulse(
+    deletion_on_left: bool,
+    fallback: float,
+    retained_limit: float,
+    impulse_time: float,
+):
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    samples = array("h", [20]) * (sample_rate * 2)
+    samples[round(impulse_time * sample_rate)] = 32_767
+
+    boundary, evidence = app_module.corroborate_repeat_retained_limit_with_pcm(
+        fallback,
+        retained_limit,
+        samples,
+        sample_rate,
+        deletion_on_left=deletion_on_left,
+    )
+
+    assert boundary is None
+    assert evidence["pcmCorroborated"] is False
+    assert evidence["retainedSpeechHardLimit"] is None
+
+
+def test_wrong_direction_repeat_delete_start_is_symmetric_and_shared():
+    samples = _wrong_direction_repeat_start_samples()
+    diagnostics: list[dict[str, object]] = []
+    forced_boundary_cache = {}
+    text_range = {
+        "key": "wrong-direction-repeat-start-text",
+        "start": 0.4,
+        "end": 0.8,
+        "originalStart": 0.4,
+        "originalEnd": 0.8,
+    }
+    timeline_range = {
+        **text_range,
+        "key": "wrong-direction-repeat-start-timeline",
+    }
+
+    aligned_text = app_module.align_cut_draft_text_ranges_to_audio(
+        Path("unused.mp4"),
+        [text_range],
+        _ambiguous_repeat_segments(),
+        2.0,
+        alignment_cache=_wrong_direction_repeat_start_alignment_cache(),
+        samples=samples,
+        diagnostics=diagnostics,
+        forced_boundary_cache=forced_boundary_cache,
+    )[0]
+    aligned_timeline = app_module.align_cut_draft_timeline_ranges_to_audio(
+        [timeline_range],
+        _ambiguous_repeat_segments(),
+        2.0,
+        alignment_cache=_wrong_direction_repeat_start_alignment_cache(),
+        samples=samples,
+        diagnostics=diagnostics,
+        forced_boundary_cache=forced_boundary_cache,
+    )[0]
+
+    assert 0.20 <= aligned_text["start"] <= 0.205
+    assert aligned_timeline["start"] == aligned_text["start"]
+    assert aligned_text["originalStart"] == 0.4
+    assert aligned_timeline["originalStart"] == 0.4
+    diagnostic = diagnostics[0]
+    assert diagnostic["direction"] == "delete_start"
+    assert diagnostic["forcedCandidate"] == 0.5
+    assert diagnostic["forcedFallbackReason"] == "alignment_wrong_direction"
+    assert diagnostic["boundaryTrustworthy"] is True
+    assert diagnostic["trustReason"] == "repeat_retained_pcm_valley"
+    assert diagnostic["retainedSpeechHardLimit"] == 0.2
+    assert aligned_text["start"] >= diagnostic["retainedSpeechHardLimit"]
 
 
 @pytest.mark.parametrize("failure", ["no_retained_speech", "overlap"])

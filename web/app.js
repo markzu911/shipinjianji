@@ -1071,10 +1071,11 @@ function updateCutSegmentTimestamps() {
       const timing = getLiveEditedSegmentTiming(segment, spans);
       item.classList.toggle("is-removed-from-timeline", !timing);
       if (!timing) {
-        time.textContent = formatTime(segment.start);
+        const editedPoint = sourceTimeToEditedTime(segment.start, spans);
+        time.textContent = formatTime(editedPoint);
         time.setAttribute(
           "aria-label",
-          `原片从 ${formatPreciseTime(segment.start)} 到 ${formatPreciseTime(segment.end)}，已删除`,
+          `剪辑后位于 ${formatPreciseTime(editedPoint)} 删除点；原片从 ${formatPreciseTime(segment.start)} 到 ${formatPreciseTime(segment.end)}，已删除`,
         );
         return;
       }
