@@ -283,11 +283,12 @@ physical_end = resolve_cut_draft_acoustic_boundaries(...)[0][0]["end"]
 - 非重复且方向、相邻 forced 结构有效时维持 forced 主路径。`coarseTokenMaxBoundaryDeviationSeconds` 只进入诊断，禁止设置全局阈值拒绝“得/你”、长静音或其他合法大偏差。
 - 重复且 forced 结构有效时，只在 semantic fallback 与 forced candidate 的有向走廊内寻找持续 PCM 谷底。谷底必须至少覆盖两个 `5ms` 采样点，以 `20ms` floor 和 `20/40/80ms` 多尺度肩部做相对能量比较；谷底不得比 fallback 更高能，并且必须相对 forced candidate 与双肩显著更低。fallback 本身已经安静时不要求固定比例改善；均匀低能、单点尖谷和单调斜坡不授权 forced candidate。
 - 走廊内没有双肩谷底时，不能立即把所有重复转场退回 semantic fallback。若 forced candidate 与保留侧 forced limit 不重叠且其间存在独立 quiet gap，PCM 必须同时证明 gap 内持续低能、删除侧候选前持续高能、保留侧 limit 外持续高能，才可原样信任 forced candidate，记录 `trustReason=forced_pcm_gap`。最终边界不得推进到 quiet gap 尾部；gap 高能、缺少任一侧语音或 forced overlap 均拒绝。
+- 内部谷底和 forced quiet gap 都失败时，只有保留侧 forced hard limit 前（delete-end）或后（delete-start）的最后 `80ms` 持续低能，并且 hard limit 保留侧的高能窗连续覆盖至少一个完整 `20ms` block（首尾验证窗不重叠），才可把终点推进到 hard limit 内的最低振幅样本，记录 `trustReason=repeat_retained_pcm_valley`。阈值由 quiet ceiling 与 retained peak 动态计算；单点爆音、噪声底轻微上升或搜索窗内没有持续保留语音均不得授权。
 - 删除终点只向后、删除起点只向前。PCM 失败时 structurally valid 的歧义 forced candidate 回退 semantic/manual fallback；forced 缺失时仍允许既有受限 waveform 降级。
 - 文字和 timeline 必须传入同一 transition context 并复用同一 forced boundary cache。cache key 至少包含 segment/character、方向、fallback 和 repeat overlap，避免不同删除状态复用动态 trust。
 - 完整行/segment 删除形成的跨段转场必须按 units 列表中的物理邻接、相邻 segment index、前段最后字符和后段首字符共同确认。两段 forced 均有效且不重叠时使用删除侧 forced 边界并以保留侧 forced 边界为 hard limit；forced 缺失或 overlap 时复用同一个 sustained-valley helper，只在 semantic fallback 与 retained-side forced/acoustic/semantic 安全界限之间搜索。无谷底或保留语音立即起音时保持 fallback，禁止固定毫秒扩张。
 - timeline 的普通 `0.20s` snap 门槛判断 requested endpoint 到 diagnostic semantic `fallback` 的距离；`boundaryTrustworthy=true` 时 final 可因可信尾音延迟超过 `0.20s`。requested 远离 semantic transition 时仍拒绝，完全位于相邻字符或 segment quiet gap 的范围保持精确。
-- 诊断至少保留 `structureValid`、`boundaryTrustworthy`、`trustReason`、`repeatAmbiguous`、`repeatOverlapText/Length/Span`、`forcedCandidate`、`pcmCorroborated`、`pcmValleyStart/End`、`pcmGapCorroborated`、`pcmGapStart/End`、`retainedSpeechHardLimit` 和 `fallbackReason`。谷底路径的 `retainedSpeechHardLimit` 来自保留侧首次连续两个 `5ms` 点的显著能量回升；forced-gap 路径保留 forced retained limit。两者都必须位于最终切点的保留侧，失败的前置探测不得把已有 hard limit 覆盖为 null。动态 trust 不写回 alignment sidecar。
+- 诊断至少保留 `structureValid`、`boundaryTrustworthy`、`trustReason`、`repeatAmbiguous`、`repeatOverlapText/Length/Span`、`forcedCandidate`、`pcmCorroborated`、`pcmValleyStart/End`、`pcmGapCorroborated`、`pcmGapStart/End`、`retainedSpeechHardLimit` 和 `fallbackReason`。内部谷底路径的 `retainedSpeechHardLimit` 来自保留侧首次连续两个 `5ms` 点的显著能量回升；forced-gap 和 retained-limit 路径保留 forced retained limit。所有 hard limit 都必须位于最终切点的保留侧，失败的前置探测不得把已有 hard limit 覆盖为 null。动态 trust 不写回 alignment sidecar。
 
 ### 4. Validation & Error Matrix
 
@@ -297,8 +298,9 @@ physical_end = resolve_cut_draft_acoustic_boundaries(...)[0][0]["end"]
 | 非重复、forced 结构与方向有效 | 使用 forced 转场，`trustReason=forced_transition` |
 | 重复、存在持续相对谷底 | 使用谷底内安全点，`trustReason=forced_pcm_valley` |
 | 重复、候选后存在独立低能 gap 且两侧持续有声 | 保留 forced candidate，`trustReason=forced_pcm_gap` |
+| 重复、前两类证据失败，但 hard limit 终端持续安静且保留侧持续起音 | 推进到不越过 hard limit 的最低振幅点，`trustReason=repeat_retained_pcm_valley` |
 | forced gap 高能、缺少删除/保留侧持续语音或 forced overlap | 拒绝 gap 佐证，不把边界推进到 gap 尾部 |
-| 重复、只有单点/斜坡/均匀低能 | 拒绝 forced，`fallbackReason=repeat_pcm_not_corroborated` |
+| 重复、只有单点/噪声轻微波动/斜坡/均匀低能，或 hard limit 后无持续语音 | 拒绝 forced，`fallbackReason=repeat_pcm_not_corroborated` |
 | forced 候选方向错误 | 拒绝候选，不扩大搜索 |
 | timeline 命中已佐证的同一重复转场 | 复用同一 boundary，即使旧的 `0.20s` 普通吸附距离不足 |
 
@@ -306,12 +308,13 @@ physical_end = resolve_cut_draft_acoustic_boundaries(...)[0][0]["end"]
 
 - Good：第一次“所以说啊”被删、第二次保留；forced 候选进入第二次起音，但 `141.795-141.815s` 持续谷底把最终边界限制在约 `141.814s`。
 - Base：完整“你身边你身边人人都觉得 / 你身边人人都觉得…”上下文会形成重复重叠，但 forced candidate `37.790s` 到保留起音 `39.850s` 有约 `2.06s` 独立静音；PCM 两侧有声时继续使用 `37.790s`，不能退回 `37.120s` 留下“得”的尾音。
+- Good：删除第一处“一起给”时，candidate/fallback `29.171s` 后仍有被删尾音，保留 hard limit `29.790s` 前最后 `80ms` 持续安静且其后有连续保留语音；最终点可推进到约 `29.789s`，但不得越过 `29.790s`。
 - Bad：看到重复就统一退回 semantic fallback，或看到长静音就把边界推进到静音尾部；前者残留被删尾音，后者会删除下一段起音。
 
 ### 6. Tests Required
 
 - 纯函数：完整重复、局部后缀/前缀、连续同字和非重复检测。
-- 合成 PCM：持续谷底在多组非削波增益下稳定；forced candidate 后独立 quiet gap 的删除终点/起点对称通过；gap 高能、缺少保留侧语音、forced overlap、单点、单调和均匀低能均回退。
+- 合成 PCM：持续谷底在多组非削波增益下稳定；forced candidate 后独立 quiet gap 和 retained hard-limit 终端静音的删除终点/起点对称通过；candidate 等于 fallback、早期孤立爆音、gap 高能、缺少保留侧语音、forced overlap、单点、噪声轻微波动、单调和均匀低能均有回退断言。
 - 共享 resolver：文字与 timeline 得到同一物理点，`original*` 保持不变，diagnostic 字段完整。
 - 非回归：必须使用完整重复上下文的“得/你”fixture，不能用只含两个字的简化 fixture；断言大 coarse deviation 仍走 `forced_pcm_gap` 且 hard limit 保持为下一 forced 起音。
 - 真实媒体：同时证明被删尾音消失和下一次重复表达的起音未被削弱；用户媒体和 sidecar 全程只读。

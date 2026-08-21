@@ -21,6 +21,7 @@
 - [x] 从合格谷底确定低振幅切点及谷底后的保留起音硬限；删除终点只后移、删除起点只前移。
 - [x] 歧义转场无内部谷底时，再用 candidate 后独立 quiet gap 的两侧语音证据授权 candidate；无任一证据时安全降级，非歧义转场保持 forced 主路径。
 - [x] 更新 forced boundary cache key，使不同重复/删除状态不会错误复用同一可信度结果。
+- [x] 在内部谷底与 forced quiet gap 都失败后增加 retained hard-limit terminal gate；覆盖 candidate==fallback、wrong-direction、早期孤立爆音、无保留语音、多档增益和 delete-start 对称，并保证失败 evidence 不清空既有 hard limit。
 
 ## Phase 4: Shared Entry Integration
 
@@ -36,14 +37,16 @@
 - [x] 修改 suggestion presentation 投影：优先使用 `originalStart/originalEnd`，字段缺失时兼容回退 `start/end`；不修改 `selectedRanges` 或媒体范围。
 - [x] 断言连续 retained run 重新合并为完整行，restore run 仍按语义范围聚合，timeline 删除和旧 suggestion 行为保持兼容。
 - [x] 用浏览器打开真实 job，确认列表不再单独显示“人”“你身”，恢复按钮、播放、撤销/重做和立即生成仍正常。
+- [x] 统一保留文案、完整删除文案和空白行的可见剪后时间；源时间 data 保持不变，并用截图同构 Node 回归锁定时间序列单调。
 
 ## Phase 6: Product And Regression Gate
 
 - [x] 定向运行：`.venv\Scripts\python.exe -m pytest -q tests/app/test_acoustic_alignment.py tests/app/test_cut_acoustic_boundaries.py tests/app/test_cut_draft.py tests/app/test_cut_rendering.py tests/app/test_composition.py tests/app/test_frontend_contracts.py tests/app/browser/test_editor_workflows.py`。
 - [x] 用任务 `d87e13fe-8f83-4712-97fc-a9b6eb4f717f` 的只读源媒体和同一草稿走产品 resolver，确认重复边界从歧义 `142.030s` 调整到 `141.814s` 的持续谷底。
 - [x] 生成完整 FFmpeg/H.264/AAC 临时成片；运行被删尾音能量、保留“得/你”和“所以说啊”起音 PCM 相关/lag/RMS 对比。
-- [ ] 对临时成片人工试听：听不到前一次被删残音，后一次“所以说啊”从首音开始完整保留。
+- [x] 对临时成片人工试听：用户确认 `fixed-full-v3.mp4` 听感通过，第一处“一起给”无额外“一”残音，后续保留文案起音完整。
 - [x] 回归上一轮“得/你”真实产品 gate，确认终点 `37.790s`、删除后静音能量仅为被删尾音约 `1.4%`、下一“你”相关性 `0.9977`。
+- [x] 回归“一起给”真实产品 gate，确认终点由 `29.171s` 推进到 `29.789s`、不越过 `29.790s` hard limit；完整新成片局部 ASR 只识别一次“所有人一起给你”。
 - [x] 运行全量测试（排除两个已知 TestClient 生命周期挂起用例）、`.venv\Scripts\python.exe -m compileall -q server` 和 `git diff --check`。
 - [x] 定向覆盖整段文字删除与手动时间轴删除：跨段 forced、无 forced PCM、无谷底、立即保留起音、delete-start 对称和远离 transition 的时间轴端点。
 

@@ -32,21 +32,25 @@
 - R11：文字剪辑列表的删除/恢复状态和 suggestion 展示边界必须只由语义 `originalStart/originalEnd` 投影；声学扩展后的物理 `start/end`、`adjacentSilence*` 和 `noSpeechRanges` 不得改变文字分组、样式或把未选字符拆成孤立行。
 - R12：连续、同状态且同语义 presentation 的保留字符必须合并为正常可编辑行。修复只改变展示投影，不得改变草稿持久化、预览跳过或最终 FFmpeg 消费的物理范围。
 - R13：units 列表中物理相邻、且分别为相邻 transcript segment 最后一字/第一字的转场必须进入同一个共享 resolver。两段 forced 结构均有效且不重叠时使用删除侧 forced 边界并以保留侧 forced 边界为硬限；forced 缺失或跨段 overlap 时，只能在语义边界与保留侧安全界限之间用同一 sustained-valley PCM 逻辑解析。无谷底或保留语音立即起音时回退语义边界，禁止固定毫秒扩张。
+- R14：重复转场的内部谷底和 forced quiet gap 都未佐证时，允许使用保留侧 forced hard limit 作为第三证据，但必须同时证明 hard limit 删除侧最后 `80ms` 持续低能、保留侧高能窗连续覆盖至少一个完整且首尾不重叠的 `20ms` block，并使用相对动态阈值保持增益无关。最终点不得越过 hard limit；噪声轻微上升、单点爆音或缺少后续语音时必须回退。
+- R15：文字剪辑列表的所有可见时间统一使用剪后时间并保持单调。行上的 `data-display-start/end` 继续保留源时间用于排序、试听和删除语义；完整删除的文案行与空白行显示其 `sourceTimeToEditedTime(sourceStart)` 拼接点，不得回退显示源时间。
 
 ## Acceptance Criteria
 
-- [ ] AC1（R1-R4、R6、R10，真实媒体）：用最新源任务的同一草稿重新生成，输出约 `111s` 不再听到前一次被删“所以说啊”的残音；局部二次 ASR 不返回拼接伪词或前一次残留，并完整识别后一次“所以说啊”。
-- [ ] AC2（R3-R4、R10，真实媒体）：重复短语边界选择约 `141.880s` 的持续谷底而非 `142.010s` 的歧义 forced candidate；成片中后一次“所以说啊”的起音 PCM 与源窗口高度相关，未发生额外截短或可测的起音衰减。
-- [ ] AC3（R1-R5）：构造相邻重复短语且 forced alignment 字符数量、顺序、时间均合法但实例错位的回归，断言 `structureValid=true`、`boundaryTrustworthy=false`，并由局部 PCM 佐证选择安全边界。
-- [ ] AC4（R4-R5）：既有“得/你”真实合法大偏差边界继续解析到当前权威终点约 `37.791s`；不得因为全局粗偏差较大而拒绝 forced alignment，也不得重新出现被删“得”的尾音。
-- [ ] AC5（R2-R4）：歧义重复转场没有持续谷底、只有单调斜坡或均匀低能时，解析器拒绝 forced candidate 并安全回退，绝不越过保留语音；整体增益变化不改变同一谷底的选择。
-- [ ] AC6（R6-R8）：同一重复转场通过文案删除和手动时间轴删除得到相同物理边界与可信度诊断；`original*` 保持各自语义，草稿 PUT、撤销/重做、预览、`/cuts` 和 `/compose` 消费同一持久化范围。
-- [ ] AC7（R8-R9）：旧 alignment sidecar 和 cut draft 可继续读取；缓存命中不触发新的全量 FunASR 推理，诊断可区分 `alignment_missing`、结构无效、重复歧义未佐证和成功 PCM 佐证。
-- [ ] AC8（R1-R10）：声学 adapter、共享 resolver、cut draft、真实 FFmpeg/AAC、compose revision 和前端契约定向测试通过；随后通过全量测试、编译检查和 `git diff --check`。
-- [ ] AC9（R11-R12，真实 job）：删除第一处“一起给”后，列表显示“而是你身边所有人”/“一起给”/“一起给你画的那条正常的线。”，不得单独出现“人”；删除第一遍“你身边你身边人人都觉得”后，保留的下一遍文字不得单独拆出“你身”。
-- [ ] AC10（R7、R11-R12）：同一 suggestion 的物理范围可以为媒体安全越过语义范围，但只有 `original*` 影响 restore/edit presentation；修复前后的草稿 payload、物理删除范围、预览时长和 compose 请求保持一致。
-- [ ] AC11（R6、R10、R13）：删除完整 segment 时，可信跨段 forced 或 sustained PCM 谷底可把物理终点移到真实尾音之后，但严格早于下一段保留起音 hard limit；删除下一整段的起点对称地不得越过上一保留段尾。
-- [ ] AC12（R6、R13）：手动时间轴端点只要距离语义转场不超过 `0.20s`，即可复用该转场已可信的最终声学点，即使最终点因尾音延迟超过旧 snap 距离；任意远离语义转场的端点、无谷底和完全位于真实 quiet gap 的范围仍保持精确。
+- [x] AC1（R1-R4、R6、R10，真实媒体）：用最新源任务的同一草稿重新生成，输出约 `111s` 不再听到前一次被删“所以说啊”的残音；局部二次 ASR 不返回拼接伪词或前一次残留，并完整识别后一次“所以说啊”。
+- [x] AC2（R3-R4、R10，真实媒体）：重复短语边界选择约 `141.880s` 的持续谷底而非 `142.010s` 的歧义 forced candidate；成片中后一次“所以说啊”的起音 PCM 与源窗口高度相关，未发生额外截短或可测的起音衰减。
+- [x] AC3（R1-R5）：构造相邻重复短语且 forced alignment 字符数量、顺序、时间均合法但实例错位的回归，断言 `structureValid=true`、`boundaryTrustworthy=false`，并由局部 PCM 佐证选择安全边界。
+- [x] AC4（R4-R5）：既有“得/你”真实合法大偏差边界继续解析到当前权威终点约 `37.791s`；不得因为全局粗偏差较大而拒绝 forced alignment，也不得重新出现被删“得”的尾音。
+- [x] AC5（R2-R4）：歧义重复转场没有持续谷底、只有单调斜坡或均匀低能时，解析器拒绝 forced candidate 并安全回退，绝不越过保留语音；整体增益变化不改变同一谷底的选择。
+- [x] AC6（R6-R8）：同一重复转场通过文案删除和手动时间轴删除得到相同物理边界与可信度诊断；`original*` 保持各自语义，草稿 PUT、撤销/重做、预览、`/cuts` 和 `/compose` 消费同一持久化范围。
+- [x] AC7（R8-R9）：旧 alignment sidecar 和 cut draft 可继续读取；缓存命中不触发新的全量 FunASR 推理，诊断可区分 `alignment_missing`、结构无效、重复歧义未佐证和成功 PCM 佐证。
+- [x] AC8（R1-R10）：声学 adapter、共享 resolver、cut draft、真实 FFmpeg/AAC、compose revision 和前端契约定向测试通过；随后通过全量测试、编译检查和 `git diff --check`。
+- [x] AC9（R11-R12，真实 job）：删除第一处“一起给”后，列表显示“而是你身边所有人”/“一起给”/“一起给你画的那条正常的线。”，不得单独出现“人”；删除第一遍“你身边你身边人人都觉得”后，保留的下一遍文字不得单独拆出“你身”。
+- [x] AC10（R7、R11-R12）：同一 suggestion 的物理范围可以为媒体安全越过语义范围，但只有 `original*` 影响 restore/edit presentation；修复前后的草稿 payload、物理删除范围、预览时长和 compose 请求保持一致。
+- [x] AC11（R6、R10、R13）：删除完整 segment 时，可信跨段 forced 或 sustained PCM 谷底可把物理终点移到真实尾音之后，但严格早于下一段保留起音 hard limit；删除下一整段的起点对称地不得越过上一保留段尾。
+- [x] AC12（R6、R13）：手动时间轴端点只要距离语义转场不超过 `0.20s`，即可复用该转场已可信的最终声学点，即使最终点因尾音延迟超过旧 snap 距离；任意远离语义转场的端点、无谷底和完全位于真实 quiet gap 的范围仍保持精确。
+- [x] AC13（R3-R4、R10、R14，真实媒体）：删除第一处“一起给”时，终点从 `29.171s` 安全推进到约 `29.789s`，严格不越过保留起音 hard limit `29.790s`；完整成片局部 ASR 只识别一次“所有人一起给你”，无额外“一”残音且保留“一起给”起音波形未损伤。
+- [x] AC14（R15）：截图同构列表中的保留文案、已删除文案和自动空白行都显示剪后时间，序列单调不降；已删除行仍保留源时间试听/恢复语义，草稿 payload 和物理范围不变。
 
 ## Out Of Scope
 

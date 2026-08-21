@@ -82,6 +82,14 @@ trustReason
 - 成功时最终点保持 forced candidate，不移动到 gap 尾部；`retainedSpeechHardLimit` 保留另一字符 forced edge。forced gap 为零、gap 中夹有语音、均匀低能或任一侧缺少持续语音肩部时拒绝。
 - 该证据区分合法“得/你”长静音与错误“所以说啊”首尾相接：前者可得到 `forced_pcm_gap`，后者 forced gap 为零，仍只能由 fallback 到 candidate 内部持续谷底授权。
 
+### 5.4 Retained Hard-Limit Terminal Gate
+
+- 内部谷底与 independent forced quiet gap 都失败后，same-segment 重复转场可使用保留字符 forced edge 作为第三层候选；该路径同时覆盖 forced candidate 等于 fallback 和 forced candidate 方向错误。
+- delete-end 要求 hard limit 前最后 `80ms` 的所有 `20ms` RMS 窗持续低能，delete-start 完全对称；hard limit 保留侧高能窗必须连续覆盖至少一个完整 `20ms` block，使首尾验证窗互不重叠，避免同一个爆音样本同时抬高多个 `5ms` 滑动窗。
+- 语音阈值取 quiet terminal ceiling 与 retained peak 的几何均值，并以 retained peak 的相对比例设下限；不得使用固定绝对音量，因此 `1x/2x/4x` 非削波增益结果一致。
+- 成功时只在 terminal quiet run 内吸附 hard limit 附近最低振幅样本，final 严格位于 hard limit 删除侧；失败时保持 semantic fallback，且失败 evidence 不得把已有 `retainedSpeechHardLimit` 覆盖为 null。
+- 该路径解决 `29.171-29.790s` 和 `122.370-124.248s` 中“噪声底轻微变化被误认成保留起音”的问题；单点爆音或搜索窗内没有持续保留语音不能通过。
+
 ## 6. Shared Resolver Integration
 
 `forced_alignment_transition_boundary()` 扩展为消费 transition context，或由一个小型 trust helper 在调用前构造该 context。边界缓存 key 必须包含重复歧义/trust 输入，不能只按 segment、character、direction、fallback 复用不同语义状态的结果。
@@ -124,6 +132,8 @@ display: "人" 位于语义 suggestion 外，继续和前文合并
 ```
 
 该修复不修改 `selectedRanges`、草稿 payload、MediaController keep ranges 或 compose 请求。旧 suggestion 没有 `original*` 时保持既有展示行为，避免历史任务丢失建议边界。
+
+列表行继续用源时间 `data-display-start/end` 负责排序、原片试听和播放高亮，但 `.segment-time` 统一投影为剪后时间。部分保留行显示其首个保留片段的 edited start；完整删除行没有 retained timing 时，使用 `sourceTimeToEditedTime(sourceStart)` 显示折叠后的拼接点。这样列表可见时间单调，同时不改变任何源时间交互。
 
 ## 8. Diagnostics And Compatibility
 
