@@ -73,6 +73,7 @@ Copy-Item .env.example .env
 - `JOB_MAX_STORED=80`：最多保留多少个非活跃临时任务目录；设为 `0` 时关闭数量上限清理。
 - `JOB_CLEANUP_INTERVAL_SECONDS=21600`：服务运行期间自动清理临时任务的间隔，默认每 6 小时执行一次；设为 `0` 时关闭定时清理。
 - `HISTORY_MAX_STORED=20`：剪辑历史最多保留最新 20 条，超出后自动删除最旧记录及其文件；设为 `0` 时关闭历史数量上限。
+- `CUT_DRAFT_PCM_CACHE_MAX_BYTES=268435456`：剪辑草稿声学校准可复用的 PCM 内存上限，默认 256 MiB；设为 `0` 时关闭缓存。
 - `DATA_DIR=./data`：视频和提取音频的保存目录。
 
 API Key 只配置在服务端 `.env`，不要写入 `web/` 下的浏览器代码，也不要提交到 Git。

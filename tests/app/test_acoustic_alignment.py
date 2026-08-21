@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import server.app as app_module
 from server import acoustic_alignment
 
 
@@ -28,6 +29,28 @@ def _monotonic_result(
         {"text": character, "start": index * 0.1, "end": index * 0.1 + 0.08}
         for index, character in enumerate(reference)
     ]
+
+
+def test_app_suite_fixture_never_enters_real_funasr_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    media_path = tmp_path / "source.mp4"
+    media_path.write_bytes(b"source-media")
+    monkeypatch.setattr(
+        acoustic_alignment,
+        "_load_model",
+        lambda _cache_dir: pytest.fail("普通应用测试不得加载真实 FunASR 模型"),
+    )
+
+    summary = app_module.prepare_job_acoustic_alignment(
+        media_path,
+        [{"text": "测试文案", "start": 0.0, "end": 1.0}],
+    )
+
+    assert summary["status"] == "unavailable"
+    assert summary["reason"] == "test_runtime_isolated"
+    assert not (app_module.DATA_DIR / "models").exists()
 
 
 def test_alignment_uses_complete_segment_text_and_reuses_sidecar(tmp_path: Path):

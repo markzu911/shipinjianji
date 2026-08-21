@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from array import array
 from pathlib import Path
 
@@ -2687,3 +2688,245 @@ def test_timeline_physical_range_and_semantic_range_are_projected_separately():
 
     assert media == [{"start": 0.0, "end": 0.5}]
     assert semantic == [{"start": 0.0, "end": 0.42}]
+
+
+def _pcm_cache_equivalence_case(case_name: str) -> dict[str, object]:
+    if case_name == "cross-segment-end":
+        return {
+            "segments": _cross_segment_segments(),
+            "alignment": None,
+            "samples": _cross_segment_delayed_tail_samples(),
+            "duration": 1.2,
+            "text": {
+                "key": "cross-end-text",
+                "start": 0.0,
+                "end": 0.4,
+                "originalStart": 0.0,
+                "originalEnd": 0.4,
+            },
+            "timeline": {
+                "key": "cross-end-timeline",
+                "start": 0.0,
+                "end": 0.42,
+                "originalStart": 0.0,
+                "originalEnd": 0.42,
+            },
+        }
+    if case_name == "cross-segment-start":
+        return {
+            "segments": _cross_segment_segments(),
+            "alignment": None,
+            "samples": _cross_segment_early_head_samples(),
+            "duration": 1.2,
+            "text": {
+                "key": "cross-start-text",
+                "start": 0.8,
+                "end": 1.2,
+                "originalStart": 0.8,
+                "originalEnd": 1.2,
+            },
+            "timeline": {
+                "key": "cross-start-timeline",
+                "start": 0.78,
+                "end": 1.2,
+                "originalStart": 0.78,
+                "originalEnd": 1.2,
+            },
+        }
+    if case_name == "repeated-de-ni":
+        return {
+            "segments": _repeated_de_ni_segments(),
+            "alignment": _repeated_de_ni_alignment_cache(),
+            "samples": _repeated_de_ni_gap_samples(),
+            "duration": 47.5,
+            "text": {
+                "key": "repeated-de-ni-text",
+                "start": 33.16,
+                "end": 37.12,
+                "originalStart": 33.16,
+                "originalEnd": 37.12,
+            },
+            "timeline": {
+                "key": "repeated-de-ni-timeline",
+                "start": 33.16,
+                "end": 37.12,
+                "originalStart": 33.16,
+                "originalEnd": 37.12,
+            },
+        }
+    if case_name == "yi-qi-gei":
+        sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+        samples = array("h", [6_000]) * (sample_rate * 2)
+        valley_start = round(0.64 * sample_rate)
+        valley_end = round(0.68 * sample_rate)
+        samples[valley_start:valley_end] = array("h", [0]) * (
+            valley_end - valley_start
+        )
+        segments = [
+            {
+                "start": 0.0,
+                "end": 1.2,
+                "text": "一起给一起给",
+                "words": [
+                    {"text": "一起", "start": 0.0, "end": 0.4},
+                    {"text": "给", "start": 0.4, "end": 0.6},
+                    {"text": "一起", "start": 0.6, "end": 1.0},
+                    {"text": "给", "start": 1.0, "end": 1.2},
+                ],
+                "asrWords": [
+                    {"text": "一起", "start": 0.0, "end": 0.4},
+                    {"text": "给一", "start": 0.4, "end": 0.8},
+                    {"text": "起给", "start": 0.8, "end": 1.2},
+                ],
+            }
+        ]
+        return {
+            "segments": segments,
+            "alignment": None,
+            "samples": samples,
+            "duration": 2.0,
+            "text": {
+                "key": "yi-qi-gei-text",
+                "start": 0.0,
+                "end": 0.6,
+                "originalStart": 0.0,
+                "originalEnd": 0.6,
+            },
+            "timeline": {
+                "key": "yi-qi-gei-timeline",
+                "start": 0.0,
+                "end": 0.6,
+                "originalStart": 0.0,
+                "originalEnd": 0.6,
+            },
+        }
+    if case_name == "immediate-retained-speech":
+        return {
+            "segments": _cross_segment_segments(retained_start=0.42),
+            "alignment": _cross_segment_alignment_cache(
+                deleted_end=0.58,
+                retained_start=0.44,
+            ),
+            "samples": array("h", [4_000])
+            * round(1.2 * app_module.CUT_BOUNDARY_SAMPLE_RATE),
+            "duration": 1.2,
+            "text": {
+                "key": "immediate-text",
+                "start": 0.0,
+                "end": 0.4,
+                "originalStart": 0.0,
+                "originalEnd": 0.4,
+            },
+            "timeline": {
+                "key": "immediate-timeline",
+                "start": 0.0,
+                "end": 0.4,
+                "originalStart": 0.0,
+                "originalEnd": 0.4,
+            },
+        }
+    if case_name == "retained-hard-limit-end":
+        return {
+            "segments": _ambiguous_repeat_segments(),
+            "alignment": _wrong_direction_repeat_alignment_cache(),
+            "samples": _wrong_direction_repeat_samples(),
+            "duration": 2.0,
+            "text": {
+                "key": "hard-limit-end-text",
+                "start": 0.0,
+                "end": 0.4,
+                "originalStart": 0.0,
+                "originalEnd": 0.4,
+            },
+            "timeline": {
+                "key": "hard-limit-end-timeline",
+                "start": 0.0,
+                "end": 0.4,
+                "originalStart": 0.0,
+                "originalEnd": 0.4,
+            },
+        }
+    if case_name == "retained-hard-limit-start":
+        return {
+            "segments": _ambiguous_repeat_segments(),
+            "alignment": _wrong_direction_repeat_start_alignment_cache(),
+            "samples": _wrong_direction_repeat_start_samples(),
+            "duration": 2.0,
+            "text": {
+                "key": "hard-limit-start-text",
+                "start": 0.4,
+                "end": 0.8,
+                "originalStart": 0.4,
+                "originalEnd": 0.8,
+            },
+            "timeline": {
+                "key": "hard-limit-start-timeline",
+                "start": 0.4,
+                "end": 0.8,
+                "originalStart": 0.4,
+                "originalEnd": 0.8,
+            },
+        }
+    raise AssertionError(f"Unhandled PCM cache equivalence case: {case_name}")
+
+
+@pytest.mark.parametrize(
+    "case_name",
+    [
+        "cross-segment-end",
+        "cross-segment-start",
+        "repeated-de-ni",
+        "yi-qi-gei",
+        "immediate-retained-speech",
+        "retained-hard-limit-end",
+        "retained-hard-limit-start",
+    ],
+)
+def test_pcm_cache_toggle_preserves_acoustic_boundary_results(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case_name: str,
+):
+    case = _pcm_cache_equivalence_case(case_name)
+    media_path = tmp_path / f"{case_name}.mp4"
+    media_path.write_bytes(b"source")
+    samples = case["samples"]
+    decode_calls = 0
+
+    def decode(_path: Path) -> array:
+        nonlocal decode_calls
+        decode_calls += 1
+        return samples
+
+    def load_alignment(*_args, **_kwargs):
+        return (
+            copy.deepcopy(case["alignment"]),
+            {"status": "completed", "case": case_name},
+        )
+
+    monkeypatch.setattr(app_module, "decode_cut_audio_samples", decode)
+    monkeypatch.setattr(app_module, "load_job_acoustic_alignment", load_alignment)
+
+    def resolve(max_bytes: int):
+        monkeypatch.setattr(
+            app_module,
+            "CUT_DRAFT_PCM_CACHE_MAX_BYTES",
+            max_bytes,
+        )
+        return app_module.resolve_cut_draft_acoustic_boundaries(
+            media_path,
+            [copy.deepcopy(case["text"])],
+            [copy.deepcopy(case["timeline"])],
+            copy.deepcopy(case["segments"]),
+            case["duration"],
+        )
+
+    app_module.CUT_DRAFT_PCM_CACHE.clear()
+    disabled = resolve(0)
+    app_module.CUT_DRAFT_PCM_CACHE.clear()
+    enabled = resolve(len(samples) * samples.itemsize + 1)
+    cached = resolve(len(samples) * samples.itemsize + 1)
+
+    assert enabled == disabled
+    assert cached == enabled
+    assert decode_calls == 2

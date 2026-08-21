@@ -22,6 +22,7 @@ def isolated_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "ARK_API_BASE_URL",
         "DASHSCOPE_HTTP_API_URL",
         "DASHSCOPE_WEBSOCKET_URL",
+        "CUT_DRAFT_PCM_CACHE_MAX_BYTES",
     )
     runtime_settings = {
         name: getattr(app_module, name) for name in runtime_setting_names
@@ -32,14 +33,46 @@ def isolated_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
     monkeypatch.delenv("ASR_API_KEY", raising=False)
     monkeypatch.delenv("ARK_API_KEY", raising=False)
+
+    def isolated_acoustic_alignment(
+        _media_path: Path,
+        segments: list[dict[str, object]],
+        _job_directory: Path,
+        _model_cache_dir: Path,
+        **_kwargs,
+    ) -> dict[str, object]:
+        return {
+            "schemaVersion": 1,
+            "sourceFingerprint": "test-runtime-isolated",
+            "aligner": app_module.ACOUSTIC_ALIGNER_NAME,
+            "modelRevision": app_module.ACOUSTIC_ALIGNMENT_MODEL_REVISION,
+            "segments": [],
+            "summary": {
+                "status": "unavailable",
+                "reason": "test_runtime_isolated",
+                "segmentCount": 0,
+                "totalSegmentCount": len(segments),
+                "validSegmentCount": 0,
+                "reusedSegmentCount": 0,
+            },
+        }
+
+    monkeypatch.setattr(
+        app_module,
+        "ensure_acoustic_alignment_cache",
+        isolated_acoustic_alignment,
+    )
     with app_module.JOBS_LOCK:
         app_module.JOBS.clear()
         app_module.JOB_FILES.clear()
+    app_module.CUT_DRAFT_PCM_CACHE.clear()
     yield
     for name, value in runtime_settings.items():
         setattr(app_module, name, value)
     app_module.dashscope.base_http_api_url = dashscope_http_url
     app_module.dashscope.base_websocket_api_url = dashscope_websocket_url
+    app_module.CUT_DRAFT_PCM_CACHE.clear()
+
 
 @pytest.fixture
 def sample_video(tmp_path: Path) -> Path:

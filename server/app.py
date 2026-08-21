@@ -51,6 +51,7 @@ from .history_repository import (
     HISTORY_LIBRARY_LOCK,
     HistoryRepository,
 )
+from .pcm_cache import FingerprintPcmCache, ReadOnlyPcmSamples
 from .schemas import (
     ArtPositionPresetCreate,
     ArtPositionPresetUpdate,
@@ -99,6 +100,10 @@ JOB_CLEANUP_INTERVAL_SECONDS = int(
     os.getenv("JOB_CLEANUP_INTERVAL_SECONDS", "21600")
 )
 HISTORY_MAX_STORED = int(os.getenv("HISTORY_MAX_STORED", "20"))
+CUT_DRAFT_PCM_CACHE_MAX_BYTES = max(
+    0,
+    int(os.getenv("CUT_DRAFT_PCM_CACHE_MAX_BYTES", str(256 * 1024 * 1024))),
+)
 ALLOWED_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm"}
 MAX_FONT_MB = 20
 MAX_FONT_BYTES = MAX_FONT_MB * 1024 * 1024
@@ -335,6 +340,8 @@ NO_SPEECH_AUDIO_FRAME_SECONDS = 0.04
 NO_SPEECH_AUDIO_SAMPLE_STRIDE = 8
 NO_SPEECH_QUIET_RMS_THRESHOLD = 650.0
 AUDIO_TIMING_QUIET_MIN_SECONDS = 0.45
+
+CUT_DRAFT_PCM_CACHE = FingerprintPcmCache()
 
 JOBS: dict[str, dict[str, Any]] = {}
 JOB_FILES: dict[str, Path] = {}
@@ -2052,6 +2059,16 @@ def decode_cut_audio_samples(media_path: Path) -> array:
     if sys.byteorder != "little":
         samples.byteswap()
     return samples
+
+
+def decode_cut_draft_audio_samples(
+    media_path: Path,
+) -> array | ReadOnlyPcmSamples:
+    return CUT_DRAFT_PCM_CACHE.get_or_decode(
+        media_path,
+        decode_cut_audio_samples,
+        max_bytes=CUT_DRAFT_PCM_CACHE_MAX_BYTES,
+    )
 
 
 def collect_speech_intervals(
@@ -4356,7 +4373,7 @@ def align_cut_draft_text_ranges_to_audio(
         return safe_fallback_ranges
     if samples is None:
         try:
-            samples = decode_cut_audio_samples(media_path)
+            samples = decode_cut_draft_audio_samples(media_path)
         except (OSError, RuntimeError, subprocess.SubprocessError):
             if diagnostics is not None:
                 diagnostics.append(
@@ -4671,7 +4688,7 @@ def resolve_cut_draft_acoustic_boundaries(
     samples: array | None = None
     if media_path is not None and media_path.is_file():
         try:
-            samples = decode_cut_audio_samples(media_path)
+            samples = decode_cut_draft_audio_samples(media_path)
         except (OSError, RuntimeError, subprocess.SubprocessError):
             samples = None
     aligned_text = align_cut_draft_text_ranges_to_audio(

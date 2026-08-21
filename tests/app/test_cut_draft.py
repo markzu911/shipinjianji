@@ -416,6 +416,139 @@ def test_cut_draft_aligns_text_media_ranges_before_preview_and_is_idempotent(
     assert second.json()["cutDraft"]["textRanges"] == first_draft["textRanges"]
 
 
+def test_cut_draft_pcm_cache_preserves_ranges_diagnostics_and_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    job_id = "37373737-3737-4737-8737-373737373737"
+    video_path = tmp_path / "source.mp4"
+    video_path.write_bytes(b"source")
+    segments = [
+        {
+            "start": 0.0,
+            "end": 1.0,
+            "text": "觉得你",
+            "words": [
+                {"text": "觉得", "start": 0.0, "end": 0.4},
+                {"text": "你", "start": 0.4, "end": 0.6},
+            ],
+            "asrWords": [
+                {"text": "觉", "start": 0.0, "end": 0.18},
+                {"text": "得你", "start": 0.18, "end": 0.6},
+            ],
+        }
+    ]
+    alignment_cache = {
+        "segments": [
+            {
+                "segmentIndex": 0,
+                "validation": {"valid": True},
+                "characters": [
+                    {"text": "觉", "start": 0.05, "end": 0.18},
+                    {"text": "得", "start": 0.2, "end": 0.5},
+                    {"text": "你", "start": 0.8, "end": 0.98},
+                ],
+            }
+        ]
+    }
+    alignment_summary = {"status": "completed", "reusedSegmentCount": 0}
+    monkeypatch.setattr(
+        app_module,
+        "load_job_acoustic_alignment",
+        lambda *_args, **_kwargs: (alignment_cache, alignment_summary),
+    )
+    decode_calls = 0
+
+    def decode(_path: Path) -> array:
+        nonlocal decode_calls
+        decode_calls += 1
+        return array("h", [4_000]) * app_module.CUT_BOUNDARY_SAMPLE_RATE
+
+    monkeypatch.setattr(app_module, "decode_cut_audio_samples", decode)
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "status": "completed",
+            "duration": 1.0,
+            "result": {"segments": segments},
+            "cutDraft": None,
+        }
+        app_module.JOB_FILES[job_id] = video_path
+
+    payload = {
+        "revision": 0,
+        "automaticNoSpeechInitialized": True,
+        "textRanges": [
+            {
+                "key": "delete-jue-de",
+                "start": 0.0,
+                "end": 0.4,
+                "originalStart": 0.0,
+                "originalEnd": 0.4,
+            }
+        ],
+        "noSpeechRanges": [],
+        "timelineRanges": [
+            {
+                "key": "manual-jue-de",
+                "start": 0.0,
+                "end": 0.4,
+                "originalStart": 0.0,
+                "originalEnd": 0.4,
+            }
+        ],
+    }
+
+    def reset_draft() -> None:
+        app_module.remove_cut_draft(job_id)
+        with app_module.JOBS_LOCK:
+            app_module.JOBS[job_id]["cutDraft"] = None
+        app_module.CUT_DRAFT_PCM_CACHE.clear()
+
+    with TestClient(app_module.app) as client:
+        monkeypatch.setattr(app_module, "CUT_DRAFT_PCM_CACHE_MAX_BYTES", 0)
+        disabled_response = client.put(
+            f"/api/transcriptions/{job_id}/cut-draft",
+            json=payload,
+        )
+        reset_draft()
+        monkeypatch.setattr(
+            app_module,
+            "CUT_DRAFT_PCM_CACHE_MAX_BYTES",
+            1024 * 1024,
+        )
+        enabled_response = client.put(
+            f"/api/transcriptions/{job_id}/cut-draft",
+            json=payload,
+        )
+        enabled_draft = enabled_response.json()["cutDraft"]
+        cached_response = client.put(
+            f"/api/transcriptions/{job_id}/cut-draft",
+            json={**payload, "revision": enabled_draft["revision"]},
+        )
+
+    assert disabled_response.status_code == 200
+    assert enabled_response.status_code == 200
+    assert cached_response.status_code == 200
+    disabled_draft = disabled_response.json()["cutDraft"]
+    cached_draft = cached_response.json()["cutDraft"]
+    equivalent_fields = (
+        "revision",
+        "textRanges",
+        "timelineRanges",
+        "boundaryDiagnostics",
+        "acousticAlignment",
+    )
+    assert {
+        key: disabled_draft[key] for key in equivalent_fields
+    } == {key: enabled_draft[key] for key in equivalent_fields}
+    assert enabled_draft["revision"] == 1
+    assert cached_draft["revision"] == 2
+    for key in equivalent_fields[1:]:
+        assert cached_draft[key] == enabled_draft[key]
+    assert decode_calls == 2
+
+
 def test_cut_draft_put_persists_shared_forced_alignment_for_text_and_timeline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
