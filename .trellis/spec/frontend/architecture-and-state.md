@@ -77,6 +77,81 @@ if (shouldPersistAutomaticDefaults) scheduleCutDraftSave();
 
 禁止用 `draft?.textRanges?.length`、`draft?.noSpeechRanges?.length`、`job.cutDraft || null` 或范围数量判断是否初始化；这些写法会把用户明确保存的空选择误当成首次打开状态。初始化标记是持久元数据，不进入撤销/重做快照。
 
+### 场景：剪辑高频交互调度与草稿保存队列
+
+#### 1. Scope / Trigger
+
+修改文字删除/恢复、空白切换、时间轴提交、撤销/重做、剪辑缩略图、cut history 或 cut-draft 保存时，必须保持本场景。目标是合并非必要工作，不改变 `selectedRanges`、`selectedNoSpeechRanges`、timeline、声学物理边界或 Store 的权威关系。
+
+#### 2. Signatures
+
+```javascript
+updateSelectionSummary() -> schedule one visible commit
+flushPendingCutSelectionCommit() -> boolean
+flushPendingCutCommitEffects() -> boolean
+scheduleCutDraftSave({ immediate?: boolean }) -> Promise<void>
+flushCutDraftSave() -> Promise<number>
+cutDraftSemanticSignature(payload) -> string
+buildCutTimelineThumbnails({ force?: boolean }) -> Promise<void>
+```
+
+#### 3. Contracts
+
+- 每个用户命令在 handler 内同步更新选择并记录自己的 before/after history transaction；同一 rAF 只能合并可见 commit 和后置 effect，不能合并两个命令的撤销边界。
+- 可见 commit 在下一帧更新删除/恢复状态和统计；EditorSuite、时间轴结构、缩略图映射、服务端保存和 history 序列化在其后执行。一次 cut commit 只允许一个 `CUT_TIMING_CHANGED`，`EditorSuite.setCutDraft()` 重绘必须使用 `hydrateProject: false`；Store 拒绝等价 action 时不得继续重绘 job 状态或覆盖其他操作刚写入的状态文案。
+- thumbnail cache key 只包含 job/source、源时长、采样数量和资源版本。删除范围只隐藏或重映射 source-time frame；同一时刻只有一个 extractor owner，source/key 切换、错误、重置和销毁都 abort 并释放旧 video source。
+- 缓存 frame 的布局必须用现有 source-to-edited spans 计算剪后 `left/width`，不能只隐藏删除区间后让 Grid 将剩余帧等宽重排；剪后时长变为零时也必须取消在途 extractor 并清空旧缩略图 DOM。
+- 本地 cut draft 在每次稳定编辑后立即写入恢复快照；服务端 PUT 使用约 `300ms` trailing debounce、单 in-flight 和 latest-state-wins。语义签名只包含 `automaticNoSpeechInitialized`、range key、文字及 `originalStart/originalEnd`，不得包含服务端派生的物理 `start/end`、revision、diagnostics 或时间戳。
+- in-flight identity 必须在调用 `fetch()` 前登记，保证同步抛错和异步拒绝都由同一 `finally` 释放队列；新命令取消旧 commit effect 时必须同时丢弃旧预览，服务端校准已直接同步 Store 时后续 effect 不得重复提交等价状态。
+- 旧响应可以推进 acknowledged revision；只有响应签名仍等于 desired signature 时才能把规范化物理范围应用到当前选择。后续请求必须在发送时使用最新 acknowledged revision 重建 envelope。
+- `flushCutDraftSave()` 必须先提交待处理 frame/effect、同步落盘 dirty history、取消 debounce、排空 in-flight，并且只在当前 job 的 desired signature 已由当前 revision 确认后返回。
+- history transaction 立即进入内存；localStorage 序列化通过 idle/短防抖合并，`pagehide`、document hidden 和显式 flush 必须同步写入 dirty 状态。localStorage 成功不等于服务端保存成功。
+
+#### 4. Validation & Error Matrix
+
+| 条件 | 结果 |
+| --- | --- |
+| 同一 rAF 前发生两个独立命令 | 一次可见 commit、两个有序 history entry，可连续撤销两次 |
+| 同一 source 上改变删除范围 | extractor 创建数为 0；只重映射/隐藏已有 frame |
+| 新 source 或缩略图密度 | cancel 旧 owner，只允许新 generation 写缓存和 DOM |
+| 首个 PUT 在途时继续编辑 | 不并发发送；首个响应推进 revision，随后发送一个 latest-state PUT |
+| 旧响应签名不是当前 desired | 不覆盖当前物理范围，但保留其 acknowledged revision 供 rebase |
+| PUT 失败 | 保留本地 dirty 状态并显示错误；下一次编辑可重试 |
+| 生成前仍有 timer/in-flight/frame | `flushCutDraftSave()` 继续排空，不使用旧 revision 生成 |
+
+#### 5. Good / Base / Bad Cases
+
+- Good：300ms 内连续 10 次删除只产生一次可见 action 序列和最多一次常规 PUT，基础 video 不 reload，history 最多序列化一次。
+- Base：单次删除在下一绘制机会可见，随后异步完成时间轴、缩略图映射和草稿保存。
+- Bad：把 cut revision 或删除范围放进 thumbnail key，或用包含物理 `start/end` 的签名判断 dirty；前者会逐次重新 seek/JPEG，后者会在服务端校准后循环 PUT。
+
+#### 6. Tests Required
+
+- 真实浏览器使用至少 600 个可见字符和 30 个既有删除范围，连续 10 次操作测量 input 到 post-commit 第二个 rAF；P95 不高于 `100ms`，无新增 `>200ms` long task。
+- 计数断言 extractor、基础 video `src/load()`、Store action、history 写入、PUT 数与最大并发；网络变慢或失败不能阻止删除状态在下一帧可见。
+- 覆盖 burst、在途编辑、revision rebase、服务端物理范围变化、失败重试、生成前 flush、刷新恢复，以及同帧两命令两次撤销。
+- cut frame 前后保持 ArtTool tab、模板 listbox、selection、document/video/tool root identity。
+
+#### 7. Wrong vs Correct
+
+```javascript
+// Wrong: every command synchronously rebuilds media and saves the full draft.
+renderCutTimeline();
+await saveCutDraft(buildPayload());
+
+// Correct: commit visible state once, then coalesce non-critical effects.
+updateSelectionSummary();
+scheduleCutDraftSave();
+```
+
+```javascript
+// Wrong: server-derived physical boundaries make an acknowledged request dirty.
+const signature = JSON.stringify({ ranges, revision, diagnostics });
+
+// Correct: signature only describes stable user intent.
+const signature = cutDraftSemanticSignature(buildPersistedCutDraftPayload());
+```
+
 ### 文字删除展示边界契约
 
 文字剪辑列表必须区分“剪辑主状态”和“展示边界”：

@@ -34,17 +34,17 @@
 
 ## Acceptance Criteria
 
-- [ ] AC1：真实浏览器中点击删除后，目标行的删除/恢复状态在关键 DOM 提交后的下一次绘制机会可见；测试在后续 rAF 中读取最终 DOM，草稿网络请求延迟或失败不阻止该反馈。
-- [ ] AC2：初始缩略图缓存完成后，连续执行文字删除、恢复、撤销和重做不会创建新的缩略图 extractor，不会改写基础 video `src`/调用 `load()`，已有缩略图节点或缓存帧被复用并按剪后时间正确重映射。
-- [ ] AC3：同一 job/source 同时最多存在一个缩略图构建；切换 job、重置或新密度构建后，旧回调不再修改状态、状态文案或 DOM。
-- [ ] AC4：一次删除操作恰好产生一个 Store `CUT_TIMING_CHANGED`，不产生 `PROJECT_HYDRATED`；公共 video/preview/timeline 的 project revision 与 timing revision 保持一致。
-- [ ] AC5：300ms 内连续 10 次选择变化最多产生 1 次常规草稿 PUT；若首个请求已在途，后续变化最多合并为 1 次 latest-state PUT，且并发请求数恒为 1。第二次请求使用首个成功响应返回的 revision，不因冻结旧 revision 得到 409。
-- [ ] AC6：点击“生成”或统一 compose 时，`flushCutDraftSave()` 能绕过 debounce，等待最新用户语义签名获得服务端 revision；保存期间的新编辑不会丢失，旧响应可以推进权威 revision，但不得把旧物理范围覆盖到新语义状态。服务端校准改变物理 `start/end` 后队列一次稳定，不循环重复 PUT。
-- [ ] AC7：同一未变化媒体的连续和并发 cut-draft 校准只执行一次完整 PCM 解码；媒体大小或 mtime 指纹变化后重新解码。缓存超过预算时按 LRU 淘汰，淘汰不删除用户媒体或 sidecar；并发命中、缓存禁用和缓存失败路径的规范化 payload 完全一致。
-- [ ] AC8：现有文字/空白删除、相邻静音保护、时间轴二次确认、撤销/重做、刷新恢复、三工具切换、公共预览与最终 compose 回归全部通过；声学校准明确覆盖完整段落跨段转场、“得/你”、“一起给”、双方向和保留侧 hard limit，同时证明尾音消失且下一段起音不受损。
-- [ ] AC9：使用至少 600 个可见字符、30 个既有删除区间的隔离浏览器 fixture 连续执行 10 次操作；本机记录输入到 post-commit 第二个 rAF 的 P95 不高于 100ms，且无大于 200ms 的新增前端 long task。测量必须在后续 rAF 验证目标 DOM 已更新，并记录环境和原始数据；确定性计数仍是 CI 的主要门禁。
-- [ ] AC10：完整 `tests/app/browser`、相关前后端测试、全部 `web/*.js` 语法检查和 `git diff --check` 通过；测试不读取真实 `data/jobs`、`data/history` 或外部模型。
-- [ ] AC11：同一 animation frame 内连续执行两个独立剪辑命令只触发一次可见 commit，但形成两个有序 history entry，连续两次撤销分别恢复两个中间状态；cut frame 重绘期间 ArtTool 三页签、listbox 焦点/关闭状态和 selection 契约不漂移。
+- [x] AC1：真实浏览器中点击删除后，目标行的删除/恢复状态在关键 DOM 提交后的下一次绘制机会可见；测试在后续 rAF 中读取最终 DOM，草稿网络请求延迟或失败不阻止该反馈。
+- [x] AC2：初始缩略图缓存完成后，连续执行文字删除、恢复、撤销和重做不会创建新的缩略图 extractor，不会改写基础 video `src`/调用 `load()`，已有缩略图节点或缓存帧被复用并按剪后时间正确重映射。
+- [x] AC3：同一 job/source 同时最多存在一个缩略图构建；切换 job、重置或新密度构建后，旧回调不再修改状态、状态文案或 DOM。
+- [x] AC4：一次删除操作恰好产生一个 Store `CUT_TIMING_CHANGED`，不产生 `PROJECT_HYDRATED`；公共 video/preview/timeline 的 project revision 与 timing revision 保持一致。
+- [x] AC5：300ms 内连续 10 次选择变化最多产生 1 次常规草稿 PUT；若首个请求已在途，后续变化最多合并为 1 次 latest-state PUT，且并发请求数恒为 1。第二次请求使用首个成功响应返回的 revision，不因冻结旧 revision 得到 409。
+- [x] AC6：点击“生成”或统一 compose 时，`flushCutDraftSave()` 能绕过 debounce，等待最新用户语义签名获得服务端 revision；保存期间的新编辑不会丢失，旧响应可以推进权威 revision，但不得把旧物理范围覆盖到新语义状态。服务端校准改变物理 `start/end` 后队列一次稳定，不循环重复 PUT。
+- [x] AC7：同一未变化媒体的连续和并发 cut-draft 校准只执行一次完整 PCM 解码；媒体大小或 mtime 指纹变化后重新解码。缓存超过预算时按 LRU 淘汰，淘汰不删除用户媒体或 sidecar；并发命中、缓存禁用和缓存失败路径的规范化 payload 完全一致。
+- [x] AC8：现有文字/空白删除、相邻静音保护、时间轴二次确认、撤销/重做、刷新恢复、三工具切换、公共预览与最终 compose 回归全部通过；声学校准明确覆盖完整段落跨段转场、“得/你”、“一起给”、双方向和保留侧 hard limit，同时证明尾音消失且下一段起音不受损。
+- [x] AC9：使用至少 600 个可见字符、30 个既有删除区间的隔离浏览器 fixture 连续执行 10 次操作；本机记录输入到 post-commit 第二个 rAF 的 P95 不高于 100ms，且无大于 200ms 的新增前端 long task。测量必须在后续 rAF 验证目标 DOM 已更新，并记录环境和原始数据；确定性计数仍是 CI 的主要门禁。
+- [x] AC10：完整 `tests/app/browser`、相关前后端测试、全部 `web/*.js` 语法检查和 `git diff --check` 通过；测试不读取真实 `data/jobs`、`data/history` 或外部模型。
+- [x] AC11：同一 animation frame 内连续执行两个独立剪辑命令只触发一次可见 commit，但形成两个有序 history entry，连续两次撤销分别恢复两个中间状态；cut frame 重绘期间 ArtTool 三页签、listbox 焦点/关闭状态和 selection 契约不漂移。
 
 ## Out of Scope
 

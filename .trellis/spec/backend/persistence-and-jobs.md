@@ -25,6 +25,78 @@
 
 参考：`save_cut_draft`、`save_history_versions_unlocked`、`save_uploaded_art_templates_unlocked`、`persist_model_provider_settings`。
 
+## 场景：剪辑草稿 PCM 指纹缓存
+
+### 1. Scope / Trigger
+
+修改 cut-draft 声学校准的媒体解码入口、PCM 样本消费者、缓存预算或并发策略时适用。缓存只减少同一源媒体的重复完整解码，不能缓存 range alignment 或改变声学边界算法。
+
+### 2. Signatures
+
+```python
+FingerprintPcmCache.get_or_decode(
+    media_path: Path,
+    decoder: Callable[[Path], array],
+    *,
+    max_bytes: int,
+) -> array | ReadOnlyPcmSamples
+
+decode_cut_draft_audio_samples(media_path: Path) \
+    -> array | ReadOnlyPcmSamples
+```
+
+- 环境变量：`CUT_DRAFT_PCM_CACHE_MAX_BYTES`，默认 `268435456`（256 MiB），`0` 表示禁用。
+- fingerprint：解析后的绝对路径、文件大小、`mtime_ns`。
+
+### 3. Contracts
+
+- value 成本严格按 `len(samples) * samples.itemsize` 计费；总预算按 LRU 淘汰，单项超过预算时只返回给当前请求，不写入缓存。
+- 缓存样本通过 `ReadOnlyPcmSamples` 暴露；消费者只能索引、切片或迭代，不得取得共享可变 `array` 后原地修改。
+- metadata lock 只保护 fingerprint/LRU/in-flight 状态；FFmpeg decoder 必须在锁外执行。同 fingerprint 的并发 miss 共用一个 in-flight 结果，其他线程等待同一个 event。
+- decode 失败不缓存失败值，必须唤醒全部 waiter；后续请求可重新 decode，并继续走既有 cut-draft 安全 fallback。
+- 媒体 size 或 `mtime_ns` 改变时形成新 key，并移除同路径旧条目；淘汰和 clear 只释放内存引用，不删除媒体、sidecar 或草稿。
+- 每次 cut-draft PUT 仍对最新 text/timeline ranges 执行完整边界解析。不得缓存 forced boundary、transition trust、diagnostics 或 revision。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 结果 |
+| --- | --- |
+| 预算为 `0` | 清空 LRU，当前调用直接 decoder，不复用 in-flight/cache |
+| 连续相同 fingerprint | 只 decode 一次并更新 LRU 最近使用顺序 |
+| 并发相同 fingerprint miss | 只有 owner decode；waiter 得到同一只读结果 |
+| size/mtime 改变 | cache miss，旧路径指纹条目失效 |
+| 单项大于总预算 | 返回解码结果但 entry count 不增加 |
+| decoder 抛错 | 所有 waiter 收到失败，in-flight 清理，下一次允许重试 |
+| 缓存命中但 ranges 改变 | 复用 PCM，仍重新计算全部物理边界和 diagnostics |
+
+### 5. Good / Base / Bad Cases
+
+- Good：同一媒体的两个并发 cut-draft PUT 只启动一次 FFmpeg decode，但分别按各自最新 ranges 产生完整 diagnostics/revision。
+- Base：首次请求 miss 并缓存，下一次请求命中；禁用缓存后 payload 与命中路径完全一致。
+- Bad：按路径字符串单独建 key，或缓存 alignment 结果；前者会在原文件被替换后复用旧音频，后者会忽略相邻删除状态和重复转场 trust 变化。
+
+### 6. Tests Required
+
+- 单元测试覆盖连续命中、并发去重、size/mtime 失效、实际字节 LRU、超大单项、预算 `0`、失败唤醒和失败后重试。
+- API/领域等价测试对比缓存启用/禁用的 text/timeline 物理范围、`original*`、diagnostics 和 revision。
+- 声学矩阵固定覆盖完整跨段转场、“得/你”、“一起给”、delete-start/delete-end、下一段立即起音和 retained-side hard limit；同时断言被删尾音消失且保留起音不受损。
+- 普通应用与浏览器测试必须替换真实 FunASR 入口，不下载模型或读取用户模型目录。
+
+### 7. Wrong vs Correct
+
+```python
+# Wrong: every PUT decodes the full media, and a path-only key can go stale.
+samples = decode_cut_audio_samples(media_path)
+cache[str(media_path)] = samples
+
+# Correct: fingerprinted, bounded and read-only decode reuse.
+samples = CUT_DRAFT_PCM_CACHE.get_or_decode(
+    media_path,
+    decode_cut_audio_samples,
+    max_bytes=CUT_DRAFT_PCM_CACHE_MAX_BYTES,
+)
+```
+
 ## 场景：剪辑草稿空白自动初始化迁移
 
 ### 1. Scope / Trigger
