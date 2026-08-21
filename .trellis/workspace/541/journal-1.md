@@ -443,3 +443,25 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 21: 修复重复文案裁剪尾音与时间显示
+
+**Date**: 2026-08-21
+**Task**: 修复重复文案裁剪尾音与时间显示
+**Branch**: `develop`
+
+### Summary
+
+通过保留侧持续起音门控精确收紧重复文案删除边界，避免尾音残留且不误删下一段开头；统一删除后文案与时间轴的剪后时间展示，并补齐回归测试与跨层契约。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `b923a81` | (see git log) |
+| `30225d0` | (see git log) |
+
+### Status
+
+[OK] **Completed**
