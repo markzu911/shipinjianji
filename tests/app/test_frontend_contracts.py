@@ -51,7 +51,7 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
 
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
-    assert "/app.js?v=20260821-02" in page_response.text
+    assert "/app.js?v=20260821-03" in page_response.text
     assert "/styles.css?v=20260821-02" in page_response.text
     assert "/transcript-follow-scroll.js?v=20260818-03" in page_response.text
     assert "/ui-feedback.js?v=20260807-03" in page_response.text
@@ -65,7 +65,7 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     assert "/editor-timeline-controller.js?v=20260820-02" in page_response.text
     assert "/editor-art-tool.js?v=20260821-02" in page_response.text
     assert "/editor-pip-tool.js?v=20260819-02" in page_response.text
-    assert "/editor-suite.js?v=20260820-02" in page_response.text
+    assert "/editor-suite.js?v=20260821-02" in page_response.text
     assert timeline_script_response.status_code == 200
     assert timeline_script_response.headers["cache-control"] == "no-store, max-age=0"
     assert "function createStore" in timeline_script_response.text
@@ -93,11 +93,12 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     assert "root.ArtTool = api" in art_tool_response.text
     assert "root.EditorPipModel = api" in pip_model_response.text
     assert "root.PipTool = api" in pip_tool_response.text
+    timeline_controller_source = timeline_controller_response.text.replace("\r\n", "\n")
     assert 'if (keyboardTarget) {\n      keyboardTarget.addEventListener?.("keydown", keyDown);' in (
-        timeline_controller_response.text
+        timeline_controller_source
     )
     assert '} else {\n      layer?.addEventListener("keydown", keyDown);' in (
-        timeline_controller_response.text
+        timeline_controller_source
     )
     assert page_response.text.index("/timeline-model.js") < page_response.text.index(
         "/editor-pip-model.js"
@@ -637,6 +638,8 @@ def test_cut_range_and_segment_frontend_contracts():
     assert 'finishEvent.type === "pointerup"' in adjustment_script
     assert 'mode === "move"' in adjustment_script
     assert "if (!hasDragged)" in adjustment_script
+    assert "const historyBefore = cloneCutHistorySnapshot();" in adjustment_script
+    assert "before: historyBefore" in adjustment_script
     confirmation_start = script_response.text.index(
         "async function requestTimelineRangeConfirmation"
     )
@@ -802,6 +805,9 @@ def test_top_level_art_and_pip_tools_are_the_only_editor_runtime():
     assert "pip: {" in suite
     assert "initialTemplateSelection: initialArtTemplateSelection" in suite
     assert "function parseRequestedArtTemplate(search)" in suite
+    assert "const commit = projectStore.dispatch({" in suite
+    assert "if (currentJob && commit.accepted)" in suite
+    assert "renderJobState(currentJob, { hydrateProject: false })" in suite
 
     assert "root.ArtTool = api" in tool
     assert "function mount(host, services)" in tool
@@ -1330,6 +1336,7 @@ const getNoSpeechRange = (suggestion) => suggestion;
 const stageCutHistoryOperation = (label) => historyActions.push(label);
 const updateSelectionSummary = () => {{ selectionUpdateCount += 1; }};
 const seekCutPreview = (time) => seekTimes.push(time);
+const scheduleCutPreviewEffect = (effect) => effect?.();
 const renderTextSegmentItem = (run) => ({{ type: "text", text: run.text }});
 const renderNoSpeechSegmentItem = (suggestion) => ({{
   type: "no-speech",
@@ -1782,8 +1789,17 @@ const getNoSpeechRange = () => null;
 let timelineDeleteRanges = [];
 let timelineRangeInProgress = false;
 let selectedTimelineRangeId = null;
+let mergedCutSelectionCache = null;
+let semanticCutDeleteRangesCache = null;
 ${{source}}
-return {{ selectedRanges, getMergedSelection }};
+return {{
+  selectedRanges,
+  getMergedSelection,
+  resetSelectionCaches() {{
+    mergedCutSelectionCache = null;
+    semanticCutDeleteRangesCache = null;
+  }},
+}};
 `,
 )(segments, [], () => 1, (value, minimum, maximum) => (
   Math.min(maximum, Math.max(minimum, value))
@@ -1802,6 +1818,7 @@ functions.selectedRanges.set("head", {{
   originalStart: 0.0,
   originalEnd: 0.4,
 }});
+functions.resetSelectionCaches();
 const head = functions.getMergedSelection();
 console.log(JSON.stringify({{ tail, head }}));
 """
@@ -1875,7 +1892,7 @@ const updateSelectionSummary = () => {{ selectionUpdates += 1; }};
 const reconcileCurrentCutHistorySnapshot = () => {{ historyReconciles += 1; }};
 ${{source}}
 return {{
-  expectedSignature: () => cutDraftSelectionSignature(buildPersistedCutDraftPayload()),
+  expectedSignature: () => cutDraftSemanticSignature(buildPersistedCutDraftPayload()),
   applyPersistedCutDraftAlignment,
   snapshot: () => ({{
     text: [...selectedRanges.entries()],
@@ -2034,6 +2051,8 @@ const functions = new Function(`
 let cutDraftReady = true;
 let currentJobId = "job-1";
 let cutDraftSaveQueue = Promise.resolve();
+let cutDraftSaveInFlight = null;
+let cutDraftSaveTimer = null;
 let cutDraftLastSignature = "stale";
 let cutDraftNeedsServerSync = true;
 let cutDraftRevision = 3;
@@ -2041,8 +2060,13 @@ let scheduleCount = 0;
 const buildPersistedCutDraftPayload = () => ({{
   textRanges: [{{ key: "text-a", start: 0, end: 0.4 }}],
 }});
-const cutDraftSelectionSignature = (payload) => JSON.stringify(payload);
+const cutDraftSemanticSignature = (payload) => JSON.stringify(payload);
+const flushPendingCutSelectionCommit = () => false;
+const flushPendingCutCommitEffects = () => false;
+const flushLocalCutHistory = () => undefined;
+const cancelCutDraftSaveTimer = () => undefined;
 const scheduleCutDraftSave = () => {{ scheduleCount += 1; }};
+const isCutDraftAcknowledged = () => false;
 ${{source}}
 return {{
   flushCutDraftSave,

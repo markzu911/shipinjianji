@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import statistics
+import time
 
 import pytest
 
@@ -70,6 +72,562 @@ def install_base_media_mutation_probe(page) -> None:
 
 def base_media_mutations(page) -> dict[str, int]:
     return page.evaluate("window.__b1MediaMutationProbe")
+
+
+def install_cut_performance_probe(page) -> None:
+    page.add_init_script(
+        """(() => {
+          const originalCreateElement = Document.prototype.createElement;
+          const originalSetItem = Storage.prototype.setItem;
+          const originalFetch = window.fetch.bind(window);
+          window.__cutPerformanceProbe = {
+            createdVideos: 0,
+            historyWrites: 0,
+            putCalls: 0,
+            putInFlight: 0,
+            putMaxInFlight: 0,
+            storeActions: [],
+            longTasks: [],
+          };
+          if (PerformanceObserver.supportedEntryTypes?.includes('longtask')) {
+            new PerformanceObserver(list => {
+              window.__cutPerformanceProbe.longTasks.push(
+                ...list.getEntries().map(entry => entry.duration),
+              );
+            }).observe({ type: 'longtask', buffered: true });
+          }
+          Document.prototype.createElement = function createElementWithProbe(
+            name,
+            options,
+          ) {
+            const element = originalCreateElement.call(this, name, options);
+            if (String(name).toLowerCase() === 'video') {
+              window.__cutPerformanceProbe.createdVideos += 1;
+            }
+            return element;
+          };
+          Storage.prototype.setItem = function setItemWithProbe(key, value) {
+            if (String(key).startsWith('video-editor:cut-history:')) {
+              window.__cutPerformanceProbe.historyWrites += 1;
+            }
+            return originalSetItem.call(this, key, value);
+          };
+          window.fetch = async (...args) => {
+            const input = args[0];
+            const options = args[1] || {};
+            const url = String(input?.url || input || '');
+            const isDraftPut = options.method === 'PUT'
+              && url.includes('/cut-draft');
+            if (isDraftPut) {
+              window.__cutPerformanceProbe.putCalls += 1;
+              window.__cutPerformanceProbe.putInFlight += 1;
+              window.__cutPerformanceProbe.putMaxInFlight = Math.max(
+                window.__cutPerformanceProbe.putMaxInFlight,
+                window.__cutPerformanceProbe.putInFlight,
+              );
+            }
+            try {
+              return await originalFetch(...args);
+            } finally {
+              if (isDraftPut) window.__cutPerformanceProbe.putInFlight -= 1;
+            }
+          };
+        })()"""
+    )
+
+
+def reset_cut_performance_probe(page) -> None:
+    page.evaluate(
+        """() => {
+          const probe = window.__cutPerformanceProbe;
+          probe.createdVideos = 0;
+          probe.historyWrites = 0;
+          probe.putCalls = 0;
+          probe.putInFlight = 0;
+          probe.putMaxInFlight = 0;
+          probe.storeActions = [];
+          probe.longTasks = [];
+          probe.commitCount = 0;
+          probe.commitBreakdowns = [];
+          probe.unsubscribe?.();
+          probe.unsubscribe = window.EditorSuite.subscribeProject(
+            (_next, _previous, action) => probe.storeActions.push(action.type),
+          );
+        }"""
+    )
+
+
+def route_cut_draft_echo(page, job_id: str) -> None:
+    revision = {"value": 1}
+
+    def fulfill(route) -> None:
+        request = json.loads(route.request.post_data or "{}")
+        revision["value"] += 1
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "cutDraft": {
+                        "schemaVersion": 1,
+                        **request,
+                        "revision": revision["value"],
+                        "boundaryDiagnostics": [],
+                        "acousticAlignment": {"status": "unavailable"},
+                        "updatedAt": "2026-08-21T00:00:01+00:00",
+                    }
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+    page.route(
+        re.compile(rf".*/api/transcriptions/{job_id}/cut-draft$"),
+        fulfill,
+    )
+
+
+def route_cut_draft_recording(
+    page,
+    job_id: str,
+    *,
+    delay_first: float = 0.0,
+    fail_first: bool = False,
+) -> list[dict[str, object]]:
+    revision = {"value": 1}
+    requests: list[dict[str, object]] = []
+
+    def fulfill(route) -> None:
+        request = json.loads(route.request.post_data or "{}")
+        requests.append(request)
+        if len(requests) == 1 and delay_first > 0:
+            time.sleep(delay_first)
+        if len(requests) == 1 and fail_first:
+            route.fulfill(
+                status=500,
+                content_type="application/json",
+                body=json.dumps({"detail": "模拟草稿保存失败"}, ensure_ascii=False),
+            )
+            return
+        revision["value"] += 1
+        response_draft = {**request, "revision": revision["value"]}
+        if len(requests) == 1 and request.get("textRanges"):
+            response_draft["textRanges"] = [
+                {
+                    **item,
+                    "start": max(0.0, float(item["start"]) - 0.02),
+                    "end": float(item["end"]) + 0.02,
+                }
+                for item in request["textRanges"]
+            ]
+        response_draft.update(
+            {
+                "schemaVersion": 1,
+                "boundaryDiagnostics": [],
+                "acousticAlignment": {"status": "unavailable"},
+                "updatedAt": "2026-08-21T00:00:01+00:00",
+            }
+        )
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"cutDraft": response_draft}, ensure_ascii=False),
+        )
+
+    page.route(
+        re.compile(rf".*/api/transcriptions/{job_id}/cut-draft$"),
+        fulfill,
+    )
+    return requests
+
+
+def test_cut_interaction_long_fixture_performance_and_work_counts(
+    browser_session,
+    seeded_performance_editor_job,
+):
+    page = browser_session.page
+    install_cut_performance_probe(page)
+    route_cut_draft_echo(page, seeded_performance_editor_job.job_id)
+    open_editor(browser_session, seeded_performance_editor_job)
+    page.wait_for_function(
+        """() => {
+          const items = [...document.querySelectorAll(
+            '#cutFrameTimelineThumbnails .frame-timeline-thumb'
+          )];
+          return items.length >= 8
+            && items.every(item => !item.classList.contains('is-loading'));
+        }"""
+    )
+    thumbnail_projection = page.evaluate(
+        """() => {
+          const duration = 60;
+          const items = [...document.querySelectorAll(
+            '#cutFrameTimelineThumbnails .frame-timeline-thumb'
+          )].filter(item => !item.hidden);
+          return {
+            allPositioned: items.every(
+              item => item.style.position === 'absolute'
+                && Number.parseFloat(item.style.width) > 0
+            ),
+            remapped: items.some(item => {
+              const sourcePercent = Number(item.dataset.sourceTime) / duration * 100;
+              return Math.abs(Number.parseFloat(item.style.left) - sourcePercent) > 0.1;
+            }),
+          };
+        }"""
+    )
+    assert thumbnail_projection == {"allPositioned": True, "remapped": True}
+    assert page.locator("#segmentList .segment-item").count() >= 60
+    assert len(page.locator("#segmentList").inner_text().replace("\n", "")) >= 600
+    install_base_media_mutation_probe(page)
+    reset_cut_performance_probe(page)
+
+    durations = page.evaluate(
+        """async () => {
+          const values = [];
+          const states = [];
+          for (let index = 0; index < 10; index += 1) {
+            const item = [...document.querySelectorAll(
+              '.segment-item[data-segment-index]'
+            )].find(candidate => candidate.dataset.displayText.includes(
+              '性能回归00测试文本'
+            ));
+            const button = item?.querySelector('.segment-toggle');
+            const before = button?.getAttribute('aria-label');
+            const started = performance.now();
+            button?.click();
+            const afterClick = performance.now();
+            await new Promise(resolve => requestAnimationFrame(resolve));
+            const afterFirstFrame = performance.now();
+            await new Promise(resolve => requestAnimationFrame(resolve));
+            const afterSecondFrame = performance.now();
+            const after = [...document.querySelectorAll(
+              '.segment-item[data-segment-index]'
+            )].find(candidate => candidate.dataset.displayText.includes(
+              '性能回归00测试文本'
+            ))?.querySelector('.segment-toggle')?.getAttribute('aria-label');
+            states.push({ before, after });
+            values.push({
+              sync: afterClick - started,
+              firstFrame: afterFirstFrame - afterClick,
+              secondFrame: afterSecondFrame - afterFirstFrame,
+              total: afterSecondFrame - started,
+            });
+          }
+          return { states, values };
+        }"""
+    )
+    page.wait_for_timeout(900)
+    probe = page.evaluate("window.__cutPerformanceProbe")
+    media_probe = base_media_mutations(page)
+    assert all(
+        state["before"] and state["after"] and state["before"] != state["after"]
+        for state in durations["states"]
+    ), durations["states"]
+    ordered = sorted(value["total"] for value in durations["values"])
+    p50 = statistics.median(ordered)
+    p95 = ordered[max(0, int(len(ordered) * 0.95) - 1)]
+    print(
+        "cut-performance-baseline",
+        {
+            "rawMs": [
+                {key: round(value[key], 3) for key in value}
+                for value in durations["values"]
+            ],
+            "p50Ms": round(p50, 3),
+            "p95Ms": round(p95, 3),
+            "maxMs": round(max(ordered), 3),
+            "probe": probe,
+            "media": media_probe,
+        },
+    )
+
+    assert p95 <= 100
+    assert probe["createdVideos"] == 0
+    assert probe["putCalls"] <= 1
+    assert probe["putMaxInFlight"] <= 1
+    assert probe["historyWrites"] <= 1
+    assert all(duration <= 200 for duration in probe["longTasks"])
+    assert media_probe == {"srcWrites": 0, "loadCalls": 0}
+
+
+def test_cut_draft_burst_uses_one_trailing_save(
+    browser_session,
+    seeded_performance_editor_job,
+):
+    page = browser_session.page
+    install_cut_performance_probe(page)
+    requests = route_cut_draft_recording(
+        page,
+        seeded_performance_editor_job.job_id,
+    )
+    open_editor(browser_session, seeded_performance_editor_job)
+    reset_cut_performance_probe(page)
+    page.evaluate(
+        """() => {
+          const original = window.EditorSuite.setCutDraft.bind(window.EditorSuite);
+          window.__cutDraftSyncCalls = 0;
+          window.EditorSuite.setCutDraft = value => {
+            window.__cutDraftSyncCalls += 1;
+            return original(value);
+          };
+        }"""
+    )
+
+    page.evaluate(
+        """() => {
+          for (const segmentIndex of [0, 2, 4, 6, 8, 10, 12, 14, 16, 18]) {
+            document.querySelector(
+              `.segment-item[data-segment-index="${segmentIndex}"] `
+                + '.segment-toggle'
+            )?.click();
+          }
+        }"""
+    )
+    page.locator("#cutDraftSaveStatus").filter(
+        has_text="剪辑草稿已保存"
+    ).wait_for()
+    page.wait_for_timeout(450)
+
+    probe = page.evaluate("window.__cutPerformanceProbe")
+    assert len(requests) == 1
+    assert probe["putCalls"] == 1
+    assert probe["putMaxInFlight"] == 1
+    assert page.evaluate("window.__cutDraftSyncCalls") == 2
+
+
+def test_cut_draft_in_flight_edit_rebases_one_latest_request(
+    browser_session,
+    seeded_performance_editor_job,
+):
+    page = browser_session.page
+    install_cut_performance_probe(page)
+    requests = route_cut_draft_recording(
+        page,
+        seeded_performance_editor_job.job_id,
+        delay_first=1.0,
+    )
+    open_editor(browser_session, seeded_performance_editor_job)
+    reset_cut_performance_probe(page)
+
+    page.evaluate(
+        """() => {
+          const clickSegment = segmentIndex => document.querySelector(
+            `.segment-item[data-segment-index="${segmentIndex}"] `
+              + '.segment-toggle'
+          )?.click();
+          clickSegment(1);
+          setTimeout(() => clickSegment(3), 700);
+        }"""
+    )
+    page.wait_for_function(
+        """() => window.__cutPerformanceProbe.putCalls === 2
+          && window.__cutPerformanceProbe.putInFlight === 0""",
+        timeout=10_000,
+    )
+
+    probe = page.evaluate("window.__cutPerformanceProbe")
+    assert len(requests) == 2
+    assert probe["putMaxInFlight"] == 1
+    assert requests[0]["revision"] == 1
+    assert requests[1]["revision"] == 2
+    assert len(requests[1]["textRanges"]) == len(requests[0]["textRanges"]) + 1
+    first_request_range = next(
+        item
+        for item in requests[0]["textRanges"]
+        if item["originalStart"] == pytest.approx(1.0)
+    )
+    latest_first_range = next(
+        item
+        for item in requests[1]["textRanges"]
+        if item["originalStart"] == pytest.approx(1.0)
+    )
+    assert latest_first_range["start"] == pytest.approx(first_request_range["start"])
+    assert latest_first_range["end"] == pytest.approx(first_request_range["end"])
+
+
+def test_cut_draft_failed_save_retries_on_next_edit(
+    browser_session,
+    seeded_performance_editor_job,
+):
+    page = browser_session.page
+    install_cut_performance_probe(page)
+    requests = route_cut_draft_recording(
+        page,
+        seeded_performance_editor_job.job_id,
+        fail_first=True,
+    )
+    open_editor(browser_session, seeded_performance_editor_job)
+    reset_cut_performance_probe(page)
+
+    page.locator('.segment-item[data-segment-index="1"] .segment-toggle').click()
+    page.locator("#cutDraftSaveStatus").filter(
+        has_text="模拟草稿保存失败"
+    ).wait_for()
+    expected_errors = [
+        message
+        for message in browser_session.http_errors
+        if message.startswith("500 PUT ") and message.endswith("/cut-draft")
+    ]
+    assert len(expected_errors) == 1
+    browser_session.http_errors.remove(expected_errors[0])
+    expected_console_errors = [
+        message
+        for message in browser_session.console_errors
+        if "server responded with a status of 500" in message
+    ]
+    assert len(expected_console_errors) == 1
+    browser_session.console_errors.remove(expected_console_errors[0])
+    page.locator('.segment-item[data-segment-index="3"] .segment-toggle').click()
+    page.locator("#cutDraftSaveStatus").filter(
+        has_text="剪辑草稿已保存"
+    ).wait_for()
+
+    probe = page.evaluate("window.__cutPerformanceProbe")
+    assert len(requests) == 2
+    assert requests[0]["revision"] == 1
+    assert requests[1]["revision"] == 1
+    assert probe["putMaxInFlight"] == 1
+
+
+def test_cut_draft_synchronous_fetch_error_releases_queue_for_retry(
+    browser_session,
+    seeded_performance_editor_job,
+):
+    page = browser_session.page
+    route_cut_draft_echo(page, seeded_performance_editor_job.job_id)
+    open_editor(browser_session, seeded_performance_editor_job)
+    page.evaluate(
+        """() => {
+          const originalFetch = window.fetch.bind(window);
+          window.__synchronousDraftPutCalls = 0;
+          window.fetch = (...args) => {
+            const input = args[0];
+            const options = args[1] || {};
+            const url = String(input?.url || input || '');
+            if (options.method === 'PUT' && url.includes('/cut-draft')) {
+              window.__synchronousDraftPutCalls += 1;
+              if (window.__synchronousDraftPutCalls === 1) {
+                throw new TypeError('模拟同步请求失败');
+              }
+            }
+            return originalFetch(...args);
+          };
+        }"""
+    )
+
+    page.locator('.segment-item[data-segment-index="1"] .segment-toggle').click()
+    page.locator("#cutDraftSaveStatus").filter(
+        has_text="模拟同步请求失败"
+    ).wait_for()
+    page.locator('.segment-item[data-segment-index="3"] .segment-toggle').click()
+    page.locator("#cutDraftSaveStatus").filter(
+        has_text="剪辑草稿已保存"
+    ).wait_for()
+
+    assert page.evaluate("window.__synchronousDraftPutCalls") == 2
+
+
+def test_cut_undo_cancels_preview_from_superseded_command(
+    browser_session,
+    seeded_performance_editor_job,
+):
+    page = browser_session.page
+    route_cut_draft_echo(page, seeded_performance_editor_job.job_id)
+    open_editor(browser_session, seeded_performance_editor_job)
+    page.wait_for_timeout(100)
+
+    seek_calls = page.evaluate(
+        """async () => {
+          const controller = window.EditorSuite.mediaController();
+          const originalSeekSource = controller.seekSource;
+          const calls = [];
+          controller.seekSource = seconds => calls.push(seconds);
+          try {
+            document.querySelector(
+              '.segment-item[data-segment-index="1"] .segment-toggle'
+            )?.click();
+            document.dispatchEvent(new KeyboardEvent('keydown', {
+              bubbles: true,
+              cancelable: true,
+              ctrlKey: true,
+              key: 'z',
+            }));
+            await new Promise(resolve => requestAnimationFrame(resolve));
+            await new Promise(resolve => requestAnimationFrame(resolve));
+            await new Promise(resolve => setTimeout(resolve, 0));
+            return calls;
+          } finally {
+            controller.seekSource = originalSeekSource;
+          }
+        }"""
+    )
+
+    assert seek_calls == []
+
+
+def test_two_cut_commands_in_one_frame_keep_two_undo_transactions(
+    browser_session,
+    seeded_performance_editor_job,
+):
+    page = browser_session.page
+    install_cut_performance_probe(page)
+    route_cut_draft_echo(page, seeded_performance_editor_job.job_id)
+    open_editor(browser_session, seeded_performance_editor_job)
+    reset_cut_performance_probe(page)
+
+    page.evaluate(
+        """async () => {
+          for (const segmentIndex of [0, 2]) {
+            document.querySelector(
+              `.segment-item[data-segment-index="${segmentIndex}"] `
+                + '.segment-toggle'
+            )?.click();
+          }
+          window.dispatchEvent(new Event('pagehide'));
+          const jobId = new URLSearchParams(location.search).get('job');
+          window.__pagehideCutHistory = JSON.parse(
+            localStorage.getItem(`video-editor:cut-history:${jobId}`) || 'null'
+          );
+          await new Promise(resolve => requestAnimationFrame(resolve));
+          await new Promise(resolve => requestAnimationFrame(resolve));
+        }"""
+    )
+    page.wait_for_function(
+        """() => window.__cutPerformanceProbe.storeActions.filter(
+          type => type === 'cutTimingChanged'
+        ).length === 1"""
+    )
+    cut_actions = page.evaluate(
+        """window.__cutPerformanceProbe.storeActions.filter(
+          type => type === 'cutTimingChanged'
+        ).length"""
+    )
+    assert cut_actions == 1
+    assert page.evaluate("window.__pagehideCutHistory.entries.length") == 2
+    assert page.evaluate("window.__cutPerformanceProbe.commitCount") == 1
+    assert page.evaluate(
+        """window.__cutPerformanceProbe.storeActions.filter(
+          type => type === 'projectHydrated'
+        ).length"""
+    ) == 0
+
+    page.keyboard.press("Control+z")
+    page.wait_for_function(
+        """() => document.querySelector(
+          '.segment-item[data-segment-index="2"] .segment-toggle'
+        )?.getAttribute('aria-label')?.startsWith('恢复')"""
+    )
+    assert page.locator(
+        '.segment-item[data-segment-index="0"] .segment-toggle'
+    ).get_attribute("aria-label").startswith("删除")
+
+    page.keyboard.press("Control+z")
+    page.wait_for_function(
+        """() => document.querySelector(
+          '.segment-item[data-segment-index="0"] .segment-toggle'
+        )?.getAttribute('aria-label')?.startsWith('恢复')"""
+    )
 
 
 def test_transcription_completion_loads_and_plays_preview_without_reload(
@@ -725,6 +1283,9 @@ def test_top_level_art_track_and_ai_draft_commit_atomically(
     seeded_editor_job,
 ):
     page = open_editor(browser_session, seeded_editor_job)
+    page.locator("#cutDraftSaveStatus").filter(
+        has_text="剪辑草稿已保存"
+    ).wait_for()
     page.locator('[data-editor-tool="art"]').click()
     panel = page.locator("#editorArtPanelRoot")
     panel.wait_for(state="visible")
@@ -1544,6 +2105,9 @@ def test_top_level_pip_deactivation_rejects_late_asset_response(
     seeded_editor_job,
 ):
     page = open_editor(browser_session, seeded_editor_job)
+    page.locator("#cutDraftSaveStatus").filter(
+        has_text="剪辑草稿已保存"
+    ).wait_for()
     page.locator('[data-editor-tool="pip"]').click()
     panel = page.locator("#editorPipPanelRoot")
     panel.wait_for(state="visible")
@@ -1747,7 +2311,10 @@ def test_version_save_preserves_base_media_identity_and_playback(
         lambda route: route.fulfill(
             status=201,
             content_type="application/json",
-            body='{"id":"b1-version","name":"B1 测试版本"}',
+            body=json.dumps(
+                {"id": "b1-version", "name": "B1 测试版本"},
+                ensure_ascii=True,
+            ),
         ),
     )
     with page.expect_response(history_url) as response_info:

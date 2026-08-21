@@ -467,6 +467,69 @@ def seeded_editor_job(
 
 
 @pytest.fixture
+def seeded_performance_editor_job(
+    seeded_editor_job: SeededEditorJob,
+) -> SeededEditorJob:
+    segment_count = 60
+    media_duration = 60.0
+    segments: list[dict[str, object]] = []
+    text_ranges: list[dict[str, object]] = []
+    for index in range(segment_count):
+        start = float(index)
+        end = round(start + 0.8, 3)
+        text = f"性能回归{index:02d}测试文本"
+        segment = {
+            "id": index,
+            "start": start,
+            "end": end,
+            "text": text,
+            "words": [{"text": text, "start": start, "end": end}],
+        }
+        segments.append(segment)
+        if index % 2 == 0:
+            text_ranges.append(
+                {
+                    "key": f"{start:.3f}-{end:.3f}",
+                    "start": start,
+                    "end": end,
+                    "originalStart": start,
+                    "originalEnd": end,
+                    "text": text,
+                    "adjacentSilenceBefore": 0.0,
+                    "adjacentSilenceAfter": 0.0,
+                }
+            )
+
+    with app_module.JOBS_LOCK:
+        job = app_module.JOBS[seeded_editor_job.job_id]
+        job["duration"] = media_duration
+        job["result"].update(
+            {
+                "text": "\n".join(str(item["text"]) for item in segments),
+                "duration": media_duration,
+                "mediaDuration": media_duration,
+                "segments": segments,
+                "editableSegments": copy.deepcopy(segments),
+                "suggestions": [],
+                "noSpeechSuggestions": [],
+                "audioQuietRanges": [],
+            }
+        )
+        job["cutDraft"] = {
+            "schemaVersion": 1,
+            "revision": 1,
+            "automaticNoSpeechInitialized": True,
+            "textRanges": text_ranges,
+            "noSpeechRanges": [],
+            "timelineRanges": [],
+            "boundaryDiagnostics": [],
+            "acousticAlignment": {"status": "unavailable"},
+            "updatedAt": "2026-08-21T00:00:00+00:00",
+        }
+    return seeded_editor_job
+
+
+@pytest.fixture
 def seeded_portrait_editor_job(
     seeded_editor_job: SeededEditorJob,
 ) -> SeededEditorJob:

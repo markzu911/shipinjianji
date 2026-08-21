@@ -1622,7 +1622,7 @@
       duration: Math.max(0, Number(payload.duration) || 0),
       transcript: payload.transcript || null,
     };
-    projectStore.dispatch({
+    const commit = projectStore.dispatch({
       type: window.EditorProjectStore.ACTIONS.CUT_TIMING_CHANGED,
       payload: {
         cut: nextCutDraftState,
@@ -1632,8 +1632,10 @@
     cutDraftState = projectSnapshot().project.cut;
     cutDraftActive = cutDraftState.active;
     updateDouyinBaseVideo();
-    if (currentJob) renderJobState(currentJob);
-    else syncGenerationButton();
+    if (currentJob && commit.accepted) {
+      renderJobState(currentJob, { hydrateProject: false });
+    } else syncGenerationButton();
+    return commit;
   }
 
   function setTimelineTracks(kind, tracks, options = {}) {
