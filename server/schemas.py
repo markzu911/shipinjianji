@@ -33,6 +33,13 @@ class CutDraftTimelineRange(DeleteRange):
     key: str | None = Field(default=None, min_length=1, max_length=120)
     originalStart: float | None = Field(default=None, ge=0, le=86400)
     originalEnd: float | None = Field(default=None, ge=0, le=86400)
+    boundaryMode: Literal["speech_safe", "split_exact"] = "speech_safe"
+    splitClipKey: str | None = Field(default=None, min_length=1, max_length=360)
+
+
+class CutDraftSplitPoint(BaseModel):
+    key: str = Field(min_length=1, max_length=120)
+    sourceTime: float = Field(ge=0, le=86400)
 
 
 class CutDraftRequest(BaseModel):
@@ -47,6 +54,7 @@ class CutDraftRequest(BaseModel):
         default_factory=list,
         max_length=500,
     )
+    splitPoints: list[CutDraftSplitPoint] = Field(default_factory=list, max_length=500)
 
 
 class JobCleanupRequest(BaseModel):
@@ -258,6 +266,7 @@ __all__ = (
     "CutDraftTextRange",
     "CutDraftNoSpeechRange",
     "CutDraftTimelineRange",
+    "CutDraftSplitPoint",
     "CutDraftRequest",
     "JobCleanupRequest",
     "ModelProviderUpdate",

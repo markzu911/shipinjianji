@@ -320,6 +320,286 @@ def test_cut_draft_defaults_automatic_no_speech_marker_for_legacy_clients():
     assert saved.json()["cutDraft"]["automaticNoSpeechInitialized"] is False
 
 
+def test_legacy_cut_draft_loads_with_empty_split_points():
+    job_id = "45454545-4545-4545-8545-454545454545"
+    path = app_module.cut_draft_path(job_id)
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        '{"schemaVersion": 1, "revision": 3, "timelineRanges": []}',
+        encoding="utf-8",
+    )
+
+    draft = app_module.load_cut_draft(job_id)
+
+    assert draft is not None
+    assert draft["revision"] == 3
+    assert draft["splitPoints"] == []
+
+
+def test_cut_draft_persists_split_points_and_exact_adjacent_clip_range(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    job_id = "46464646-4646-4646-8646-464646464646"
+    app_module.cut_draft_path(job_id).parent.mkdir(parents=True)
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "status": "completed",
+            "duration": 10.0,
+            "result": {"segments": []},
+            "cutDraft": None,
+        }
+
+    def fail_acoustic_load(*_args, **_kwargs):
+        raise AssertionError("split_exact must not load forced-alignment evidence")
+
+    def fail_pcm_decode(*_args, **_kwargs):
+        raise AssertionError("split_exact must not decode or inspect PCM")
+
+    monkeypatch.setattr(
+        app_module,
+        "load_job_acoustic_alignment",
+        fail_acoustic_load,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "decode_cut_draft_audio_samples",
+        fail_pcm_decode,
+    )
+
+    payload = {
+        "revision": 0,
+        "textRanges": [],
+        "noSpeechRanges": [],
+        "splitPoints": [
+            {"key": "split-b", "sourceTime": 7.0},
+            {"key": "split-a", "sourceTime": 3.0},
+        ],
+        "timelineRanges": [
+            {
+                "key": "timeline-exact-a-b",
+                "start": 3.0,
+                "end": 7.0,
+                "originalStart": 3.0,
+                "originalEnd": 7.0,
+                "boundaryMode": "split_exact",
+                "splitClipKey": "split-clip:split-a:split-b",
+            }
+        ],
+    }
+
+    with TestClient(app_module.app) as client:
+        saved = client.put(
+            f"/api/transcriptions/{job_id}/cut-draft",
+            json=payload,
+        )
+        restored = client.get(f"/api/transcriptions/{job_id}/cut-draft")
+
+    assert saved.status_code == 200
+    draft = saved.json()["cutDraft"]
+    assert draft["schemaVersion"] == 1
+    assert draft["splitPoints"] == [
+        {"key": "split-a", "sourceTime": 3.0},
+        {"key": "split-b", "sourceTime": 7.0},
+    ]
+    assert draft["timelineRanges"] == [
+        {
+            "key": "timeline-exact-a-b",
+            "start": 3.0,
+            "end": 7.0,
+            "originalStart": 3.0,
+            "originalEnd": 7.0,
+            "boundaryMode": "split_exact",
+            "splitClipKey": "split-clip:split-a:split-b",
+        }
+    ]
+    assert draft["acousticAlignment"]["status"] == "not_required"
+    assert [item["fallbackReason"] for item in draft["boundaryDiagnostics"]] == [
+        "split_boundary_exact",
+        "split_boundary_exact",
+    ]
+    assert restored.json()["cutDraft"] == draft
+
+
+def test_split_points_do_not_change_manual_timeline_range_alignment_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    job_id = "47474747-4747-4747-8747-474747474747"
+    video_path = tmp_path / "source.mp4"
+    video_path.write_bytes(b"source")
+    app_module.cut_draft_path(job_id).parent.mkdir(parents=True)
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "status": "completed",
+            "duration": 10.0,
+            "result": {"segments": []},
+            "cutDraft": None,
+        }
+        app_module.JOB_FILES[job_id] = video_path
+
+    acoustic_calls: list[list[dict[str, float]]] = []
+    pcm_calls = 0
+
+    def load_alignment(_path, _segments, relevant_ranges):
+        acoustic_calls.append(relevant_ranges)
+        return None, {"status": "unavailable"}
+
+    def decode_pcm(_path: Path) -> array:
+        nonlocal pcm_calls
+        pcm_calls += 1
+        return array("h", [0]) * (10 * app_module.CUT_BOUNDARY_SAMPLE_RATE)
+
+    monkeypatch.setattr(app_module, "load_job_acoustic_alignment", load_alignment)
+    monkeypatch.setattr(app_module, "decode_cut_draft_audio_samples", decode_pcm)
+
+    with TestClient(app_module.app) as client:
+        saved = client.put(
+            f"/api/transcriptions/{job_id}/cut-draft",
+            json={
+                "revision": 0,
+                "textRanges": [],
+                "noSpeechRanges": [],
+                "splitPoints": [{"key": "split-a", "sourceTime": 3.0}],
+                "timelineRanges": [
+                    {
+                        "key": "manual-range",
+                        "start": 7.0,
+                        "end": 8.0,
+                        "originalStart": 7.0,
+                        "originalEnd": 8.0,
+                    }
+                ],
+            },
+        )
+
+    assert saved.status_code == 200
+    timeline_range = saved.json()["cutDraft"]["timelineRanges"][0]
+    assert "boundaryMode" not in timeline_range
+    assert "splitClipKey" not in timeline_range
+    assert acoustic_calls == [[{"start": 7.0, "end": 8.0}]]
+    assert pcm_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "clip_key"),
+    [
+        (3.0, 8.0, "split-clip:split-a:split-b"),
+        (3.0, 7.0, "split-clip:source-start:split-b"),
+    ],
+)
+def test_cut_draft_rejects_split_exact_range_without_matching_adjacent_anchors(
+    start: float,
+    end: float,
+    clip_key: str,
+):
+    job_id = "47474747-4747-4747-8747-474747474747"
+    app_module.cut_draft_path(job_id).parent.mkdir(parents=True)
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "status": "completed",
+            "duration": 10.0,
+            "result": {"segments": []},
+            "cutDraft": None,
+        }
+
+    with TestClient(app_module.app) as client:
+        response = client.put(
+            f"/api/transcriptions/{job_id}/cut-draft",
+            json={
+                "revision": 0,
+                "splitPoints": [
+                    {"key": "split-a", "sourceTime": 3.0},
+                    {"key": "split-b", "sourceTime": 7.0},
+                ],
+                "timelineRanges": [
+                    {
+                        "start": start,
+                        "end": end,
+                        "originalStart": start,
+                        "originalEnd": end,
+                        "boundaryMode": "split_exact",
+                        "splitClipKey": clip_key,
+                    }
+                ],
+            },
+        )
+
+    assert response.status_code == 400
+    assert "相邻的源时间分割边界" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("split_points", "timeline_ranges", "expected_detail"),
+    [
+        (
+            [{"key": "source-start", "sourceTime": 3.0}],
+            [],
+            "保留边界名称",
+        ),
+        (
+            [{"key": "split-a", "sourceTime": 3.0}],
+            [
+                {
+                    "start": 4.0,
+                    "end": 5.0,
+                    "splitClipKey": "split-clip:source-start:split-a",
+                }
+            ],
+            "普通语音安全区间",
+        ),
+        (
+            [{"key": "split-a", "sourceTime": 3.0}],
+            [
+                {
+                    "start": 0.0,
+                    "end": 3.0,
+                    "boundaryMode": "split_exact",
+                    "splitClipKey": "split-clip:source-start:split-a",
+                },
+                {
+                    "start": 0.0,
+                    "end": 3.0,
+                    "boundaryMode": "split_exact",
+                    "splitClipKey": "split-clip:source-start:split-a",
+                },
+            ],
+            "不能重复删除",
+        ),
+    ],
+)
+def test_cut_draft_rejects_ambiguous_split_identity_contracts(
+    split_points: list[dict[str, object]],
+    timeline_ranges: list[dict[str, object]],
+    expected_detail: str,
+):
+    job_id = "48484848-4848-4848-8848-484848484848"
+    app_module.cut_draft_path(job_id).parent.mkdir(parents=True)
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "status": "completed",
+            "duration": 10.0,
+            "result": {"segments": []},
+            "cutDraft": None,
+        }
+
+    with TestClient(app_module.app) as client:
+        response = client.put(
+            f"/api/transcriptions/{job_id}/cut-draft",
+            json={
+                "revision": 0,
+                "splitPoints": split_points,
+                "timelineRanges": timeline_ranges,
+            },
+        )
+
+    assert response.status_code == 400
+    assert expected_detail in response.json()["detail"]
+
+
 def test_cut_draft_aligns_text_media_ranges_before_preview_and_is_idempotent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

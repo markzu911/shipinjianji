@@ -63,6 +63,7 @@ from .schemas import (
     ArtTextSuggestionRequest,
     CutDraftNoSpeechRange,
     CutDraftRequest,
+    CutDraftSplitPoint,
     CutDraftTextRange,
     CutDraftTimelineRange,
     CutRequest,
@@ -458,7 +459,13 @@ def load_cut_draft(job_id: str) -> dict[str, Any] | None:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    return payload if isinstance(payload, dict) else None
+    if not isinstance(payload, dict):
+        return None
+    # Drafts created before timeline splitting did not persist this collection.
+    # Materialize the v1 default at the storage boundary so every caller sees the
+    # same backward-compatible shape without rewriting the user's draft file.
+    payload.setdefault("splitPoints", [])
+    return payload
 
 
 def save_cut_draft(job_id: str, draft: dict[str, Any]) -> None:
@@ -493,6 +500,79 @@ def normalize_cut_draft_range(
     if end <= start:
         raise ValueError("剪辑草稿区间的结束时间必须晚于开始时间。")
     return {"start": round(start, 3), "end": round(end, 3)}
+
+
+def normalize_cut_draft_split_points(
+    points: list[Any],
+    duration: float,
+) -> list[dict[str, Any]]:
+    minimum_clip_duration = 0.1
+    normalized: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    candidates: list[tuple[float, str]] = []
+    for point in points:
+        key = str(getattr(point, "key", "") or "").strip()
+        source_time = float(getattr(point, "sourceTime", float("nan")))
+        if not key or not math.isfinite(source_time):
+            raise ValueError("剪辑草稿包含无效分割点。")
+        if key in {"source-start", "source-end"}:
+            raise ValueError("分割点标识不能使用保留边界名称。")
+        candidates.append((round(max(0.0, min(source_time, duration)), 3), key))
+
+    for source_time, key in sorted(candidates, key=lambda item: (item[0], item[1])):
+        if key in seen_keys:
+            continue
+        if (
+            source_time < minimum_clip_duration
+            or duration - source_time < minimum_clip_duration
+            or (
+                normalized
+                and source_time - float(normalized[-1]["sourceTime"])
+                < minimum_clip_duration
+            )
+        ):
+            continue
+        if normalized and abs(source_time - float(normalized[-1]["sourceTime"])) <= 0.001:
+            continue
+        normalized.append({"key": key, "sourceTime": source_time})
+        seen_keys.add(key)
+    return normalized
+
+
+def split_clip_key(left_key: str, right_key: str) -> str:
+    return f"split-clip:{left_key}:{right_key}"
+
+
+def validate_split_exact_timeline_range(
+    item: dict[str, Any],
+    split_points: list[dict[str, Any]],
+    duration: float,
+) -> None:
+    if item.get("boundaryMode", "speech_safe") != "split_exact":
+        if item.get("splitClipKey"):
+            raise ValueError("普通语音安全区间不能携带分割片段标识。")
+        return
+    split_clip = str(item.get("splitClipKey") or "")
+    if not split_clip:
+        raise ValueError("精确分割区间缺少片段标识。")
+    original_start = float(item["originalStart"])
+    original_end = float(item["originalEnd"])
+    boundaries = [
+        ("source-start", 0.0),
+        *((str(point["key"]), float(point["sourceTime"])) for point in split_points),
+        ("source-end", duration),
+    ]
+    for (left_key, left_time), (right_key, right_time) in zip(
+        boundaries,
+        boundaries[1:],
+    ):
+        if (
+            abs(original_start - left_time) <= 0.001
+            and abs(original_end - right_time) <= 0.001
+            and split_clip == split_clip_key(left_key, right_key)
+        ):
+            return
+    raise ValueError("精确分割区间必须匹配相邻的源时间分割边界。")
 
 
 def is_job_directory_name(value: str) -> bool:
@@ -4440,7 +4520,14 @@ def align_cut_draft_timeline_ranges_to_audio(
     ] | None = None,
 ) -> list[dict[str, Any]]:
     forced_boundary_cache = forced_boundary_cache if forced_boundary_cache is not None else {}
-    units = transcript_acoustic_character_units(segments, alignment_cache)
+    units = (
+        transcript_acoustic_character_units(segments, alignment_cache)
+        if any(
+            item.get("boundaryMode", "speech_safe") != "split_exact"
+            for item in timeline_ranges
+        )
+        else []
+    )
     aligned_ranges: list[dict[str, Any]] = []
     for item in timeline_ranges:
         original_start = max(
@@ -4454,6 +4541,36 @@ def align_cut_draft_timeline_ranges_to_audio(
         if original_end <= original_start:
             original_start = float(item["start"])
             original_end = float(item["end"])
+        if item.get("boundaryMode", "speech_safe") == "split_exact":
+            for endpoint, requested in (
+                ("start", original_start),
+                ("end", original_end),
+            ):
+                diagnostics.append(
+                    {
+                        "entryType": "timeline",
+                        "rangeKey": item.get("key"),
+                        "endpoint": endpoint,
+                        "direction": f"delete_{endpoint}",
+                        "requested": round(requested, 3),
+                        "fallback": round(requested, 3),
+                        "final": round(requested, 3),
+                        "alignmentSource": None,
+                        "structureValid": True,
+                        "pcmAdjustment": 0.0,
+                        "fallbackReason": "split_boundary_exact",
+                    }
+                )
+            aligned_ranges.append(
+                {
+                    **copy.deepcopy(item),
+                    "start": round(original_start, 3),
+                    "end": round(original_end, 3),
+                    "originalStart": round(original_start, 3),
+                    "originalEnd": round(original_end, 3),
+                }
+            )
+            continue
         final_start = original_start
         final_end = original_end
         def acoustic_core_start(unit: dict[str, Any]) -> float:
@@ -4673,20 +4790,34 @@ def resolve_cut_draft_acoustic_boundaries(
         tuple[Any, ...],
         tuple[float | None, dict[str, Any]],
     ] = {}
+    speech_safe_timeline_ranges = [
+        item
+        for item in timeline_ranges
+        if item.get("boundaryMode", "speech_safe") != "split_exact"
+    ]
     relevant_ranges = [
         {
             "start": float(item.get("originalStart", item["start"])),
             "end": float(item.get("originalEnd", item["end"])),
         }
-        for item in [*text_ranges, *timeline_ranges]
+        for item in [*text_ranges, *speech_safe_timeline_ranges]
     ]
-    alignment_cache, alignment_summary = load_job_acoustic_alignment(
-        media_path,
-        segments,
-        relevant_ranges,
-    )
+    if relevant_ranges:
+        alignment_cache, alignment_summary = load_job_acoustic_alignment(
+            media_path,
+            segments,
+            relevant_ranges,
+        )
+    else:
+        alignment_cache = None
+        alignment_summary = {
+            "status": "not_required",
+            "reason": "split_boundary_exact",
+            "aligner": ACOUSTIC_ALIGNER_NAME,
+            "modelRevision": ACOUSTIC_ALIGNMENT_MODEL_REVISION,
+        }
     samples: array | None = None
-    if media_path is not None and media_path.is_file():
+    if relevant_ranges and media_path is not None and media_path.is_file():
         try:
             samples = decode_cut_draft_audio_samples(media_path)
         except (OSError, RuntimeError, subprocess.SubprocessError):
@@ -12121,6 +12252,10 @@ def update_cut_draft(
         )
 
     try:
+        split_points = normalize_cut_draft_split_points(
+            list(request.splitPoints),
+            duration,
+        )
         text_ranges = []
         for item in request.textRanges:
             normalized = normalize_cut_draft_range(item, duration)
@@ -12143,6 +12278,7 @@ def update_cut_draft(
                 }
             )
         timeline_ranges = []
+        exact_split_clip_keys: set[str] = set()
         for item in request.timelineRanges:
             normalized = normalize_cut_draft_range(item, duration)
             original_start = float(
@@ -12166,12 +12302,23 @@ def update_cut_draft(
                     **item.model_dump(
                         exclude={"start", "end", "originalStart", "originalEnd"},
                         exclude_none=True,
+                        exclude_defaults=True,
                     ),
                     **normalized,
                     "originalStart": round(original_start, 3),
                     "originalEnd": round(original_end, 3),
                 }
             )
+            validate_split_exact_timeline_range(
+                timeline_ranges[-1],
+                split_points,
+                duration,
+            )
+            if timeline_ranges[-1].get("boundaryMode") == "split_exact":
+                split_clip = str(timeline_ranges[-1]["splitClipKey"])
+                if split_clip in exact_split_clip_keys:
+                    raise ValueError("同一分割片段不能重复删除。")
+                exact_split_clip_keys.add(split_clip)
         (
             text_ranges,
             timeline_ranges,
@@ -12210,6 +12357,7 @@ def update_cut_draft(
             "textRanges": text_ranges,
             "noSpeechRanges": no_speech_ranges,
             "timelineRanges": timeline_ranges,
+            "splitPoints": split_points,
             "boundaryDiagnostics": boundary_diagnostics,
             "acousticAlignment": acoustic_alignment,
             "updatedAt": utc_now(),

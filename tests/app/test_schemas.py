@@ -10,6 +10,7 @@ SCHEMA_NAMES = (
     "CutDraftTextRange",
     "CutDraftNoSpeechRange",
     "CutDraftTimelineRange",
+    "CutDraftSplitPoint",
     "CutDraftRequest",
     "JobCleanupRequest",
     "ModelProviderUpdate",
