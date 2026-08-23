@@ -775,6 +775,432 @@ def test_cut_draft_survives_refresh(
     assert refreshed_draft == saved_draft
 
 
+def test_timeline_split_exact_clip_delete_restore_history_and_mobile_layout(
+    browser_session,
+    seeded_editor_job,
+):
+    page = open_editor(browser_session, seeded_editor_job)
+    page.wait_for_function(
+        """() => {
+          const video = document.querySelector('#cutPreviewVideo');
+          return video?.readyState >= 1 && Number(video.duration) > 0;
+        }"""
+    )
+    page.wait_for_timeout(900)
+    install_base_media_mutation_probe(page)
+    page.evaluate(
+        """() => {
+          const originalCreateElement = Document.prototype.createElement;
+          window.__splitVideoCreations = 0;
+          Document.prototype.createElement = function createElementWithSplitProbe(
+            name,
+            options,
+          ) {
+            const element = originalCreateElement.call(this, name, options);
+            if (String(name).toLowerCase() === 'video') {
+              window.__splitVideoCreations += 1;
+            }
+            return element;
+          };
+        }"""
+    )
+    page.locator("#cutPreviewVideo").evaluate(
+        """video => {
+          video.pause();
+          video.currentTime = 0.5;
+          video.dispatchEvent(new Event('seeking'));
+          video.dispatchEvent(new Event('timeupdate'));
+        }"""
+    )
+    split_button = page.get_by_role(
+        "button",
+        name="在当前播放头位置分割视频",
+    )
+    page.wait_for_function(
+        """() => !document.querySelector('#cutTimelineSplitButton')?.disabled"""
+    )
+    page.evaluate(
+        """() => {
+          window.__splitStoreActions = [];
+          window.__splitStoreUnsubscribe = window.EditorSuite.subscribeProject(
+            (_next, _previous, action) => window.__splitStoreActions.push(action.type),
+          );
+        }"""
+    )
+    before = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          const video = document.querySelector('#cutPreviewVideo');
+          return {
+            revision: snapshot.revision,
+            timingRevision: snapshot.timingRevision,
+            duration: Number(document.querySelector('#cutPreviewSeek').max),
+            currentTime: video.currentTime,
+            source: video.currentSrc,
+          };
+        }"""
+    )
+
+    split_button.click()
+    page.locator("#cutFrameTimelineClips .cut-timeline-split-clip").nth(1).wait_for()
+    page.locator("#cutDraftSaveStatus").filter(
+        has_text="剪辑草稿已保存"
+    ).wait_for()
+    after_split = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          const video = document.querySelector('#cutPreviewVideo');
+          return {
+            revision: snapshot.revision,
+            timingRevision: snapshot.timingRevision,
+            duration: Number(document.querySelector('#cutPreviewSeek').max),
+            currentTime: video.currentTime,
+            source: video.currentSrc,
+            splitPoints: snapshot.project.cut.splitPoints,
+            actions: window.__splitStoreActions,
+          };
+        }"""
+    )
+    assert after_split["actions"].count("cutStructureChanged") == 1
+    assert after_split["revision"] == before["revision"] + 1, after_split
+    assert after_split["timingRevision"] == before["timingRevision"]
+    assert after_split["duration"] == pytest.approx(before["duration"])
+    assert after_split["currentTime"] == pytest.approx(before["currentTime"], abs=0.06)
+    assert after_split["source"] == before["source"]
+    assert len(after_split["splitPoints"]) == 1
+    assert after_split["splitPoints"][0]["sourceTime"] == pytest.approx(0.5)
+    assert base_media_mutations(page) == {"srcWrites": 0, "loadCalls": 0}
+
+    page.locator("#cutPreviewVideo").evaluate(
+        """video => {
+          video.currentTime = 0.75;
+          video.dispatchEvent(new Event('seeking'));
+          video.dispatchEvent(new Event('timeupdate'));
+        }"""
+    )
+    page.wait_for_function(
+        """() => !document.querySelector('#cutTimelineSplitButton')?.disabled"""
+    )
+    split_button.click()
+    page.wait_for_function(
+        """() => document.querySelectorAll(
+          '#cutFrameTimelineClips .cut-timeline-split-clip'
+        ).length === 3"""
+    )
+    page.locator("#cutDraftSaveStatus").filter(
+        has_text="剪辑草稿已保存"
+    ).wait_for()
+    before_split_history = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          return {
+            revision: snapshot.revision,
+            timingRevision: snapshot.timingRevision,
+          };
+        }"""
+    )
+    page.keyboard.press("Control+z")
+    page.wait_for_function(
+        """() => document.querySelectorAll(
+          '#cutFrameTimelineClips .cut-timeline-split-clip'
+        ).length === 2"""
+    )
+    after_split_undo = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          return {
+            revision: snapshot.revision,
+            timingRevision: snapshot.timingRevision,
+            splitPointCount: snapshot.project.cut.splitPoints.length,
+          };
+        }"""
+    )
+    assert after_split_undo == {
+        "revision": before_split_history["revision"] + 1,
+        "timingRevision": before_split_history["timingRevision"],
+        "splitPointCount": 1,
+    }
+    page.keyboard.press("Control+y")
+    page.wait_for_function(
+        """() => document.querySelectorAll(
+          '#cutFrameTimelineClips .cut-timeline-split-clip'
+        ).length === 3"""
+    )
+    after_split_redo = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          return {
+            revision: snapshot.revision,
+            timingRevision: snapshot.timingRevision,
+            splitPointCount: snapshot.project.cut.splitPoints.length,
+          };
+        }"""
+    )
+    assert after_split_redo == {
+        "revision": after_split_undo["revision"] + 1,
+        "timingRevision": before_split_history["timingRevision"],
+        "splitPointCount": 2,
+    }
+    page.locator("#cutDraftSaveStatus").filter(
+        has_text="剪辑草稿已保存"
+    ).wait_for()
+    page.wait_for_function(
+        """async () => {
+          const job = new URLSearchParams(location.search).get('job');
+          const payload = await (await fetch(
+            `/api/transcriptions/${job}/cut-draft`, { cache: 'no-store' }
+          )).json();
+          return payload.cutDraft?.splitPoints?.length === 2;
+        }"""
+    )
+    page.locator("#cutPreviewVideo").evaluate(
+        """video => {
+          video.currentTime = 0.5;
+          video.dispatchEvent(new Event('seeking'));
+          video.dispatchEvent(new Event('timeupdate'));
+        }"""
+    )
+    page.wait_for_function(
+        """() => document.querySelector('#cutTimelineSplitButton')?.disabled"""
+    )
+    assert base_media_mutations(page) == {"srcWrites": 0, "loadCalls": 0}
+    assert page.evaluate("window.__splitVideoCreations") == 0
+
+    page.set_viewport_size({"width": 375, "height": 812})
+    mobile_layout = page.evaluate(
+        """() => {
+          const button = document.querySelector('#cutTimelineSplitButton')
+            .getBoundingClientRect();
+          const actions = document.querySelector('.cut-frame-timeline-actions')
+            .getBoundingClientRect();
+          const track = document.querySelector('#cutFrameTimelineTrack')
+            .getBoundingClientRect();
+          return {
+            buttonWidth: button.width,
+            buttonHeight: button.height,
+            buttonRight: button.right,
+            actionsBottom: actions.bottom,
+            trackTop: track.top,
+            viewportWidth: innerWidth,
+            documentWidth: document.documentElement.scrollWidth,
+          };
+        }"""
+    )
+    assert mobile_layout["buttonWidth"] >= 44
+    assert mobile_layout["buttonHeight"] >= 44
+    assert mobile_layout["buttonRight"] <= mobile_layout["viewportWidth"]
+    assert mobile_layout["trackTop"] >= mobile_layout["actionsBottom"]
+    assert mobile_layout["documentWidth"] <= mobile_layout["viewportWidth"]
+
+    first_clip = page.locator("#cutFrameTimelineClips .cut-timeline-split-clip").first
+    first_clip.focus()
+    first_clip.press("Delete")
+    page.locator("#appDialogConfirm").filter(has_text="删除片段").click()
+    marker = page.locator("#cutFrameTimelineClips .cut-timeline-deleted-marker")
+    marker.wait_for()
+    page.locator("#cutDraftSaveStatus").filter(
+        has_text="剪辑草稿已保存"
+    ).wait_for()
+    deleted_draft = page.evaluate(
+        """async () => (await fetch(
+          `/api/transcriptions/${new URLSearchParams(location.search).get('job')}/cut-draft`
+        )).json()"""
+    )["cutDraft"]
+    assert deleted_draft["timelineRanges"] == [
+        {
+            "key": "split-delete-1",
+            "start": 0.0,
+            "end": 0.5,
+            "originalStart": 0.0,
+            "originalEnd": 0.5,
+            "boundaryMode": "split_exact",
+            "splitClipKey": (
+                "split-clip:source-start:"
+                + deleted_draft["splitPoints"][0]["key"]
+            ),
+        }
+    ]
+    assert {
+        item["fallbackReason"]
+        for item in deleted_draft["boundaryDiagnostics"]
+    } == {"split_boundary_exact"}
+
+    marker.focus()
+    marker.press("Backspace")
+    page.wait_for_function(
+        """() => document.querySelectorAll(
+          '#cutFrameTimelineClips .cut-timeline-deleted-marker'
+        ).length === 0"""
+    )
+    page.keyboard.press("Control+z")
+    marker.wait_for()
+    page.keyboard.press("Control+y")
+    page.wait_for_function(
+        """() => document.querySelectorAll(
+          '#cutFrameTimelineClips .cut-timeline-deleted-marker'
+        ).length === 0"""
+    )
+    page.wait_for_function(
+        """async () => {
+          const job = new URLSearchParams(location.search).get('job');
+          const payload = await (await fetch(
+            `/api/transcriptions/${job}/cut-draft`, { cache: 'no-store' }
+          )).json();
+          return payload.cutDraft?.timelineRanges?.length === 0;
+        }"""
+    )
+
+    page.reload()
+    page.locator("#resultCard").wait_for(state="visible")
+    page.locator("#cutFrameTimelineClips .cut-timeline-split-clip").nth(1).wait_for()
+    install_base_media_mutation_probe(page)
+    page.evaluate(
+        """() => {
+          const originalCreateElement = Document.prototype.createElement;
+          window.__splitVideoCreations = 0;
+          Document.prototype.createElement = function createElementWithSplitProbe(
+            name,
+            options,
+          ) {
+            const element = originalCreateElement.call(this, name, options);
+            if (String(name).toLowerCase() === 'video') {
+              window.__splitVideoCreations += 1;
+            }
+            return element;
+          };
+        }"""
+    )
+    assert page.locator("#cutFrameTimelineClips .cut-timeline-split-clip").count() == 3
+    assert page.locator("#cutFrameTimelineClips .cut-timeline-deleted-marker").count() == 0
+    page.wait_for_function(
+        """async () => {
+          const job = new URLSearchParams(location.search).get('job');
+          const payload = await (await fetch(
+            `/api/transcriptions/${job}/cut-draft`, { cache: 'no-store' }
+          )).json();
+          return payload.cutDraft?.timelineRanges?.length === 0;
+        }"""
+    )
+
+    reloaded_first_clip = page.locator(
+        "#cutFrameTimelineClips .cut-timeline-split-clip"
+    ).first
+    reloaded_first_clip.click()
+    selected_focus = page.evaluate(
+        """() => ({
+          selected: document.querySelector(
+            '#cutFrameTimelineClips .cut-timeline-split-clip.is-selected'
+          )?.dataset.splitClipKey || '',
+          focused: document.activeElement?.dataset?.splitClipKey || '',
+          storeClipId:
+            window.EditorSuite.projectSnapshot().project.timeline.selection?.clipId || '',
+        })"""
+    )
+    assert selected_focus["selected"]
+    assert selected_focus["focused"] == selected_focus["selected"]
+    assert selected_focus["storeClipId"] == f"cut:split:{selected_focus['selected']}"
+
+    # Splitting must not take over the existing free-drag delete workflow.
+    # Start the gesture on the ruler (outside the clip buttons) and prove that
+    # the ordinary pending range remains available and independently cancellable.
+    page.evaluate(
+        """() => {
+          const track = document.querySelector('#cutFrameTimelineTrack');
+          const ruler = document.querySelector('#cutFrameTimelineRuler');
+          const bounds = track.getBoundingClientRect();
+          const startX = bounds.left + bounds.width * 0.78;
+          const endX = bounds.left + bounds.width * 0.92;
+          ruler.dispatchEvent(new PointerEvent('pointerdown', {
+            bubbles: true, button: 0, buttons: 1, clientX: startX,
+          }));
+          window.dispatchEvent(new PointerEvent('pointermove', {
+            bubbles: true, button: 0, buttons: 1, clientX: endX,
+          }));
+          window.dispatchEvent(new PointerEvent('pointerup', {
+            bubbles: true, button: 0, clientX: endX,
+          }));
+        }"""
+    )
+    pending_range = page.locator(
+        "#cutFrameTimelineRanges .cut-timeline-range-body"
+    )
+    pending_range.wait_for()
+    pending_range.evaluate("body => body.focus()")
+    assert "待确认删除区间" in pending_range.get_attribute("aria-label")
+    page.locator(
+        "#cutFrameTimelineRanges .cut-timeline-range-cancel"
+    ).dispatch_event("click")
+    page.wait_for_function(
+        """() => document.querySelectorAll(
+          '#cutFrameTimelineRanges .cut-timeline-delete-range'
+        ).length === 0"""
+    )
+
+    # Every clip remains independently recoverable, including the last clip:
+    # a zero-duration edited timeline must keep the stacked restore markers.
+    for expected_markers in range(1, 4):
+        clip = page.locator(
+            "#cutFrameTimelineClips .cut-timeline-split-clip"
+        ).first
+        clip.focus()
+        clip.press("Delete")
+        page.locator("#appDialogConfirm").filter(has_text="删除片段").click()
+        page.wait_for_function(
+            """expected => document.querySelectorAll(
+              '#cutFrameTimelineClips .cut-timeline-deleted-marker'
+            ).length === expected""",
+            arg=expected_markers,
+        )
+
+    all_deleted = page.evaluate(
+        """() => {
+          const timeline = document.querySelector('#cutFrameTimeline');
+          const track = document.querySelector('#cutFrameTimelineTrack')
+            .getBoundingClientRect();
+          const markers = [...document.querySelectorAll(
+            '#cutFrameTimelineClips .cut-timeline-deleted-marker'
+          )];
+          return {
+            timelineHidden: timeline.hidden,
+            markerCount: markers.length,
+            transforms: markers.map(item => getComputedStyle(item).transform),
+            insideTrack: markers.every(item => {
+              const bounds = item.getBoundingClientRect();
+              return bounds.left >= track.left - 1 && bounds.right <= track.right + 1;
+            }),
+            storeMarkers: window.EditorSuite.projectSnapshot().project.timeline.tracks
+              .find(item => item.id === 'cut:split-structure')?.clips
+              .filter(item => item.payload.deleted) || [],
+          };
+        }"""
+    )
+    assert all_deleted["timelineHidden"] is False
+    assert all_deleted["markerCount"] == 3
+    assert len(set(all_deleted["transforms"])) == 3
+    assert all_deleted["insideTrack"] is True
+    assert len(all_deleted["storeMarkers"]) == 3
+    assert all(item["payload"]["markerEditedTime"] == 0 for item in all_deleted["storeMarkers"])
+
+    first_marker = page.locator(
+        "#cutFrameTimelineClips .cut-timeline-deleted-marker"
+    ).first
+    restored_key = first_marker.get_attribute("data-split-clip-key")
+    first_marker.focus()
+    first_marker.press("Backspace")
+    page.wait_for_function(
+        """() => document.querySelectorAll(
+          '#cutFrameTimelineClips .cut-timeline-split-clip'
+        ).length === 1"""
+    )
+    restored_focus = page.evaluate(
+        """() => document.activeElement?.dataset?.splitClipKey || ''"""
+    )
+    assert restored_focus == restored_key
+    assert page.locator("iframe").count() == 0
+    assert base_media_mutations(page) == {"srcWrites": 0, "loadCalls": 0}
+    assert page.evaluate("window.__splitVideoCreations") == 0
+
+
 def test_tool_switch_keeps_selection_preview_and_playback_position(
     browser_session,
     seeded_editor_job,

@@ -1865,7 +1865,59 @@ h1 {
   gap: 3px;
 }
 
-.cut-frame-timeline-heading span {
+.cut-frame-timeline-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.cut-frame-timeline-heading output {
+  justify-self: start;
+  text-align: left;
+}
+
+.cut-frame-timeline-heading > .cut-frame-timeline-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.cut-timeline-action-button {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 7px 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  background: rgba(13, 22, 16, 0.92);
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.cut-timeline-action-button:hover:not(:disabled),
+.cut-timeline-action-button:focus-visible {
+  color: var(--text);
+  background: var(--surface-hover);
+  border-color: var(--primary);
+}
+
+.cut-timeline-action-button.is-danger:hover:not(:disabled),
+.cut-timeline-action-button.is-danger:focus-visible {
+  color: #fff0ed;
+  border-color: #ef8a79;
+}
+
+.cut-timeline-action-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.cut-frame-timeline-heading > span {
   color: var(--text-muted);
   font-size: 12px;
   white-space: normal;
@@ -1893,7 +1945,7 @@ h1 {
   --frame-timeline-ruler-height: 18px;
   --cut-timeline-text-height: 30px;
   --editor-layer-timeline-height: 30px;
-  --editor-timeline-track-height: 74px;
+  --editor-timeline-track-height: 92px;
   min-width: 100%;
   height: var(--editor-timeline-track-height);
   cursor: crosshair;
@@ -1981,6 +2033,94 @@ h1 {
   inset: var(--frame-timeline-ruler-height) 0 0;
   z-index: 3;
   pointer-events: none;
+}
+
+.cut-frame-timeline-clips {
+  position: absolute;
+  inset: calc(var(--frame-timeline-ruler-height) + var(--cut-timeline-text-height)) 0 0;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.cut-timeline-split-clip {
+  position: absolute;
+  inset-block: 0;
+  min-width: 4px;
+  padding: 0 5px;
+  overflow: hidden;
+  color: rgba(249, 251, 239, 0.88);
+  background: rgba(183, 205, 91, 0.12);
+  border: 1px solid rgba(209, 230, 121, 0.78);
+  border-radius: 4px;
+  box-shadow: inset -2px 0 0 rgba(224, 241, 143, 0.72);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: auto;
+  touch-action: manipulation;
+}
+
+.cut-timeline-split-clip span {
+  overflow: hidden;
+  display: block;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cut-timeline-split-clip.has-hidden-left-boundary {
+  border-left-color: transparent;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.cut-timeline-split-clip.has-hidden-right-boundary {
+  border-right-color: transparent;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  box-shadow: none;
+}
+
+.cut-timeline-split-clip:hover,
+.cut-timeline-split-clip:focus-visible,
+.cut-timeline-split-clip.is-selected {
+  z-index: 1;
+  color: #fff;
+  background: rgba(191, 218, 79, 0.24);
+  border-color: #e4f38e;
+  box-shadow:
+    inset -2px 0 0 #f0ff9b,
+    0 0 0 2px rgba(228, 243, 142, 0.22);
+}
+
+.cut-timeline-deleted-marker {
+  --split-marker-shift: -50%;
+  --split-marker-offset: 0px;
+  position: absolute;
+  top: 0;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  color: #ffd4ca;
+  background: rgba(91, 23, 31, 0.94);
+  border: 1px solid rgba(255, 125, 142, 0.9);
+  border-radius: 8px;
+  box-shadow: 0 6px 16px rgba(21, 3, 7, 0.34);
+  pointer-events: auto;
+  transform: translateX(
+    calc(var(--split-marker-shift) + var(--split-marker-offset))
+  );
+}
+
+.cut-timeline-deleted-marker:hover,
+.cut-timeline-deleted-marker:focus-visible,
+.cut-timeline-deleted-marker.is-selected {
+  z-index: 2;
+  color: #fff;
+  border-color: #ffb3bd;
+  box-shadow:
+    0 0 0 2px rgba(255, 138, 153, 0.22),
+    0 8px 20px rgba(21, 3, 7, 0.42);
 }
 
 .cut-frame-timeline .frame-timeline-playhead {
@@ -11543,7 +11683,7 @@ input[type="range"] {
 }
 
 .cut-frame-timeline .cut-frame-timeline-track.has-effect-track {
-  --editor-timeline-track-height: 104px;
+  --editor-timeline-track-height: 122px;
 }
 
 .cut-frame-timeline-track.has-effect-track .cut-frame-timeline-text {
@@ -11551,6 +11691,15 @@ input[type="range"] {
 }
 
 .cut-frame-timeline-track.has-effect-track .frame-timeline-thumbnails {
+  inset: calc(
+      var(--frame-timeline-ruler-height) +
+      var(--editor-layer-timeline-height) +
+      var(--cut-timeline-text-height)
+    )
+    0 0;
+}
+
+.cut-frame-timeline-track.has-effect-track .cut-frame-timeline-clips {
   inset: calc(
       var(--frame-timeline-ruler-height) +
       var(--editor-layer-timeline-height) +

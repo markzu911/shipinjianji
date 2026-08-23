@@ -51,13 +51,13 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
 
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
-    assert "/app.js?v=20260821-03" in page_response.text
-    assert "/styles.css?v=20260821-02" in page_response.text
+    assert "/app.js?v=20260822-01" in page_response.text
+    assert "/styles.css?v=20260822-01" in page_response.text
     assert "/transcript-follow-scroll.js?v=20260818-03" in page_response.text
     assert "/ui-feedback.js?v=20260807-03" in page_response.text
     assert "/timeline-model.js?v=20260810-01" in page_response.text
     assert "/editor-pip-model.js?v=20260819-01" in page_response.text
-    assert "/editor-project-store.js?v=20260820-01" in page_response.text
+    assert "/editor-project-store.js?v=20260822-01" in page_response.text
     assert "/editor-media-controller.js?v=20260819-01" in page_response.text
     assert "/editor-art-model.js?v=20260820-01" in page_response.text
     assert "/editor-art-renderer.js?v=20260819-01" in page_response.text
@@ -65,7 +65,7 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     assert "/editor-timeline-controller.js?v=20260820-02" in page_response.text
     assert "/editor-art-tool.js?v=20260821-02" in page_response.text
     assert "/editor-pip-tool.js?v=20260819-02" in page_response.text
-    assert "/editor-suite.js?v=20260821-02" in page_response.text
+    assert "/editor-suite.js?v=20260822-01" in page_response.text
     assert timeline_script_response.status_code == 200
     assert timeline_script_response.headers["cache-control"] == "no-store, max-age=0"
     assert "function createStore" in timeline_script_response.text
@@ -397,7 +397,13 @@ def test_cut_timeline_and_draft_frontend_contracts():
     assert 'id="cutFrameTimelineTrack"' in page_response.text
     assert 'id="cutFrameTimelineText"' in page_response.text
     assert 'id="cutFrameTimelineThumbnails"' in page_response.text
+    assert 'id="cutFrameTimelineClips"' in page_response.text
     assert 'id="cutFrameTimelineRanges"' in page_response.text
+    assert 'id="cutTimelineSplitButton"' in page_response.text
+    assert 'icon="ph:scissors-bold"' in page_response.text
+    assert 'aria-label="在当前播放头位置分割视频"' in page_response.text
+    assert 'id="cutTimelineDeleteClipButton"' in page_response.text
+    assert 'id="cutTimelineRestoreClipButton"' in page_response.text
     assert 'id="timelineRangeConfirmActions"' not in page_response.text
     assert 'id="cancelTimelineRangeButton"' not in page_response.text
     assert 'id="confirmTimelineRangeButton"' not in page_response.text
@@ -455,12 +461,29 @@ def test_cut_timeline_and_draft_frontend_contracts():
     assert "source=original&tool=pip" in script_response.text
     assert "/original-video`" in script_response.text
     assert "buildCutTimelineThumbnails" in script_response.text
+    assert "function splitCutTimelineAtPlayhead" in script_response.text
+    assert "function deriveCutSplitClips" in script_response.text
+    assert "function deleteSelectedCutSplitClip" in script_response.text
+    assert "function restoreSelectedCutSplitClip" in script_response.text
+    assert 'boundaryMode: "split_exact"' in script_response.text
+    assert "splitClipKey: currentClip.key" in script_response.text
+    assert 'stageCutHistoryOperation("分割视频片段")' in script_response.text
+    assert script_response.text.count("splitPoints: cutSplitPoints.map") >= 4
+    assert "structureOnly: true" in script_response.text
+    assert "CUT_STRUCTURE_CHANGED" in editor_suite_script_response.text
     assert "renderCutTimelineTextSegments" in script_response.text
     assert "cutTimelinePixelsPerSecond" in script_response.text
     assert "CUT_TIMELINE_TEXT_LINES" in script_response.text
     assert "Math.ceil(total / majorStep) + 1" in script_response.text
     assert ".cut-timeline-text-segment {" in styles_response.text
     assert ".cut-frame-timeline .frame-timeline-thumb img {" in styles_response.text
+    assert ".cut-frame-timeline-actions {" in styles_response.text
+    assert ".cut-timeline-action-button {" in styles_response.text
+    assert ".cut-frame-timeline-clips {" in styles_response.text
+    assert ".cut-timeline-split-clip {" in styles_response.text
+    assert ".cut-timeline-deleted-marker {" in styles_response.text
+    assert "min-width: 44px" in styles_response.text
+    assert "min-height: 44px" in styles_response.text
     assert "background-repeat: repeat-x" in styles_response.text
     assert "beginCutTimelineSelection" in script_response.text
     assert "beginTimelineRangeAdjustment" in script_response.text
@@ -998,7 +1021,7 @@ def test_art_template_library_frontend_contracts():
     art_tool_response = responses["/editor-art-tool.js"]
 
     assert template_page_response.status_code == 200
-    assert "/styles.css?v=20260820-01" in template_page_response.text
+    assert "/styles.css?v=20260822-01" in template_page_response.text
     assert "/art-template-library.js?v=20260819-01" in template_page_response.text
     assert "当前模板主色" in template_page_response.text
     assert 'id="templateCardGrid"' in template_page_response.text
@@ -1059,7 +1082,7 @@ def test_font_manager_frontend_contracts():
     font_script_response = responses["/font-manager.js"]
 
     assert font_page_response.status_code == 200
-    assert "/styles.css?v=20260820-01" in font_page_response.text
+    assert "/styles.css?v=20260822-01" in font_page_response.text
     assert "/font-manager.js?v=" in font_page_response.text
     assert 'id="fontUploadForm"' in font_page_response.text
     assert 'id="fontCardGrid"' in font_page_response.text
@@ -1156,9 +1179,12 @@ const transcriptFunctions = new Function(
   "clamp",
   `
 const CUT_SPEECH_BOUNDARY_EPSILON = 0.001;
+const CUT_TIMELINE_MIN_RANGE = 0.1;
 const selectedRanges = new Map();
 const selectedNoSpeechRanges = new Map();
 let timelineDeleteRanges = [];
+let cutSplitPoints = [];
+let selectedSplitClipKey = "";
 let nextTimelineRangeId = 1;
 let selectedTimelineRangeId = null;
 let timelineRangeInProgress = false;
@@ -1166,6 +1192,8 @@ let timelineRangeConfirmationOpen = false;
 let cutHistoryLastState = null;
 let cutHistoryReplaying = false;
 const cloneCutHistorySnapshot = (snapshot) => snapshot;
+const cutHistoryTimingSignature = (snapshot) => JSON.stringify(snapshot);
+const refreshCutStructureState = () => {{}};
 const updateCutTimelineStatus = () => {{}};
 const updateSelectionSummary = () => {{}};
 ${{source}}
@@ -1878,6 +1906,7 @@ let timelineDeleteRanges = [{{
   id: 1, key: "timeline-1", start: 0.35, end: 0.5,
   originalStart: 0.35, originalEnd: 0.42,
 }}];
+let cutSplitPoints = [];
 let timelineRangeInProgress = false;
 let selectedTimelineRangeId = null;
 let cutDraftRevision = 3;

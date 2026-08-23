@@ -139,6 +139,7 @@
   let cutDraftState = {
     active: false,
     ranges: [],
+    splitPoints: [],
     cutDraftRevision: 0,
     sourceDuration: 0,
     duration: 0,
@@ -271,7 +272,8 @@
       (actionType === window.EditorProjectStore.ACTIONS.SELECTION_CHANGED &&
         (!selectionId || /^(art|pip):/.test(selectionId))) ||
       actionType === window.EditorProjectStore.ACTIONS.TRANSCRIPT_TEXT_CHANGED ||
-      actionType === window.EditorProjectStore.ACTIONS.CUT_TIMING_CHANGED;
+      actionType === window.EditorProjectStore.ACTIONS.CUT_TIMING_CHANGED ||
+      actionType === window.EditorProjectStore.ACTIONS.CUT_STRUCTURE_CHANGED;
     if (!relevant) return;
     const storage = draftStorage();
     if (!storage) return;
@@ -1614,6 +1616,14 @@
     const nextCutDraftState = {
       active: Boolean(payload.active),
       ranges,
+      splitPoints: Array.isArray(payload.splitPoints)
+        ? payload.splitPoints
+            .map((point) => ({
+              key: String(point?.key || ""),
+              sourceTime: Math.max(0, Number(point?.sourceTime) || 0),
+            }))
+            .filter((point) => point.key)
+        : [],
       cutDraftRevision: Math.max(
         0,
         Number(payload.cutDraftRevision ?? cutDraftState.cutDraftRevision) || 0,
@@ -1623,7 +1633,9 @@
       transcript: payload.transcript || null,
     };
     const commit = projectStore.dispatch({
-      type: window.EditorProjectStore.ACTIONS.CUT_TIMING_CHANGED,
+      type: payload.structureOnly
+        ? window.EditorProjectStore.ACTIONS.CUT_STRUCTURE_CHANGED
+        : window.EditorProjectStore.ACTIONS.CUT_TIMING_CHANGED,
       payload: {
         cut: nextCutDraftState,
         timeline: payload.timeline || null,
@@ -1720,6 +1732,7 @@
     isDouyinPreview: () => douyinPreviewEnabled,
     setCutDraft,
     setTimelineTracks,
+    selectTimelineClip: selectSemanticClip,
     timelineSnapshot: () => syncProjectTimeline(),
     mediaController: () => mediaController,
     clearMediaSource: (options = {}) => mediaController?.clearSource(options) || false,

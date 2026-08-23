@@ -135,6 +135,79 @@ console.log(JSON.stringify({
     }
 
 
+def test_editor_project_store_split_structure_changes_revision_not_timing() -> None:
+    result = run_store_script(
+        r"""
+const store = projectStore.createStore({}, { timeline });
+store.dispatch({ type: 'projectHydrated', payload: { job: {
+  id: 'job-split', status: 'completed', duration: 10,
+  result: { text: '原文', segments: [], editableSegments: [] },
+} } });
+const before = store.getState();
+const cut = {
+  ...before.project.cut,
+  splitPoints: [{ key: 'split-a', sourceTime: 4 }],
+  ranges: [{ start: 1, end: 9 }],
+  sourceDuration: 99,
+  duration: 1,
+  transcript: { text: '结构动作不得覆盖时序内容', segments: [] },
+};
+const structureTimeline = {
+  duration: 10,
+  tracks: [{
+    id: 'cut:split-structure', kind: 'cut', name: '视频片段', order: 0,
+    clips: [
+      { id: 'cut:split:left', start: 0, end: 4, minDuration: 0.001 },
+      { id: 'cut:split:right', start: 4, end: 10, minDuration: 0.001 },
+    ],
+  }],
+};
+const structureAction = {
+  type: projectStore.ACTIONS.CUT_STRUCTURE_CHANGED,
+  payload: { cut, timeline: structureTimeline },
+};
+const changed = store.dispatch(structureAction);
+const after = store.getState();
+const duplicate = store.dispatch(structureAction);
+console.log(JSON.stringify({
+  changed,
+  duplicate,
+  beforeRevision: before.revision,
+  afterRevision: after.revision,
+  beforeTimingRevision: before.timingRevision,
+  afterTimingRevision: after.timingRevision,
+  splitPoints: after.project.cut.splitPoints,
+  ranges: after.project.cut.ranges,
+  sourceDuration: after.project.cut.sourceDuration,
+  duration: after.project.cut.duration,
+  transcriptText: after.project.cut.transcript.text,
+  cutTrackIds: after.project.timeline.tracks
+    .filter(track => track.kind === 'cut')
+    .map(track => track.id),
+  splitClipIds: after.project.timeline.tracks
+    .find(track => track.id === 'cut:split-structure')
+    ?.clips.map(clip => clip.id) || [],
+}));
+"""
+    )
+
+    assert result == {
+        "changed": {"accepted": True, "revision": 2, "timingRevision": 1},
+        "duplicate": {"accepted": False, "revision": 2, "timingRevision": 1},
+        "beforeRevision": 1,
+        "afterRevision": 2,
+        "beforeTimingRevision": 1,
+        "afterTimingRevision": 1,
+        "splitPoints": [{"key": "split-a", "sourceTime": 4}],
+        "ranges": [],
+        "sourceDuration": 10,
+        "duration": 10,
+        "transcriptText": "原文",
+        "cutTrackIds": ["cut:split-structure"],
+        "splitClipIds": ["cut:split:left", "cut:split:right"],
+    }
+
+
 def test_editor_project_store_only_selects_media_after_transcription_completes() -> None:
     result = run_store_script(
         r"""

@@ -124,6 +124,7 @@ const cutFrameTimelineText = document.querySelector("#cutFrameTimelineText");
 const cutFrameTimelineThumbnails = document.querySelector(
   "#cutFrameTimelineThumbnails",
 );
+const cutFrameTimelineClips = document.querySelector("#cutFrameTimelineClips");
 const cutFrameTimelineRanges = document.querySelector(
   "#cutFrameTimelineRanges",
 );
@@ -134,6 +135,13 @@ const cutFrameTimelineSeek = document.querySelector("#cutFrameTimelineSeek");
 const cutFrameTimelineTime = document.querySelector("#cutFrameTimelineTime");
 const cutFrameTimelineStatus = document.querySelector(
   "#cutFrameTimelineStatus",
+);
+const cutTimelineSplitButton = document.querySelector("#cutTimelineSplitButton");
+const cutTimelineDeleteClipButton = document.querySelector(
+  "#cutTimelineDeleteClipButton",
+);
+const cutTimelineRestoreClipButton = document.querySelector(
+  "#cutTimelineRestoreClipButton",
 );
 const textEditorPreviewPane = document.querySelector("#textEditorPreviewPane");
 const cutPreviewPanel = document.querySelector(".cut-preview-panel");
@@ -148,6 +156,7 @@ if (textEditorOutputPanel) {
 
 const CUT_TIMELINE_STEP = 1 / 30;
 const CUT_TIMELINE_MIN_RANGE = 0.1;
+const CUT_TIMELINE_SPLIT_EPSILON = 0.001;
 const CUT_TIMELINE_DRAG_THRESHOLD = 5;
 const CUT_SPEECH_BOUNDARY_EPSILON = 0.002;
 const CUT_SAFE_NO_SPEECH_MIN_DURATION = 0.45;
@@ -184,9 +193,13 @@ let currentAudioQuietRanges = [];
 let cutControlsLocked = false;
 let currentVideoDuration = 0;
 let timelineDeleteRanges = [];
+let cutSplitPoints = [];
 let generatedCutSelectionSignature = "";
 let pendingCutSelectionSignature = "";
 let selectedTimelineRangeId = null;
+let selectedSplitClipKey = "";
+let nextCutSplitPointId = 1;
+let splitClipConfirmationOpen = false;
 let timelineRangeInProgress = false;
 let timelineRangeConfirmationOpen = false;
 let nextTimelineRangeId = 1;
@@ -210,6 +223,7 @@ let cutPlaybackFrameClock = null;
 let editedTimelineSpansCache = null;
 let mergedCutSelectionCache = null;
 let semanticCutDeleteRangesCache = null;
+let cutSplitClipsCache = null;
 let cutTimelinePixelsPerSecondCache = null;
 let cutTimelineScaleSignature = "";
 let cutTimelineTrackWidthCache = 0;
@@ -1903,6 +1917,7 @@ function invalidateCutPlaybackStructure() {
   editedTimelineSpansCache = null;
   mergedCutSelectionCache = null;
   semanticCutDeleteRangesCache = null;
+  cutSplitClipsCache = null;
   invalidateCutTimelineScale();
   cutTimelineTextPlaybackEntries = [];
   cutTimelineTextPlaybackFloorCursor = -1;
@@ -1986,6 +2001,108 @@ function editedTimeToSourceTime(seconds, spans = getEditedTimelineSpans()) {
     }
   }
   return spans.at(-1)?.sourceEnd || 0;
+}
+
+function deriveCutSplitClips() {
+  if (cutSplitPoints.length === 0) return { clips: [], markers: [] };
+  if (cutSplitClipsCache !== null) return cutSplitClipsCache;
+  const spans = getEditedTimelineSpans();
+  const boundaries = cutSplitBoundaries();
+  const mergedDeletes = getMergedSelection();
+  const hiddenBoundaryKeys = new Set(
+    cutSplitPoints
+      .filter((point) =>
+        mergedDeletes.some(
+          (range) =>
+            point.sourceTime > range.start + CUT_TIMELINE_SPLIT_EPSILON &&
+            point.sourceTime < range.end - CUT_TIMELINE_SPLIT_EPSILON,
+        ),
+      )
+      .map((point) => point.key),
+  );
+  const clips = [];
+  const markers = [];
+  for (let index = 0; index < boundaries.length - 1; index += 1) {
+    const left = boundaries[index];
+    const right = boundaries[index + 1];
+    const key = cutSplitClipKey(left.key, right.key);
+    const exactRange = timelineDeleteRanges.find((range) => {
+      const semantic = timelineSemanticDeleteRange(range);
+      return (
+        range?.boundaryMode === "split_exact" &&
+        range?.splitClipKey === key &&
+        Math.abs(semantic.start - left.sourceTime) <= CUT_TIMELINE_SPLIT_EPSILON &&
+        Math.abs(semantic.end - right.sourceTime) <= CUT_TIMELINE_SPLIT_EPSILON
+      );
+    });
+    if (exactRange) {
+      markers.push({
+        key,
+        rangeId: exactRange.id,
+        sourceStart: left.sourceTime,
+        sourceEnd: right.sourceTime,
+        editedTime: sourceTimeToEditedTime(left.sourceTime, spans),
+      });
+      continue;
+    }
+    const retained = spans.flatMap((span) => {
+      const sourceStart = Math.max(left.sourceTime, span.sourceStart);
+      const sourceEnd = Math.min(right.sourceTime, span.sourceEnd);
+      return sourceEnd - sourceStart > CUT_TIMELINE_SPLIT_EPSILON
+        ? [{ sourceStart, sourceEnd }]
+        : [];
+    });
+    if (retained.length === 0) continue;
+    const visibleStart = retained[0].sourceStart;
+    const visibleEnd = retained.at(-1).sourceEnd;
+    clips.push({
+      key,
+      leftKey: left.key,
+      rightKey: right.key,
+      hiddenLeftBoundary: hiddenBoundaryKeys.has(left.key),
+      hiddenRightBoundary: hiddenBoundaryKeys.has(right.key),
+      sourceStart: left.sourceTime,
+      sourceEnd: right.sourceTime,
+      editedStart: sourceTimeToEditedTime(visibleStart, spans),
+      editedEnd: sourceTimeToEditedTime(visibleEnd, spans),
+    });
+  }
+  cutSplitClipsCache = { clips, markers };
+  return cutSplitClipsCache;
+}
+
+function validateCutTimelineSplit(sourceTime) {
+  const total = cutTimelineDuration();
+  const point = Math.round(clamp(Number(sourceTime) || 0, 0, total) * 1000) / 1000;
+  if (cutControlsLocked) return { valid: false, reason: "剪辑操作进行中" };
+  if (timelineRangeInProgress || timelineRangeConfirmationOpen) {
+    return { valid: false, reason: "请先完成当前时间轴选区" };
+  }
+  if (total <= 0) return { valid: false, reason: "当前没有可分割的视频" };
+  const boundaries = cutSplitBoundaries();
+  const rightIndex = boundaries.findIndex(
+    (boundary) => boundary.sourceTime > point + CUT_TIMELINE_SPLIT_EPSILON,
+  );
+  if (rightIndex <= 0) {
+    return { valid: false, reason: "播放头已在片段边界" };
+  }
+  const left = boundaries[rightIndex - 1];
+  const right = boundaries[rightIndex];
+  if (
+    point - left.sourceTime < CUT_TIMELINE_MIN_RANGE ||
+    right.sourceTime - point < CUT_TIMELINE_MIN_RANGE
+  ) {
+    return { valid: false, reason: "分割点距片段边界过近" };
+  }
+  const retainedSpan = getEditedTimelineSpans().find(
+    (span) =>
+      point > span.sourceStart + CUT_TIMELINE_SPLIT_EPSILON &&
+      point < span.sourceEnd - CUT_TIMELINE_SPLIT_EPSILON,
+  );
+  if (!retainedSpan) {
+    return { valid: false, reason: "已删除区间不能分割" };
+  }
+  return { valid: true, point, left, right };
 }
 
 function getEditedAudioQuietRanges(spans = getEditedTimelineSpans()) {
@@ -2229,6 +2346,7 @@ function buildLiveCutDraftState() {
     active: hasUncommittedCutSelection(),
     cutDraftRevision,
     ranges: getMergedSelection().map(({ start, end }) => ({ start, end })),
+    splitPoints: cutSplitPoints.map((point) => ({ ...point })),
     sourceDuration: cutTimelineDuration(),
     duration: editedCutTimelineDuration(spans),
     transcript: {
@@ -2239,10 +2357,14 @@ function buildLiveCutDraftState() {
   };
 }
 
-function syncEditorSuiteCutDraftState(state = buildLiveCutDraftState()) {
+function syncEditorSuiteCutDraftState(
+  state = buildLiveCutDraftState(),
+  { structureOnly = false } = {},
+) {
   if (suppressEditorSuiteCutSync) return;
   window.EditorSuite?.setCutDraft({
     ...state,
+    structureOnly,
     timeline: syncCutTimelineModel(),
   });
 }
@@ -2266,6 +2388,7 @@ function acceptEditorSuiteJobState(event) {
   syncEditorSuiteCutDraftState({
     active: false,
     ranges: edit.ranges || edit.requestedRanges || [],
+    splitPoints: cutSplitPoints.map((point) => ({ ...point })),
     sourceDuration: cutTimelineDuration(),
     duration: Number(edit.outputDuration) || 0,
     transcript: edit.transcript || null,
@@ -2299,6 +2422,7 @@ function setCutControlsDisabled(disabled) {
   clearSelectionButton.disabled = disabled || !hasCutSelection();
   generateCutButton.disabled = disabled || getMergedSelection().length === 0;
   updateTimelineRangeConfirmation();
+  updateCutSplitControls();
 }
 
 function setCutDraftSaveStatus(message, tone = "neutral") {
@@ -2373,12 +2497,62 @@ function serializableTimelineCutDraftRange(range, fallbackKey = "") {
     return null;
   }
   const defaultKey = `timeline-${rangeKey(semantic.start, semantic.end)}`;
-  return {
+  const payload = {
     key: String(range?.key || fallbackKey || range?.id || defaultKey),
     ...normalized,
     originalStart: semantic.start,
     originalEnd: semantic.end,
   };
+  if (range?.boundaryMode === "split_exact") {
+    const splitClipKey = String(range?.splitClipKey || "");
+    if (!splitClipKey) return null;
+    payload.boundaryMode = "split_exact";
+    payload.splitClipKey = splitClipKey;
+  }
+  return payload;
+}
+
+function normalizeCutSplitPoints(points) {
+  const duration = cutTimelineDuration();
+  const seenKeys = new Set();
+  const normalized = [];
+  const candidates = (Array.isArray(points) ? points : []).flatMap((point) => {
+    const key = String(point?.key || "").trim();
+    const sourceTime = Number(point?.sourceTime);
+    return key && Number.isFinite(sourceTime)
+      ? [{ key, sourceTime: Math.round(clamp(sourceTime, 0, duration) * 1000) / 1000 }]
+      : [];
+  });
+  candidates.sort(
+    (left, right) =>
+      left.sourceTime - right.sourceTime || left.key.localeCompare(right.key),
+  );
+  for (const point of candidates) {
+    if (
+      seenKeys.has(point.key) ||
+      point.sourceTime < CUT_TIMELINE_MIN_RANGE ||
+      duration - point.sourceTime < CUT_TIMELINE_MIN_RANGE ||
+      (normalized.length > 0 &&
+        point.sourceTime - normalized.at(-1).sourceTime < CUT_TIMELINE_MIN_RANGE)
+    ) {
+      continue;
+    }
+    seenKeys.add(point.key);
+    normalized.push(point);
+  }
+  return normalized;
+}
+
+function cutSplitClipKey(leftKey, rightKey) {
+  return `split-clip:${leftKey}:${rightKey}`;
+}
+
+function cutSplitBoundaries() {
+  return [
+    { key: "source-start", sourceTime: 0 },
+    ...cutSplitPoints,
+    { key: "source-end", sourceTime: cutTimelineDuration() },
+  ];
 }
 
 function normalizeRestoredTextDeleteRange(item) {
@@ -2446,6 +2620,7 @@ function buildPersistedCutDraftPayload() {
     textRanges,
     noSpeechRanges,
     timelineRanges,
+    splitPoints: cutSplitPoints.map((point) => ({ ...point })),
   };
 }
 
@@ -2456,6 +2631,8 @@ function cutDraftSelectionSignature(payload) {
     textRanges: payload.textRanges,
     noSpeechRanges: payload.noSpeechRanges,
     timelineRanges: payload.timelineRanges,
+    splitPoints: payload.splitPoints,
+    selection: payload.selection || null,
   });
 }
 
@@ -2492,8 +2669,20 @@ function cutDraftSemanticSnapshot(payload) {
         key: String(range?.key || ""),
         originalStart: semanticBoundary(range, "originalStart", "start"),
         originalEnd: semanticBoundary(range, "originalEnd", "end"),
+        boundaryMode:
+          range?.boundaryMode === "split_exact" ? "split_exact" : "speech_safe",
+        splitClipKey: String(range?.splitClipKey || ""),
       }))
       .sort(byKey),
+    splitPoints: (Array.isArray(payload?.splitPoints) ? payload.splitPoints : [])
+      .map((point) => ({
+        key: String(point?.key || ""),
+        sourceTime: Number(point?.sourceTime),
+      }))
+      .sort(
+        (left, right) =>
+          left.sourceTime - right.sourceTime || left.key.localeCompare(right.key),
+      ),
   };
 }
 
@@ -2505,6 +2694,9 @@ function restorePersistedCutDraft(draft) {
   cutDraftRevision = Math.max(0, Number(draft?.revision) || 0);
   automaticNoSpeechInitialized =
     draft?.automaticNoSpeechInitialized === true;
+  cutSplitPoints = normalizeCutSplitPoints(draft?.splitPoints);
+  cutSplitClipsCache = null;
+  selectedSplitClipKey = "";
   for (const item of Array.isArray(draft?.textRanges) ? draft.textRanges : []) {
     const restoredRange = normalizeRestoredTextDeleteRange(item);
     if (!restoredRange) continue;
@@ -2551,7 +2743,8 @@ function restorePersistedCutDraft(draft) {
   const restoredCount =
     payload.textRanges.length +
     payload.noSpeechRanges.length +
-    payload.timelineRanges.length;
+    payload.timelineRanges.length +
+    payload.splitPoints.length;
   setCutDraftSaveStatus(
     restoredCount > 0 ? "已恢复并保存剪辑草稿" : "剪辑草稿自动保存",
     restoredCount > 0 ? "success" : "neutral",
@@ -2663,6 +2856,8 @@ function applyPersistedCutDraftAlignment(draft, expectedSignature) {
         "end",
         "originalStart",
         "originalEnd",
+        "boundaryMode",
+        "splitClipKey",
       ]),
     );
 
@@ -2853,6 +3048,7 @@ function scheduleCutDraftSave({ immediate = false } = {}) {
   if (isCutDraftAcknowledged(desired.signature)) {
     cutDraftNeedsServerSync = false;
     cancelCutDraftSaveTimer();
+    setCutDraftSaveStatus("剪辑草稿已保存", "success");
     return cutDraftSaveInFlight?.promise || Promise.resolve();
   }
   cutDraftNeedsServerSync = true;
@@ -2915,7 +3111,9 @@ function cutHistoryStorageKey(jobId = currentJobId) {
   return jobId ? `video-editor:cut-history:${jobId}` : "";
 }
 
-function cloneCutHistorySnapshot(source = buildPersistedCutDraftPayload()) {
+function cloneCutHistorySnapshot(source) {
+  const useCurrentState = source == null;
+  source = source || buildPersistedCutDraftPayload();
   const textRanges = (Array.isArray(source?.textRanges) ? source.textRanges : [])
     .flatMap((item) => {
       const normalized = serializableCutDraftRange(item);
@@ -2961,11 +3159,30 @@ function cloneCutHistorySnapshot(source = buildPersistedCutDraftPayload()) {
     );
     return normalized ? [normalized] : [];
   });
-  return { textRanges, noSpeechRanges, timelineRanges };
+  const splitPoints = normalizeCutSplitPoints(source?.splitPoints).map((point) => ({
+    ...point,
+  }));
+  const selection = {
+    splitClipKey: String(
+      useCurrentState
+        ? selectedSplitClipKey
+        : source?.selection?.splitClipKey || "",
+    ),
+  };
+  return { textRanges, noSpeechRanges, timelineRanges, splitPoints, selection };
 }
 
 function cutHistorySnapshotSignature(snapshot) {
   return cutDraftSelectionSignature(cloneCutHistorySnapshot(snapshot));
+}
+
+function cutHistoryTimingSignature(snapshot) {
+  const normalized = cloneCutHistorySnapshot(snapshot);
+  return JSON.stringify({
+    textRanges: normalized.textRanges,
+    noSpeechRanges: normalized.noSpeechRanges,
+    timelineRanges: normalized.timelineRanges,
+  });
 }
 
 function writeLocalCutHistory(jobId = currentJobId) {
@@ -3037,7 +3254,8 @@ function canUndoCutHistory() {
       cutHistoryIndex > 0 &&
       !cutControlsLocked &&
       !timelineRangeInProgress &&
-      !timelineRangeConfirmationOpen,
+      !timelineRangeConfirmationOpen &&
+      !splitClipConfirmationOpen,
   );
 }
 
@@ -3047,7 +3265,8 @@ function canRedoCutHistory() {
       cutHistoryIndex < cutHistoryEntries.length &&
       !cutControlsLocked &&
       !timelineRangeInProgress &&
-      !timelineRangeConfirmationOpen,
+      !timelineRangeConfirmationOpen &&
+      !splitClipConfirmationOpen,
   );
 }
 
@@ -3151,6 +3370,7 @@ function recordCutHistoryIfChanged() {
 }
 
 function applyCutHistorySnapshot(snapshot) {
+  const previous = cloneCutHistorySnapshot();
   const normalized = cloneCutHistorySnapshot(snapshot);
   selectedRanges.clear();
   selectedNoSpeechRanges.clear();
@@ -3174,6 +3394,9 @@ function applyCutHistorySnapshot(snapshot) {
     id: nextTimelineRangeId++,
     ...range,
   }));
+  cutSplitPoints = normalizeCutSplitPoints(normalized.splitPoints);
+  cutSplitClipsCache = null;
+  selectedSplitClipKey = String(normalized.selection?.splitClipKey || "");
   selectedTimelineRangeId = null;
   timelineRangeInProgress = false;
   timelineRangeConfirmationOpen = false;
@@ -3181,7 +3404,11 @@ function applyCutHistorySnapshot(snapshot) {
   cutHistoryReplaying = true;
   try {
     updateCutTimelineStatus("");
-    updateSelectionSummary();
+    if (cutHistoryTimingSignature(previous) !== cutHistoryTimingSignature(normalized)) {
+      updateSelectionSummary();
+    } else {
+      refreshCutStructureState({ recordHistory: false });
+    }
   } finally {
     cutHistoryReplaying = false;
   }
@@ -3249,6 +3476,7 @@ function runCutCommitEffects({ preview = true } = {}) {
   updateCutTimelineScale();
   renderCutTimelineRuler();
   renderCutTimelineTextSegments();
+  renderCutSplitClips();
   renderCutTimelineRanges();
   updateCutTimelinePlayhead();
   buildCutTimelineThumbnails();
@@ -3610,7 +3838,8 @@ function updateCutTimelinePlayhead(
       )
     : getCutPlaybackFrameState(cutPreviewVideo.currentTime || 0);
   const { current, progress, sourceCurrent, total } = frame;
-  cutFrameTimeline.hidden = total <= 0;
+  cutFrameTimeline.hidden =
+    total <= 0 && deriveCutSplitClips().markers.length === 0;
   cutFrameTimelineSeek.max = String(total);
   cutFrameTimelineSeek.step = String(CUT_TIMELINE_STEP);
   cutFrameTimelineSeek.value = String(current);
@@ -3621,6 +3850,7 @@ function updateCutTimelinePlayhead(
     `${formatTime(current)} / ${formatTime(total)}`,
   );
   cutFrameTimelineTime.value = `${formatTime(current)} / ${formatTime(total)}`;
+  updateCutSplitControls(frame);
   if (!cutPreviewVideo.paused && cutFrameTimelineScroll.clientWidth > 0) {
     const playheadX = progress * cutFrameTimelineTrack.clientWidth;
     const viewportStart = cutFrameTimelineScroll.scrollLeft;
@@ -3778,14 +4008,69 @@ function cutTimelineClipId(rangeId) {
 
 function syncCutTimelineModel() {
   const total = Math.max(currentVideoDuration, cutTimelineDuration());
+  const derivedSplitEntries = deriveCutSplitClips();
+  const splitTimelineClips = [
+    ...derivedSplitEntries.clips.map((clip) => ({
+      id: `cut:split:${clip.key}`,
+      sourceId: clip.key,
+      name: "视频片段",
+      start: clip.editedStart,
+      end: clip.editedEnd,
+      minDuration: 0.001,
+      editable: false,
+      locked: true,
+      payload: {
+        sourceStart: clip.sourceStart,
+        sourceEnd: clip.sourceEnd,
+        deleted: false,
+      },
+    })),
+    ...derivedSplitEntries.markers.map((marker) => {
+      const markerStart = clamp(marker.editedTime, 0, total);
+      const markerEnd = Math.min(total, markerStart + CUT_TIMELINE_SPLIT_EPSILON);
+      return {
+        id: `cut:split:${marker.key}`,
+        sourceId: marker.key,
+        name: "已删除视频片段",
+        start:
+          markerEnd > markerStart
+            ? markerStart
+            : Math.max(0, markerStart - CUT_TIMELINE_SPLIT_EPSILON),
+        end:
+          markerEnd > markerStart
+            ? markerEnd
+            : markerStart,
+        minDuration: 0.001,
+        editable: false,
+        locked: true,
+        payload: {
+          sourceStart: marker.sourceStart,
+          sourceEnd: marker.sourceEnd,
+          markerEditedTime: marker.editedTime,
+          deleted: true,
+        },
+      };
+    }),
+  ];
+  const splitStructureTrack = cutSplitPoints.length > 0
+    ? {
+        id: "cut:split-structure",
+        kind: "cut",
+        name: "视频片段",
+        order: 0,
+        locked: true,
+        clips: splitTimelineClips,
+      }
+    : null;
   cutTimelineDocument = window.EditorTimeline.normalizeDocument({
     duration: total,
     tracks: [
+      ...(splitStructureTrack ? [splitStructureTrack] : []),
       {
         id: "cut:deletions",
         kind: "cut",
         name: "删除区间",
-        order: 0,
+        order: 1,
         clips: timelineDeleteRanges.map((range) => ({
           id: cutTimelineClipId(range.id),
           sourceId: range.id,
@@ -3793,16 +4078,24 @@ function syncCutTimelineModel() {
           start: range.start,
           end: range.end,
           minDuration: CUT_TIMELINE_MIN_RANGE,
-          editable: true,
+          editable: range.boundaryMode !== "split_exact",
           payload: {
             pending:
               timelineRangeInProgress && range.id === selectedTimelineRangeId,
+            boundaryMode:
+              range.boundaryMode === "split_exact"
+                ? "split_exact"
+                : "speech_safe",
+            splitClipKey: String(range.splitClipKey || ""),
           },
         })),
       },
     ],
-    selection:
-      selectedTimelineRangeId === null
+    selection: selectedSplitClipKey && splitTimelineClips.some(
+      (clip) => clip.sourceId === selectedSplitClipKey,
+    )
+      ? { clipId: `cut:split:${selectedSplitClipKey}` }
+      : selectedTimelineRangeId === null
         ? null
         : { clipId: cutTimelineClipId(selectedTimelineRangeId) },
   });
@@ -3813,7 +4106,7 @@ function applySharedTimelineRange(transaction) {
   const range = timelineDeleteRanges.find(
     (item) => String(item.id) === String(transaction?.sourceId),
   );
-  if (!range) return false;
+  if (!range || range.boundaryMode === "split_exact") return false;
   const start = Math.max(0, Number(transaction.start) || 0);
   const end = Math.max(start, Number(transaction.end) || start);
   if (end <= start) return false;
@@ -3855,6 +4148,237 @@ function deleteSharedTimelineRange(sourceId) {
     suppressEditorSuiteCutSync = false;
   }
   syncEditorSuiteCutDraftState();
+  return true;
+}
+
+function selectedCutSplitEntry() {
+  if (!selectedSplitClipKey) return null;
+  const derived = deriveCutSplitClips();
+  return (
+    derived.clips.find((clip) => clip.key === selectedSplitClipKey) ||
+    derived.markers.find((marker) => marker.key === selectedSplitClipKey) ||
+    null
+  );
+}
+
+function updateCutSplitControls(frame = getCutPlaybackFrameState()) {
+  const validation = validateCutTimelineSplit(frame.sourceCurrent);
+  cutTimelineSplitButton.disabled = !validation.valid;
+  cutTimelineSplitButton.title = validation.valid
+    ? `在 ${formatTime(frame.current)} 分割视频`
+    : validation.reason;
+  const selected = selectedCutSplitEntry();
+  const isDeleted = Boolean(selected?.rangeId);
+  cutTimelineDeleteClipButton.hidden = !selected || isDeleted;
+  cutTimelineDeleteClipButton.disabled = cutControlsLocked || !selected || isDeleted;
+  cutTimelineRestoreClipButton.hidden = !isDeleted;
+  cutTimelineRestoreClipButton.disabled = cutControlsLocked || !isDeleted;
+}
+
+function renderCutSplitClips() {
+  const focusedSplitKey = String(
+    document.activeElement?.closest?.("[data-split-clip-key]")?.dataset
+      ?.splitClipKey || "",
+  );
+  cutFrameTimelineClips.replaceChildren();
+  const total = editedCutTimelineDuration();
+  if (cutSplitPoints.length === 0) {
+    selectedSplitClipKey = "";
+    updateCutSplitControls();
+    return;
+  }
+  const { clips, markers } = deriveCutSplitClips();
+  if (
+    selectedSplitClipKey &&
+    !clips.some((clip) => clip.key === selectedSplitClipKey) &&
+    !markers.some((marker) => marker.key === selectedSplitClipKey)
+  ) {
+    selectedSplitClipKey = "";
+  }
+  const fragment = document.createDocumentFragment();
+  for (const clip of clips) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "cut-timeline-split-clip";
+    button.dataset.splitClipKey = clip.key;
+    button.style.left = `${(clip.editedStart / total) * 100}%`;
+    button.style.width = `${Math.max(
+      0.25,
+      ((clip.editedEnd - clip.editedStart) / total) * 100,
+    )}%`;
+    button.classList.toggle("is-selected", clip.key === selectedSplitClipKey);
+    button.classList.toggle(
+      "has-hidden-left-boundary",
+      clip.hiddenLeftBoundary,
+    );
+    button.classList.toggle(
+      "has-hidden-right-boundary",
+      clip.hiddenRightBoundary,
+    );
+    button.setAttribute(
+      "aria-label",
+      `视频片段 ${formatCutRange(clip.sourceStart, clip.sourceEnd)}，点击选中`,
+    );
+    button.setAttribute(
+      "aria-pressed",
+      clip.key === selectedSplitClipKey ? "true" : "false",
+    );
+    button.title = "选中视频片段后可删除";
+    const label = document.createElement("span");
+    label.textContent = formatCutRange(clip.sourceStart, clip.sourceEnd);
+    button.append(label);
+    fragment.append(button);
+  }
+  const markerStacks = new Map();
+  for (const marker of markers) {
+    const stackKey = marker.editedTime.toFixed(3);
+    const stackIndex = markerStacks.get(stackKey) || 0;
+    markerStacks.set(stackKey, stackIndex + 1);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "cut-timeline-deleted-marker";
+    button.dataset.splitClipKey = marker.key;
+    button.dataset.deleted = "true";
+    const markerRatio = total > 0
+      ? clamp(marker.editedTime / total, 0, 1)
+      : 0;
+    button.style.left = `${markerRatio * 100}%`;
+    const stackDirection = markerRatio >= 0.95 ? -1 : 1;
+    button.style.setProperty(
+      "--split-marker-offset",
+      `${stackDirection * stackIndex * 18}px`,
+    );
+    button.style.setProperty(
+      "--split-marker-shift",
+      markerRatio <= 0.05
+        ? "0%"
+        : markerRatio >= 0.95
+          ? "-100%"
+          : "-50%",
+    );
+    button.classList.toggle("is-selected", marker.key === selectedSplitClipKey);
+    button.setAttribute(
+      "aria-label",
+      `已删除视频片段 ${formatCutRange(marker.sourceStart, marker.sourceEnd)}，点击选中恢复`,
+    );
+    button.setAttribute(
+      "aria-pressed",
+      marker.key === selectedSplitClipKey ? "true" : "false",
+    );
+    button.title = "选中后可恢复这个片段";
+    const icon = document.createElement("iconify-icon");
+    icon.setAttribute("icon", "ph:arrow-counter-clockwise-bold");
+    icon.setAttribute("aria-hidden", "true");
+    button.append(icon);
+    fragment.append(button);
+  }
+  cutFrameTimelineClips.append(fragment);
+  if (focusedSplitKey) {
+    const focusTarget = [...cutFrameTimelineClips.children].find(
+      (element) => element.dataset?.splitClipKey === focusedSplitKey,
+    );
+    focusTarget?.focus({ preventScroll: true });
+  }
+  updateCutSplitControls();
+}
+
+function refreshCutStructureState({ recordHistory = true } = {}) {
+  cutSplitClipsCache = null;
+  if (recordHistory) recordCutHistoryIfChanged();
+  syncEditorSuiteCutDraftState(buildLiveCutDraftState(), { structureOnly: true });
+  renderCutSplitClips();
+  scheduleCutDraftSave();
+}
+
+function splitCutTimelineAtPlayhead() {
+  const frame = getCutPlaybackFrameState();
+  const validation = validateCutTimelineSplit(frame.sourceCurrent);
+  if (!validation.valid) {
+    updateCutTimelineStatus(validation.reason, "error", "split");
+    updateCutSplitControls(frame);
+    return false;
+  }
+  stageCutHistoryOperation("分割视频片段");
+  const point = {
+    key: `split-${Date.now().toString(36)}-${nextCutSplitPointId++}`,
+    sourceTime: validation.point,
+  };
+  cutSplitPoints = normalizeCutSplitPoints([...cutSplitPoints, point]);
+  cutSplitClipsCache = null;
+  if (!cutSplitPoints.some((item) => item.key === point.key)) {
+    cutHistoryPendingMeta = null;
+    updateCutTimelineStatus("当前位置无法形成有效片段。", "error", "split");
+    return false;
+  }
+  selectedSplitClipKey = cutSplitClipKey(point.key, validation.right.key);
+  refreshCutStructureState();
+  updateCutTimelineStatus(
+    `已在 ${formatTime(frame.current)} 分割，视频时长和播放位置保持不变。`,
+    "success",
+    "split",
+  );
+  return true;
+}
+
+async function deleteSelectedCutSplitClip() {
+  const clip = deriveCutSplitClips().clips.find(
+    (item) => item.key === selectedSplitClipKey,
+  );
+  if (!clip || cutControlsLocked || splitClipConfirmationOpen) return false;
+  splitClipConfirmationOpen = true;
+  let confirmed = false;
+  try {
+    confirmed = await window.appConfirm({
+      eyebrow: "时间轴片段",
+      title: "删除这个视频片段？",
+      message:
+        `将精确删除 ${formatCutRange(clip.sourceStart, clip.sourceEnd)} 并无缝拼接前后画面。` +
+        "分割边界不会被语音保护机制移动，删除后可在拼接点恢复。",
+      confirmText: "删除片段",
+      cancelText: "取消",
+      tone: "danger",
+      icon: "ph:trash-bold",
+    });
+  } finally {
+    splitClipConfirmationOpen = false;
+  }
+  const currentClip = deriveCutSplitClips().clips.find(
+    (item) => item.key === clip.key,
+  );
+  if (!confirmed || !currentClip) return false;
+  stageCutHistoryOperation("删除分割片段");
+  const id = nextTimelineRangeId++;
+  const range = {
+    id,
+    key: `split-delete-${id}`,
+    start: currentClip.sourceStart,
+    end: currentClip.sourceEnd,
+    originalStart: currentClip.sourceStart,
+    originalEnd: currentClip.sourceEnd,
+    boundaryMode: "split_exact",
+    splitClipKey: currentClip.key,
+  };
+  timelineDeleteRanges.push(range);
+  selectedSplitClipKey = currentClip.key;
+  selectedTimelineRangeId = null;
+  updateSelectionSummary();
+  scheduleCutPreviewEffect(() => previewSelectedCutRange(range));
+  updateCutTimelineStatus("已精确删除选中片段，可在拼接点恢复。", "success", "split");
+  return true;
+}
+
+function restoreSelectedCutSplitClip() {
+  const marker = deriveCutSplitClips().markers.find(
+    (item) => item.key === selectedSplitClipKey,
+  );
+  if (!marker || cutControlsLocked) return false;
+  stageCutHistoryOperation("恢复分割片段");
+  timelineDeleteRanges = timelineDeleteRanges.filter(
+    (range) => range.id !== marker.rangeId,
+  );
+  selectedTimelineRangeId = null;
+  updateSelectionSummary();
+  updateCutTimelineStatus("已恢复选中的视频片段。", "success", "split");
   return true;
 }
 
@@ -4270,6 +4794,7 @@ function refreshCutTimeline(options = {}) {
   updateCutTimelineScale();
   renderCutTimelineRuler();
   renderCutTimelineTextSegments();
+  renderCutSplitClips();
   renderCutTimelineRanges();
   updateCutTimelinePlayhead();
   if (options.thumbnails !== false) buildCutTimelineThumbnails(options);
@@ -4280,11 +4805,17 @@ function beginCutTimelineSelection(event) {
     cutControlsLocked ||
     timelineRangeInProgress ||
     event.button !== 0 ||
-    event.target.closest(".cut-timeline-delete-range")
+    event.target.closest(
+      ".cut-timeline-delete-range, .cut-timeline-split-clip, .cut-timeline-deleted-marker",
+    )
   ) {
     return;
   }
   event.preventDefault();
+  if (selectedSplitClipKey) {
+    selectedSplitClipKey = "";
+    renderCutSplitClips();
+  }
   pauseCutPreview();
   const anchorSeconds = cutTimelineSecondsFromClientX(event.clientX);
   const startClientX = event.clientX;
@@ -5230,9 +5761,13 @@ function resetToUpload() {
   cutControlsLocked = false;
   currentVideoDuration = 0;
   timelineDeleteRanges = [];
+  cutSplitPoints = [];
   generatedCutSelectionSignature = "";
   pendingCutSelectionSignature = "";
   selectedTimelineRangeId = null;
+  selectedSplitClipKey = "";
+  nextCutSplitPointId = 1;
+  splitClipConfirmationOpen = false;
   timelineRangeInProgress = false;
   timelineRangeConfirmationOpen = false;
   nextTimelineRangeId = 1;
@@ -5271,6 +5806,7 @@ function resetToUpload() {
   cutFrameTimelineRuler.replaceChildren();
   cutFrameTimelineText.replaceChildren();
   cutFrameTimelineThumbnails.replaceChildren();
+  cutFrameTimelineClips.replaceChildren();
   cutFrameTimelineRanges.replaceChildren();
   updateTimelineRangeConfirmation();
   updateCutTimelineStatus("");
@@ -5413,11 +5949,15 @@ function renderResult(job) {
     Number(result.mediaDuration || result.duration || job.duration) || 0,
   );
   timelineDeleteRanges = [];
+  cutSplitPoints = [];
   generatedCutSelectionSignature = cutSelectionSignature(
     job.edit?.requestedRanges || [],
   );
   pendingCutSelectionSignature = "";
   selectedTimelineRangeId = null;
+  selectedSplitClipKey = "";
+  nextCutSplitPointId = 1;
+  splitClipConfirmationOpen = false;
   timelineRangeInProgress = false;
   timelineRangeConfirmationOpen = false;
   nextTimelineRangeId = 1;
@@ -5563,6 +6103,7 @@ function renderEdit(edit) {
     syncEditorSuiteCutDraftState({
       active: false,
       ranges: edit.ranges || edit.requestedRanges || [],
+      splitPoints: cutSplitPoints.map((point) => ({ ...point })),
       sourceDuration: cutTimelineDuration(),
       duration: Number(edit.outputDuration) || 0,
       transcript: edit.transcript || null,
@@ -6022,6 +6563,64 @@ mergeSegmentDownButton.addEventListener("click", () => {
   applyEditableSegmentOperation("merge_down");
 });
 
+cutTimelineSplitButton.addEventListener("click", splitCutTimelineAtPlayhead);
+cutTimelineDeleteClipButton.addEventListener("click", () => {
+  void deleteSelectedCutSplitClip();
+});
+cutTimelineRestoreClipButton.addEventListener(
+  "click",
+  restoreSelectedCutSplitClip,
+);
+cutFrameTimelineClips.addEventListener("pointerdown", (event) => {
+  if (event.target.closest("[data-split-clip-key]")) event.stopPropagation();
+});
+cutFrameTimelineClips.addEventListener("click", (event) => {
+  const target = event.target.closest("[data-split-clip-key]");
+  if (!target) return;
+  event.preventDefault();
+  event.stopPropagation();
+  selectedTimelineRangeId = null;
+  selectedSplitClipKey = String(target.dataset.splitClipKey || "");
+  window.EditorSuite?.selectTimelineClip?.({
+    kind: "cut",
+    clipId: `cut:split:${selectedSplitClipKey}`,
+  });
+  if (!target.dataset.deleted && event.detail > 0) {
+    const clip = deriveCutSplitClips().clips.find(
+      (item) => item.key === selectedSplitClipKey,
+    );
+    if (clip) {
+      seekCutPreview(
+        clamp(
+          cutTimelineSecondsFromClientX(event.clientX),
+          clip.sourceStart,
+          clip.sourceEnd,
+        ),
+      );
+    }
+  }
+  renderCutSplitClips();
+  updateCutTimelineStatus(
+    target.dataset.deleted
+      ? "已选中删除片段，可点击恢复。"
+      : "已选中视频片段，可单独删除。",
+    "neutral",
+    "split",
+  );
+});
+cutFrameTimelineClips.addEventListener("keydown", (event) => {
+  const target = event.target.closest("[data-split-clip-key]");
+  if (!target) return;
+  if (event.key !== "Delete" && event.key !== "Backspace") return;
+  event.preventDefault();
+  selectedTimelineRangeId = null;
+  selectedSplitClipKey = String(target.dataset.splitClipKey || "");
+  if (target.dataset.deleted === "true") {
+    restoreSelectedCutSplitClip();
+  } else {
+    void deleteSelectedCutSplitClip();
+  }
+});
 cutFrameTimelineTrack.addEventListener("pointerdown", beginCutTimelineSelection);
 cutFrameTimelineRanges.addEventListener(
   "pointerdown",

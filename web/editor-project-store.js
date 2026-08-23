@@ -13,6 +13,7 @@
       PROJECT_DRAFT_RESTORED: "projectDraftRestored",
       TRANSCRIPT_TEXT_CHANGED: "transcriptTextChanged",
       CUT_TIMING_CHANGED: "cutTimingChanged",
+      CUT_STRUCTURE_CHANGED: "cutStructureChanged",
       ART_STATE_CHANGED: "artStateChanged",
       PIP_STATE_CHANGED: "pipStateChanged",
       TIMELINE_KIND_CHANGED: "timelineKindChanged",
@@ -59,10 +60,27 @@
         .sort((left, right) => left.start - right.start || left.end - right.end);
     }
 
+    function normalizeSplitPoints(points) {
+      const seenKeys = new Set();
+      const normalized = [];
+      for (const point of Array.isArray(points) ? points : []) {
+        const key = String(point?.key || "").trim();
+        const sourceTime = Number(point?.sourceTime);
+        if (!key || !Number.isFinite(sourceTime) || seenKeys.has(key)) continue;
+        seenKeys.add(key);
+        normalized.push({ key, sourceTime: Math.max(0, sourceTime) });
+      }
+      return normalized.sort(
+        (left, right) =>
+          left.sourceTime - right.sourceTime || left.key.localeCompare(right.key),
+      );
+    }
+
     function normalizeCut(value = {}) {
       return {
         active: Boolean(value.active),
         ranges: normalizeRanges(value.ranges),
+        splitPoints: normalizeSplitPoints(value.splitPoints),
         cutDraftRevision: Math.max(
           0,
           finiteNumber(value.cutDraftRevision),
@@ -807,6 +825,42 @@
         serverVersion = String(
           payload.serverVersion || payload.job?.updatedAt || serverVersion,
         );
+      } else if (action.type === ACTIONS.CUT_STRUCTURE_CHANGED) {
+        const incomingStructure = normalizeCut(payload.cut || payload);
+        project.cut = normalizeCut({
+          ...project.cut,
+          splitPoints: incomingStructure.splitPoints,
+        });
+        if (payload.timeline) {
+          const incomingCutTimeline = normalizeTimeline(
+            payload.timeline,
+            timelineApi,
+          );
+          project.timeline = replaceTimelineKind(
+            project.timeline,
+            "cut",
+            {
+              duration: Math.max(
+                project.cut.duration,
+                Number(incomingCutTimeline.duration) || 0,
+              ),
+              tracks: [
+                ...cutTimelineTracks(project.cut),
+                ...incomingCutTimeline.tracks.filter(
+                  (track) =>
+                    track.kind === "cut" && track.id !== "cut:transcript",
+                ),
+              ],
+              selection: incomingCutTimeline.selection,
+            },
+            timelineApi,
+            { acceptIncomingSelection: ui.activeTool === "cut" },
+          );
+          project.timeline = normalizeTimeline(
+            { ...project.timeline, duration: project.cut.duration },
+            timelineApi,
+          );
+        }
       } else if (action.type === ACTIONS.CUT_TIMING_CHANGED) {
         const previousCut = project.cut;
         const previousArt = project.art;
@@ -957,8 +1011,9 @@
           },
         }) === stableSignature(state);
       const timingChanged =
-        (action.type === ACTIONS.PROJECT_HYDRATED && jobId !== state.jobId) ||
-        projectTimingSignature(project) !== projectTimingSignature(state.project);
+        action.type !== ACTIONS.CUT_STRUCTURE_CHANGED &&
+        ((action.type === ACTIONS.PROJECT_HYDRATED && jobId !== state.jobId) ||
+          projectTimingSignature(project) !== projectTimingSignature(state.project));
       return owned({
         ...comparable,
         revision: state.revision + (cutDraftMetadataOnly ? 0 : 1),
