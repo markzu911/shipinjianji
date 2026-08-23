@@ -511,3 +511,26 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 24: 实现时间轴分割与精确片段删除
+
+**Date**: 2026-08-23
+**Task**: 实现时间轴分割与精确片段删除
+**Branch**: `develop`
+
+### Summary
+
+新增播放头分割、分割片段独立删除/恢复/撤销重做与持久化；后端引入经锚点验证的 split_exact 精确边界，保留普通选区声学对齐；补齐响应式、键盘交互、Store 投影、浏览器回归和 Trellis 契约。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `184b080` | (see git log) |
+| `ee90b83` | (see git log) |
+| `74e166c` | (see git log) |
+
+### Status
+
+[OK] **Completed**
