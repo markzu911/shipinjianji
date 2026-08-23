@@ -156,6 +156,13 @@ if (
 }
 ```
 
+## Cut-draft 分割结构的增量兼容
+
+- 播放头分割继续使用 `cut-draft.json` 的 `schemaVersion: 1` 增量字段：`splitPoints[]`、`timelineRanges[].boundaryMode` 和可选 `splitClipKey`。历史文件缺少这些字段时分别恢复为 `[]`、`speech_safe` 和无 identity，不为此批量迁移 job 目录。
+- split points 与三类删除范围必须在同一个 revision 检查、同一个 job lock 和同一次临时文件 `replace` 中原子保存；不得先保存结构再保存删除状态。
+- `splitPoints` 与 exact identity 是用户语义，服务端响应往返时必须保留；boundary diagnostics 和 acoustic cache 仍是派生数据，不能用来推断或重建分割结构。
+- API 回归必须覆盖旧草稿读取、新字段往返、revision conflict 不覆盖结构、非法 exact 请求不写部分草稿，以及删除草稿时一并清除结构字段。
+
 ## 任务状态更新
 
 - 通过 `update_job` 或对应的 `update_edit_job`、`update_art_job`、`update_picture_in_picture_job` 更新，不直接在无锁区域修改嵌套字典。

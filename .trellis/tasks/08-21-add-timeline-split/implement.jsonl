@@ -1,0 +1,8 @@
+{"file":".trellis/spec/frontend/index.md","reason":"定位 Store、交互和媒体完整规格；实施前按索引读取 architecture-and-state、ui-and-interactions、api-and-media。"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"实现时间轴按钮、clip 选择、二次确认、恢复、键盘和 375px 交互。"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"保证 source/edited 映射、基础 video identity 和生成前 draft flush 不回归。"}
+{"file":".trellis/spec/backend/index.md","reason":"定位持久化与媒体时间轴完整规格；实施前读取 persistence-and-jobs 和 media-and-timeline 相关章节。"}
+{"file":".trellis/spec/backend/persistence-and-jobs.md","reason":"扩展 schemaVersion 1 cut-draft 字段、revision、锁与原子持久化。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"贯通点击、Store、草稿保存、服务端 revision、预览与 compose 的双时间数据流。"}
+{"file":".trellis/tasks/08-21-add-timeline-split/research/current-timeline-split-dataflow.md","reason":"本任务当前数据流、缺口、代码锚点和最小字段契约。"}
+{"file":".trellis/tasks/08-21-add-timeline-split/research/implementation-contract-checklist.md","reason":"集中注入未截断的 structure/timing revision、exact boundary、history、identity 和兼容检查点。"}

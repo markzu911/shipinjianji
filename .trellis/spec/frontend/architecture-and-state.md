@@ -152,6 +152,87 @@ const signature = JSON.stringify({ ranges, revision, diagnostics });
 const signature = cutDraftSemanticSignature(buildPersistedCutDraftPayload());
 ```
 
+### 场景：播放头分割与精确片段删除
+
+#### 1. Scope / Trigger
+
+修改播放头分割、基础视频片段选择、片段删除/恢复、cut draft 结构字段、cut history 或 Store cut 轨道时适用。分割是源媒体结构状态，不是新的媒体或删除 owner；普通拖选删除的语音安全边界不得因此改变。
+
+#### 2. Signatures
+
+```javascript
+EditorProjectStore.ACTIONS.CUT_STRUCTURE_CHANGED
+normalizeCutSplitPoints(points) -> Array<{ key, sourceTime }>
+deriveCutSplitClips() -> { clips, markers }
+splitCutTimelineAtPlayhead() -> boolean
+deleteSelectedCutSplitClip() -> Promise<boolean>
+restoreSelectedCutSplitClip() -> boolean
+```
+
+```text
+PUT /api/transcriptions/{job_id}/cut-draft
+splitPoints[] = { key: string, sourceTime: number }
+timelineRanges[].boundaryMode = "speech_safe" | "split_exact"
+timelineRanges[].splitClipKey? = "split-clip:<left-key>:<right-key>"
+```
+
+#### 3. Contracts
+
+- split point 永远持久化 source time；edited time、CSS 百分比和 scroll 坐标只能作为当前视图投影。边界使用 `source-start` / `source-end` sentinel 与稳定 point key 派生 clip key。
+- 纯分割只 dispatch 一次 `CUT_STRUCTURE_CHANGED`：project revision `+1`，`timingRevision +0`，不触发 Art/PiP cut reconciliation，不改变 duration、播放头、播放状态或基础 video source。
+- `cut:split-structure` 是同一 Store timeline 中的只读 cut 轨道，包含可见 clip、deleted marker 和当前 selection；不得建立第二个 timeline store。marker 不占剪后时长，即使成片时长为零也必须保持时间轴与恢复入口可操作。
+- 删除完整分割片段仍写唯一 `timelineRanges`，携带 `split_exact` 与稳定 `splitClipKey`；恢复只移除对应 exact range。普通自由拖选省略 boundary metadata，继续按 `speech_safe` 保存。
+- `splitPoints`、`boundaryMode`、`splitClipKey` 和 history selection 属于用户语义，必须进入草稿语义签名与历史快照；服务端派生物理 `start/end`、diagnostics、revision 和时间戳仍不得进入签名。
+- clip/marker 重绘后按稳定 key 恢复键盘焦点；多个 marker 位于同一拼接点时使用实际 CSS 自定义属性分层，并在左右边缘向内堆叠。确认弹窗打开期间撤销/重做快捷键必须锁定。
+- 命中已 acknowledged 的 redo 状态时取消待保存 timer，并把提示恢复为“已保存”；不能永久停留在“正在保存”。所有变更继续遵守单 in-flight、latest-state-wins 和生成前 flush。
+
+#### 4. Validation & Error Matrix
+
+| 条件 | 结果 |
+| --- | --- |
+| 播放头在起点、终点、已有边界、删除区或不足最小时长 | 分割按钮 disabled；命令 no-op，无 revision/history/PUT intent |
+| 历史草稿缺少 `splitPoints` / boundary metadata | 恢复为空结构；普通 timeline range 按 `speech_safe` |
+| exact range 不匹配相邻 source anchors 或 clip key | 服务端 `400`，不写部分草稿 |
+| `speech_safe` range 携带 `splitClipKey` | 服务端 `400`，不得借普通模式伪造分割身份 |
+| 同一 split clip 重复 exact 删除 | 服务端 `400`，不得保存重叠身份 |
+| 全部分割片段被删除 | edited duration 可为零；恢复 marker 和公共 timeline 仍可操作 |
+| Store 收到等价 structure action | no-op；revision 与 `timingRevision` 均不变 |
+
+#### 5. Good / Base / Bad Cases
+
+- Good：连续分割后独立删除中间片段，服务端物理端点严格等于相邻 source anchors；刷新、撤销、重做和恢复保持同一 clip identity，基础 video `src/load()` 为 0。
+- Base：纯分割只改变时间轴结构与草稿 revision，预览声音、画面、总时长和当前播放位置完全不变。
+- Bad：持久化 edited time、把 split clip 放进私有 DOM 状态、用 `CUT_TIMING_CHANGED` 表示纯分割，或把 exact range 送进 acoustic/PCM；这些都会造成漂移、双 owner、错误重定时或再次残留/误删语音。
+
+#### 6. Tests Required
+
+- 后端：split point clamp/sort/dedupe、保留 sentinel、相邻 anchor/clip-key 校验、重复 exact 拒绝、speech-safe identity 拒绝，以及 exact 路径对 forced alignment/PCM 解码调用数为 0。
+- Store/Node：structure action 单 revision、`timingRevision` 不变、等价 no-op、`cut:split-structure` clip/marker/selection 投影和旧 cut state 兼容。
+- 真实浏览器：连续 split、边界 disabled、选择/精确删除/恢复、全删后恢复、撤销/重做、刷新、键盘焦点、多个 marker、375px、普通拖选取消和基础 video/extractor identity 计数。
+- 生成回归：纯分割不改变 compose 输出；删除片段后 preview/compose 消费同一权威 exact range，生成前等待最新 draft revision。
+
+#### 7. Wrong vs Correct
+
+```javascript
+// Wrong: edited time drifts whenever earlier ranges change.
+splitPoints.push({ key, sourceTime: cutFrameTimelineSeek.value });
+store.dispatch({ type: ACTIONS.CUT_TIMING_CHANGED, payload: cut });
+
+// Correct: anchor in source time and commit structure without retiming media.
+splitPoints.push({ key, sourceTime: getCutPlaybackFrameState().sourceCurrent });
+store.dispatch({ type: ACTIONS.CUT_STRUCTURE_CHANGED, payload: { cut, timeline } });
+```
+
+```python
+# Wrong: exact user-created clip edges must never enter acoustic movement.
+aligned = align_cut_draft_timeline_ranges_to_audio([split_range], ...)
+
+# Correct: validate adjacent source anchors, then persist exact endpoints.
+validate_split_exact_timeline_range(split_range, split_points, duration)
+split_range["start"] = split_range["originalStart"]
+split_range["end"] = split_range["originalEnd"]
+```
+
 ### 文字删除展示边界契约
 
 文字剪辑列表必须区分“剪辑主状态”和“展示边界”：

@@ -34,6 +34,7 @@ seeded_editor_job(sample_video) -> SeededEditorJob
 ### 4. Core Workflows
 
 - 刷新恢复：执行可见删除操作，等待草稿保存，再核对 UI、cut draft JSON 和时间映射。
+- 时间轴分割：连续播放头分割后核对 source anchor、structure revision 与不变的 `timingRevision`；覆盖精确删除/恢复、全删后 marker、撤销/重做、刷新、键盘焦点、Store `cut:split-structure` 轨道、普通拖选取消及 375px。纯分割期间基础 video `srcWrites/loadCalls` 和 extractor 创建数都必须为 0。
 - 工具切换：cut/art/pip 始终保持同一 document、基础 video、公共预览和公共时间线；隐藏 panel 必须 inert。
 - 文字保存：暂停/播放两种状态都保持 document/video/ArtTool/PipTool identity、src、currentTime、play state 和 art/pip 时间；新文案通过顶层 Store 进入艺术字与 compose。
 - 统一生成：用 `expect_response` 捕获真实 compose 响应，断言请求字段来自同一个 editor frame。

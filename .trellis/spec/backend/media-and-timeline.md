@@ -148,6 +148,8 @@ body = { count, existingOverlays, draftTranscript, draftDuration };
 - 后端：`refine_shared_character_boundary(left, right, fallback, samples, sample_rate, *, deletion_on_left, allow_token_extension=True)`
 - 后端：`find_quiet_token_extension_boundary(left, right, fallback, samples, sample_rate, *, deletion_on_left, enabled)`
 - 后端：`resolve_cut_draft_delete_ranges(draft, suggestions, segments, duration, *, use_text_semantic_boundaries=False)`
+- 后端：`normalize_cut_draft_split_points(points, duration)`
+- 后端：`validate_split_exact_timeline_range(item, split_points, duration)`
 - 后端：`normalize_delete_ranges(ranges, duration, protected_ranges=None)`
 - 后端：`subtract_protected_ranges(ranges, protected_ranges, *, minimum_duration=0.0)`
 - 前端：`applyPersistedCutDraftAlignment(draft, expectedSignature)`
@@ -156,6 +158,7 @@ body = { count, existingOverlays, draftTranscript, draftDuration };
 
 - `textRanges[].originalStart/originalEnd` 表示删除哪些文字，不因波形吸附而改变。
 - `timelineRanges[].originalStart/originalEnd` 表示用户确认的精确时间语义；物理 `start/end` 只有在距离可靠字符状态转换不超过 `0.20s` 且不跨保留语音核心时才能独立吸附。完全位于强制对齐 quiet gap 的范围保持精确。
+- `splitPoints[].sourceTime` 是播放头分割的源媒体锚点。`boundaryMode="split_exact"` 只允许完整匹配两个相邻 source anchors 及其 `splitClipKey`；验证成功后物理 `start/end` 严格等于 `original*`，不得加载 forced alignment、解码 PCM 或执行任何声学移动。缺少 mode 的历史/普通手动范围按 `speech_safe`。
 - `textRanges[].start/end` 表示真实媒体删除范围；草稿 PUT 响应可以在上一保留文字结束与下一保留文字开始之间扩大，禁止为草稿对齐传入 head/tail guard 穿越保留文字。
 - `adjacentSilenceBefore/After` 必须按校准后的物理边界重新计算。
 - 音频解码或分析失败时，物理范围回退到 `originalStart/originalEnd`，不沿用客户端传入的可能越界 `start/end`。
@@ -190,6 +193,9 @@ body = { count, existingOverlays, draftTranscript, draftDuration };
 | 手动时间轴范围只覆盖一个识别词的部分 | 仅该精确片段可删除，词的其余片段继续作为自动合并保护区 |
 | 手动端点在可靠语音转换 `0.20s` 内 | 只吸附对应物理端点，`original*` 保持精确；另一端独立判定 |
 | 手动范围完全位于强制对齐 quiet gap | 物理范围保持 `original*`，不扩大到相邻文案 |
+| exact range 的端点、相邻关系或 `splitClipKey` 不匹配 | `400`，不写部分草稿且不降级为 speech-safe |
+| speech-safe range 携带 split identity，或同一 split clip 重复 exact 删除 | `400`，拒绝歧义身份 |
+| 合法 split_exact | 原样保存 `original*` 为物理端点，forced alignment/PCM 调用数均为 0 |
 | 保存期间前端又发生编辑 | 只推进 revision，不用旧响应覆盖新编辑；队列继续同步新状态 |
 | 删除起点字符中心走廊只有较浅相对低谷，上一 token 内存在更深且持续的相对谷底 | 使用上一 token 内离 fallback 最近的谷底点 |
 | 删除终点字符中心走廊不足，但下一保留字符说完后存在静音 | 保持字符走廊结果或 fallback，不进入下一 token 尾部 |
@@ -202,6 +208,7 @@ body = { count, existingOverlays, draftTranscript, draftDuration };
 - Good：粗 ASR token 同时包含被删“得”和保留“你”时，用完整句段已知文本对齐取得被删字可靠尾点 `37.810s`；文字 `originalEnd` 仍为语义边界，物理 `end` 不吞后续 quiet gap，也不越过“你”的可靠起音。
 - Good：删除起点前的真实停顿被 ASR 均摊到上一保留字符时间内，字符中心走廊只有较浅低谷时，起点在上一 token 内向前移动到更深且持续的相对谷底，但语义范围不变。
 - Base：手动范围完全落在完整句段字符之间的 quiet gap 时，物理 `start/end` 等于 `original*`；重复保存命中 sidecar 且边界不继续漂移。
+- Base：删除播放头分割形成的完整 clip 时先验证相邻 anchors，再保持精确端点；普通拖选仍独立使用语音安全吸附。
 - Bad：在短音频窗内只对齐局部文字、把 DashScope token 时间当字符硬包络、把单调衰减的响亮采样点当低谷，或直接把相邻 ASR token 整体扩进删除范围。
 
 ### 6. Tests Required
@@ -213,6 +220,7 @@ body = { count, existingOverlays, draftTranscript, draftDuration };
 - 单元测试：删除起点字符走廊仅有较浅相对低谷而上一 token 内存在更深持续谷底时选择最近谷底点；谷底位于 token 外时回退；删除终点不得吸附到下一保留字符说完后的静音；短保留字符夹在两段删除之间时禁用扩展。
 - 单元测试：自动空白部分/完全覆盖文字、两个自动范围夹住小于 `0.12s` 的保留词、手动范围只删除词的部分时，断言保留片段不被合并穿越。
 - API 测试：草稿 PUT 返回校准后的 `start/end`、原始语义边界和重算的相邻静音，并验证前后两侧保留文字限制、分析失败安全回退与重复 PUT 幂等。
+- API 测试：历史草稿缺少 split 字段时恢复为空；split point clamp/sort/dedupe；合法 exact 不触发 alignment/PCM；伪造 key、非相邻 anchors、speech-safe identity 和重复 exact 均返回 `400`。
 - 生成回归：`process_cut_job` 与组合生成不得再次调用边界吸附，最终 `ranges` 等于已保存草稿物理范围；物理范围延长时 `transcriptRanges` 仍只删除选中的语义文字；revision 过期、缺失草稿和空权威草稿分别断言冲突/拒绝。
 - 前端契约：校准响应原子更新 text/timeline 和当前撤销快照，键盘微调同步 `original*`，旧请求响应不能覆盖并发新编辑，生成必须等待稳定保存队列；真实浏览器验证刷新、立即生成、公共预览/compose revision 和 375px。
 - 真实媒体 gate：产品 resolver + FFmpeg/AAC 重生成后，二次 ASR 不再返回被删音节，下一保留字 PCM 相关、lag 和 RMS 不退化；人耳盲听仍是发布前人工门槛。
@@ -260,6 +268,16 @@ segment = ensure_acoustic_alignment_cache(
     segment_indexes={affected_segment_index},
 )
 physical_end = resolve_cut_draft_acoustic_boundaries(...)[0][0]["end"]
+```
+
+```python
+# Wrong: 分割片段边界进入普通吸附，会重新引入尾音或误删下一段起音。
+aligned = align_cut_draft_timeline_ranges_to_audio([split_exact], ...)
+
+# Correct: 验证相邻源锚点后保持用户建立的精确帧边界。
+validate_split_exact_timeline_range(split_exact, split_points, duration)
+split_exact["start"] = split_exact["originalStart"]
+split_exact["end"] = split_exact["originalEnd"]
 ```
 
 ## 场景：相邻重复文案使用转场级可信度

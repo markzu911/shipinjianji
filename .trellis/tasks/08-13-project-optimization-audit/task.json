@@ -37,7 +37,8 @@
     "08-19-fix-preview-load-after-transcription",
     "08-20-merge-manual-art-timeline-track",
     "08-20-fix-art-preview-and-track-lanes",
-    "08-20-eliminate-cut-tail-protect-retained-speech"
+    "08-20-eliminate-cut-tail-protect-retained-speech",
+    "08-21-add-timeline-split"
   ],
   "parent": null,
   "relatedFiles": [],

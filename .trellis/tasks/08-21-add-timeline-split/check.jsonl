@@ -1,0 +1,9 @@
+{"file":".trellis/spec/frontend/index.md","reason":"定位并读取前端状态、交互和媒体完整规范，检查单一 owner 与 revision。"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"检查按钮、选择、删除、恢复、确认和 375px 可访问性交互。"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"检查 split 不重载基础视频且 source/edited 映射和生成 flush 正确。"}
+{"file":".trellis/spec/backend/index.md","reason":"定位并读取持久化与媒体时间轴完整规范，检查 exact/speech-safe 分支。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"检查兼容性、边界校验、资源影响、定向测试和完整质量门。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"检查真实浏览器隔离、响应式、identity、计数和跨工具回归。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"审计 split 从 UI 到 Store、草稿、预览和 compose 的端到端数据流。"}
+{"file":".trellis/tasks/08-21-add-timeline-split/research/current-timeline-split-dataflow.md","reason":"对照已识别的数据流缺口逐项验证实现。"}
+{"file":".trellis/tasks/08-21-add-timeline-split/research/implementation-contract-checklist.md","reason":"核对未截断的 revision、exact boundary、history、identity 和兼容检查点。"}
