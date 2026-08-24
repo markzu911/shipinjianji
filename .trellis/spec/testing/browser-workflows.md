@@ -29,7 +29,7 @@ seeded_editor_job(sample_video) -> SeededEditorJob
 - seeded job 只使用临时一秒媒体和本地图片；禁止读取真实 `data/jobs`、`data/history`、`.env` 或调用外部模型。
 - 优先使用 Playwright Chromium，可回退本机 Chrome/Edge；全部缺失时明确失败，不得静默跳过。
 - 未处理 `pageerror`、console error、本地失败请求和未允许的 HTTP 4xx/5xx 都使测试失败；诊断截图只写 `tmp_path`。
-- 已知服务重启缺口只能在观察到精确 404/detail 后运行时 `pytest.xfail()`；禁止函数级 xfail 掩盖其他错误。
+- 服务重启恢复是必须通过的真实浏览器契约；不得使用运行时或函数级 xfail 掩盖 404、无限轮询或重试失效。
 
 ### 4. Core Workflows
 
@@ -38,7 +38,7 @@ seeded_editor_job(sample_video) -> SeededEditorJob
 - 工具切换：cut/art/pip 始终保持同一 document、基础 video、公共预览和公共时间线；隐藏 panel 必须 inert。
 - 文字保存：暂停/播放两种状态都保持 document/video/ArtTool/PipTool identity、src、currentTime、play state 和 art/pip 时间；新文案通过顶层 Store 进入艺术字与 compose。
 - 统一生成：用 `expect_response` 捕获真实 compose 响应，断言请求字段来自同一个 editor frame。
-- 重启恢复：先访问 job API；仅精确已知 404 进入 xfail，否则继续验证同一 URL 可编辑。
+- 重启恢复：completed 工程清空进程内状态后仍从同一 URL 恢复文案/草稿/工具；running 工程变为 `interrupted`、停止轮询并提供同 job 重试。重试响应迟到时，已点击“重新选择视频”的页面不得被旧 job 重新渲染。
 - 清理：context、Uvicorn 线程、socket 和临时媒体全部释放；连续运行结果一致。
 
 ### 5. Validation Matrix
@@ -50,7 +50,9 @@ seeded_editor_job(sample_video) -> SeededEditorJob
 | 任意工具路径出现 iframe 或第二个基础 video | 失败 |
 | 非本地请求、页面错误或未允许 HTTP 错误 | 失败并保留临时诊断 |
 | 375px `scrollWidth > clientWidth` 或隐藏 panel 可聚焦 | 失败 |
-| 精确服务重启 404/detail | 唯一允许的运行时 xfail |
+| completed 服务重启恢复为 404 | 失败 |
+| running 重启后仍轮询或无重试动作 | 失败 |
+| 重选后迟到 retry/poll 响应恢复旧 UI | 失败 |
 
 ## Scenario：B4 单页唯一运行时与兼容入口
 

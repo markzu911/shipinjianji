@@ -17,6 +17,7 @@
 - `test_schemas.py`：后端 Pydantic 模型公开清单与 `server.app` 旧导入路径的同一性兼容契约。
 - `test_settings.py`、`test_maintenance_history.py`：运行配置、任务清理和历史版本完整生命周期。
 - `test_history_repository.py`：历史仓库独立导入、模块常量/共享锁同一性，以及旧适配器对运行时目录和容量配置的惰性读取。
+- `test_project_repository.py`：工程快照独立导入、原子写、损坏/路径/shape 校验、legacy 恢复、draft metadata 自愈、缺失输出降级、attempt 迟到 no-op 和 retry 并发。
 - `test_frontend_contracts.py`：资源版本、DOM/ARIA、跨页面消息安全和 Node 行为契约。
 - `test_asset_libraries.py`：艺术字模板、位置预设和字体资源库。
 - `test_transcription_suggestions.py`：语音识别、语义分词、AI 建议和无语音检测。
@@ -39,7 +40,7 @@
 ## 断言层级
 
 - API：状态码、`detail`、JSON 字段和文件响应。
-- 状态：queued -> processing -> completed/failed/cancelled，失败不留伪成功文件。
+- 状态：queued -> processing -> completed/failed/cancelled；重启时 running -> interrupted。失败不留伪成功文件，旧 attempt 不覆盖新状态/输出。
 - 时间轴：源时间/剪后时间、边界、相邻区间和往返。
 - 渲染：尺寸、安全区、透明层、音频规范化、预览与导出一致。
 - 前端静态契约：资源版本、关键 DOM/ARIA、共享脚本引用和消息安全检查。
@@ -48,6 +49,7 @@
 
 - API/后端通用：完整 `tests/app/`。
 - 设置、维护或历史：对应 `test_settings.py` 或 `test_maintenance_history.py`，随后完整测试。
+- 工程快照、重启恢复、retry/attempt 或 retention 竞态：`test_project_repository.py`、`test_maintenance_history.py`、对应 API 测试和 browser restart/interrupted 用例，随后完整测试。
 - 转写或建议：`test_transcription_suggestions.py`。
 - 时间轴或剪辑：`test_acoustic_alignment.py`、`test_cut_draft.py`、`test_cut_acoustic_boundaries.py` 和 `test_cut_rendering.py`；同时覆盖 timeline 双范围、普通转场 `0.20s` 语义邻近门槛、可信 final 超距复用、重复转场的 structure/trust 分离与 PCM 佐证、完整 segment 的跨段 forced/PCM/无谷底/立即起音/delete-start 对称、合法大 coarse deviation、静音内精确范围、草稿 revision 生成门槛与生成阶段零次重对齐。重复和跨段边界测试必须同时断言被删语音消失和下一次保留表达未损伤，并覆盖走廊内部持续谷底、forced candidate 后独立 quiet gap、candidate/fallback 后 retained hard-limit 终端静音、gap 高能/缺少两侧语音/forced overlap、早期孤立爆音、单点尖谷、噪声轻微波动、单调斜坡、均匀低能和非削波增益；失败探测还要断言既有 hard limit 不会被 null 覆盖。“得/你”必须保留完整重复上下文，禁止只用两个相邻字的简化 fixture 掩盖重复分类。
 - overlay 或统一合成：art + pip + composition 对应模块，随后完整测试。

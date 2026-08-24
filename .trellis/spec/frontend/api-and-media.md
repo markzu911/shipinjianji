@@ -10,9 +10,10 @@
 ## 轮询
 
 - 创建后台任务后轮询 `GET /api/transcriptions/{job_id}` 的相应子状态。
-- 只在非终态继续；`completed` 渲染结果，`failed`/`cancelled` 停止并恢复控件。
-- 新任务、页面重置、过期任务和取消操作必须使旧轮询失效，防止迟到响应覆盖新状态。
-- 404 的“任务不存在或服务已重启”走现有过期任务恢复流程。
+- 只在非终态继续；`completed` 渲染结果，`failed`/`cancelled`/`interrupted` 停止并恢复控件。`interrupted` 必须显示原因和明确的同 job 重试动作。
+- 新任务、页面重置、过期任务和取消操作必须递增 request generation；所有 poll/retry/upload 成功与异常分支在渲染前同时校验 generation 和 job id，防止迟到响应覆盖重选后的页面。
+- 只有真正不存在/已清理的 404 走过期任务流程；恢复失败 409 和 `interrupted` 保留当前 job 与重试 UI。
+- “重试处理”与“重新选择视频”是两个独立操作；重试期间按钮 disabled/`aria-busy`，重复点击或双标签冲突显示服务端 409，不新建 job。
 
 ## 媒体源
 

@@ -25,7 +25,7 @@
 - 画中画支持图片和动态视频两种素材：图片使用 Seedream 5.0 Lite，视频使用 Seedance；两者都支持自定义提示词或根据所选文案智能生成，生成后可实时预览并分别调整位置与大小，用户确认后才合成最终视频。
 - Chrome/Edge 桌面与窄屏响应式界面。
 
-当前任务状态保存在内存中，服务重启后任务记录会清空。最终成片成功保存或任务进入终态失败后，`data/jobs/` 中的工作目录会立即删除；未完成任务由启动清理和定时清理按保留策略回收。
+任务会在 `data/jobs/<job_id>/project-state.json` 保存版本化快照。服务重启后，已完成的工程可从原地址继续编辑；重启时尚在运行的转写或生成任务会标记为“已中断，可重试”，不会自动重复调用 FFmpeg 或外部模型。失败和统一合成完成后会保留源视频、转写结果、剪辑草稿与工具素材，再由临时任务保留策略统一回收。
 
 ## 本地启动
 
@@ -80,7 +80,7 @@ API Key 只配置在服务端 `.env`，不要写入 `web/` 下的浏览器代码
 
 ## 临时任务清理
 
-`data/jobs/` 保存上传源视频、提取音频和生成中的临时文件。服务会在启动时立即清理一次，并在运行期间按 `JOB_CLEANUP_INTERVAL_SECONDS` 定时清理。也可以先预览再手动执行：
+`data/jobs/` 保存上传源视频、任务快照、剪辑草稿、工具素材和可重建的中间文件。服务启动时会先恢复工程与中断状态，再执行一次清理；运行期间按 `JOB_CLEANUP_INTERVAL_SECONDS` 定时清理。也可以先预览再手动执行：
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8001/api/maintenance/jobs
@@ -127,6 +127,7 @@ Invoke-RestMethod http://127.0.0.1:8001/api/maintenance/jobs/cleanup -Method Pos
 
 - `POST /api/transcriptions/{job_id}/cuts`：提交需要删除的 `{start, end}` 时间区间，创建后台剪辑任务。
 - `GET /api/transcriptions/{job_id}`：读取转写任务及 `edit` 剪辑进度。
+- `POST /api/transcriptions/{job_id}/retry`：在转写失败或服务重启中断后，保留同一 job 和源视频重新处理。
 - `PUT /api/transcriptions/{job_id}/transcript`：保存用户修改后的识别全文，自动对齐对应词块并保留原时间戳。
 - `PATCH /api/transcriptions/{job_id}/transcript`：按单个词块修正 ASR 文字，供精确编辑和兼容调用使用。
 - `GET /api/transcriptions/{job_id}/edited-video`：在线播放剪辑成片；添加 `?download=true` 下载 MP4。

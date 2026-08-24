@@ -12,11 +12,12 @@
 
 - Windows：`start.ps1`，`.venv` + Uvicorn，端口 8001，监听 `0.0.0.0`，开发时 `--reload`。
 - 健康检查：`GET /api/health`，同时报告 FFmpeg/FFprobe 能力。
-- 服务重启会丢失 `JOBS`；排障和用户提示必须考虑这一点。
+- 服务启动先从 `data/jobs/<uuid>/project-state.json` 恢复工程，把重启时仍在运行的顶层/子任务投影为 `interrupted`，然后执行存储维护。不自动续跑 FFmpeg/ASR/模型请求。
 
 ## 数据目录
 
-- `data/jobs` 是临时工作区，受保留天数、数量上限和运行中保护控制。
+- `data/jobs` 是保留期内的可恢复工程工作区，受保留天数、数量上限和运行中保护控制；成功/失败不立即删除整个 job 目录。
+- cleanup 删除前必须复查目录 `mtime_ns` 和 live running 状态，防止与语义更新、attempt promotion 或快照刷新竞态。
 - `data/history` 是最终成片历史，单独受 `HISTORY_MAX_STORED` 控制。
 - `data/models` 保存固定 revision 的本地声学对齐模型；首次在语音附近保存剪辑边界时可下载约 159 MB 的 `fa-zh` 权重。模型下载、校验、加载或推理失败必须可诊断并安全降级，不能阻断转写或草稿保存。
 - fonts、art templates、position presets 是用户资产，不随 job 清理。

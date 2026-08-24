@@ -1,0 +1,8 @@
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"审计 restore/retry 从磁盘到 API、Store、媒体和 compose 的完整一致性。"}
+{"file":".trellis/spec/backend/persistence-and-jobs.md","reason":"检查快照 schema、原子写、锁外 I/O、恢复矩阵、cut draft 和 cleanup。"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"检查 failed/cancelled/interrupted 终态、错误文本、半成品和可恢复输入。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"执行兼容、边界、资源影响、定向和完整质量门。"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"检查轮询停止、重试、媒体 identity 和 URL 恢复。"}
+{"file":".trellis/spec/testing/index.md","reason":"检查状态矩阵、真实媒体、全局隔离和完整回归要求。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"将 restart xfail 转为真实恢复，并覆盖 interrupted/retry/375px/无网络泄漏。"}
+{"file":".trellis/tasks/08-23-recover-and-retry-interrupted-jobs/research/current-job-recovery-dataflow.md","reason":"逐项核对当前已知删除、锁、legacy、attempt 和性能缺口。"}

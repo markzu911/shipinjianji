@@ -4,8 +4,8 @@
 
 项目没有数据库：
 
-- `JOBS` 和 `JOB_FILES` 保存当前进程的任务状态，受 `JOBS_LOCK` 保护；服务重启后丢失。
-- `data/jobs/<uuid>/` 保存上传源文件、处理中间文件、`cut-draft.json` 和可重建的 `acoustic-alignment.json`。
+- `JOBS` 和 `JOB_FILES` 是进程内 live authority，受 `JOBS_LOCK` 保护；`project-state.json` 是用于重启恢复的持久副本。
+- `data/jobs/<uuid>/` 保存上传源文件、版本化任务快照、处理中间文件、独立权威的 `cut-draft.json` 和可重建的 `acoustic-alignment.json`。
 - `data/history/` 保存最终版本、缩略图和 history manifest，跨重启存在。
 - `data/fonts/`、`data/art-templates/`、`data/art-position-presets/` 各自使用 manifest JSON。
 - `.env` 保存模型服务商配置和凭证，由 settings API 在锁内更新。
@@ -159,7 +159,8 @@ if (
 ## Cut-draft 分割结构的增量兼容
 
 - 播放头分割继续使用 `cut-draft.json` 的 `schemaVersion: 1` 增量字段：`splitPoints[]`、`timelineRanges[].boundaryMode` 和可选 `splitClipKey`。历史文件缺少这些字段时分别恢复为 `[]`、`speech_safe` 和无 identity，不为此批量迁移 job 目录。
-- split points 与三类删除范围必须在同一个 revision 检查、同一个 job lock 和同一次临时文件 `replace` 中原子保存；不得先保存结构再保存删除状态。
+- split points 与三类删除范围必须在同一个 revision 检查、同一个 per-job lock 和同一次临时文件 `replace` 中原子保存；读写 JSON 时不得持有 `JOBS_LOCK`。
+- `cut-draft.json` 是草稿权威；PUT/DELETE 响应后再 best-effort 刷新 `project-state.json` 的 present/revision metadata，分割和文字选择热路径不同步等待第二次 JSON/fsync。重启发现 metadata 漂移时以草稿文件自愈，向公开 job 返回可诊断 warning，不误降级 completed。
 - `splitPoints` 与 exact identity 是用户语义，服务端响应往返时必须保留；boundary diagnostics 和 acoustic cache 仍是派生数据，不能用来推断或重建分割结构。
 - API 回归必须覆盖旧草稿读取、新字段往返、revision conflict 不覆盖结构、非法 exact 请求不写部分草稿，以及删除草稿时一并清除结构字段。
 
@@ -170,11 +171,24 @@ if (
 - `public_job` 是对外投影边界；新增内部字段前确认是否应暴露给浏览器。
 - 运行中工作由 `job_has_running_work` 判定，清理逻辑不得删除这些目录。
 
+## 场景：工程快照、重启恢复与 attempt 隔离
+
+- `server/project_repository.py` 是 `project-state.json` 的唯一存储边界；只依赖标准库和构造参数，不导入 FastAPI 或 `server.app`。
+- schema v1 只保存公开 job 状态、source basename/fingerprint 和 cut-draft metadata。密钥、凭证、绝对路径、PCM、进程对象和草稿全文不得入快照。
+- source 必须是同一 UUID job 目录的直接子文件；校验 basename、扩展名、size、`mtime_ns`、symlink/junction 逃逸和 resolved parent。PIP asset id 必须是安全单文件名片段。
+- save 在 repository lock 内使用唯一同目录临时文件、flush/fsync 和 `replace`；损坏的旧快照只返回诊断，禁止用新空状态覆盖。
+- 在 `JOBS_LOCK` 内只验证、mutation 和必要的 deepcopy；JSON 编码、fsync/replace、媒体 promotion 和目录删除都在锁外。纯 stage/progress 不逐次写全量快照。
+- 启动顺序固定为 restore -> 运行态投影为 `interrupted` -> 回写投影 -> maintenance；不自动重跑 FFmpeg/ASR/外部模型。legacy source-only 只恢复可重试顶层任务，GET 也不得重新挂载旧 cut draft。
+- 恢复 completed 投影时验证固定输出或 history 引用；文件缺失只把对应子任务降为 `interrupted`，不伪造可读成片。
+- 每次顶层/子任务/动态 PIP 尝试都携带 `attemptId`。状态写回、输出 promotion、取消和重试必须验证 current attempt 且状态仍运行；终态旧 worker 在其他任务清除 job-wide cancel 后仍为 no-op。
+- 清理建计划后，删除前在 per-job/repository 锁内复查目录 `mtime_ns` 和 live running 状态；已中断工程在保留期内可访问，到期后仍按现有上限回收。
+- 必测：snapshot 原子/损坏/路径/shape、legacy、状态投影、缺输出、draft metadata 自愈、100 次 progress 无写盘风暴、cancel/retry 迟到回调、双标签重试与 cleanup 二次门禁。
+
 ## 清理和历史
 
 - `cleanup_job_directories` 只接受 UUID 目录，保护运行中任务，并支持 dry-run。
 - `HISTORY_MAX_STORED` 只管理最终历史，不受临时 job 保留期影响。
-- 成功保存历史或任务终态失败后可以清理工作目录；不得删除历史成片或用户上传的模板/字体。
+- 成功保存历史或任务失败后保留 job 源媒体、草稿、工具素材和快照；只清理本 attempt 半成品，工程目录由 retention/数量上限或明确用户清理回收。
 - 新的持久化目录必须同步更新 README、`.env.example`、打包清洁数据规则和测试。
 
 ## 场景：历史版本仓库边界

@@ -1,0 +1,9 @@
+{"file":".trellis/spec/guides/project-overview.md","reason":"保持 FastAPI/原生前端、DATA_DIR、临时 jobs 与 history 的现有产品边界。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"贯通浏览器轮询、API、内存 job、磁盘快照、后台 worker、媒体和清理的数据流。"}
+{"file":".trellis/spec/backend/index.md","reason":"定位持久化、错误、日志、媒体和质量完整规范。"}
+{"file":".trellis/spec/backend/persistence-and-jobs.md","reason":"实现原子 JSON、锁、任务状态、cut draft 独立权威、清理与 history 兼容。"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"保证后台异常形成可重试终态、取消不误报失败且不留下伪成功输出。"}
+{"file":".trellis/spec/operations/index.md","reason":"遵守 DATA_DIR、启动/清理、健康检查、README 与打包数据隔离契约。"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"实现 interrupted 轮询/重试且保持唯一媒体、请求错误和 source retry 语义。"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"实现可访问的中断提示、重试 busy 状态和 375px 行为。"}
+{"file":".trellis/tasks/08-23-recover-and-retry-interrupted-jobs/research/current-job-recovery-dataflow.md","reason":"当前内存权威、删除路径、性能风险、attempt 和 legacy 证据。"}
