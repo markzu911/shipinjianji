@@ -20,7 +20,7 @@ import unicodedata
 import uuid
 from array import array
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime
 from http import HTTPStatus
 from pathlib import Path
@@ -52,6 +52,11 @@ from .history_repository import (
     HistoryRepository,
 )
 from .pcm_cache import FingerprintPcmCache, ReadOnlyPcmSamples
+from .project_repository import (
+    PROJECT_REPOSITORY_LOCK,
+    ProjectRepository,
+    ProjectSnapshotError,
+)
 from .schemas import (
     ArtPositionPresetCreate,
     ArtPositionPresetUpdate,
@@ -347,6 +352,11 @@ CUT_DRAFT_PCM_CACHE = FingerprintPcmCache()
 JOBS: dict[str, dict[str, Any]] = {}
 JOB_FILES: dict[str, Path] = {}
 JOBS_LOCK = threading.Lock()
+PROJECT_RECOVERY_FAILURES: list[dict[str, str]] = []
+PROJECT_SNAPSHOT_FAILURES: list[dict[str, str]] = []
+PROJECT_FAILURES_LOCK = threading.Lock()
+JOB_ATTEMPT_LOCKS: dict[str, tuple[threading.RLock, int]] = {}
+JOB_ATTEMPT_LOCKS_GUARD = threading.Lock()
 FONT_LIBRARY_LOCK = threading.Lock()
 ART_TEMPLATE_LIBRARY_LOCK = threading.Lock()
 ART_POSITION_PRESETS_LOCK = threading.Lock()
@@ -378,6 +388,7 @@ async def periodic_storage_cleanup(
 
 @asynccontextmanager
 async def app_lifespan(_: FastAPI):
+    await asyncio.to_thread(restore_projects_from_disk)
     await asyncio.to_thread(run_storage_maintenance)
     stop_event = asyncio.Event()
     cleanup_task = asyncio.create_task(periodic_storage_cleanup(stop_event))
@@ -441,6 +452,354 @@ def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _project_repository() -> ProjectRepository:
+    return ProjectRepository(
+        data_dir=DATA_DIR,
+        allowed_extensions=ALLOWED_EXTENSIONS,
+        lock=PROJECT_REPOSITORY_LOCK,
+        utc_now=utc_now,
+    )
+
+
+def _record_project_snapshot_failure(job_id: str, exc: Exception) -> None:
+    with PROJECT_FAILURES_LOCK:
+        PROJECT_SNAPSHOT_FAILURES.append({"id": job_id, "error": str(exc)})
+        del PROJECT_SNAPSHOT_FAILURES[:-100]
+
+
+def _persist_snapshot_copy(
+    job_id: str,
+    source_path: Path,
+    job: dict[str, Any],
+    *,
+    raise_on_error: bool = False,
+    preserve_directory_mtime: bool = False,
+) -> bool:
+    repository = _project_repository()
+    try:
+        expected_job_dir = repository.job_directory(job_id).resolve()
+        source_parent = source_path.resolve().parent
+    except (OSError, ProjectSnapshotError) as exc:
+        _record_project_snapshot_failure(job_id, exc)
+        if raise_on_error:
+            raise
+        return False
+    if source_parent != expected_job_dir:
+        # Some compatibility callers can still hold an in-memory fixture or
+        # imported source outside data/jobs. Never persist that unsafe path,
+        # while allowing the existing live-only operation to finish.
+        exc = ProjectSnapshotError("任务源视频路径与工程不匹配。")
+        _record_project_snapshot_failure(job_id, exc)
+        return False
+    try:
+        repository.save(
+            job_id,
+            source_path,
+            job,
+            job.get("cutDraft") if isinstance(job.get("cutDraft"), dict) else None,
+            preserve_directory_mtime=preserve_directory_mtime,
+        )
+    except (OSError, ProjectSnapshotError) as exc:
+        _record_project_snapshot_failure(job_id, exc)
+        if raise_on_error:
+            raise
+        return False
+    return True
+
+
+def persist_job_snapshot(job_id: str, *, raise_on_error: bool = False) -> bool:
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        source_path = JOB_FILES.get(job_id)
+        if job is None or source_path is None:
+            return False
+        snapshot = copy.deepcopy(job)
+    return _persist_snapshot_copy(
+        job_id,
+        source_path,
+        snapshot,
+        raise_on_error=raise_on_error,
+    )
+
+
+def persist_job_snapshot_best_effort(job_id: str) -> None:
+    try:
+        persist_job_snapshot(job_id)
+    except Exception as exc:  # A response-time draft commit must remain authoritative.
+        _record_project_snapshot_failure(job_id, exc)
+
+
+@contextmanager
+def job_attempt_lock(job_id: str):
+    """Serialize attempt promotion/cancellation for one job without global I/O locks."""
+    with JOB_ATTEMPT_LOCKS_GUARD:
+        entry = JOB_ATTEMPT_LOCKS.get(job_id)
+        if entry is None:
+            lock = threading.RLock()
+            references = 1
+        else:
+            lock, references = entry
+            references += 1
+        JOB_ATTEMPT_LOCKS[job_id] = (lock, references)
+    lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()
+        with JOB_ATTEMPT_LOCKS_GUARD:
+            current = JOB_ATTEMPT_LOCKS.get(job_id)
+            if current is not None and current[0] is lock:
+                remaining = current[1] - 1
+                if remaining <= 0:
+                    JOB_ATTEMPT_LOCKS.pop(job_id, None)
+                else:
+                    JOB_ATTEMPT_LOCKS[job_id] = (lock, remaining)
+
+
+_RUNNING_JOB_STATUSES = {"queued", "extracting", "transcribing", "processing"}
+_RUNNING_SUBJOB_STATUSES = {"queued", "processing"}
+
+
+def _interrupt_recovered_state(state: dict[str, Any], now: str) -> bool:
+    status = str(state.get("status") or "")
+    if status not in _RUNNING_SUBJOB_STATUSES:
+        return False
+    state["previousStatus"] = status
+    state["previousStage"] = state.get("stage")
+    if state.get("error"):
+        state["previousError"] = state["error"]
+    state["status"] = "interrupted"
+    state["stage"] = "任务已中断，可重试"
+    state["error"] = "服务重启时该任务尚未完成，请重试。"
+    state["retryable"] = True
+    state["interruptedAt"] = now
+    state["updatedAt"] = now
+    return True
+
+
+def project_interrupted_after_restart(job: dict[str, Any]) -> bool:
+    now = utc_now()
+    changed = False
+    status = str(job.get("status") or "")
+    if status in _RUNNING_JOB_STATUSES:
+        job["previousStatus"] = status
+        job["previousStage"] = job.get("stage")
+        if job.get("error"):
+            job["previousError"] = job["error"]
+        job["status"] = "interrupted"
+        job["stage"] = "处理已中断，可重试"
+        job["error"] = "服务重启时该处理尚未完成，请重试处理。"
+        job["retryable"] = True
+        job["interruptedAt"] = now
+        changed = True
+    for key in (
+        "edit",
+        "art",
+        "artSuggestion",
+        "pictureInPicture",
+        "composition",
+    ):
+        state = job.get(key)
+        if isinstance(state, dict):
+            changed = _interrupt_recovered_state(state, now) or changed
+    for state in job.get("pictureInPictureVideos") or []:
+        if isinstance(state, dict):
+            changed = _interrupt_recovered_state(state, now) or changed
+    if changed:
+        job["cancelRequested"] = False
+        job["updatedAt"] = now
+    return changed
+
+
+def _usable_recovered_file(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def is_safe_asset_file_id(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value))
+
+
+def _interrupt_missing_recovered_output(
+    state: dict[str, Any],
+    now: str,
+    message: str,
+) -> None:
+    state["previousStatus"] = state.get("status")
+    state["previousStage"] = state.get("stage")
+    state["status"] = "interrupted"
+    state["stage"] = "恢复的生成文件不可用，可重试"
+    state["error"] = message
+    state["retryable"] = True
+    state["outputUrl"] = None
+    state["interruptedAt"] = now
+    state["updatedAt"] = now
+
+
+def validate_recovered_project_outputs(
+    job: dict[str, Any],
+    source_path: Path,
+) -> bool:
+    """Downgrade stale completed projections without probing or decoding media."""
+    now = utc_now()
+    changed = False
+    if job.get("status") == "completed":
+        result = job.get("result")
+        if not isinstance(result, dict) or not isinstance(result.get("segments"), list):
+            job["previousStatus"] = "completed"
+            job["status"] = "interrupted"
+            job["stage"] = "恢复的转写结果不可用，可重试"
+            job["error"] = "任务快照缺少完整转写结果，请重新处理原视频。"
+            job["retryable"] = True
+            job["interruptedAt"] = now
+            changed = True
+
+    output_contracts = (
+        ("edit", source_path.parent / "edited.mp4", "恢复的剪辑视频文件不存在，请重新生成。"),
+        ("art", source_path.parent / "art-text.mp4", "恢复的艺术字视频文件不存在，请重新生成。"),
+        (
+            "pictureInPicture",
+            source_path.parent / "picture-in-picture.mp4",
+            "恢复的画中画视频文件不存在，请重新生成。",
+        ),
+    )
+    for key, output_path, message in output_contracts:
+        state = job.get(key)
+        if (
+            isinstance(state, dict)
+            and state.get("status") == "completed"
+            and not _usable_recovered_file(output_path)
+        ):
+            _interrupt_missing_recovered_output(state, now, message)
+            changed = True
+
+    composition = job.get("composition")
+    if isinstance(composition, dict) and composition.get("status") == "completed":
+        history_id = str(composition.get("historyId") or "")
+        history_record = find_history_version(history_id) if history_id else None
+        history_path = None
+        if history_record is not None:
+            history_path = history_version_directory(history_id) / str(
+                history_record.get("videoFilename") or ""
+            )
+        if not (
+            _usable_recovered_file(source_path.parent / "composition.mp4")
+            or (history_path is not None and _usable_recovered_file(history_path))
+        ):
+            _interrupt_missing_recovered_output(
+                composition,
+                now,
+                "恢复的最终视频与历史版本均不可用，请重新生成。",
+            )
+            changed = True
+
+    for record in job.get("pictureInPictureImages") or []:
+        if not isinstance(record, dict):
+            continue
+        asset_id = str(record.get("id") or "")
+        if not is_safe_asset_file_id(asset_id) or not _usable_recovered_file(
+            source_path.parent / f"picture-in-picture-{asset_id}.png"
+        ):
+            record["status"] = "interrupted"
+            record["assetUrl"] = None
+            record["imageUrl"] = None
+            record["error"] = "恢复的画中画图片文件不存在，请重新生成。"
+            record["updatedAt"] = now
+            changed = True
+    for record in job.get("pictureInPictureVideos") or []:
+        if not isinstance(record, dict) or record.get("status") != "completed":
+            continue
+        asset_id = str(record.get("id") or "")
+        if not is_safe_asset_file_id(asset_id) or not _usable_recovered_file(
+            source_path.parent / f"picture-in-picture-{asset_id}.mp4"
+        ):
+            _interrupt_missing_recovered_output(
+                record,
+                now,
+                "恢复的动态画中画文件不存在，请重新生成。",
+            )
+            record["assetUrl"] = None
+            changed = True
+    if changed:
+        job["updatedAt"] = now
+    return changed
+
+
+def project_recovery_failure_detail(job_id: str) -> str | None:
+    with PROJECT_FAILURES_LOCK:
+        failure = next(
+            (item for item in PROJECT_RECOVERY_FAILURES if item.get("id") == job_id),
+            None,
+        )
+    if failure is None:
+        return None
+    return f"任务工程无法恢复：{failure.get('error') or '快照无效。'}"
+
+
+def restore_projects_from_disk() -> dict[str, Any]:
+    recovered, failures = _project_repository().discover()
+    restored_ids: list[str] = []
+    projected_ids: list[str] = []
+    for record in recovered:
+        job = copy.deepcopy(record["job"])
+        source_path = Path(record["sourcePath"])
+        job_id = str(job["id"])
+        legacy = bool(record.get("legacy"))
+        draft_reference_mismatch = False
+        if not legacy:
+            draft = load_cut_draft(job_id)
+            job["cutDraft"] = draft
+            draft_reference = record.get("cutDraft") or {}
+            expected_present = bool(draft_reference.get("present"))
+            expected_revision = int(draft_reference.get("revision") or 0)
+            actual_present = draft is not None
+            actual_revision = int((draft or {}).get("revision") or 0)
+            if expected_present != actual_present or (
+                actual_present and actual_revision != expected_revision
+            ):
+                draft_reference_mismatch = True
+                warning = (
+                    "剪辑草稿以 cut-draft.json 为准，"
+                    "已自动修正工程快照中的 revision 引用。"
+                )
+                job["recoveryWarnings"] = [warning]
+                failures.append(
+                    {
+                        "id": job_id,
+                        "error": warning,
+                    }
+                )
+        projected = project_interrupted_after_restart(job)
+        projected = validate_recovered_project_outputs(job, source_path) or projected
+        with JOBS_LOCK:
+            if job_id in JOBS:
+                continue
+            JOBS[job_id] = job
+            JOB_FILES[job_id] = source_path
+        restored_ids.append(job_id)
+        if projected:
+            projected_ids.append(job_id)
+        if projected or legacy or draft_reference_mismatch:
+            _persist_snapshot_copy(
+                job_id,
+                source_path,
+                copy.deepcopy(job),
+                preserve_directory_mtime=True,
+            )
+    with PROJECT_FAILURES_LOCK:
+        PROJECT_RECOVERY_FAILURES.clear()
+        PROJECT_RECOVERY_FAILURES.extend(copy.deepcopy(failures))
+    return {
+        "restored": len(restored_ids),
+        "restoredIds": restored_ids,
+        "interrupted": len(projected_ids),
+        "interruptedIds": projected_ids,
+        "failures": copy.deepcopy(failures),
+    }
+
+
 def jobs_directory() -> Path:
     return DATA_DIR / "jobs"
 
@@ -485,6 +844,30 @@ def remove_cut_draft(job_id: str) -> None:
         path.unlink()
     except FileNotFoundError:
         pass
+
+
+def hydrate_job_cut_draft(job_id: str) -> tuple[bool, dict[str, Any] | None]:
+    """Load the independent draft authority without holding the global job lock."""
+    with job_attempt_lock(job_id):
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if job is None:
+                return False, None
+            if job.get("recoveryKind") == "legacy_source_only":
+                return True, None
+            current = job.get("cutDraft")
+            if current is not None:
+                return True, copy.deepcopy(current)
+        loaded = load_cut_draft(job_id)
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if job is None:
+                return False, None
+            if job.get("recoveryKind") == "legacy_source_only":
+                return True, None
+            if job.get("cutDraft") is None:
+                job["cutDraft"] = loaded
+            return True, copy.deepcopy(job.get("cutDraft"))
 
 
 def normalize_cut_draft_range(
@@ -591,7 +974,8 @@ def remove_job_working_directory(job_id: str, video_path: Path) -> bool:
     expected_dir = (jobs_directory() / job_id).resolve()
     if video_path.resolve().parent != expected_dir:
         return False
-    shutil.rmtree(expected_dir, ignore_errors=True)
+    with PROJECT_REPOSITORY_LOCK:
+        shutil.rmtree(expected_dir, ignore_errors=True)
     if expected_dir.exists():
         return False
     with JOBS_LOCK:
@@ -681,7 +1065,8 @@ def cleanup_job_directories(
             ignored += 1
             continue
         try:
-            modified_at = path.stat().st_mtime
+            path_stat = path.stat()
+            modified_at = path_stat.st_mtime
         except OSError:
             ignored += 1
             continue
@@ -693,12 +1078,14 @@ def cleanup_job_directories(
                 "id": path.name,
                 "path": path,
                 "modifiedAt": modified_at,
+                "modifiedAtNs": path_stat.st_mtime_ns,
                 "ageDays": max(0.0, (now - modified_at) / 86400),
                 "reasons": set(),
             }
         )
 
     cleanup_by_id: dict[str, dict[str, Any]] = {}
+    examined_count = len(candidates) + protected
     for item in candidates:
         if item["ageDays"] >= max_age_days:
             item["reasons"].add("expired")
@@ -745,16 +1132,54 @@ def cleanup_job_directories(
             "reasons": sorted(item["reasons"]),
         }
         if not dry_run:
+            removed_job: dict[str, Any] | None = None
+            removed_source: Path | None = None
+            skipped = False
             try:
-                shutil.rmtree(path)
+                with job_attempt_lock(str(item["id"])):
+                    with PROJECT_REPOSITORY_LOCK:
+                        try:
+                            current_stat = path.stat()
+                        except OSError:
+                            skipped = True
+                        if (
+                            not skipped
+                            and current_stat.st_mtime_ns
+                            != int(item["modifiedAtNs"])
+                        ):
+                            # A durable edit landed after the cleanup plan was
+                            # built. Re-evaluate it on the next maintenance run.
+                            skipped = True
+                        with JOBS_LOCK:
+                            current_job = JOBS.get(str(item["id"]))
+                            if current_job is not None and job_has_running_work(
+                                current_job
+                            ):
+                                skipped = True
+                                protected += 1
+                            if not skipped:
+                                removed_job = JOBS.pop(str(item["id"]), None)
+                                removed_source = JOB_FILES.pop(
+                                    str(item["id"]),
+                                    None,
+                                )
+                        if not skipped:
+                            shutil.rmtree(path)
             except OSError as exc:
+                if removed_job is not None and path.is_dir():
+                    with JOBS_LOCK:
+                        JOBS.setdefault(str(item["id"]), removed_job)
+                        if removed_source is not None:
+                            JOB_FILES.setdefault(
+                                str(item["id"]),
+                                removed_source,
+                            )
                 failures.append({"id": item["id"], "error": str(exc)})
+                continue
+            if skipped:
                 continue
             freed_bytes += size
             deleted_count += 1
-            with JOBS_LOCK:
-                JOBS.pop(str(item["id"]), None)
-                JOB_FILES.pop(str(item["id"]), None)
         items.append(record)
 
     return {
@@ -762,7 +1187,7 @@ def cleanup_job_directories(
         "dryRun": dry_run,
         "maxAgeDays": max_age_days,
         "maxDirectories": max_directories,
-        "examined": len(candidates) + protected,
+        "examined": examined_count,
         "eligible": len(candidates),
         "protected": protected,
         "ignored": ignored,
@@ -1419,6 +1844,54 @@ def check_cancelled(job_id: str) -> None:
         raise GenerationCancelledError()
 
 
+def check_attempt_active(
+    job_id: str,
+    attempt_id: str | None,
+    scope: str | None,
+    *,
+    asset_id: str | None = None,
+) -> None:
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        state = _attempt_state_unlocked(job, scope, asset_id=asset_id)
+        running_statuses = (
+            _RUNNING_JOB_STATUSES if scope is None else _RUNNING_SUBJOB_STATUSES
+        )
+        if (
+            job is None
+            or job.get("cancelRequested")
+            or not isinstance(state, dict)
+            or str(state.get("status") or "") not in running_statuses
+            or (
+                attempt_id is not None
+                and state.get("attemptId") != attempt_id
+            )
+        ):
+            raise GenerationCancelledError()
+
+
+def promote_attempt_output(
+    job_id: str,
+    attempt_id: str | None,
+    scope: str,
+    temporary_path: Path,
+    output_path: Path,
+    *,
+    asset_id: str | None = None,
+) -> None:
+    with job_attempt_lock(job_id):
+        check_attempt_active(
+            job_id,
+            attempt_id,
+            scope,
+            asset_id=asset_id,
+        )
+        # The per-job attempt lock prevents cancellation/retry from changing
+        # ownership while the atomic filesystem promotion runs. JOBS_LOCK is
+        # deliberately not held during this I/O.
+        temporary_path.replace(output_path)
+
+
 def run_ffmpeg(
     command: list[str],
     *,
@@ -1472,17 +1945,50 @@ def run_ffmpeg(
 
 def mark_job_cancelled(job_id: str) -> None:
     """Flag the job as cancelled, mark in-flight sub-jobs, and kill FFmpeg."""
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        if job is None:
-            return
-        job["cancelRequested"] = True
-        for key in ("edit", "art", "pictureInPicture", "composition"):
-            sub = job.get(key)
-            if isinstance(sub, dict) and sub.get("status") in {"queued", "processing"}:
-                sub["status"] = "cancelled"
-                sub["stage"] = "已取消"
-                sub["error"] = "用户取消了生成。"
+    snapshot: tuple[Path, dict[str, Any]] | None = None
+    with job_attempt_lock(job_id):
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if job is None:
+                return
+            now = utc_now()
+            job["cancelRequested"] = True
+            if job.get("status") in _RUNNING_JOB_STATUSES:
+                job["previousStatus"] = job.get("status")
+                job["status"] = "cancelled"
+                job["stage"] = "已取消"
+                job["error"] = "用户取消了处理。"
+            for key in (
+                "edit",
+                "art",
+                "artSuggestion",
+                "pictureInPicture",
+                "composition",
+            ):
+                sub = job.get(key)
+                if isinstance(sub, dict) and sub.get("status") in {
+                    "queued",
+                    "processing",
+                }:
+                    sub["status"] = "cancelled"
+                    sub["stage"] = "已取消"
+                    sub["error"] = "用户取消了生成。"
+                    sub["updatedAt"] = now
+            for sub in job.get("pictureInPictureVideos") or []:
+                if isinstance(sub, dict) and sub.get("status") in {
+                    "queued",
+                    "processing",
+                }:
+                    sub["status"] = "cancelled"
+                    sub["stage"] = "已取消"
+                    sub["error"] = "用户取消了生成。"
+                    sub["updatedAt"] = now
+            job["updatedAt"] = now
+            source_path = JOB_FILES.get(job_id)
+            if source_path is not None:
+                snapshot = (source_path, copy.deepcopy(job))
+    if snapshot is not None:
+        _persist_snapshot_copy(job_id, snapshot[0], snapshot[1])
     with PROCESSES_LOCK:
         processes = list(RUNNING_PROCESSES.pop(job_id, ()))
     for process in processes:
@@ -1492,64 +1998,254 @@ def mark_job_cancelled(job_id: str) -> None:
             pass
 
 
-def update_job(job_id: str, **changes: Any) -> None:
+_TRANSIENT_JOB_FIELDS = {"stage", "progress", "updatedAt"}
+
+
+def _durable_transition(target: dict[str, Any], changes: dict[str, Any]) -> bool:
+    return any(
+        key not in _TRANSIENT_JOB_FIELDS and target.get(key) != value
+        for key, value in changes.items()
+    )
+
+
+def _attempt_matches(
+    job: dict[str, Any],
+    expected_attempt_id: str | None,
+    attempt_scope: str | None = None,
+) -> bool:
+    if expected_attempt_id is None:
+        return True
+    state = job if attempt_scope is None else job.get(attempt_scope)
+    return isinstance(state, dict) and state.get("attemptId") == expected_attempt_id
+
+
+def _attempt_state_unlocked(
+    job: dict[str, Any] | None,
+    attempt_scope: str | None,
+    *,
+    asset_id: str | None = None,
+) -> dict[str, Any] | None:
+    if job is None:
+        return None
+    if attempt_scope is None:
+        return job
+    if attempt_scope == "pictureInPictureVideos":
+        return next(
+            (
+                item
+                for item in job.get("pictureInPictureVideos") or []
+                if isinstance(item, dict) and str(item.get("id") or "") == asset_id
+            ),
+            None,
+        )
+    state = job.get(attempt_scope)
+    return state if isinstance(state, dict) else None
+
+
+def _attempt_update_allowed(
+    job: dict[str, Any],
+    expected_attempt_id: str | None,
+    attempt_scope: str | None,
+    changes: dict[str, Any],
+) -> bool:
+    if not _attempt_matches(job, expected_attempt_id, attempt_scope):
+        return False
+    if expected_attempt_id is not None:
+        state = _attempt_state_unlocked(job, attempt_scope)
+        current_status = str((state or {}).get("status") or "")
+        running_statuses = (
+            _RUNNING_JOB_STATUSES
+            if attempt_scope is None
+            else _RUNNING_SUBJOB_STATUSES
+        )
+        if current_status not in running_statuses:
+            return changes.get("status") == current_status == "cancelled"
+        if job.get("cancelRequested") and changes.get("status") != "cancelled":
+            return False
+    return True
+
+
+def _snapshot_after_update_unlocked(
+    job_id: str,
+    job: dict[str, Any],
+    durable: bool,
+) -> tuple[Path, dict[str, Any]] | None:
+    source_path = JOB_FILES.get(job_id)
+    if not durable or source_path is None:
+        return None
+    return source_path, copy.deepcopy(job)
+
+
+def update_job(
+    job_id: str,
+    *,
+    expected_attempt_id: str | None = None,
+    attempt_scope: str | None = None,
+    **changes: Any,
+) -> bool:
+    snapshot: tuple[Path, dict[str, Any]] | None = None
     with JOBS_LOCK:
         job = JOBS.get(job_id)
-        if job is None:
-            return
+        if job is None or not _attempt_update_allowed(
+            job, expected_attempt_id, attempt_scope, changes
+        ):
+            return False
+        durable = _durable_transition(job, changes)
         job.update(changes)
         job["updatedAt"] = utc_now()
+        snapshot = _snapshot_after_update_unlocked(job_id, job, durable)
+    if snapshot is not None:
+        _persist_snapshot_copy(job_id, snapshot[0], snapshot[1])
+    return True
 
 
-def update_edit_job(job_id: str, **changes: Any) -> None:
+def update_edit_job(
+    job_id: str,
+    *,
+    expected_attempt_id: str | None = None,
+    **changes: Any,
+) -> bool:
+    snapshot: tuple[Path, dict[str, Any]] | None = None
     with JOBS_LOCK:
         job = JOBS.get(job_id)
-        if job is None or job.get("edit") is None:
-            return
+        if (
+            job is None
+            or job.get("edit") is None
+            or not _attempt_update_allowed(
+                job, expected_attempt_id, "edit", changes
+            )
+        ):
+            return False
+        durable = _durable_transition(job["edit"], changes)
         job["edit"].update(changes)
         job["edit"]["updatedAt"] = utc_now()
         job["updatedAt"] = utc_now()
+        snapshot = _snapshot_after_update_unlocked(job_id, job, durable)
+    if snapshot is not None:
+        _persist_snapshot_copy(job_id, snapshot[0], snapshot[1])
+    return True
 
 
-def update_art_job(job_id: str, **changes: Any) -> None:
+def update_art_job(
+    job_id: str,
+    *,
+    expected_attempt_id: str | None = None,
+    **changes: Any,
+) -> bool:
+    snapshot: tuple[Path, dict[str, Any]] | None = None
     with JOBS_LOCK:
         job = JOBS.get(job_id)
-        if job is None or job.get("art") is None:
-            return
+        if (
+            job is None
+            or job.get("art") is None
+            or not _attempt_update_allowed(
+                job, expected_attempt_id, "art", changes
+            )
+        ):
+            return False
+        durable = _durable_transition(job["art"], changes)
         job["art"].update(changes)
         job["art"]["updatedAt"] = utc_now()
         job["updatedAt"] = utc_now()
+        snapshot = _snapshot_after_update_unlocked(job_id, job, durable)
+    if snapshot is not None:
+        _persist_snapshot_copy(job_id, snapshot[0], snapshot[1])
+    return True
 
 
-def update_art_suggestion_job(job_id: str, **changes: Any) -> None:
+def update_art_suggestion_job(
+    job_id: str,
+    *,
+    expected_attempt_id: str | None = None,
+    **changes: Any,
+) -> bool:
+    snapshot: tuple[Path, dict[str, Any]] | None = None
     with JOBS_LOCK:
         job = JOBS.get(job_id)
-        if job is None or job.get("artSuggestion") is None:
-            return
+        if (
+            job is None
+            or job.get("artSuggestion") is None
+            or not _attempt_update_allowed(
+                job, expected_attempt_id, "artSuggestion", changes
+            )
+        ):
+            return False
+        durable = _durable_transition(job["artSuggestion"], changes)
         job["artSuggestion"].update(changes)
         job["artSuggestion"]["updatedAt"] = utc_now()
         job["updatedAt"] = utc_now()
+        snapshot = _snapshot_after_update_unlocked(job_id, job, durable)
+    if snapshot is not None:
+        _persist_snapshot_copy(job_id, snapshot[0], snapshot[1])
+    return True
 
 
-def update_picture_in_picture_job(job_id: str, **changes: Any) -> None:
+def update_picture_in_picture_job(
+    job_id: str,
+    *,
+    expected_attempt_id: str | None = None,
+    **changes: Any,
+) -> bool:
+    snapshot: tuple[Path, dict[str, Any]] | None = None
     with JOBS_LOCK:
         job = JOBS.get(job_id)
-        if job is None or job.get("pictureInPicture") is None:
-            return
+        if (
+            job is None
+            or job.get("pictureInPicture") is None
+            or not _attempt_update_allowed(
+                job, expected_attempt_id, "pictureInPicture", changes
+            )
+        ):
+            return False
+        durable = _durable_transition(job["pictureInPicture"], changes)
         job["pictureInPicture"].update(changes)
         job["pictureInPicture"]["updatedAt"] = utc_now()
         job["updatedAt"] = utc_now()
+        snapshot = _snapshot_after_update_unlocked(job_id, job, durable)
+    if snapshot is not None:
+        _persist_snapshot_copy(job_id, snapshot[0], snapshot[1])
+    return True
+
+
+def update_composition_job(
+    job_id: str,
+    *,
+    expected_attempt_id: str | None = None,
+    **changes: Any,
+) -> bool:
+    snapshot: tuple[Path, dict[str, Any]] | None = None
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if (
+            job is None
+            or job.get("composition") is None
+            or not _attempt_update_allowed(
+                job, expected_attempt_id, "composition", changes
+            )
+        ):
+            return False
+        durable = _durable_transition(job["composition"], changes)
+        job["composition"].update(changes)
+        job["composition"]["updatedAt"] = utc_now()
+        job["updatedAt"] = utc_now()
+        snapshot = _snapshot_after_update_unlocked(job_id, job, durable)
+    if snapshot is not None:
+        _persist_snapshot_copy(job_id, snapshot[0], snapshot[1])
+    return True
 
 
 def update_picture_in_picture_video_asset(
     job_id: str,
     asset_id: str,
+    *,
+    expected_attempt_id: str | None = None,
     **changes: Any,
-) -> None:
+) -> bool:
+    snapshot: tuple[Path, dict[str, Any]] | None = None
     with JOBS_LOCK:
         job = JOBS.get(job_id)
         if job is None:
-            return
+            return False
         record = next(
             (
                 item
@@ -1558,11 +2254,34 @@ def update_picture_in_picture_video_asset(
             ),
             None,
         )
-        if record is None:
-            return
+        if record is None or (
+            expected_attempt_id is not None
+            and (
+                record.get("attemptId") != expected_attempt_id
+                or (
+                    job.get("cancelRequested")
+                    and changes.get("status") != "cancelled"
+                )
+                or (
+                    str(record.get("status") or "")
+                    not in _RUNNING_SUBJOB_STATUSES
+                    and not (
+                        changes.get("status")
+                        == record.get("status")
+                        == "cancelled"
+                    )
+                )
+            )
+        ):
+            return False
+        durable = _durable_transition(record, changes)
         record.update(changes)
         record["updatedAt"] = utc_now()
         job["updatedAt"] = utc_now()
+        snapshot = _snapshot_after_update_unlocked(job_id, job, durable)
+    if snapshot is not None:
+        _persist_snapshot_copy(job_id, snapshot[0], snapshot[1])
+    return True
 
 
 def get_ffmpeg_binary(name: str) -> str:
@@ -8834,6 +9553,8 @@ def normalize_picture_in_picture_overlays(
     seen_ids: set[str] = set()
     for index, overlay in enumerate(overlays, start=1):
         asset_id = str(overlay.assetId or overlay.imageId).strip()
+        if not is_safe_asset_file_id(asset_id):
+            raise ValueError(f"第 {index} 个画中画素材标识无效。")
         record = records.get(asset_id)
         if record is None:
             raise ValueError(f"第 {index} 个画中画素材不存在。")
@@ -9001,6 +9722,21 @@ def resolve_picture_in_picture_reference(
             max(0.0, duration - 0.01),
         )
     return source_path, duration, reference_path, reference_time
+
+
+def picture_in_picture_source_attempt_id(
+    job: dict[str, Any],
+    video_path: Path | None,
+    source_path: Path,
+    requested_source: str,
+) -> str | None:
+    if video_path is not None and source_path == video_path:
+        return job.get("attemptId")
+    if requested_source == "edited":
+        return (job.get("edit") or {}).get("attemptId")
+    if requested_source == "art":
+        return (job.get("art") or {}).get("attemptId")
+    return job.get("attemptId")
 
 
 def render_picture_in_picture_video(
@@ -10749,40 +11485,72 @@ def transcribe_audio(
     }
 
 
-def process_job(job_id: str) -> None:
-    video_path = JOB_FILES[job_id]
-    audio_path = video_path.parent / "speech.mp3"
+def process_job(job_id: str, attempt_id: str | None = None) -> None:
+    with JOBS_LOCK:
+        video_path = JOB_FILES.get(job_id)
+        job = JOBS.get(job_id)
+        if video_path is None or job is None:
+            return
+        if attempt_id is None:
+            attempt_id = job.get("attemptId")
+        elif job.get("attemptId") != attempt_id:
+            return
+    audio_suffix = attempt_id or "initial"
+    audio_path = video_path.parent / f"speech-{audio_suffix}.mp3"
 
     try:
-        update_job(
+        check_attempt_active(job_id, attempt_id, None)
+        if not update_job(
             job_id,
+            expected_attempt_id=attempt_id,
             status="extracting",
             stage="正在提取音频",
             progress=18,
-        )
+        ):
+            raise GenerationCancelledError()
         extract_audio(video_path, audio_path)
+        check_attempt_active(job_id, attempt_id, None)
 
-        update_job(
+        if not update_job(
             job_id,
+            expected_attempt_id=attempt_id,
             status="transcribing",
             stage=f"正在使用阿里云百炼 {ASR_MODEL} 识别语音",
             progress=45,
-        )
+        ):
+            raise GenerationCancelledError()
+
+        def report_transcription_progress(progress: int) -> None:
+            if not update_job(
+                job_id,
+                expected_attempt_id=attempt_id,
+                progress=progress,
+            ):
+                raise GenerationCancelledError()
+
         result = transcribe_audio(
             audio_path,
-            lambda progress: update_job(job_id, progress=progress),
+            report_transcription_progress,
         )
         result["editableSegments"] = build_editable_transcript_segments(
             result.get("segments") or []
         )
         with JOBS_LOCK:
-            media_duration = float(JOBS[job_id]["duration"])
-        update_job(
+            current_job = JOBS.get(job_id)
+            if current_job is None or (
+                attempt_id is not None
+                and current_job.get("attemptId") != attempt_id
+            ):
+                return
+            media_duration = float(current_job["duration"])
+        if not update_job(
             job_id,
+            expected_attempt_id=attempt_id,
             status="transcribing",
             stage="正在检测长时间无文字片段",
             progress=96,
-        )
+        ):
+            raise GenerationCancelledError()
         try:
             audio_samples = decode_cut_audio_samples(audio_path)
         except (OSError, RuntimeError, subprocess.SubprocessError):
@@ -10798,23 +11566,27 @@ def process_job(job_id: str) -> None:
             audio_samples,
         )
         result["noSpeechStatus"] = "completed"
-        update_job(
+        if not update_job(
             job_id,
+            expected_attempt_id=attempt_id,
             status="transcribing",
             stage="正在校准文字声学边界",
             progress=96,
-        )
+        ):
+            raise GenerationCancelledError()
         alignment_cache, alignment_summary = load_job_acoustic_alignment(
             video_path,
             result["segments"],
         )
         result["acousticAlignment"] = alignment_summary
-        update_job(
+        if not update_job(
             job_id,
+            expected_attempt_id=attempt_id,
             status="transcribing",
             stage=f"正在使用 {SUGGESTION_MODEL} 分析口误",
             progress=97,
-        )
+        ):
+            raise GenerationCancelledError()
         suggestions, suggestion_status = suggest_deletions(
             result["segments"],
             get_asr_api_key(),
@@ -10829,58 +11601,87 @@ def process_job(job_id: str) -> None:
             )
         result["suggestions"] = suggestions
         result["suggestionStatus"] = suggestion_status
-        update_job(
+        if not update_job(
             job_id,
+            expected_attempt_id=attempt_id,
             status="completed",
             stage="文字提取和 AI 初筛完成",
             progress=100,
             result=result,
             error=None,
+            retryable=False,
+        ):
+            raise GenerationCancelledError()
+    except GenerationCancelledError:
+        update_job(
+            job_id,
+            expected_attempt_id=attempt_id,
+            status="cancelled",
+            stage="已取消",
+            error="用户取消了处理。",
         )
     except Exception as exc:  # Background jobs must persist a readable failure state.
         update_job(
             job_id,
+            expected_attempt_id=attempt_id,
             status="failed",
             stage="处理失败",
             error=str(exc),
+            retryable=True,
         )
-        remove_job_working_directory(job_id, video_path)
+    finally:
+        audio_path.unlink(missing_ok=True)
 
 
 def process_cut_job(
     job_id: str,
     delete_ranges: list[dict[str, float]],
     transcript_delete_ranges: list[dict[str, float]] | None = None,
+    attempt_id: str | None = None,
 ) -> None:
     _set_thread_job(job_id)
-    video_path = JOB_FILES[job_id]
+    with JOBS_LOCK:
+        video_path = JOB_FILES.get(job_id)
+        job = JOBS.get(job_id)
+        if video_path is None or job is None:
+            return
+        edit = job.get("edit") or {}
+        if attempt_id is None:
+            attempt_id = edit.get("attemptId")
+        elif edit.get("attemptId") != attempt_id:
+            return
     output_path = video_path.parent / "edited.mp4"
+    attempt_output_path = video_path.parent / f".edited-{attempt_id or 'initial'}.tmp.mp4"
 
     try:
         with JOBS_LOCK:
             duration = float(JOBS[job_id]["duration"])
             source_result = copy.deepcopy(JOBS[job_id].get("result") or {})
             source_segments = source_result.get("segments") or []
-        update_edit_job(
+        if not update_edit_job(
             job_id,
+            expected_attempt_id=attempt_id,
             status="processing",
             stage="正在按当前预览剪辑视频",
             progress=20,
-        )
+        ):
+            raise GenerationCancelledError()
         requested_ranges = (
             transcript_delete_ranges
             if transcript_delete_ranges is not None
             else delete_ranges
         )
         media_ranges = copy.deepcopy(delete_ranges)
-        update_edit_job(
+        if not update_edit_job(
             job_id,
+            expected_attempt_id=attempt_id,
             stage="正在生成当前预览视频",
             progress=35,
             ranges=media_ranges,
-        )
-        check_cancelled(job_id)
-        render_cut_video(video_path, output_path, media_ranges, duration)
+        ):
+            raise GenerationCancelledError()
+        check_attempt_active(job_id, attempt_id, "edit")
+        render_cut_video(video_path, attempt_output_path, media_ranges, duration)
         deleted_duration = sum(
             item["end"] - item["start"] for item in media_ranges
         )
@@ -10893,27 +11694,38 @@ def process_cut_job(
             audio_quiet_ranges=source_result.get("audioQuietRanges") or [],
         )
         try:
-            edited_samples = decode_cut_audio_samples(output_path)
+            edited_samples = decode_cut_audio_samples(attempt_output_path)
         except (OSError, RuntimeError, subprocess.SubprocessError):
             edited_samples = None
         transcript["audioQuietRanges"] = detect_audio_quiet_ranges(
             edited_samples,
             output_duration,
         ) or transcript.get("audioQuietRanges", [])
-        update_edit_job(
-            job_id,
-            status="completed",
-            stage="剪辑视频已生成",
-            progress=100,
-            outputUrl=f"/api/transcriptions/{job_id}/edited-video",
-            outputDuration=output_duration,
-            transcript=transcript,
-            ranges=media_ranges,
-            error=None,
-        )
+        with job_attempt_lock(job_id):
+            promote_attempt_output(
+                job_id,
+                attempt_id,
+                "edit",
+                attempt_output_path,
+                output_path,
+            )
+            if not update_edit_job(
+                job_id,
+                expected_attempt_id=attempt_id,
+                status="completed",
+                stage="剪辑视频已生成",
+                progress=100,
+                outputUrl=f"/api/transcriptions/{job_id}/edited-video",
+                outputDuration=output_duration,
+                transcript=transcript,
+                ranges=media_ranges,
+                error=None,
+            ):
+                raise GenerationCancelledError()
     except GenerationCancelledError:
         update_edit_job(
             job_id,
+            expected_attempt_id=attempt_id,
             status="cancelled",
             stage="已取消",
             error="用户取消了生成。",
@@ -10921,21 +11733,26 @@ def process_cut_job(
     except Exception as exc:
         update_edit_job(
             job_id,
+            expected_attempt_id=attempt_id,
             status="failed",
             stage="视频剪辑失败",
             error=str(exc),
         )
+    finally:
+        attempt_output_path.unlink(missing_ok=True)
 
 
 def process_art_text_job(
     job_id: str,
     input_path: Path,
     overlays: list[dict[str, Any]],
+    attempt_id: str | None = None,
 ) -> None:
     _set_thread_job(job_id)
     output_path = input_path.parent / "art-text.mp4"
+    attempt_output_path = input_path.parent / f".art-text-{attempt_id or 'initial'}.tmp.mp4"
     try:
-        check_cancelled(job_id)
+        check_attempt_active(job_id, attempt_id, "art")
         with JOBS_LOCK:
             job = JOBS[job_id]
             art = job.get("art") or {}
@@ -10950,29 +11767,42 @@ def process_art_text_job(
             transcript.get("audioQuietRanges") or [],
             transcript.get("segments") or [],
         )
-        update_art_job(
+        if not update_art_job(
             job_id,
+            expected_attempt_id=attempt_id,
             status="processing",
             stage="正在把艺术字合成到视频",
             progress=25,
             overlays=overlays,
-        )
-        render_art_text_video(input_path, output_path, overlays)
+        ):
+            raise GenerationCancelledError()
+        render_art_text_video(input_path, attempt_output_path, overlays)
         with JOBS_LOCK:
             job = JOBS[job_id]
             art = job.get("art") or {}
             duration = float(art.get("outputDuration") or 0)
-        update_art_job(
-            job_id,
-            status="completed",
-            stage="艺术字视频已生成",
-            progress=100,
-            outputUrl=f"/api/transcriptions/{job_id}/art-text-video",
-            error=None,
-        )
+        with job_attempt_lock(job_id):
+            promote_attempt_output(
+                job_id,
+                attempt_id,
+                "art",
+                attempt_output_path,
+                output_path,
+            )
+            if not update_art_job(
+                job_id,
+                expected_attempt_id=attempt_id,
+                status="completed",
+                stage="艺术字视频已生成",
+                progress=100,
+                outputUrl=f"/api/transcriptions/{job_id}/art-text-video",
+                error=None,
+            ):
+                raise GenerationCancelledError()
     except GenerationCancelledError:
         update_art_job(
             job_id,
+            expected_attempt_id=attempt_id,
             status="cancelled",
             stage="已取消",
             error="用户取消了生成。",
@@ -10980,39 +11810,59 @@ def process_art_text_job(
     except Exception as exc:
         update_art_job(
             job_id,
+            expected_attempt_id=attempt_id,
             status="failed",
             stage="艺术字视频生成失败",
             error=str(exc),
         )
+    finally:
+        attempt_output_path.unlink(missing_ok=True)
 
 
 def process_picture_in_picture_job(
     job_id: str,
     input_path: Path,
     overlays: list[dict[str, Any]],
+    attempt_id: str | None = None,
 ) -> None:
     _set_thread_job(job_id)
     output_path = input_path.parent / "picture-in-picture.mp4"
+    attempt_output_path = (
+        input_path.parent / f".picture-in-picture-{attempt_id or 'initial'}.tmp.mp4"
+    )
     try:
-        check_cancelled(job_id)
-        update_picture_in_picture_job(
+        check_attempt_active(job_id, attempt_id, "pictureInPicture")
+        if not update_picture_in_picture_job(
             job_id,
+            expected_attempt_id=attempt_id,
             status="processing",
             stage="正在把画中画合成到视频",
             progress=25,
-        )
-        render_picture_in_picture_video(input_path, output_path, overlays)
-        update_picture_in_picture_job(
-            job_id,
-            status="completed",
-            stage="画中画视频已生成",
-            progress=100,
-            outputUrl=f"/api/transcriptions/{job_id}/picture-in-picture-video",
-            error=None,
-        )
+        ):
+            raise GenerationCancelledError()
+        render_picture_in_picture_video(input_path, attempt_output_path, overlays)
+        with job_attempt_lock(job_id):
+            promote_attempt_output(
+                job_id,
+                attempt_id,
+                "pictureInPicture",
+                attempt_output_path,
+                output_path,
+            )
+            if not update_picture_in_picture_job(
+                job_id,
+                expected_attempt_id=attempt_id,
+                status="completed",
+                stage="画中画视频已生成",
+                progress=100,
+                outputUrl=f"/api/transcriptions/{job_id}/picture-in-picture-video",
+                error=None,
+            ):
+                raise GenerationCancelledError()
     except GenerationCancelledError:
         update_picture_in_picture_job(
             job_id,
+            expected_attempt_id=attempt_id,
             status="cancelled",
             stage="已取消",
             error="用户取消了生成。",
@@ -11020,10 +11870,13 @@ def process_picture_in_picture_job(
     except Exception as exc:
         update_picture_in_picture_job(
             job_id,
+            expected_attempt_id=attempt_id,
             status="failed",
             stage="画中画视频生成失败",
             error=str(exc),
         )
+    finally:
+        attempt_output_path.unlink(missing_ok=True)
 
 
 def process_preview_composition_job(
@@ -11033,48 +11886,68 @@ def process_preview_composition_job(
     art_overlays: list[dict[str, Any]],
     picture_in_picture_overlays: list[dict[str, Any]],
     composition_request: dict[str, Any],
+    attempt_id: str | None = None,
 ) -> None:
-    """Turn the shared live preview into one rendered video in a single job."""
+    """Turn the shared live preview into one recoverable rendered video."""
     _set_thread_job(job_id)
-    video_path = JOB_FILES[job_id]
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        video_path = JOB_FILES.get(job_id)
+        composition = (job or {}).get("composition") or {}
+        if job is None or video_path is None:
+            return
+        if attempt_id is None:
+            attempt_id = composition.get("attemptId")
+        elif composition.get("attemptId") != attempt_id:
+            return
+        duration = float(job["duration"])
+        source_result = copy.deepcopy(job.get("result") or {})
+        source_segments = source_result.get("segments") or []
+
+    attempt_label = attempt_id or "initial"
     edited_path = video_path.parent / "edited.mp4"
     art_path = video_path.parent / "art-text.mp4"
     pip_path = video_path.parent / "picture-in-picture.mp4"
+    composition_path = video_path.parent / "composition.mp4"
+    edited_attempt_path = video_path.parent / f".edited-{attempt_label}.tmp.mp4"
+    art_attempt_path = video_path.parent / f".art-text-{attempt_label}.tmp.mp4"
+    pip_attempt_path = video_path.parent / f".pip-{attempt_label}.tmp.mp4"
+    composition_attempt_path = (
+        video_path.parent / f".composition-{attempt_label}.tmp.mp4"
+    )
 
     try:
-        with JOBS_LOCK:
-            job = JOBS[job_id]
-            duration = float(job["duration"])
-            source_result = copy.deepcopy(job.get("result") or {})
-            source_segments = source_result.get("segments") or []
-
-        update_edit_job(
+        check_attempt_active(job_id, attempt_id, "composition")
+        if not update_edit_job(
             job_id,
+            expected_attempt_id=attempt_id,
             status="processing",
             stage="正在生成当前预览的剪辑基础视频",
             progress=15,
-        )
-        update_job(
+        ):
+            raise GenerationCancelledError()
+        if not update_composition_job(
             job_id,
-            composition={
-                "status": "processing",
-                "stage": "正在生成当前预览的剪辑基础视频",
-                "progress": 15,
-                "outputUrl": None,
-                "outputDuration": None,
-                "error": None,
-                "updatedAt": utc_now(),
-            },
-        )
+            expected_attempt_id=attempt_id,
+            status="processing",
+            stage="正在生成当前预览的剪辑基础视频",
+            progress=15,
+            outputUrl=None,
+            outputDuration=None,
+            error=None,
+        ):
+            raise GenerationCancelledError()
         if art_overlays:
             update_art_job(
                 job_id,
+                expected_attempt_id=attempt_id,
                 stage="正在生成当前预览的剪辑基础视频",
                 progress=10,
             )
         if picture_in_picture_overlays:
             update_picture_in_picture_job(
                 job_id,
+                expected_attempt_id=attempt_id,
                 stage="正在生成当前预览的剪辑基础视频",
                 progress=10,
             )
@@ -11082,15 +11955,16 @@ def process_preview_composition_job(
         media_ranges = copy.deepcopy(requested_ranges)
         update_edit_job(
             job_id,
+            expected_attempt_id=attempt_id,
             stage="正在按当前预览生成最终时间轴",
             progress=35,
             ranges=media_ranges,
         )
-        render_cut_video(video_path, edited_path, media_ranges, duration)
-        check_cancelled(job_id)
+        check_attempt_active(job_id, attempt_id, "composition")
+        render_cut_video(video_path, edited_attempt_path, media_ranges, duration)
+        check_attempt_active(job_id, attempt_id, "composition")
         output_duration = round(
-            duration
-            - sum(item["end"] - item["start"] for item in media_ranges),
+            duration - sum(item["end"] - item["start"] for item in media_ranges),
             3,
         )
         transcript = build_retained_transcript(
@@ -11101,24 +11975,34 @@ def process_preview_composition_job(
             audio_quiet_ranges=source_result.get("audioQuietRanges") or [],
         )
         try:
-            edited_samples = decode_cut_audio_samples(edited_path)
+            edited_samples = decode_cut_audio_samples(edited_attempt_path)
         except (OSError, RuntimeError, subprocess.SubprocessError):
             edited_samples = None
         transcript["audioQuietRanges"] = detect_audio_quiet_ranges(
             edited_samples,
             output_duration,
         ) or transcript.get("audioQuietRanges", [])
-        update_edit_job(
-            job_id,
-            status="completed",
-            stage="当前预览的剪辑基础视频已生成",
-            progress=100,
-            outputUrl=f"/api/transcriptions/{job_id}/edited-video",
-            outputDuration=output_duration,
-            transcript=transcript,
-            ranges=media_ranges,
-            error=None,
-        )
+        with job_attempt_lock(job_id):
+            promote_attempt_output(
+                job_id,
+                attempt_id,
+                "edit",
+                edited_attempt_path,
+                edited_path,
+            )
+            if not update_edit_job(
+                job_id,
+                expected_attempt_id=attempt_id,
+                status="completed",
+                stage="当前预览的剪辑基础视频已生成",
+                progress=100,
+                outputUrl=f"/api/transcriptions/{job_id}/edited-video",
+                outputDuration=output_duration,
+                transcript=transcript,
+                ranges=media_ranges,
+                error=None,
+            ):
+                raise GenerationCancelledError()
 
         current_input = edited_path
         if art_overlays:
@@ -11131,191 +12015,203 @@ def process_preview_composition_job(
                 raise RuntimeError("剪辑后没有可显示的艺术字，请检查当前预览。")
             update_art_job(
                 job_id,
+                expected_attempt_id=attempt_id,
                 status="processing",
                 stage="正在按最终时间轴合成艺术字",
                 progress=55,
                 overlays=final_art_overlays,
             )
-            update_job(
+            update_composition_job(
                 job_id,
-                composition={
-                    "status": "processing",
-                    "stage": "正在按最终时间轴合成艺术字",
-                    "progress": 55,
-                    "outputUrl": None,
-                    "outputDuration": output_duration,
-                    "error": None,
-                    "updatedAt": utc_now(),
-                },
+                expected_attempt_id=attempt_id,
+                stage="正在按最终时间轴合成艺术字",
+                progress=55,
+                outputDuration=output_duration,
             )
             if picture_in_picture_overlays:
                 update_picture_in_picture_job(
                     job_id,
+                    expected_attempt_id=attempt_id,
                     stage="正在按最终时间轴合成艺术字",
                     progress=55,
                 )
-            render_art_text_video(edited_path, art_path, final_art_overlays)
-            check_cancelled(job_id)
-            update_art_job(
-                job_id,
-                status="completed",
-                stage="当前预览的艺术字已合成",
-                progress=100,
-                outputUrl=f"/api/transcriptions/{job_id}/art-text-video",
-                outputDuration=output_duration,
-                error=None,
-            )
+            render_art_text_video(edited_path, art_attempt_path, final_art_overlays)
+            with job_attempt_lock(job_id):
+                promote_attempt_output(
+                    job_id,
+                    attempt_id,
+                    "art",
+                    art_attempt_path,
+                    art_path,
+                )
+                if not update_art_job(
+                    job_id,
+                    expected_attempt_id=attempt_id,
+                    status="completed",
+                    stage="当前预览的艺术字已合成",
+                    progress=100,
+                    outputUrl=f"/api/transcriptions/{job_id}/art-text-video",
+                    outputDuration=output_duration,
+                    error=None,
+                ):
+                    raise GenerationCancelledError()
             current_input = art_path
 
         if picture_in_picture_overlays:
             final_pip_overlays = copy.deepcopy(picture_in_picture_overlays)
-            if not final_pip_overlays:
-                raise RuntimeError("剪辑后没有可显示的画中画，请检查当前预览。")
             update_picture_in_picture_job(
                 job_id,
+                expected_attempt_id=attempt_id,
                 status="processing",
                 stage="正在按最终时间轴合成画中画",
                 progress=75,
                 overlays=final_pip_overlays,
             )
-            update_job(
+            update_composition_job(
                 job_id,
-                composition={
-                    "status": "processing",
-                    "stage": "正在按最终时间轴合成画中画",
-                    "progress": 75,
-                    "outputUrl": None,
-                    "outputDuration": output_duration,
-                    "error": None,
-                    "updatedAt": utc_now(),
-                },
-            )
-            render_picture_in_picture_video(current_input, pip_path, final_pip_overlays)
-            check_cancelled(job_id)
-            update_picture_in_picture_job(
-                job_id,
-                status="completed",
-                stage="当前预览已生成视频",
-                progress=100,
-                outputUrl=f"/api/transcriptions/{job_id}/picture-in-picture-video",
+                expected_attempt_id=attempt_id,
+                stage="正在按最终时间轴合成画中画",
+                progress=75,
                 outputDuration=output_duration,
-                error=None,
             )
+            render_picture_in_picture_video(
+                current_input,
+                pip_attempt_path,
+                final_pip_overlays,
+            )
+            with job_attempt_lock(job_id):
+                promote_attempt_output(
+                    job_id,
+                    attempt_id,
+                    "pictureInPicture",
+                    pip_attempt_path,
+                    pip_path,
+                )
+                if not update_picture_in_picture_job(
+                    job_id,
+                    expected_attempt_id=attempt_id,
+                    status="completed",
+                    stage="当前预览已生成视频",
+                    progress=100,
+                    outputUrl=f"/api/transcriptions/{job_id}/picture-in-picture-video",
+                    outputDuration=output_duration,
+                    error=None,
+                ):
+                    raise GenerationCancelledError()
             current_input = pip_path
 
-        # Keep one canonical output for the shared editor button. The staged
-        # files above are still retained for backwards-compatible result views,
-        # while this file is always the exact final preview composition.
-        check_cancelled(job_id)
-        composition_path = video_path.parent / "composition.mp4"
-        shutil.copy2(current_input, composition_path)
-        with JOBS_LOCK:
-            original_filename = str(JOBS[job_id].get("filename") or "视频.mp4")
-        history_version = save_history_version(
-            job_id=job_id,
-            kind="composed",
-            source_video=composition_path,
-            duration=output_duration,
-            transcript=transcript,
-            original_filename=original_filename,
-            custom_name=(composition_request or {}).get("historyName"),
-        )
-        update_job(
-            job_id,
-            composition={
-                "status": "completed",
-                "stage": "当前预览已生成最终视频",
-                "progress": 100,
-                "outputUrl": f"/api/transcriptions/{job_id}/composition-video",
-                "outputDuration": output_duration,
-                "request": composition_request,
-                "historyId": history_version["id"],
-                "historyName": history_version["name"],
-                "error": None,
-                "updatedAt": utc_now(),
-            },
-        )
-        remove_job_working_directory(job_id, video_path)
+        check_attempt_active(job_id, attempt_id, "composition")
+        shutil.copy2(current_input, composition_attempt_path)
+        with job_attempt_lock(job_id):
+            promote_attempt_output(
+                job_id,
+                attempt_id,
+                "composition",
+                composition_attempt_path,
+                composition_path,
+            )
+            with JOBS_LOCK:
+                original_filename = str(
+                    (JOBS.get(job_id) or {}).get("filename") or "视频.mp4"
+                )
+            history_version = save_history_version(
+                job_id=job_id,
+                kind="composed",
+                source_video=composition_path,
+                duration=output_duration,
+                transcript=transcript,
+                original_filename=original_filename,
+                custom_name=(composition_request or {}).get("historyName"),
+            )
+            if not update_composition_job(
+                job_id,
+                expected_attempt_id=attempt_id,
+                status="completed",
+                stage="当前预览已生成最终视频",
+                progress=100,
+                outputUrl=f"/api/transcriptions/{job_id}/composition-video",
+                outputDuration=output_duration,
+                request=composition_request,
+                historyId=history_version["id"],
+                historyName=history_version["name"],
+                error=None,
+            ):
+                raise GenerationCancelledError()
     except GenerationCancelledError:
-        with JOBS_LOCK:
-            job = JOBS.get(job_id) or {}
-            edit_status = (job.get("edit") or {}).get("status")
-            art_status = (job.get("art") or {}).get("status")
-            pip_status = (job.get("pictureInPicture") or {}).get("status")
-        if edit_status in {"queued", "processing"}:
-            update_edit_job(
-                job_id,
-                status="cancelled",
-                stage="已取消",
-                error="用户取消了生成。",
-            )
-        if art_status in {"queued", "processing"}:
-            update_art_job(
-                job_id,
-                status="cancelled",
-                stage="已取消",
-                error="用户取消了生成。",
-            )
-        if pip_status in {"queued", "processing"}:
-            update_picture_in_picture_job(
-                job_id,
-                status="cancelled",
-                stage="已取消",
-                error="用户取消了生成。",
-            )
-        update_job(
+        _finish_composition_attempt(
             job_id,
-            composition={
-                "status": "cancelled",
-                "stage": "已取消",
-                "progress": 100,
-                "outputUrl": None,
-                "outputDuration": None,
-                "error": "用户取消了生成。",
-                "updatedAt": utc_now(),
-            },
+            attempt_id,
+            status="cancelled",
+            stage="已取消",
+            message="用户取消了生成。",
         )
     except Exception as exc:
-        message = str(exc)
-        with JOBS_LOCK:
-            job = JOBS.get(job_id) or {}
-            edit_status = (job.get("edit") or {}).get("status")
-            art_status = (job.get("art") or {}).get("status")
-            pip_status = (job.get("pictureInPicture") or {}).get("status")
-        if edit_status in {"queued", "processing"}:
-            update_edit_job(
-                job_id,
-                status="failed",
-                stage="当前预览生成失败",
-                error=message,
-            )
-        if art_status in {"queued", "processing"}:
-            update_art_job(
-                job_id,
-                status="failed",
-                stage="当前预览生成失败",
-                error=message,
-            )
-        if pip_status in {"queued", "processing"}:
-            update_picture_in_picture_job(
-                job_id,
-                status="failed",
-                stage="当前预览生成失败",
-                error=message,
-            )
-        update_job(
+        _finish_composition_attempt(
             job_id,
-            composition={
-                "status": "failed",
-                "stage": "当前预览生成失败",
-                "progress": 100,
-                "outputUrl": None,
-                "outputDuration": None,
-                "error": message,
-                "updatedAt": utc_now(),
-            },
+            attempt_id,
+            status="failed",
+            stage="当前预览生成失败",
+            message=str(exc),
         )
-        remove_job_working_directory(job_id, video_path)
+    finally:
+        for path in (
+            edited_attempt_path,
+            art_attempt_path,
+            pip_attempt_path,
+            composition_attempt_path,
+        ):
+            path.unlink(missing_ok=True)
+
+
+def _finish_composition_attempt(
+    job_id: str,
+    attempt_id: str | None,
+    *,
+    status: str,
+    stage: str,
+    message: str,
+) -> None:
+    with JOBS_LOCK:
+        job = JOBS.get(job_id) or {}
+        statuses = {
+            "edit": (job.get("edit") or {}).get("status"),
+            "art": (job.get("art") or {}).get("status"),
+            "pictureInPicture": (job.get("pictureInPicture") or {}).get("status"),
+        }
+    if statuses["edit"] in {"queued", "processing"}:
+        update_edit_job(
+            job_id,
+            expected_attempt_id=attempt_id,
+            status=status,
+            stage=stage,
+            error=message,
+        )
+    if statuses["art"] in {"queued", "processing"}:
+        update_art_job(
+            job_id,
+            expected_attempt_id=attempt_id,
+            status=status,
+            stage=stage,
+            error=message,
+        )
+    if statuses["pictureInPicture"] in {"queued", "processing"}:
+        update_picture_in_picture_job(
+            job_id,
+            expected_attempt_id=attempt_id,
+            status=status,
+            stage=stage,
+            error=message,
+        )
+    update_composition_job(
+        job_id,
+        expected_attempt_id=attempt_id,
+        status=status,
+        stage=stage,
+        progress=100,
+        outputUrl=None,
+        outputDuration=None,
+        error=message,
+    )
 
 
 def process_picture_in_picture_video_asset(
@@ -11326,24 +12222,37 @@ def process_picture_in_picture_video_asset(
     aspect_ratio: str,
     generation_duration: int,
     safe_generation_prompt: str | None = None,
+    attempt_id: str | None = None,
 ) -> None:
+    attempt_output_path = output_path.parent / (
+        f".{output_path.stem}-{attempt_id or 'initial'}.tmp{output_path.suffix}"
+    )
+
     def report(stage: str, progress: int, task_id: str | None) -> None:
-        update_picture_in_picture_video_asset(
+        if not update_picture_in_picture_video_asset(
             job_id,
             asset_id,
+            expected_attempt_id=attempt_id,
             status="processing",
             stage=stage,
             progress=progress,
             providerTaskId=task_id,
             error=None,
-        )
+        ):
+            raise GenerationCancelledError()
 
     used_safe_retry = False
     try:
+        check_attempt_active(
+            job_id,
+            attempt_id,
+            "pictureInPictureVideos",
+            asset_id=asset_id,
+        )
         try:
             task_id = generate_picture_in_picture_video_asset(
                 generation_prompt,
-                output_path,
+                attempt_output_path,
                 aspect_ratio,
                 generation_duration,
                 report,
@@ -11354,9 +12263,10 @@ def process_picture_in_picture_video_asset(
             ):
                 raise
             used_safe_retry = True
-            update_picture_in_picture_video_asset(
+            if not update_picture_in_picture_video_asset(
                 job_id,
                 asset_id,
+                expected_attempt_id=attempt_id,
                 status="processing",
                 stage="Seedance 触发版权保护，正在使用原创安全提示词重试…",
                 progress=18,
@@ -11364,39 +12274,62 @@ def process_picture_in_picture_video_asset(
                 promptFallbackApplied=True,
                 retryReason="copyright_restriction",
                 error=None,
-            )
+            ):
+                raise GenerationCancelledError()
             task_id = generate_picture_in_picture_video_asset(
                 safe_generation_prompt,
-                output_path,
+                attempt_output_path,
                 aspect_ratio,
                 generation_duration,
                 report,
             )
-        generated_duration = probe_video(output_path)
+        generated_duration = probe_video(attempt_output_path)
+        with job_attempt_lock(job_id):
+            promote_attempt_output(
+                job_id,
+                attempt_id,
+                "pictureInPictureVideos",
+                attempt_output_path,
+                output_path,
+                asset_id=asset_id,
+            )
+            if not update_picture_in_picture_video_asset(
+                job_id,
+                asset_id,
+                expected_attempt_id=attempt_id,
+                status="completed",
+                stage="Seedance 动态画中画已生成",
+                progress=100,
+                providerTaskId=task_id,
+                generatedDuration=round(generated_duration, 3),
+                promptFallbackApplied=used_safe_retry,
+                retryReason="copyright_restriction" if used_safe_retry else None,
+                assetUrl=(
+                    f"/api/transcriptions/{job_id}/picture-in-picture/videos/{asset_id}"
+                ),
+                error=None,
+            ):
+                raise GenerationCancelledError()
+    except GenerationCancelledError:
         update_picture_in_picture_video_asset(
             job_id,
             asset_id,
-            status="completed",
-            stage="Seedance 动态画中画已生成",
-            progress=100,
-            providerTaskId=task_id,
-            generatedDuration=round(generated_duration, 3),
-            promptFallbackApplied=used_safe_retry,
-            retryReason="copyright_restriction" if used_safe_retry else None,
-            assetUrl=(
-                f"/api/transcriptions/{job_id}/picture-in-picture/videos/{asset_id}"
-            ),
-            error=None,
+            expected_attempt_id=attempt_id,
+            status="cancelled",
+            stage="已取消",
+            error="用户取消了生成。",
         )
     except Exception as exc:
-        output_path.unlink(missing_ok=True)
         update_picture_in_picture_video_asset(
             job_id,
             asset_id,
+            expected_attempt_id=attempt_id,
             status="failed",
             stage="Seedance 动态画中画生成失败",
             error=seedance_user_facing_error(exc),
         )
+    finally:
+        attempt_output_path.unlink(missing_ok=True)
 
 
 def process_art_suggestion_job(
@@ -11406,37 +12339,57 @@ def process_art_suggestion_job(
     duration: float,
     count: int,
     existing_overlays: list[dict[str, Any]],
+    attempt_id: str | None = None,
 ) -> None:
     try:
-        update_art_suggestion_job(
+        if not update_art_suggestion_job(
             job_id,
+            expected_attempt_id=attempt_id,
             status="processing",
             stage="正在准备 AI 视频分析",
             progress=12,
-        )
+        ):
+            raise GenerationCancelledError()
+
+        def report_art_suggestion_progress(progress: int, stage: str) -> None:
+            if not update_art_suggestion_job(
+                job_id,
+                expected_attempt_id=attempt_id,
+                progress=progress,
+                stage=stage,
+            ):
+                raise GenerationCancelledError()
+
         suggestions = generate_art_text_suggestions(
             input_path,
             transcript,
             duration,
             count,
             existing_overlays,
-            lambda progress, stage: update_art_suggestion_job(
-                job_id,
-                progress=progress,
-                stage=stage,
-            ),
+            report_art_suggestion_progress,
         )
-        update_art_suggestion_job(
+        if not update_art_suggestion_job(
             job_id,
+            expected_attempt_id=attempt_id,
             status="completed",
             stage="AI 艺术字草稿已生成，等待确认",
             progress=100,
             suggestions=suggestions,
             error=None,
+        ):
+            raise GenerationCancelledError()
+    except GenerationCancelledError:
+        update_art_suggestion_job(
+            job_id,
+            expected_attempt_id=attempt_id,
+            status="cancelled",
+            stage="已取消",
+            error="用户取消了生成。",
         )
     except Exception as exc:
         update_art_suggestion_job(
             job_id,
+            expected_attempt_id=attempt_id,
             status="failed",
             stage="AI 艺术字分析失败",
             error=str(exc),
@@ -11971,6 +12924,17 @@ def use_history_version(history_id: str) -> JSONResponse:
     with JOBS_LOCK:
         JOBS[job_id] = job
         JOB_FILES[job_id] = video_path
+    try:
+        persist_job_snapshot(job_id, raise_on_error=True)
+    except (OSError, ProjectSnapshotError) as exc:
+        with JOBS_LOCK:
+            JOBS.pop(job_id, None)
+            JOB_FILES.pop(job_id, None)
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise HTTPException(
+            status_code=500,
+            detail="历史工程状态保存失败。",
+        ) from exc
     return JSONResponse(public_job(job), status_code=201)
 
 
@@ -12090,12 +13054,14 @@ async def create_transcription(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     now = utc_now()
+    attempt_id = str(uuid.uuid4())
     job = {
         "id": job_id,
         "filename": filename,
         "fileSize": written,
         "duration": round(duration, 3),
         "status": "queued",
+        "attemptId": attempt_id,
         "stage": "视频上传完成，等待处理",
         "progress": 10,
         "result": None,
@@ -12115,19 +13081,119 @@ async def create_transcription(
         JOBS[job_id] = job
         JOB_FILES[job_id] = video_path
 
-    background_tasks.add_task(process_job, job_id)
+    try:
+        persist_job_snapshot(job_id, raise_on_error=True)
+    except (OSError, ProjectSnapshotError) as exc:
+        with JOBS_LOCK:
+            JOBS.pop(job_id, None)
+            JOB_FILES.pop(job_id, None)
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise HTTPException(
+            status_code=500,
+            detail="任务状态保存失败，请重新上传。",
+        ) from exc
+
+    background_tasks.add_task(process_job, job_id, attempt_id)
     return JSONResponse(public_job(job), status_code=202)
 
 
 @app.get("/api/transcriptions/{job_id}")
 def get_transcription(job_id: str) -> dict[str, Any]:
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        if job is None:
-            raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
-        if job.get("cutDraft") is None:
-            job["cutDraft"] = load_cut_draft(job_id)
-        return public_job(job)
+    exists, _draft = hydrate_job_cut_draft(job_id)
+    if exists:
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if job is not None:
+                return public_job(job)
+    recovery_detail = project_recovery_failure_detail(job_id)
+    if recovery_detail:
+        raise HTTPException(status_code=409, detail=recovery_detail)
+    raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+
+
+def cleanup_transcription_attempt_artifacts(video_path: Path) -> None:
+    for pattern in ("speech-*.mp3", ".transcription-*.tmp", "*.partial-asr.json"):
+        for path in video_path.parent.glob(pattern):
+            if path.is_file() and path.parent == video_path.parent:
+                path.unlink(missing_ok=True)
+
+
+@app.post("/api/transcriptions/{job_id}/retry", status_code=202)
+def retry_transcription(
+    job_id: str,
+    background_tasks: BackgroundTasks,
+) -> JSONResponse:
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        raise HTTPException(status_code=503, detail="服务器尚未安装 FFmpeg。")
+    if not get_asr_api_key():
+        raise HTTPException(
+            status_code=503,
+            detail="阿里云百炼语音识别尚未配置，请在服务端设置 DASHSCOPE_API_KEY。",
+        )
+
+    attempt_id = str(uuid.uuid4())
+    now = utc_now()
+    with job_attempt_lock(job_id):
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            video_path = JOB_FILES.get(job_id)
+            if job is None:
+                recovery_detail = project_recovery_failure_detail(job_id)
+                if recovery_detail:
+                    raise HTTPException(status_code=409, detail=recovery_detail)
+                raise HTTPException(status_code=404, detail="转写任务不存在或已过期。")
+            if video_path is None or not video_path.is_file():
+                raise HTTPException(status_code=404, detail="原视频文件不存在。")
+            status = str(job.get("status") or "")
+            if status not in {"failed", "interrupted"}:
+                raise HTTPException(
+                    status_code=409,
+                    detail="只能重试失败或已中断的转写任务。",
+                )
+            job["previousStatus"] = status
+            job["status"] = "queued"
+            job["attemptId"] = attempt_id
+            job["stage"] = "重试任务已创建"
+            job["progress"] = 10
+            job["result"] = None
+            job["error"] = None
+            job["retryable"] = False
+            job["cancelRequested"] = False
+            job["updatedAt"] = now
+            queued_snapshot = copy.deepcopy(job)
+
+    try:
+        cleanup_transcription_attempt_artifacts(video_path)
+        duration = probe_video(video_path)
+        queued_snapshot["duration"] = round(duration, 3)
+        with JOBS_LOCK:
+            current = JOBS.get(job_id)
+            if current is None or current.get("attemptId") != attempt_id:
+                raise HTTPException(status_code=409, detail="转写任务已被其他重试更新。")
+            current["duration"] = round(duration, 3)
+            current["updatedAt"] = utc_now()
+            queued_snapshot = copy.deepcopy(current)
+        _persist_snapshot_copy(
+            job_id,
+            video_path,
+            queued_snapshot,
+            raise_on_error=True,
+        )
+    except HTTPException:
+        raise
+    except (OSError, ProjectSnapshotError, RuntimeError, ValueError) as exc:
+        update_job(
+            job_id,
+            expected_attempt_id=attempt_id,
+            status="failed",
+            stage="重试启动失败",
+            error=str(exc),
+            retryable=True,
+        )
+        raise HTTPException(status_code=409, detail="原视频无法重新处理。") from exc
+
+    background_tasks.add_task(process_job, job_id, attempt_id)
+    return JSONResponse(copy.deepcopy(queued_snapshot), status_code=202)
 
 
 @app.post("/api/transcriptions/{job_id}/history", status_code=201)
@@ -12189,6 +13255,13 @@ def save_transcription_history_version(
         if current_result.get("updatedAt") == result_updated_at:
             current_result["historyId"] = saved["id"]
             current_result["historyName"] = saved["name"]
+    try:
+        persist_job_snapshot(job_id, raise_on_error=True)
+    except (OSError, ProjectSnapshotError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="历史版本已保存，但工程引用同步失败。",
+        ) from exc
     return saved
 
 
@@ -12210,21 +13283,17 @@ def cancel_transcription_job(job_id: str) -> dict[str, Any]:
 
 @app.get("/api/transcriptions/{job_id}/cut-draft")
 def get_cut_draft(job_id: str) -> dict[str, Any]:
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        if job is None:
-            raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
-        draft = job.get("cutDraft")
-        if draft is None:
-            draft = load_cut_draft(job_id)
-            job["cutDraft"] = draft
-        return {"cutDraft": copy.deepcopy(draft)}
+    exists, draft = hydrate_job_cut_draft(job_id)
+    if not exists:
+        raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+    return {"cutDraft": draft}
 
 
 @app.put("/api/transcriptions/{job_id}/cut-draft")
 def update_cut_draft(
     job_id: str,
     request: CutDraftRequest,
+    background_tasks: BackgroundTasks,
 ) -> dict[str, Any]:
     with JOBS_LOCK:
         job = JOBS.get(job_id)
@@ -12236,19 +13305,19 @@ def update_cut_draft(
         if duration <= 0:
             raise HTTPException(status_code=409, detail="视频时长无效，无法保存剪辑草稿。")
 
-        current_draft = job.get("cutDraft")
-        if current_draft is None:
-            current_draft = load_cut_draft(job_id)
-        current_revision = int((current_draft or {}).get("revision") or 0)
-        if request.revision != current_revision:
-            raise HTTPException(
-                status_code=409,
-                detail="剪辑草稿已在其他页面更新，请刷新后继续。",
-            )
+        current_draft = copy.deepcopy(job.get("cutDraft"))
 
         video_path = JOB_FILES.get(job_id)
         source_segments = copy.deepcopy(
             (job.get("result") or {}).get("segments") or []
+        )
+    if current_draft is None:
+        current_draft = load_cut_draft(job_id)
+    current_revision = int((current_draft or {}).get("revision") or 0)
+    if request.revision != current_revision:
+        raise HTTPException(
+            status_code=409,
+            detail="剪辑草稿已在其他页面更新，请刷新后继续。",
         )
 
     try:
@@ -12334,22 +13403,32 @@ def update_cut_draft(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        if job is None:
-            raise HTTPException(
-                status_code=404,
-                detail="转写任务不存在或服务已重启。",
-            )
-        current_draft = job.get("cutDraft")
+    with job_attempt_lock(job_id):
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if job is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="转写任务不存在或服务已重启。",
+                )
+            current_draft = copy.deepcopy(job.get("cutDraft"))
         if current_draft is None:
             current_draft = load_cut_draft(job_id)
-        current_revision = int((current_draft or {}).get("revision") or 0)
-        if request.revision != current_revision:
-            raise HTTPException(
-                status_code=409,
-                detail="剪辑草稿已在其他页面更新，请刷新后继续。",
-            )
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if job is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="转写任务不存在或服务已重启。",
+                )
+            if job.get("cutDraft") is not None:
+                current_draft = job["cutDraft"]
+            current_revision = int((current_draft or {}).get("revision") or 0)
+            if request.revision != current_revision:
+                raise HTTPException(
+                    status_code=409,
+                    detail="剪辑草稿已在其他页面更新，请刷新后继续。",
+                )
         draft = {
             "schemaVersion": 1,
             "revision": current_revision + 1,
@@ -12369,24 +13448,45 @@ def update_cut_draft(
                 status_code=500,
                 detail="剪辑草稿保存失败，请检查磁盘空间后重试。",
             ) from exc
-        job["cutDraft"] = draft
-        job["updatedAt"] = draft["updatedAt"]
-        return {"cutDraft": copy.deepcopy(draft)}
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if job is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="转写任务不存在或服务已重启。",
+                )
+            job["cutDraft"] = draft
+            job["updatedAt"] = draft["updatedAt"]
+            response = {"cutDraft": copy.deepcopy(draft)}
+    # cut-draft.json is the authoritative durable write. Refresh only the
+    # project-state metadata after the response so split/selection interactions
+    # never wait for a second full snapshot fsync.
+    background_tasks.add_task(persist_job_snapshot_best_effort, job_id)
+    return response
 
 
 @app.delete("/api/transcriptions/{job_id}/cut-draft")
-def delete_cut_draft(job_id: str) -> dict[str, str]:
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        if job is None:
-            raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+def delete_cut_draft(
+    job_id: str,
+    background_tasks: BackgroundTasks,
+) -> dict[str, str]:
+    with job_attempt_lock(job_id):
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if job is None:
+                raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
         try:
             remove_cut_draft(job_id)
         except OSError as exc:
             raise HTTPException(status_code=500, detail="剪辑草稿清除失败。") from exc
-        job["cutDraft"] = None
-        job["updatedAt"] = utc_now()
-        return {"status": "cleared"}
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if job is None:
+                raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+            job["cutDraft"] = None
+            job["updatedAt"] = utc_now()
+    background_tasks.add_task(persist_job_snapshot_best_effort, job_id)
+    return {"status": "cleared"}
 
 
 @app.patch("/api/transcriptions/{job_id}/transcript")
@@ -12458,10 +13558,15 @@ def update_transcript_word(
         job["composition"] = None
 
         job["updatedAt"] = utc_now()
-        return {
+        response = {
             "result": copy.deepcopy(result),
             "editTranscript": copy.deepcopy(edit_transcript),
         }
+    try:
+        persist_job_snapshot(job_id, raise_on_error=True)
+    except (OSError, ProjectSnapshotError) as exc:
+        raise HTTPException(status_code=500, detail="文字修改状态保存失败。") from exc
+    return response
 
 
 @app.put("/api/transcriptions/{job_id}/transcript")
@@ -12523,11 +13628,16 @@ def update_transcript_text(
             job["composition"] = None
 
         job["updatedAt"] = utc_now()
-        return {
+        response = {
             "result": copy.deepcopy(result),
             "editTranscript": copy.deepcopy(edit_transcript),
             "changedWords": changed_count,
         }
+    try:
+        persist_job_snapshot(job_id, raise_on_error=True)
+    except (OSError, ProjectSnapshotError) as exc:
+        raise HTTPException(status_code=500, detail="文字修改状态保存失败。") from exc
+    return response
 
 
 @app.put("/api/transcriptions/{job_id}/editable-segments")
@@ -12591,7 +13701,12 @@ def update_editable_transcript_segments(
                     source_segment.get("text") or "",
                 )
         job["updatedAt"] = utc_now()
-        return {"editableSegments": copy.deepcopy(updated_segments)}
+        response = {"editableSegments": copy.deepcopy(updated_segments)}
+    try:
+        persist_job_snapshot(job_id, raise_on_error=True)
+    except (OSError, ProjectSnapshotError) as exc:
+        raise HTTPException(status_code=500, detail="分段状态保存失败。") from exc
+    return response
 
 
 @app.post("/api/transcriptions/{job_id}/cuts", status_code=202)
@@ -12600,6 +13715,7 @@ def create_cut(
     request: CutRequest,
     background_tasks: BackgroundTasks,
 ) -> JSONResponse:
+    _exists, hydrated_draft = hydrate_job_cut_draft(job_id)
     with JOBS_LOCK:
         job = JOBS.get(job_id)
         if job is None:
@@ -12612,8 +13728,7 @@ def create_cut(
         duration = float(job["duration"])
         draft = job.get("cutDraft")
         if draft is None:
-            draft = load_cut_draft(job_id)
-            job["cutDraft"] = draft
+            draft = hydrated_draft
         source_result = job.get("result") or {}
         try:
             requested_ranges, transcript_delete_ranges = (
@@ -12630,8 +13745,10 @@ def create_cut(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         now = utc_now()
+        attempt_id = str(uuid.uuid4())
         edit = {
             "status": "queued",
+            "attemptId": attempt_id,
             "stage": "剪辑任务已创建",
             "progress": 10,
             "ranges": copy.deepcopy(requested_ranges),
@@ -12652,11 +13769,23 @@ def create_cut(
         job["cancelRequested"] = False
         job["updatedAt"] = now
 
+    try:
+        persist_job_snapshot(job_id, raise_on_error=True)
+    except (OSError, ProjectSnapshotError) as exc:
+        update_edit_job(
+            job_id,
+            expected_attempt_id=attempt_id,
+            status="failed",
+            stage="剪辑任务保存失败",
+            error="剪辑任务状态保存失败，请重试。",
+        )
+        raise HTTPException(status_code=500, detail="剪辑任务保存失败。") from exc
     background_tasks.add_task(
         process_cut_job,
         job_id,
         requested_ranges,
         transcript_delete_ranges,
+        attempt_id,
     )
     return JSONResponse(copy.deepcopy(edit), status_code=202)
 
@@ -12785,6 +13914,13 @@ def create_art_text_suggestions(
             duration = float(job["duration"])
             transcript = copy.deepcopy(job.get("result") or {})
             input_path = video_path
+        input_attempt_id = (
+            job.get("attemptId")
+            if live_draft
+            else (job.get("edit") or {}).get("attemptId")
+            if request.source == "edited"
+            else job.get("attemptId")
+        )
 
     if not input_path.is_file():
         raise HTTPException(status_code=404, detail="用于分析的视频文件不存在。")
@@ -12805,8 +13941,10 @@ def create_art_text_suggestions(
         )
 
     now = utc_now()
+    attempt_id = str(uuid.uuid4())
     suggestion_job = {
         "status": "queued",
+        "attemptId": attempt_id,
         "stage": "AI 艺术字分析任务已创建",
         "progress": 5,
         "source": request.source,
@@ -12816,16 +13954,41 @@ def create_art_text_suggestions(
         "createdAt": now,
         "updatedAt": now,
     }
-    with JOBS_LOCK:
-        latest_job = JOBS.get(job_id)
-        if latest_job is None:
-            raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
-        latest_suggestion = latest_job.get("artSuggestion") or {}
-        if latest_suggestion.get("status") in {"queued", "processing"}:
-            raise HTTPException(status_code=409, detail="AI 艺术字正在分析，请稍候。")
-        latest_job["artSuggestion"] = suggestion_job
-        latest_job["updatedAt"] = now
+    with job_attempt_lock(job_id):
+        with JOBS_LOCK:
+            latest_job = JOBS.get(job_id)
+            if latest_job is None:
+                raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+            latest_suggestion = latest_job.get("artSuggestion") or {}
+            if latest_suggestion.get("status") in {"queued", "processing"}:
+                raise HTTPException(status_code=409, detail="AI 艺术字正在分析，请稍候。")
+            latest_input_attempt_id = (
+                latest_job.get("attemptId")
+                if live_draft
+                else (latest_job.get("edit") or {}).get("attemptId")
+                if request.source == "edited"
+                else latest_job.get("attemptId")
+            )
+            if latest_input_attempt_id != input_attempt_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail="用于 AI 艺术字的视频版本已变化，请刷新后重试。",
+                )
+            latest_job["artSuggestion"] = suggestion_job
+            latest_job["cancelRequested"] = False
+            latest_job["updatedAt"] = now
 
+    try:
+        persist_job_snapshot(job_id, raise_on_error=True)
+    except (OSError, ProjectSnapshotError) as exc:
+        update_art_suggestion_job(
+            job_id,
+            expected_attempt_id=attempt_id,
+            status="failed",
+            stage="AI 艺术字任务保存失败",
+            error="AI 艺术字任务状态保存失败，请重试。",
+        )
+        raise HTTPException(status_code=500, detail="AI 艺术字任务保存失败。") from exc
     background_tasks.add_task(
         process_art_suggestion_job,
         job_id,
@@ -12834,6 +13997,7 @@ def create_art_text_suggestions(
         duration,
         request.count,
         existing_overlays,
+        attempt_id,
     )
     return JSONResponse(copy.deepcopy(suggestion_job), status_code=202)
 
@@ -12846,6 +14010,10 @@ def clear_art_text_suggestions(job_id: str) -> dict[str, str]:
             raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
         job["artSuggestion"] = None
         job["updatedAt"] = utc_now()
+    try:
+        persist_job_snapshot(job_id, raise_on_error=True)
+    except (OSError, ProjectSnapshotError) as exc:
+        raise HTTPException(status_code=500, detail="AI 艺术字状态清除失败。") from exc
     return {"status": "cleared"}
 
 
@@ -12995,9 +14163,11 @@ def create_art_text(
         if request.source == "edited":
             duration = float(edit.get("outputDuration") or 0)
             input_path = video_path.parent / "edited.mp4"
+            input_attempt_id = edit.get("attemptId")
         else:
             duration = float(job["duration"])
             input_path = video_path
+            input_attempt_id = job.get("attemptId")
 
     try:
         overlays = normalize_text_overlays(request.overlays, duration)
@@ -13005,8 +14175,10 @@ def create_art_text(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     now = utc_now()
+    attempt_id = str(uuid.uuid4())
     art = {
         "status": "queued",
+        "attemptId": attempt_id,
         "stage": "艺术字合成任务已创建",
         "progress": 10,
         "source": request.source,
@@ -13017,14 +14189,52 @@ def create_art_text(
         "createdAt": now,
         "updatedAt": now,
     }
-    with JOBS_LOCK:
-        JOBS[job_id]["art"] = art
-        JOBS[job_id]["pictureInPicture"] = None
-        JOBS[job_id]["composition"] = None
-        JOBS[job_id]["cancelRequested"] = False
-        JOBS[job_id]["updatedAt"] = now
+    with job_attempt_lock(job_id):
+        with JOBS_LOCK:
+            latest_job = JOBS.get(job_id)
+            if latest_job is None:
+                raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+            latest_art = latest_job.get("art") or {}
+            if latest_art.get("status") in {"queued", "processing"}:
+                raise HTTPException(status_code=409, detail="已有艺术字视频正在生成。")
+            if request.source == "edited" and (
+                (latest_job.get("edit") or {}).get("status") != "completed"
+            ):
+                raise HTTPException(status_code=409, detail="请先完成视频剪辑。")
+            latest_input_attempt_id = (
+                (latest_job.get("edit") or {}).get("attemptId")
+                if request.source == "edited"
+                else latest_job.get("attemptId")
+            )
+            if latest_input_attempt_id != input_attempt_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail="用于艺术字的视频来源已变化，请刷新后重试。",
+                )
+            latest_job["art"] = art
+            latest_job["pictureInPicture"] = None
+            latest_job["composition"] = None
+            latest_job["cancelRequested"] = False
+            latest_job["updatedAt"] = now
 
-    background_tasks.add_task(process_art_text_job, job_id, input_path, overlays)
+    try:
+        persist_job_snapshot(job_id, raise_on_error=True)
+    except (OSError, ProjectSnapshotError) as exc:
+        update_art_job(
+            job_id,
+            expected_attempt_id=attempt_id,
+            status="failed",
+            stage="艺术字任务保存失败",
+            error="艺术字任务状态保存失败，请重试。",
+        )
+        raise HTTPException(status_code=500, detail="艺术字任务保存失败。") from exc
+    background_tasks.add_task(
+        process_art_text_job,
+        job_id,
+        input_path,
+        overlays,
+        attempt_id,
+    )
     return JSONResponse(copy.deepcopy(art), status_code=202)
 
 
@@ -13133,6 +14343,12 @@ def create_picture_in_picture_image(
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        source_attempt_id = picture_in_picture_source_attempt_id(
+            job,
+            video_path,
+            source_path,
+            request.source,
+        )
         asset_count = sum(
             1
             for item in [
@@ -13201,13 +14417,69 @@ def create_picture_in_picture_image(
         "assetUrl": image_url,
         "createdAt": now,
     }
-    with JOBS_LOCK:
-        latest_job = JOBS.get(job_id)
-        if latest_job is None:
-            image_path.unlink(missing_ok=True)
-            raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
-        latest_job.setdefault("pictureInPictureImages", []).append(record)
-        latest_job["updatedAt"] = now
+    try:
+        with job_attempt_lock(job_id):
+            with JOBS_LOCK:
+                latest_job = JOBS.get(job_id)
+                latest_video_path = JOB_FILES.get(job_id)
+                if latest_job is None:
+                    raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+                try:
+                    latest_source_path, _, _, _ = (
+                        resolve_picture_in_picture_reference(
+                            latest_job,
+                            latest_video_path,
+                            request,
+                        )
+                    )
+                except ValueError as exc:
+                    raise HTTPException(status_code=409, detail=str(exc)) from exc
+                latest_source_attempt_id = picture_in_picture_source_attempt_id(
+                    latest_job,
+                    latest_video_path,
+                    latest_source_path,
+                    request.source,
+                )
+                latest_asset_count = sum(
+                    1
+                    for item in [
+                        *(latest_job.get("pictureInPictureImages") or []),
+                        *(latest_job.get("pictureInPictureVideos") or []),
+                    ]
+                    if str(item.get("source") or "art") == request.source
+                )
+                if latest_asset_count >= 20:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="画中画素材已达上限，请刷新后继续。",
+                    )
+                if (
+                    latest_source_path != source_path
+                    or latest_source_attempt_id != source_attempt_id
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="用于画中画的视频版本已变化，请刷新后重试。",
+                    )
+                latest_job.setdefault("pictureInPictureImages", []).append(record)
+                latest_job["updatedAt"] = now
+    except HTTPException:
+        image_path.unlink(missing_ok=True)
+        raise
+    try:
+        persist_job_snapshot(job_id, raise_on_error=True)
+    except (OSError, ProjectSnapshotError) as exc:
+        image_path.unlink(missing_ok=True)
+        with JOBS_LOCK:
+            current_job = JOBS.get(job_id)
+            if current_job is not None:
+                current_job["pictureInPictureImages"] = [
+                    item
+                    for item in current_job.get("pictureInPictureImages") or []
+                    if item.get("id") != image_id
+                ]
+                current_job["updatedAt"] = utc_now()
+        raise HTTPException(status_code=500, detail="画中画图片状态保存失败。") from exc
     return JSONResponse(copy.deepcopy(record), status_code=201)
 
 
@@ -13215,6 +14487,8 @@ def create_picture_in_picture_image(
     "/api/transcriptions/{job_id}/picture-in-picture/images/{image_id}"
 )
 def get_picture_in_picture_image(job_id: str, image_id: str) -> FileResponse:
+    if not is_safe_asset_file_id(image_id):
+        raise HTTPException(status_code=404, detail="画中画图片不存在。")
     with JOBS_LOCK:
         job = JOBS.get(job_id)
         video_path = JOB_FILES.get(job_id)
@@ -13263,6 +14537,12 @@ def create_picture_in_picture_video_asset(
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        source_attempt_id = picture_in_picture_source_attempt_id(
+            job,
+            video_path,
+            source_path,
+            request.source,
+        )
         asset_count = sum(
             1
             for item in [
@@ -13316,6 +14596,7 @@ def create_picture_in_picture_video_asset(
         max(4, math.ceil(float(request.end) - float(request.start))),
     )
     asset_id = str(uuid.uuid4())
+    attempt_id = str(uuid.uuid4())
     output_path = source_path.parent / f"picture-in-picture-{asset_id}.mp4"
     now = utc_now()
     record = {
@@ -13333,6 +14614,7 @@ def create_picture_in_picture_video_asset(
         "styleMatched": True,
         "styleReferenceTime": round(reference_time, 3),
         "status": "queued",
+        "attemptId": attempt_id,
         "stage": "Seedance 视频任务已创建",
         "progress": 10,
         "providerTaskId": None,
@@ -13343,12 +14625,63 @@ def create_picture_in_picture_video_asset(
         "createdAt": now,
         "updatedAt": now,
     }
-    with JOBS_LOCK:
-        latest_job = JOBS.get(job_id)
-        if latest_job is None:
-            raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
-        latest_job.setdefault("pictureInPictureVideos", []).append(record)
-        latest_job["updatedAt"] = now
+    with job_attempt_lock(job_id):
+        with JOBS_LOCK:
+            latest_job = JOBS.get(job_id)
+            if latest_job is None:
+                raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+            latest_video_path = JOB_FILES.get(job_id)
+            try:
+                latest_source_path, _, _, _ = resolve_picture_in_picture_reference(
+                    latest_job,
+                    latest_video_path,
+                    request,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            latest_source_attempt_id = picture_in_picture_source_attempt_id(
+                latest_job,
+                latest_video_path,
+                latest_source_path,
+                request.source,
+            )
+            latest_asset_count = sum(
+                1
+                for item in [
+                    *(latest_job.get("pictureInPictureImages") or []),
+                    *(latest_job.get("pictureInPictureVideos") or []),
+                ]
+                if str(item.get("source") or "art") == request.source
+            )
+            if latest_asset_count >= 20:
+                raise HTTPException(
+                    status_code=409,
+                    detail="画中画素材已达上限，请刷新后继续。",
+                )
+            if (
+                latest_source_path != source_path
+                or latest_source_attempt_id != source_attempt_id
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="用于动态画中画的视频版本已变化，请刷新后重试。",
+                )
+            latest_job.setdefault("pictureInPictureVideos", []).append(record)
+            latest_job["cancelRequested"] = False
+            latest_job["updatedAt"] = now
+
+    try:
+        persist_job_snapshot(job_id, raise_on_error=True)
+    except (OSError, ProjectSnapshotError) as exc:
+        update_picture_in_picture_video_asset(
+            job_id,
+            asset_id,
+            expected_attempt_id=attempt_id,
+            status="failed",
+            stage="Seedance 任务保存失败",
+            error="Seedance 任务状态保存失败，请重试。",
+        )
+        raise HTTPException(status_code=500, detail="Seedance 任务保存失败。") from exc
 
     background_tasks.add_task(
         process_picture_in_picture_video_asset,
@@ -13359,6 +14692,7 @@ def create_picture_in_picture_video_asset(
         request.aspectRatio,
         generation_duration,
         safe_generation_prompt,
+        attempt_id,
     )
     return JSONResponse(copy.deepcopy(record), status_code=202)
 
@@ -13367,6 +14701,8 @@ def create_picture_in_picture_video_asset(
     "/api/transcriptions/{job_id}/picture-in-picture/videos/{asset_id}"
 )
 def get_picture_in_picture_video_asset(job_id: str, asset_id: str) -> FileResponse:
+    if not is_safe_asset_file_id(asset_id):
+        raise HTTPException(status_code=404, detail="动态画中画不存在。")
     with JOBS_LOCK:
         job = JOBS.get(job_id)
         video_path = JOB_FILES.get(job_id)
@@ -13397,6 +14733,7 @@ def create_preview_composition(
     request: PreviewCompositionRequest,
     background_tasks: BackgroundTasks,
 ) -> JSONResponse:
+    _exists, hydrated_draft = hydrate_job_cut_draft(job_id)
     with JOBS_LOCK:
         job = JOBS.get(job_id)
         video_path = JOB_FILES.get(job_id)
@@ -13416,9 +14753,9 @@ def create_preview_composition(
         duration = float(job.get("duration") or 0)
         draft = job.get("cutDraft")
         if draft is None:
-            draft = load_cut_draft(job_id)
-            job["cutDraft"] = draft
+            draft = hydrated_draft
         draft = copy.deepcopy(draft)
+        draft_revision = int((draft or {}).get("revision") or 0)
         source_result = copy.deepcopy(job.get("result") or {})
         asset_records = copy.deepcopy(
             [
@@ -13466,8 +14803,10 @@ def create_preview_composition(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     now = utc_now()
+    attempt_id = str(uuid.uuid4())
     composition = {
         "status": "queued",
+        "attemptId": attempt_id,
         "stage": "当前预览生成任务已创建",
         "progress": 5,
         "outputUrl": None,
@@ -13478,6 +14817,7 @@ def create_preview_composition(
     }
     edit = {
         "status": "queued",
+        "attemptId": attempt_id,
         "stage": "当前预览生成任务已创建",
         "progress": 5,
         "historyName": request.historyName,
@@ -13495,6 +14835,7 @@ def create_preview_composition(
     art = (
         {
             "status": "queued",
+            "attemptId": attempt_id,
             "stage": "等待合成当前预览的艺术字",
             "progress": 5,
             "historyName": request.historyName,
@@ -13514,6 +14855,7 @@ def create_preview_composition(
     picture_in_picture = (
         {
             "status": "queued",
+            "attemptId": attempt_id,
             "stage": "等待合成当前预览的画中画",
             "progress": 5,
             "source": request.pictureInPictureSource,
@@ -13529,18 +14871,48 @@ def create_preview_composition(
         if request.pictureInPictureOverlays
         else None
     )
-    with JOBS_LOCK:
-        latest_job = JOBS.get(job_id)
-        if latest_job is None:
-            raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
-        latest_job["edit"] = edit
-        latest_job["art"] = art
-        latest_job["artSuggestion"] = None
-        latest_job["pictureInPicture"] = picture_in_picture
-        latest_job["composition"] = composition
-        latest_job["cancelRequested"] = False
-        latest_job["updatedAt"] = now
+    with job_attempt_lock(job_id):
+        with JOBS_LOCK:
+            latest_job = JOBS.get(job_id)
+            if latest_job is None:
+                raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+            for state_name in ("edit", "art", "pictureInPicture", "composition"):
+                latest_state = latest_job.get(state_name) or {}
+                if latest_state.get("status") in {"queued", "processing"}:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="当前预览已有生成任务正在处理，请稍候。",
+                    )
+            latest_draft = latest_job.get("cutDraft")
+            if latest_draft is None:
+                latest_draft = hydrated_draft
+            if int((latest_draft or {}).get("revision") or 0) != draft_revision:
+                raise HTTPException(
+                    status_code=409,
+                    detail="剪辑草稿已在其他页面更新，请刷新后重新生成。",
+                )
+            latest_job["edit"] = edit
+            latest_job["art"] = art
+            latest_job["artSuggestion"] = None
+            latest_job["pictureInPicture"] = picture_in_picture
+            latest_job["composition"] = composition
+            latest_job["cancelRequested"] = False
+            latest_job["updatedAt"] = now
 
+    try:
+        persist_job_snapshot(job_id, raise_on_error=True)
+    except (OSError, ProjectSnapshotError) as exc:
+        _finish_composition_attempt(
+            job_id,
+            attempt_id,
+            status="failed",
+            stage="当前预览任务保存失败",
+            message="当前预览任务状态保存失败，请重试。",
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="当前预览任务保存失败。",
+        ) from exc
     background_tasks.add_task(
         process_preview_composition_job,
         job_id,
@@ -13549,6 +14921,7 @@ def create_preview_composition(
         art_overlays,
         picture_in_picture_overlays,
         request.model_dump(mode="json"),
+        attempt_id,
     )
     return JSONResponse(copy.deepcopy(composition), status_code=202)
 
@@ -13581,6 +14954,13 @@ def create_picture_in_picture_video(
                 *(job.get("pictureInPictureVideos") or []),
             ]
         )
+        input_attempt_id = (
+            job.get("attemptId")
+            if request.source == "original"
+            else (job.get("edit") or {}).get("attemptId")
+            if request.source == "edited"
+            else (job.get("art") or {}).get("attemptId")
+        )
     try:
         overlays = normalize_picture_in_picture_overlays(
             request.overlays,
@@ -13593,8 +14973,10 @@ def create_picture_in_picture_video(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     now = utc_now()
+    attempt_id = str(uuid.uuid4())
     picture_in_picture = {
         "status": "queued",
+        "attemptId": attempt_id,
         "stage": "画中画合成任务已创建",
         "progress": 10,
         "source": request.source,
@@ -13605,17 +14987,61 @@ def create_picture_in_picture_video(
         "createdAt": now,
         "updatedAt": now,
     }
-    with JOBS_LOCK:
-        JOBS[job_id]["pictureInPicture"] = picture_in_picture
-        JOBS[job_id]["composition"] = None
-        JOBS[job_id]["cancelRequested"] = False
-        JOBS[job_id]["updatedAt"] = now
+    with job_attempt_lock(job_id):
+        with JOBS_LOCK:
+            latest_job = JOBS.get(job_id)
+            if latest_job is None:
+                raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+            latest_state = latest_job.get("pictureInPicture") or {}
+            if latest_state.get("status") in {"queued", "processing"}:
+                raise HTTPException(status_code=409, detail="画中画视频正在生成，请稍候。")
+            try:
+                latest_input_path, _, _ = resolve_picture_in_picture_source(
+                    latest_job,
+                    JOB_FILES.get(job_id),
+                    request.source,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            if latest_input_path != input_path:
+                raise HTTPException(
+                    status_code=409,
+                    detail="用于画中画的视频来源已变化，请刷新后重试。",
+                )
+            latest_input_attempt_id = (
+                latest_job.get("attemptId")
+                if request.source == "original"
+                else (latest_job.get("edit") or {}).get("attemptId")
+                if request.source == "edited"
+                else (latest_job.get("art") or {}).get("attemptId")
+            )
+            if latest_input_attempt_id != input_attempt_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail="用于画中画的视频版本已变化，请刷新后重试。",
+                )
+            latest_job["pictureInPicture"] = picture_in_picture
+            latest_job["composition"] = None
+            latest_job["cancelRequested"] = False
+            latest_job["updatedAt"] = now
 
+    try:
+        persist_job_snapshot(job_id, raise_on_error=True)
+    except (OSError, ProjectSnapshotError) as exc:
+        update_picture_in_picture_job(
+            job_id,
+            expected_attempt_id=attempt_id,
+            status="failed",
+            stage="画中画任务保存失败",
+            error="画中画任务状态保存失败，请重试。",
+        )
+        raise HTTPException(status_code=500, detail="画中画任务保存失败。") from exc
     background_tasks.add_task(
         process_picture_in_picture_job,
         job_id,
         input_path,
         overlays,
+        attempt_id,
     )
     return JSONResponse(copy.deepcopy(picture_in_picture), status_code=202)
 
