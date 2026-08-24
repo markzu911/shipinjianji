@@ -336,7 +336,10 @@
           card.dataset.pictureId = asset.id;
           card.classList.toggle("is-selected", state.selectedAssetId === asset.id || Boolean(overlay && selectedOverlay()?.assetId === asset.id));
           card.classList.toggle("is-processing", ["queued", "processing"].includes(asset.status));
-          card.classList.toggle("is-failed", asset.status === "failed");
+          card.classList.toggle(
+            "is-failed",
+            ["failed", "interrupted"].includes(asset.status),
+          );
           const preview = host.ownerDocument.createElement("button");
           preview.type = "button";
           preview.className = "pip-image-preview-button";
@@ -357,7 +360,9 @@
           } else {
             const placeholder = host.ownerDocument.createElement("span");
             placeholder.className = "pip-asset-placeholder";
-            placeholder.textContent = asset.status === "failed" ? "生成失败" : `${Math.round(Number(asset.progress) || 10)}%`;
+            placeholder.textContent = ["failed", "interrupted"].includes(asset.status)
+              ? asset.status === "interrupted" ? "已中断" : "生成失败"
+              : `${Math.round(Number(asset.progress) || 10)}%`;
             preview.append(placeholder);
           }
           preview.addEventListener("click", () => {
@@ -392,8 +397,14 @@
           });
           enabledLabel.append(enabled, host.ownerDocument.createTextNode("使用"));
           const meta = host.ownerDocument.createElement("time");
-          meta.textContent = asset.status === "failed"
-            ? String(asset.error || "生成失败")
+          meta.textContent = ["failed", "interrupted"].includes(asset.status)
+            ? String(
+              asset.error || (
+                asset.status === "interrupted"
+                  ? "任务已中断，请重新生成"
+                  : "生成失败"
+              ),
+            )
             : `${asset.type === "video" ? "视频" : "图片"} · ${asset.aspectRatio || "16:9"}`;
           heading.append(enabledLabel, meta);
           const text = host.ownerDocument.createElement("p");

@@ -32,6 +32,7 @@ const stepTranscribe = document.querySelector("#stepTranscribe");
 const jobError = document.querySelector("#jobError");
 const jobErrorText = document.querySelector("#jobErrorText");
 const retryButton = document.querySelector("#retryButton");
+const reselectVideoButton = document.querySelector("#reselectVideoButton");
 const segmentList = document.querySelector("#segmentList");
 const transcriptNowPlayingLayer = document.querySelector(
   "#transcriptNowPlayingLayer",
@@ -181,6 +182,7 @@ let selectedFile = null;
 let selectedPreviewUrl = "";
 let pollTimer = null;
 let editPollTimer = null;
+let jobRequestGeneration = 0;
 let generationModalActive = false;
 let currentJobId = null;
 let currentSegments = [];
@@ -356,6 +358,7 @@ function rangeKey(start, end) {
 
 function rememberJob(jobId) {
   if (!JOB_ID_PATTERN.test(jobId)) return;
+  if (currentJobId !== jobId) jobRequestGeneration += 1;
   currentJobId = jobId;
   restartProjectButton.hidden = false;
   try {
@@ -5722,6 +5725,7 @@ async function deleteHistoryVersion(version) {
 }
 
 function resetToUpload() {
+  jobRequestGeneration += 1;
   flushLocalCutHistory();
   resetCutCommitScheduler();
   resetCutDraftSaveRuntime();
@@ -5827,7 +5831,7 @@ async function handleExpiredTask() {
     eyebrow: "需要重新上传",
     title: "当前任务已失效",
     message:
-      "服务重启后，已上传视频的处理记录会清空。请重新上传视频，开始新的剪辑。",
+      "当前任务不存在、已过保留期或源视频已被清理。请重新上传视频。",
     confirmText: "重新上传",
   });
   resetToUpload();
@@ -5883,6 +5887,9 @@ function renderJob(job) {
   setProgress(job.progress || 0);
   liveStatus.textContent = job.stage || "正在处理…";
   jobError.hidden = true;
+  retryButton.disabled = false;
+  retryButton.removeAttribute("aria-busy");
+  retryButton.hidden = !["failed", "interrupted"].includes(job.status);
 
   if (job.status === "queued" || job.status === "extracting") {
     progressTitle.textContent = "正在提取音频";
@@ -5913,6 +5920,12 @@ function renderJob(job) {
     jobErrorText.textContent = job.error || "未知错误，请重新尝试。";
     jobError.hidden = false;
     liveStatus.textContent = "处理失败";
+  } else if (job.status === "interrupted") {
+    progressTitle.textContent = "处理已中断";
+    jobErrorText.textContent =
+      job.error || "服务重启时任务尚未完成，可以从原视频重试。";
+    jobError.hidden = false;
+    liveStatus.textContent = "处理已中断，可重试";
   }
 }
 
@@ -6024,23 +6037,26 @@ function renderResult(job) {
   resultCard.focus({ preventScroll: true });
 }
 
-async function pollJob(jobId) {
+async function pollJob(jobId, generation = jobRequestGeneration) {
   try {
     const response = await fetch(`/api/transcriptions/${encodeURIComponent(jobId)}`);
     const payload = await response.json();
+    if (generation !== jobRequestGeneration || currentJobId !== jobId) return;
     if (!response.ok) throw new Error(payload.detail || "无法读取转写进度。请刷新后重试。");
 
     renderJob(payload);
-    if (!['completed', 'failed'].includes(payload.status)) {
-      pollTimer = window.setTimeout(() => pollJob(jobId), 1200);
+    if (!["completed", "failed", "interrupted", "cancelled"].includes(payload.status)) {
+      pollTimer = window.setTimeout(() => pollJob(jobId, generation), 1200);
     }
   } catch (error) {
+    if (generation !== jobRequestGeneration || currentJobId !== jobId) return;
     if (isExpiredJobError(error)) {
       handleExpiredTask();
       return;
     }
     jobErrorText.textContent = error.message;
     jobError.hidden = false;
+    retryButton.hidden = true;
     liveStatus.textContent = "无法读取处理状态";
   }
 }
@@ -6133,16 +6149,20 @@ function renderEdit(edit) {
         redirectOnClose: "/",
       });
     }
-  } else if (edit.status === "failed") {
+  } else if (["failed", "interrupted"].includes(edit.status)) {
     setCutOperationLock(false);
     cutProgress.hidden = true;
-    cutError.textContent = edit.error || "视频剪辑失败，请重新尝试。";
+    cutError.textContent = edit.error || (
+      edit.status === "interrupted"
+        ? "剪辑任务已中断，请重新生成。"
+        : "视频剪辑失败，请重新尝试。"
+    );
     cutError.hidden = false;
     setCutControlsDisabled(false);
     if (generationModalActive) {
       generationModalActive = false;
       window.appGeneration?.fail(
-        edit.error || "视频剪辑失败，请重新尝试。",
+        edit.error || "剪辑任务未完成，请重新尝试。",
       );
     }
   } else if (edit.status === "cancelled") {
@@ -6155,18 +6175,20 @@ function renderEdit(edit) {
   }
 }
 
-async function pollEdit(jobId) {
+async function pollEdit(jobId, generation = jobRequestGeneration) {
   try {
     const response = await fetch(`/api/transcriptions/${encodeURIComponent(jobId)}`);
     const payload = await response.json();
+    if (generation !== jobRequestGeneration || currentJobId !== jobId) return;
     if (!response.ok) throw new Error(payload.detail || "无法读取剪辑进度。");
 
     window.EditorSuite?.update(payload);
     renderEdit(payload.edit);
     if (["queued", "processing"].includes(payload.edit?.status)) {
-      editPollTimer = window.setTimeout(() => pollEdit(jobId), 1200);
+      editPollTimer = window.setTimeout(() => pollEdit(jobId, generation), 1200);
     }
   } catch (error) {
+    if (generation !== jobRequestGeneration || currentJobId !== jobId) return;
     if (isExpiredJobError(error)) {
       handleExpiredTask();
       return;
@@ -6174,7 +6196,7 @@ async function pollEdit(jobId) {
     cutProgress.hidden = false;
     cutError.hidden = true;
     setCutOperationLock(true, "连接暂时中断，正在重新获取剪辑状态…");
-    editPollTimer = window.setTimeout(() => pollEdit(jobId), 1800);
+    editPollTimer = window.setTimeout(() => pollEdit(jobId, generation), 1800);
   }
 }
 
@@ -6260,6 +6282,8 @@ async function generateCut() {
 }
 
 function startUpload(file) {
+  jobRequestGeneration += 1;
+  const requestGeneration = jobRequestGeneration;
   const formData = new FormData();
   formData.append("file", file);
   const request = new XMLHttpRequest();
@@ -6288,11 +6312,13 @@ function startUpload(file) {
   });
 
   request.addEventListener("load", () => {
+    if (requestGeneration !== jobRequestGeneration) return;
     const payload = request.response || {};
     if (request.status < 200 || request.status >= 300) {
       progressTitle.textContent = "上传遇到问题";
       jobErrorText.textContent = payload.detail || "上传失败，请检查视频后重试。";
       jobError.hidden = false;
+      retryButton.hidden = true;
       liveStatus.textContent = "上传失败";
       return;
     }
@@ -6303,9 +6329,11 @@ function startUpload(file) {
   });
 
   request.addEventListener("error", () => {
+    if (requestGeneration !== jobRequestGeneration) return;
     progressTitle.textContent = "上传遇到问题";
     jobErrorText.textContent = "网络连接中断，请重新选择视频上传。";
     jobError.hidden = false;
+    retryButton.hidden = true;
     liveStatus.textContent = "上传失败";
   });
 
@@ -6701,7 +6729,36 @@ uploadForm.addEventListener("submit", (event) => {
   startUpload(selectedFile);
 });
 
-retryButton.addEventListener("click", resetToUpload);
+async function retryCurrentTranscription() {
+  if (!currentJobId || retryButton.getAttribute("aria-busy") === "true") return;
+  const retryJobId = currentJobId;
+  const generation = jobRequestGeneration;
+  if (pollTimer) window.clearTimeout(pollTimer);
+  retryButton.disabled = true;
+  retryButton.setAttribute("aria-busy", "true");
+  liveStatus.textContent = "正在重新启动处理…";
+  try {
+    const response = await fetch(
+      `/api/transcriptions/${encodeURIComponent(retryJobId)}/retry`,
+      { method: "POST" },
+    );
+    const payload = await response.json();
+    if (generation !== jobRequestGeneration || currentJobId !== retryJobId) return;
+    if (!response.ok) throw new Error(payload.detail || "无法重试当前任务。");
+    renderJob(payload);
+    pollJob(payload.id, generation);
+  } catch (error) {
+    if (generation !== jobRequestGeneration || currentJobId !== retryJobId) return;
+    jobErrorText.textContent = error.message || "重试失败，请稍后再试。";
+    jobError.hidden = false;
+    liveStatus.textContent = "重试未启动";
+    retryButton.disabled = false;
+    retryButton.removeAttribute("aria-busy");
+  }
+}
+
+retryButton.addEventListener("click", retryCurrentTranscription);
+reselectVideoButton.addEventListener("click", resetToUpload);
 restartProjectButton.addEventListener("click", confirmAndResetProject);
 document.addEventListener("keydown", handleGlobalCutHistoryShortcut);
 window.addEventListener("editor-suite:job-state", acceptEditorSuiteJobState);

@@ -1674,6 +1674,16 @@ h1 {
   margin: 4px 0 16px;
 }
 
+.job-error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.job-error-actions button {
+  min-height: 44px;
+}
+
 .success-label {
   color: var(--primary);
 }

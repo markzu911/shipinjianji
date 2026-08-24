@@ -1170,9 +1170,9 @@
         syncGenerationButton();
         return;
       }
-      if (composition?.status === "failed") {
+      if (["failed", "interrupted"].includes(composition?.status)) {
         window.appGeneration?.fail(
-          composition.error || "合成失败，请重新尝试。",
+          composition.error || "合成任务未完成，请重新尝试。",
         );
         return;
       }
