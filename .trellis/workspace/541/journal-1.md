@@ -534,3 +534,27 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 25: 任务重启恢复与失败重试
+
+**Date**: 2026-08-24
+**Task**: 任务重启恢复与失败重试
+**Branch**: `develop`
+
+### Summary
+
+新增版本化任务快照和启动恢复，将运行中任务恢复为可重试的 interrupted；加入 attempt 隔离、并发与清理竞态保护、同任务重试和前端中断交互，并完成 391 项全量回归与规范同步。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9da6b7c` | (see git log) |
+| `554d46c` | (see git log) |
+| `3f611f9` | (see git log) |
+| `218c4c6` | (see git log) |
+
+### Status
+
+[OK] **Completed**
