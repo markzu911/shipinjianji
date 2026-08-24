@@ -65,6 +65,11 @@ def isolated_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     with app_module.JOBS_LOCK:
         app_module.JOBS.clear()
         app_module.JOB_FILES.clear()
+    with app_module.PROJECT_FAILURES_LOCK:
+        app_module.PROJECT_RECOVERY_FAILURES.clear()
+        app_module.PROJECT_SNAPSHOT_FAILURES.clear()
+    with app_module.JOB_ATTEMPT_LOCKS_GUARD:
+        app_module.JOB_ATTEMPT_LOCKS.clear()
     app_module.CUT_DRAFT_PCM_CACHE.clear()
     yield
     for name, value in runtime_settings.items():
@@ -72,6 +77,11 @@ def isolated_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     app_module.dashscope.base_http_api_url = dashscope_http_url
     app_module.dashscope.base_websocket_api_url = dashscope_websocket_url
     app_module.CUT_DRAFT_PCM_CACHE.clear()
+    with app_module.PROJECT_FAILURES_LOCK:
+        app_module.PROJECT_RECOVERY_FAILURES.clear()
+        app_module.PROJECT_SNAPSHOT_FAILURES.clear()
+    with app_module.JOB_ATTEMPT_LOCKS_GUARD:
+        app_module.JOB_ATTEMPT_LOCKS.clear()
 
 
 @pytest.fixture

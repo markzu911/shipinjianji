@@ -911,7 +911,10 @@ def test_upload_extracts_audio_and_returns_transcript(
     assert result["result"]["noSpeechStatus"] == "completed"
     assert isinstance(result["result"]["noSpeechSuggestions"], list)
     assert result["result"]["mediaDuration"] == result["duration"]
-    assert (app_module.DATA_DIR / "jobs" / job_id / "speech.mp3").exists()
+    job_dir = app_module.DATA_DIR / "jobs" / job_id
+    assert (job_dir / "source.mp4").is_file()
+    assert (job_dir / "project-state.json").is_file()
+    assert not list(job_dir.glob("speech-*.mp3"))
 
 
 def test_no_speech_detection_keeps_boundaries_and_protects_video_edges():

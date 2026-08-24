@@ -166,7 +166,9 @@ def test_full_transcript_edits_are_aligned_to_the_matching_words():
     assert refreshed["pictureInPicture"] is None
 
 
-def test_cut_draft_is_persisted_versioned_restored_and_cleared():
+def test_cut_draft_is_persisted_versioned_restored_and_cleared(
+    monkeypatch: pytest.MonkeyPatch,
+):
     job_id = "33333333-3333-4333-8333-333333333333"
     job_dir = app_module.jobs_directory() / job_id
     job_dir.mkdir(parents=True)
@@ -178,6 +180,31 @@ def test_cut_draft_is_persisted_versioned_restored_and_cleared():
             "result": {"segments": []},
             "cutDraft": None,
         }
+
+    snapshot_calls: list[str] = []
+    original_save_cut_draft = app_module.save_cut_draft
+    original_remove_cut_draft = app_module.remove_cut_draft
+
+    def checked_save_cut_draft(saved_job_id: str, draft: dict[str, object]):
+        assert not app_module.JOBS_LOCK.locked()
+        original_save_cut_draft(saved_job_id, draft)
+
+    def checked_remove_cut_draft(removed_job_id: str):
+        assert not app_module.JOBS_LOCK.locked()
+        original_remove_cut_draft(removed_job_id)
+
+    def checked_persist_job_snapshot(persisted_job_id: str, **_kwargs) -> bool:
+        assert not app_module.JOBS_LOCK.locked()
+        snapshot_calls.append(persisted_job_id)
+        return True
+
+    monkeypatch.setattr(app_module, "save_cut_draft", checked_save_cut_draft)
+    monkeypatch.setattr(app_module, "remove_cut_draft", checked_remove_cut_draft)
+    monkeypatch.setattr(
+        app_module,
+        "persist_job_snapshot",
+        checked_persist_job_snapshot,
+    )
 
     payload = {
         "revision": 0,
@@ -254,6 +281,47 @@ def test_cut_draft_is_persisted_versioned_restored_and_cleared():
     assert cleared.json() == {"status": "cleared"}
     assert after_clear.json()["cutDraft"] is None
     assert not app_module.cut_draft_path(job_id).exists()
+    assert snapshot_calls == [job_id, job_id]
+
+
+def test_cut_draft_commit_survives_async_snapshot_metadata_failure(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    job_id = "38383838-3838-4838-8838-383838383838"
+    app_module.cut_draft_path(job_id).parent.mkdir(parents=True)
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "status": "completed",
+            "duration": 10.0,
+            "result": {"segments": []},
+            "cutDraft": None,
+        }
+
+    def fail_snapshot(_job_id: str, **_kwargs):
+        raise OSError("snapshot unavailable")
+
+    monkeypatch.setattr(app_module, "persist_job_snapshot", fail_snapshot)
+    with TestClient(app_module.app) as client:
+        saved = client.put(
+            f"/api/transcriptions/{job_id}/cut-draft",
+            json={
+                "revision": 0,
+                "textRanges": [],
+                "noSpeechRanges": [],
+                "timelineRanges": [],
+            },
+        )
+        restored = client.get(f"/api/transcriptions/{job_id}/cut-draft")
+
+    assert saved.status_code == 200
+    assert restored.json()["cutDraft"]["revision"] == 1
+    assert app_module.cut_draft_path(job_id).is_file()
+    with app_module.PROJECT_FAILURES_LOCK:
+        assert any(
+            item["id"] == job_id and "snapshot unavailable" in item["error"]
+            for item in app_module.PROJECT_SNAPSHOT_FAILURES
+        )
 
 
 def test_cut_draft_preserves_explicitly_empty_text_ranges():

@@ -7,6 +7,8 @@ import time
 
 import pytest
 
+import server.app as app_module
+
 
 def open_editor(session, job):
     page = session.page
@@ -712,10 +714,22 @@ def install_template_catalog_revision_probe(page) -> None:
             );
             if (requestUrl.pathname !== '/api/art-templates') return response;
             const payload = await response.clone().json();
-            while (!window.EditorSuite?.projectSnapshot?.()) {
+            const query = new URLSearchParams(window.location.search);
+            const expectedJobId = query.get('job') || '';
+            const expectedTool = query.get('tool') || 'cut';
+            let snapshot = null;
+            // The template catalog may resolve before the async project
+            // hydration/tool handoff. Capture the baseline only after both so
+            // navigation revisions are not mistaken for template mutations.
+            while (true) {
+              snapshot = window.EditorSuite?.projectSnapshot?.() || null;
+              if (
+                snapshot &&
+                (!expectedJobId || snapshot.jobId === expectedJobId) &&
+                snapshot.ui?.activeTool === expectedTool
+              ) break;
               await new Promise(resolve => window.setTimeout(resolve, 0));
             }
-            const snapshot = window.EditorSuite.projectSnapshot();
             window.__templateCatalogBaseline = {
               revision: snapshot.revision,
               timingRevision: snapshot.timingRevision,
@@ -4365,12 +4379,6 @@ def test_job_url_remains_editable_after_service_restart(
     recovery_response = page.request.get(
         f"{browser_session.base_url}/api/transcriptions/{seeded_editor_job.job_id}"
     )
-    if recovery_response.status == 404:
-        assert recovery_response.json()["detail"] == "转写任务不存在或服务已重启。"
-        page.wait_for_timeout(50)
-        assert browser_session.diagnostics() == []
-        pytest.xfail("Phase A：服务重启后尚未从磁盘恢复同一 job 的完整可编辑状态。")
-
     assert recovery_response.ok
     page.goto(editor_url)
 
@@ -4379,3 +4387,77 @@ def test_job_url_remains_editable_after_service_restart(
     assert page.locator('[data-editor-tool="art"]').get_attribute(
         "aria-disabled"
     ) == "false"
+
+
+def test_running_job_restores_as_interrupted_without_endless_polling(
+    browser_session,
+    browser_server,
+    seeded_editor_job,
+):
+    with app_module.JOBS_LOCK:
+        job = app_module.JOBS[seeded_editor_job.job_id]
+        job.update(
+            status="transcribing",
+            attemptId="browser-interrupted-attempt",
+            stage="正在识别文字",
+            progress=55,
+            result=None,
+            error=None,
+            updatedAt=app_module.utc_now(),
+        )
+    app_module.persist_job_snapshot(seeded_editor_job.job_id, raise_on_error=True)
+
+    browser_server.restart_without_memory_state()
+    page = browser_session.page
+    recovery_response = page.request.get(
+        f"{browser_session.base_url}/api/transcriptions/{seeded_editor_job.job_id}"
+    )
+    assert recovery_response.ok
+    page.goto(
+        f"{browser_session.base_url}/?job={seeded_editor_job.job_id}"
+    )
+    page.locator("#jobError").wait_for(state="visible")
+
+    assert page.locator("#liveStatus").inner_text() == "处理已中断，可重试"
+    assert page.locator("#retryButton").inner_text() == "重试处理"
+    assert page.locator("#reselectVideoButton").inner_text() == "重新选择视频"
+    assert page.locator("#retryButton").is_enabled()
+    page.wait_for_timeout(1400)
+    assert page.locator("#jobError").is_visible()
+
+    queued_payload = recovery_response.json()
+    queued_payload.update(
+        status="queued",
+        stage="重试任务已创建",
+        progress=10,
+        error=None,
+    )
+    page.evaluate(
+        """
+        payload => {
+          const originalFetch = window.fetch.bind(window);
+          window.fetch = (input, init) => {
+            const url = String(input || '');
+            if (url.endsWith('/retry')) {
+              return new Promise(resolve => {
+                window.__resolveDelayedRetry = () => resolve(new Response(
+                  JSON.stringify(payload),
+                  {status: 202, headers: {'Content-Type': 'application/json'}},
+                ));
+              });
+            }
+            return originalFetch(input, init);
+          };
+        }
+        """,
+        queued_payload,
+    )
+    page.locator("#retryButton").click()
+    page.wait_for_function("() => typeof window.__resolveDelayedRetry === 'function'")
+    page.locator("#reselectVideoButton").click()
+    page.evaluate("window.__resolveDelayedRetry()")
+    page.wait_for_timeout(100)
+
+    assert page.locator("#uploadCard").is_visible()
+    assert page.locator("#progressCard").is_hidden()
+    assert page.locator("#resultCard").is_hidden()

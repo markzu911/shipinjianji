@@ -236,6 +236,74 @@ def test_picture_in_picture_image_uses_source_anchor_without_edited_video(
     assert response.json()["styleReferenceTime"] == 0.4
 
 
+def test_picture_in_picture_image_rechecks_asset_limit_before_commit(
+    sample_video: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    job_id = "45454545-4545-4545-8545-454545454545"
+    existing = [
+        {"id": f"existing-{index}", "type": "image", "source": "original"}
+        for index in range(19)
+    ]
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "filename": sample_video.name,
+            "duration": 1.0,
+            "status": "completed",
+            "attemptId": "source-attempt",
+            "result": {"text": "测试文案", "duration": 1.0, "segments": []},
+            "edit": None,
+            "art": None,
+            "artSuggestion": None,
+            "pictureInPictureImages": existing,
+            "pictureInPictureVideos": [],
+            "pictureInPicture": None,
+        }
+        app_module.JOB_FILES[job_id] = sample_video
+
+    generated_paths: list[Path] = []
+
+    def generate_and_win_concurrent_slot(
+        _prompt,
+        output_path,
+        _reference_image,
+        _aspect_ratio,
+    ):
+        generated_paths.append(output_path)
+        Image.new("RGB", (160, 90), "#38cfa4").save(output_path, "PNG")
+        with app_module.JOBS_LOCK:
+            app_module.JOBS[job_id]["pictureInPictureImages"].append(
+                {"id": "concurrent-winner", "type": "image", "source": "original"}
+            )
+
+    monkeypatch.setenv("ARK_API_KEY", "test-ark-key")
+    monkeypatch.setattr(
+        app_module,
+        "generate_picture_in_picture_image",
+        generate_and_win_concurrent_slot,
+    )
+
+    with TestClient(app_module.app) as client:
+        response = client.post(
+            f"/api/transcriptions/{job_id}/picture-in-picture/images",
+            json={
+                "text": "测试文案",
+                "start": 0.1,
+                "end": 0.8,
+                "mode": "auto",
+                "prompt": "",
+                "source": "original",
+                "aspectRatio": "3:4",
+            },
+        )
+
+    assert response.status_code == 409
+    with app_module.JOBS_LOCK:
+        assert len(app_module.JOBS[job_id]["pictureInPictureImages"]) == 20
+    assert generated_paths and not generated_paths[0].exists()
+
+
 def test_picture_in_picture_generation_requires_ark_key(sample_video: Path):
     job_id = "33333333-3333-3333-3333-333333333333"
     with app_module.JOBS_LOCK:

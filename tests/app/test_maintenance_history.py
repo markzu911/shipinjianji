@@ -107,6 +107,57 @@ def test_job_cleanup_removes_stale_completed_in_memory_job(tmp_path: Path):
     assert job_id not in app_module.JOB_FILES
 
 
+def test_job_cleanup_rechecks_late_snapshot_and_running_transition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    job_id = "acacacac-acac-4cac-8cac-acacacacacac"
+    job_dir = app_module.jobs_directory() / job_id
+    job_dir.mkdir(parents=True)
+    video_path = job_dir / "source.mp4"
+    video_path.write_bytes(b"completed")
+    old_time = app_module.time.time() - 8 * 86400
+    app_module.os.utime(job_dir, (old_time, old_time))
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {"id": job_id, "status": "completed"}
+        app_module.JOB_FILES[job_id] = video_path
+
+    original_size = app_module.directory_size_bytes
+
+    def touch_during_scan(path: Path) -> int:
+        size = original_size(path)
+        app_module.os.utime(path, None)
+        return size
+
+    monkeypatch.setattr(app_module, "directory_size_bytes", touch_during_scan)
+    touched = app_module.cleanup_job_directories(
+        max_age_days=7,
+        max_directories=0,
+    )
+    assert touched["deleted"] == 0
+    assert job_dir.is_dir()
+
+    app_module.os.utime(job_dir, (old_time, old_time))
+
+    def start_work_during_scan(path: Path) -> int:
+        size = original_size(path)
+        with app_module.JOBS_LOCK:
+            app_module.JOBS[job_id]["edit"] = {
+                "status": "queued",
+                "attemptId": "late-attempt",
+            }
+        return size
+
+    monkeypatch.setattr(app_module, "directory_size_bytes", start_work_during_scan)
+    running = app_module.cleanup_job_directories(
+        max_age_days=7,
+        max_directories=0,
+    )
+    assert running["deleted"] == 0
+    assert running["protected"] == 1
+    assert job_dir.is_dir()
+
+
 def test_periodic_storage_cleanup_runs_after_interval(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -160,7 +211,7 @@ def test_job_cleanup_api_supports_preview_and_execution(tmp_path: Path):
     assert not old_dir.exists()
 
 
-def test_failed_transcription_removes_job_working_directory(
+def test_failed_transcription_preserves_source_for_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -192,8 +243,10 @@ def test_failed_transcription_removes_job_working_directory(
         job = app_module.JOBS[job_id]
     assert job["status"] == "failed"
     assert job["error"] == "测试解析失败"
-    assert not job_dir.exists()
-    assert job_id not in app_module.JOB_FILES
+    assert job_dir.is_dir()
+    assert video_path.is_file()
+    assert (job_dir / "project-state.json").is_file()
+    assert app_module.JOB_FILES[job_id] == video_path
 
 
 def test_history_versions_are_persistent_manageable_and_reusable(

@@ -212,7 +212,9 @@ def test_preview_composition_renders_cut_art_and_pip_in_one_request(
     assert payload["composition"]["status"] == "completed"
     assert payload["composition"]["outputUrl"].endswith("/composition-video")
     assert payload["composition"]["historyId"].startswith("history-")
-    assert not job_dir.exists()
+    assert job_dir.is_dir()
+    assert video_path.is_file()
+    assert (job_dir / "project-state.json").is_file()
 
     with TestClient(app_module.app) as client:
         output_response = client.get(
@@ -392,7 +394,9 @@ def test_preview_composition_allows_unchanged_timeline(
     assert calls == [[]]
     assert payload["edit"]["outputDuration"] == 1.0
     assert payload["composition"]["status"] == "completed"
-    assert not job_dir.exists()
+    assert job_dir.is_dir()
+    assert video_path.is_file()
+    assert (job_dir / "project-state.json").is_file()
 
     with TestClient(app_module.app) as client:
         output_response = client.get(
@@ -402,7 +406,7 @@ def test_preview_composition_allows_unchanged_timeline(
     assert output_response.content == b"unchanged"
 
 
-def test_failed_preview_composition_removes_job_working_directory(
+def test_failed_preview_composition_preserves_recoverable_project(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -456,5 +460,8 @@ def test_failed_preview_composition_removes_job_working_directory(
     assert response.status_code == 202
     assert payload["composition"]["status"] == "failed"
     assert payload["composition"]["error"] == "测试生成失败"
-    assert not job_dir.exists()
-    assert job_id not in app_module.JOB_FILES
+    assert job_dir.is_dir()
+    assert video_path.is_file()
+    assert (job_dir / "project-state.json").is_file()
+    assert not list(job_dir.glob(".*.tmp.mp4"))
+    assert app_module.JOB_FILES[job_id] == video_path

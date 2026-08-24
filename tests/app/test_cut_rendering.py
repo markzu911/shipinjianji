@@ -426,7 +426,9 @@ def test_cut_endpoint_revision_uses_authoritative_persisted_draft(
     monkeypatch.setattr(
         app_module,
         "process_cut_job",
-        lambda _job_id, media, semantic: captured.append((media, semantic)),
+            lambda _job_id, media, semantic, _attempt_id=None: captured.append(
+                (media, semantic)
+            ),
     )
     monkeypatch.setattr(
         app_module,

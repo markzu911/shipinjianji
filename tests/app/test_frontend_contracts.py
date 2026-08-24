@@ -51,8 +51,8 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
 
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
-    assert "/app.js?v=20260822-01" in page_response.text
-    assert "/styles.css?v=20260822-01" in page_response.text
+    assert "/app.js?v=20260823-01" in page_response.text
+    assert "/styles.css?v=20260823-01" in page_response.text
     assert "/transcript-follow-scroll.js?v=20260818-03" in page_response.text
     assert "/ui-feedback.js?v=20260807-03" in page_response.text
     assert "/timeline-model.js?v=20260810-01" in page_response.text
@@ -64,8 +64,8 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     assert "/editor-preview-compositor.js?v=20260820-01" in page_response.text
     assert "/editor-timeline-controller.js?v=20260820-02" in page_response.text
     assert "/editor-art-tool.js?v=20260821-02" in page_response.text
-    assert "/editor-pip-tool.js?v=20260819-02" in page_response.text
-    assert "/editor-suite.js?v=20260822-01" in page_response.text
+    assert "/editor-pip-tool.js?v=20260823-01" in page_response.text
+    assert "/editor-suite.js?v=20260823-01" in page_response.text
     assert timeline_script_response.status_code == 200
     assert timeline_script_response.headers["cache-control"] == "no-store, max-age=0"
     assert "function createStore" in timeline_script_response.text
@@ -1021,7 +1021,7 @@ def test_art_template_library_frontend_contracts():
     art_tool_response = responses["/editor-art-tool.js"]
 
     assert template_page_response.status_code == 200
-    assert "/styles.css?v=20260822-01" in template_page_response.text
+    assert "/styles.css?v=20260823-01" in template_page_response.text
     assert "/art-template-library.js?v=20260819-01" in template_page_response.text
     assert "当前模板主色" in template_page_response.text
     assert 'id="templateCardGrid"' in template_page_response.text
@@ -1082,7 +1082,7 @@ def test_font_manager_frontend_contracts():
     font_script_response = responses["/font-manager.js"]
 
     assert font_page_response.status_code == 200
-    assert "/styles.css?v=20260822-01" in font_page_response.text
+    assert "/styles.css?v=20260823-01" in font_page_response.text
     assert "/font-manager.js?v=" in font_page_response.text
     assert 'id="fontUploadForm"' in font_page_response.text
     assert 'id="fontCardGrid"' in font_page_response.text

@@ -111,6 +111,9 @@ class LiveServer:
         with app_module.JOBS_LOCK:
             app_module.JOBS.clear()
             app_module.JOB_FILES.clear()
+        with app_module.PROJECT_FAILURES_LOCK:
+            app_module.PROJECT_RECOVERY_FAILURES.clear()
+            app_module.PROJECT_SNAPSHOT_FAILURES.clear()
         self.start()
 
 
@@ -456,6 +459,7 @@ def seeded_editor_job(
     with app_module.JOBS_LOCK:
         app_module.JOBS[job_id] = job
         app_module.JOB_FILES[job_id] = video_path
+    app_module.persist_job_snapshot(job_id, raise_on_error=True)
 
     return SeededEditorJob(
         job_id=job_id,
