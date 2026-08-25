@@ -293,10 +293,16 @@
         } else if (selectedLabel && list.clientHeight > 0) {
           const listRect = list.getBoundingClientRect();
           const itemRect = selectedLabel.getBoundingClientRect();
+          const visualScale = list.offsetHeight > 0
+            ? listRect.height / list.offsetHeight
+            : 1;
+          const scrollScale = Number.isFinite(visualScale) && visualScale > 0
+            ? visualScale
+            : 1;
           if (itemRect.top < listRect.top) {
-            list.scrollTop -= listRect.top - itemRect.top;
+            list.scrollTop -= (listRect.top - itemRect.top) / scrollScale;
           } else if (itemRect.bottom > listRect.bottom) {
-            list.scrollTop += itemRect.bottom - listRect.bottom;
+            list.scrollTop += (itemRect.bottom - listRect.bottom) / scrollScale;
           }
         }
       }

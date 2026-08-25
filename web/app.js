@@ -4232,49 +4232,6 @@ function renderCutSplitClips() {
     button.append(label);
     fragment.append(button);
   }
-  const markerStacks = new Map();
-  for (const marker of markers) {
-    const stackKey = marker.editedTime.toFixed(3);
-    const stackIndex = markerStacks.get(stackKey) || 0;
-    markerStacks.set(stackKey, stackIndex + 1);
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "cut-timeline-deleted-marker";
-    button.dataset.splitClipKey = marker.key;
-    button.dataset.deleted = "true";
-    const markerRatio = total > 0
-      ? clamp(marker.editedTime / total, 0, 1)
-      : 0;
-    button.style.left = `${markerRatio * 100}%`;
-    const stackDirection = markerRatio >= 0.95 ? -1 : 1;
-    button.style.setProperty(
-      "--split-marker-offset",
-      `${stackDirection * stackIndex * 18}px`,
-    );
-    button.style.setProperty(
-      "--split-marker-shift",
-      markerRatio <= 0.05
-        ? "0%"
-        : markerRatio >= 0.95
-          ? "-100%"
-          : "-50%",
-    );
-    button.classList.toggle("is-selected", marker.key === selectedSplitClipKey);
-    button.setAttribute(
-      "aria-label",
-      `已删除视频片段 ${formatCutRange(marker.sourceStart, marker.sourceEnd)}，点击选中恢复`,
-    );
-    button.setAttribute(
-      "aria-pressed",
-      marker.key === selectedSplitClipKey ? "true" : "false",
-    );
-    button.title = "选中后可恢复这个片段";
-    const icon = document.createElement("iconify-icon");
-    icon.setAttribute("icon", "ph:arrow-counter-clockwise-bold");
-    icon.setAttribute("aria-hidden", "true");
-    button.append(icon);
-    fragment.append(button);
-  }
   cutFrameTimelineClips.append(fragment);
   if (focusedSplitKey) {
     const focusTarget = [...cutFrameTimelineClips.children].find(
@@ -4809,7 +4766,7 @@ function beginCutTimelineSelection(event) {
     timelineRangeInProgress ||
     event.button !== 0 ||
     event.target.closest(
-      ".cut-timeline-delete-range, .cut-timeline-split-clip, .cut-timeline-deleted-marker",
+      ".cut-timeline-delete-range, .cut-timeline-split-clip",
     )
   ) {
     return;
