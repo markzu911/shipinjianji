@@ -558,3 +558,36 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 26: 紧凑编辑布局与时间轴帧预览修复
+
+**Date**: 2026-08-25
+**Task**: 紧凑编辑布局与时间轴帧预览修复
+**Branch**: `develop`
+
+### Summary
+
+移除时间轴恢复按钮，压缩文案与画中画 UI，并修复绝对定位缩略帧高度为零的问题。
+
+### Main Changes
+
+- 文字剪辑行和画中画设置按 50% 紧凑显示
+- 时间轴帧缩略图纵向铺满并保留剪后时间映射
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `cc24366` | (see git log) |
+| `b9ef052` | (see git log) |
+| `d6c3d99` | (see git log) |
+
+### Testing
+
+- [OK] 相关静态与浏览器检查 29 项通过
+- [OK] 完整套件 391/392；剩余为无关的艺术字模板初始化 revision 时序断言
+
+### Status
+
+[OK] **Completed**
