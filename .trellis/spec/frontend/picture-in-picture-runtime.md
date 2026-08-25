@@ -42,6 +42,8 @@ sessionStorage[`editor-suite:project-draft:${jobId}`] = {
 - schema v2 不保存 assets；艺术字同时保存活动 `overlays` 和撤销剪辑所需的内部 `suppressedOverlays`。恢复前先从当前 job 建立注册表，再按当前 cut reconcile art 并原子恢复 art+pip+selection。未知 asset、跨两个艺术字集合的重复 id、disabled overlay、无效数值/范围/source 或非空未知 selection 使整份 v2 草稿失效。schema v1 继续只恢复 art，pip 保持服务端状态。
 - `/picture-in-picture` 只返回 307 到 `/?tool=pip`，保留 `job/source` 等 query、覆盖冲突 `tool` 并删除 `embedded`；目标页面必须激活 `#editorPipPanelRoot`，运行 DOM 中 iframe 数量为 0。
 - `picture-in-picture.html/js` 不存在。PipTool、公共预览、时间线和 compose 必须继续共享同一个 Store frame，禁止恢复第二个 video、storage、message 或生成 runtime。
+- 顶层 `.editor-pip-tool-panel` 是一个明确的紧凑密度例外：其全部内部 UI 以 `zoom: 0.5` 显示，但自身保持 `width: 100%`，外层隐藏横向溢出并负责纵向滚动；不得用 `width: 200%` 二次补偿，因为 Chromium 已在 zoom 布局中补偿百分比宽度。
+- 缩放容器内基于 `getBoundingClientRect()` 计算的视觉滚动差值，写回 `scrollTop` 前必须除以 `getBoundingClientRect().height / offsetHeight` 的有效比例；禁止直接把视觉像素当作逻辑滚动像素。
 
 ### 4. Validation & Error Matrix
 
@@ -66,7 +68,7 @@ sessionStorage[`editor-suite:project-draft:${jobId}`] = {
 
 - Node：asset/overlay 分离、稳定 id、source filter、pending/failed、严格草稿校验、15% 最小和大于 100% 的有限 width。
 - Store：art+pip+timeline+selection 一次原子恢复，revision/timingRevision 矩阵和 compose width 一致。
-- 浏览器：prompt/image/video 全部 mock；覆盖 completed/failed、enable/disable、selection、position、range、175%、v2/v1 reload、无效 selection、迟到响应、历史 URL 重定向、iframe 为 0 和 375px 无溢出。
+- 浏览器：prompt/image/video 全部 mock；覆盖 completed/failed、enable/disable、selection、position、range、175%、v2/v1 reload、无效 selection、迟到响应、历史 URL 重定向、iframe 为 0，以及画中画面板 50% 实际几何、滚动换算和 375px 无溢出。
 - 后端：normalize 接受 175%、拒绝非有限/过小值；真实 FFmpeg 样片断言超大 overlay 的中心裁切。
 
 ### 7. Wrong vs Correct

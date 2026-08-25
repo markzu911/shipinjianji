@@ -1,0 +1,4 @@
+{"file":".trellis/spec/guides/project-overview.md","reason":"确认原生前端技术栈、公共编辑器结构和最小改动边界。"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"遵守文案列表、按钮、响应式、焦点和可访问性交互规范。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"按真实浏览器要求验证时间轴按钮移除、50% 行缩放和 375px 布局。"}
+{"file":".trellis/spec/frontend/picture-in-picture-runtime.md","reason":"实现顶层画中画面板 50% 紧凑缩放，并按视觉比例换算文案列表滚动距离。"}

@@ -1,0 +1,5 @@
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"检查缩放后的可观察布局、键盘焦点、点击行为和窄屏一致性。"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"核对删除分割片段后无 marker DOM，但 Store、草稿和历史结构仍完整保留。"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"确认只修改展示层，不改变播放定位、草稿和媒体身份行为。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"要求静态契约之外执行真实 Chromium 桌面与 375px 回归。"}
+{"file":".trellis/spec/frontend/picture-in-picture-runtime.md","reason":"检查画中画面板缩放、宽度、滚动换算、工具生命周期和生成流程没有回退。"}
