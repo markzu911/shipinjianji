@@ -51,8 +51,8 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
 
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
-    assert "/app.js?v=20260823-01" in page_response.text
-    assert "/styles.css?v=20260823-01" in page_response.text
+    assert "/app.js?v=20260825-01" in page_response.text
+    assert "/styles.css?v=20260825-03" in page_response.text
     assert "/transcript-follow-scroll.js?v=20260818-03" in page_response.text
     assert "/ui-feedback.js?v=20260807-03" in page_response.text
     assert "/timeline-model.js?v=20260810-01" in page_response.text
@@ -64,7 +64,7 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     assert "/editor-preview-compositor.js?v=20260820-01" in page_response.text
     assert "/editor-timeline-controller.js?v=20260820-02" in page_response.text
     assert "/editor-art-tool.js?v=20260821-02" in page_response.text
-    assert "/editor-pip-tool.js?v=20260823-01" in page_response.text
+    assert "/editor-pip-tool.js?v=20260825-01" in page_response.text
     assert "/editor-suite.js?v=20260823-01" in page_response.text
     assert timeline_script_response.status_code == 200
     assert timeline_script_response.headers["cache-control"] == "no-store, max-age=0"
@@ -481,7 +481,8 @@ def test_cut_timeline_and_draft_frontend_contracts():
     assert ".cut-timeline-action-button {" in styles_response.text
     assert ".cut-frame-timeline-clips {" in styles_response.text
     assert ".cut-timeline-split-clip {" in styles_response.text
-    assert ".cut-timeline-deleted-marker {" in styles_response.text
+    assert "cut-timeline-deleted-marker" not in styles_response.text
+    assert "cut-timeline-deleted-marker" not in script_response.text
     assert "min-width: 44px" in styles_response.text
     assert "min-height: 44px" in styles_response.text
     assert "background-repeat: repeat-x" in styles_response.text
@@ -720,13 +721,19 @@ def test_cut_range_and_segment_frontend_contracts():
     assert "所有 AI 建议都需由用户确认" not in page_response.text
     assert 'stageCutHistoryOperation("恢复已删除文字")' in script_response.text
     assert "segment-edit-hint" not in script_response.text
-    assert "grid-template-columns: 44px 52px minmax(0, 1fr) 44px" in (
+    assert "grid-template-columns: 22px 26px minmax(0, 1fr) 22px" in (
         styles_response.text
     )
+    assert "min-height: 32px" in styles_response.text
+    assert "font-size: 7.5px" in styles_response.text
+    assert "width: 22px" in styles_response.text
+    assert "height: 22px" in styles_response.text
+    assert "text-shadow: 0 0 6px" in styles_response.text
+    assert "transform: translateY(0.5px)" in styles_response.text
     assert ".segment-play-button {" in styles_response.text
     assert ".segment-play-button:focus-visible" in styles_response.text
     assert "@media (max-width: 480px)" in styles_response.text
-    assert "grid-template-columns: 44px minmax(0, 1fr) 44px" in (
+    assert "grid-template-columns: 22px minmax(0, 1fr) 22px" in (
         styles_response.text
     )
     assert "selectSegmentButton.disabled =" in script_response.text
@@ -803,6 +810,7 @@ def test_top_level_art_and_pip_tools_are_the_only_editor_runtime():
     project_store = (web / "editor-project-store.js").read_text(encoding="utf-8")
     tool = (web / "editor-art-tool.js").read_text(encoding="utf-8")
     pip_tool = (web / "editor-pip-tool.js").read_text(encoding="utf-8")
+    styles = (web / "styles.css").read_text(encoding="utf-8")
     compositor = (root / "web" / "editor-preview-compositor.js").read_text(
         encoding="utf-8"
     )
@@ -821,6 +829,11 @@ def test_top_level_art_and_pip_tools_are_the_only_editor_runtime():
     assert 'id="editorPipPanelRoot"' in page
     assert 'title="画中画设置"' not in page
     assert "window.PipTool.mount(pipPanelRoot, createPipToolServices())" in suite
+    assert ".editor-pip-tool {\n  width: 100%;" in styles
+    assert "overflow-x: hidden;\n  overflow-y: auto;\n  padding: 8px;" in styles
+    assert ".editor-pip-tool-panel {\n  width: 100%;\n  zoom: 0.5;\n}" in styles
+    assert "@media (max-width: 720px)" in styles
+    assert ".editor-pip-tool {\n    padding: 6px;\n  }" in styles
     assert "restoreEditorDraft(projectSnapshot())" in suite
     assert "PROJECT_DRAFT_RESTORED" in suite
     assert "editor-suite:project-draft:" in suite
@@ -1021,7 +1034,7 @@ def test_art_template_library_frontend_contracts():
     art_tool_response = responses["/editor-art-tool.js"]
 
     assert template_page_response.status_code == 200
-    assert "/styles.css?v=20260823-01" in template_page_response.text
+    assert "/styles.css?v=20260825-03" in template_page_response.text
     assert "/art-template-library.js?v=20260819-01" in template_page_response.text
     assert "当前模板主色" in template_page_response.text
     assert 'id="templateCardGrid"' in template_page_response.text
@@ -1082,7 +1095,7 @@ def test_font_manager_frontend_contracts():
     font_script_response = responses["/font-manager.js"]
 
     assert font_page_response.status_code == 200
-    assert "/styles.css?v=20260823-01" in font_page_response.text
+    assert "/styles.css?v=20260825-03" in font_page_response.text
     assert "/font-manager.js?v=" in font_page_response.text
     assert 'id="fontUploadForm"' in font_page_response.text
     assert 'id="fontCardGrid"' in font_page_response.text
@@ -3439,7 +3452,8 @@ def test_realtime_effect_timeline_and_inspector_contracts():
     assert "data-art-selection-empty" in art_tool
     assert "ownedRoot.scrollTop = 0" in art_tool
     assert "scrollIntoView" not in pip_tool
-    assert "list.scrollTop += itemRect.bottom - listRect.bottom" in pip_tool
+    assert "listRect.height / list.offsetHeight" in pip_tool
+    assert "(itemRect.bottom - listRect.bottom) / scrollScale" in pip_tool
     assert ".editor-art-selection-empty" in styles
     art_tabs_start = styles.index(".editor-art-tool-tabs {")
     art_tabs_end = styles.index("}", art_tabs_start)

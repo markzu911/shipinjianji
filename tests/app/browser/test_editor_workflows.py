@@ -263,6 +263,8 @@ def test_cut_interaction_long_fixture_performance_and_work_counts(
     thumbnail_projection = page.evaluate(
         """() => {
           const duration = 60;
+          const layer = document.querySelector('#cutFrameTimelineThumbnails');
+          const layerHeight = layer.getBoundingClientRect().height;
           const items = [...document.querySelectorAll(
             '#cutFrameTimelineThumbnails .frame-timeline-thumb'
           )].filter(item => !item.hidden);
@@ -271,6 +273,13 @@ def test_cut_interaction_long_fixture_performance_and_work_counts(
               item => item.style.position === 'absolute'
                 && Number.parseFloat(item.style.width) > 0
             ),
+            allVisible: items.length > 0 && items.every(item => {
+              const height = item.getBoundingClientRect().height;
+              return height > 0 && Math.abs(height - layerHeight) <= 0.5;
+            }),
+            allHaveFrames: items.every(
+              item => item.style.backgroundImage.startsWith('url(')
+            ),
             remapped: items.some(item => {
               const sourcePercent = Number(item.dataset.sourceTime) / duration * 100;
               return Math.abs(Number.parseFloat(item.style.left) - sourcePercent) > 0.1;
@@ -278,7 +287,12 @@ def test_cut_interaction_long_fixture_performance_and_work_counts(
           };
         }"""
     )
-    assert thumbnail_projection == {"allPositioned": True, "remapped": True}
+    assert thumbnail_projection == {
+        "allPositioned": True,
+        "allVisible": True,
+        "allHaveFrames": True,
+        "remapped": True,
+    }
     assert page.locator("#segmentList .segment-item").count() >= 60
     assert len(page.locator("#segmentList").inner_text().replace("\n", "")) >= 600
     install_base_media_mutation_probe(page)
@@ -1010,8 +1024,17 @@ def test_timeline_split_exact_clip_delete_restore_history_and_mobile_layout(
     first_clip.focus()
     first_clip.press("Delete")
     page.locator("#appDialogConfirm").filter(has_text="删除片段").click()
-    marker = page.locator("#cutFrameTimelineClips .cut-timeline-deleted-marker")
-    marker.wait_for()
+    page.wait_for_function(
+        """() => document.querySelectorAll(
+          '#cutFrameTimelineClips .cut-timeline-split-clip'
+        ).length === 2"""
+    )
+    assert page.locator(
+        "#cutFrameTimelineClips .cut-timeline-deleted-marker"
+    ).count() == 0
+    assert page.locator(
+        '#cutFrameTimelineClips [data-deleted="true"]'
+    ).count() == 0
     page.locator("#cutDraftSaveStatus").filter(
         has_text="剪辑草稿已保存"
     ).wait_for()
@@ -1039,20 +1062,26 @@ def test_timeline_split_exact_clip_delete_restore_history_and_mobile_layout(
         for item in deleted_draft["boundaryDiagnostics"]
     } == {"split_boundary_exact"}
 
-    marker.focus()
-    marker.press("Backspace")
+    page.keyboard.press("Control+z")
     page.wait_for_function(
         """() => document.querySelectorAll(
-          '#cutFrameTimelineClips .cut-timeline-deleted-marker'
-        ).length === 0"""
+          '#cutFrameTimelineClips .cut-timeline-split-clip'
+        ).length === 3"""
     )
-    page.keyboard.press("Control+z")
-    marker.wait_for()
     page.keyboard.press("Control+y")
     page.wait_for_function(
         """() => document.querySelectorAll(
-          '#cutFrameTimelineClips .cut-timeline-deleted-marker'
-        ).length === 0"""
+          '#cutFrameTimelineClips .cut-timeline-split-clip'
+        ).length === 2"""
+    )
+    assert page.locator(
+        "#cutFrameTimelineClips .cut-timeline-deleted-marker"
+    ).count() == 0
+    page.keyboard.press("Control+z")
+    page.wait_for_function(
+        """() => document.querySelectorAll(
+          '#cutFrameTimelineClips .cut-timeline-split-clip'
+        ).length === 3"""
     )
     page.wait_for_function(
         """async () => {
@@ -1150,9 +1179,9 @@ def test_timeline_split_exact_clip_delete_restore_history_and_mobile_layout(
         ).length === 0"""
     )
 
-    # Every clip remains independently recoverable, including the last clip:
-    # a zero-duration edited timeline must keep the stacked restore markers.
-    for expected_markers in range(1, 4):
+    # Deleting every clip keeps the internal split structure and history, but
+    # the timeline must not render a restore marker, placeholder, or focus target.
+    for expected_remaining in range(2, -1, -1):
         clip = page.locator(
             "#cutFrameTimelineClips .cut-timeline-split-clip"
         ).first
@@ -1161,27 +1190,24 @@ def test_timeline_split_exact_clip_delete_restore_history_and_mobile_layout(
         page.locator("#appDialogConfirm").filter(has_text="删除片段").click()
         page.wait_for_function(
             """expected => document.querySelectorAll(
-              '#cutFrameTimelineClips .cut-timeline-deleted-marker'
+              '#cutFrameTimelineClips .cut-timeline-split-clip'
             ).length === expected""",
-            arg=expected_markers,
+            arg=expected_remaining,
         )
+        assert page.locator(
+            "#cutFrameTimelineClips .cut-timeline-deleted-marker"
+        ).count() == 0
 
     all_deleted = page.evaluate(
         """() => {
           const timeline = document.querySelector('#cutFrameTimeline');
-          const track = document.querySelector('#cutFrameTimelineTrack')
-            .getBoundingClientRect();
-          const markers = [...document.querySelectorAll(
-            '#cutFrameTimelineClips .cut-timeline-deleted-marker'
-          )];
+          const clipLayer = document.querySelector('#cutFrameTimelineClips');
           return {
             timelineHidden: timeline.hidden,
-            markerCount: markers.length,
-            transforms: markers.map(item => getComputedStyle(item).transform),
-            insideTrack: markers.every(item => {
-              const bounds = item.getBoundingClientRect();
-              return bounds.left >= track.left - 1 && bounds.right <= track.right + 1;
-            }),
+            renderedChildren: clipLayer.children.length,
+            focusTargets: clipLayer.querySelectorAll(
+              'button, [tabindex], [data-deleted="true"]'
+            ).length,
             storeMarkers: window.EditorSuite.projectSnapshot().project.timeline.tracks
               .find(item => item.id === 'cut:split-structure')?.clips
               .filter(item => item.payload.deleted) || [],
@@ -1189,30 +1215,271 @@ def test_timeline_split_exact_clip_delete_restore_history_and_mobile_layout(
         }"""
     )
     assert all_deleted["timelineHidden"] is False
-    assert all_deleted["markerCount"] == 3
-    assert len(set(all_deleted["transforms"])) == 3
-    assert all_deleted["insideTrack"] is True
+    assert all_deleted["renderedChildren"] == 0
+    assert all_deleted["focusTargets"] == 0
     assert len(all_deleted["storeMarkers"]) == 3
     assert all(item["payload"]["markerEditedTime"] == 0 for item in all_deleted["storeMarkers"])
 
-    first_marker = page.locator(
-        "#cutFrameTimelineClips .cut-timeline-deleted-marker"
-    ).first
-    restored_key = first_marker.get_attribute("data-split-clip-key")
-    first_marker.focus()
-    first_marker.press("Backspace")
+    page.keyboard.press("Control+z")
     page.wait_for_function(
         """() => document.querySelectorAll(
           '#cutFrameTimelineClips .cut-timeline-split-clip'
         ).length === 1"""
     )
-    restored_focus = page.evaluate(
-        """() => document.activeElement?.dataset?.splitClipKey || ''"""
+    restored_history = page.evaluate(
+        """() => ({
+          timelineRanges:
+            window.EditorSuite.projectSnapshot().project.cut.ranges.length,
+          storeDeleted:
+            window.EditorSuite.projectSnapshot().project.timeline.tracks
+              .find(item => item.id === 'cut:split-structure')?.clips
+              .filter(item => item.payload.deleted).length,
+          markerCount: document.querySelectorAll(
+            '#cutFrameTimelineClips .cut-timeline-deleted-marker'
+          ).length,
+        })"""
     )
-    assert restored_focus == restored_key
+    assert restored_history == {
+        "timelineRanges": 1,
+        "storeDeleted": 2,
+        "markerCount": 0,
+    }
+    page.keyboard.press("Control+y")
+    page.wait_for_function(
+        """() => document.querySelectorAll(
+          '#cutFrameTimelineClips .cut-timeline-split-clip'
+        ).length === 0"""
+    )
+    assert page.locator("#cutFrameTimelineClips").locator("button").count() == 0
     assert page.locator("iframe").count() == 0
     assert base_media_mutations(page) == {"srcWrites": 0, "loadCalls": 0}
     assert page.evaluate("window.__splitVideoCreations") == 0
+
+
+def test_transcript_rows_use_half_scale_geometry_without_horizontal_overflow(
+    browser_session,
+    seeded_editor_job,
+):
+    long_text = "这是一段用于验证窄屏换行且不产生横向溢出的较长中文文案。" * 8
+    with app_module.JOBS_LOCK:
+        result = app_module.JOBS[seeded_editor_job.job_id]["result"]
+        for field in ("segments", "editableSegments"):
+            segment = result[field][1]
+            segment["text"] = long_text
+            segment["words"] = [
+                {
+                    "text": long_text,
+                    "start": segment["start"],
+                    "end": segment["end"],
+                }
+            ]
+        result["text"] = f'删除片段\n{long_text}'
+        result["noSpeechSuggestions"] = [
+            {
+                "id": "browser-middle-gap",
+                "start": 0.3,
+                "end": 0.35,
+                "duration": 0.05,
+                "originalGapDuration": 0.05,
+                "kind": "middle",
+                "protected": False,
+                "deletable": True,
+                "audioState": "quiet",
+                "quietRatio": 1.0,
+                "confidence": 0.98,
+                "reason": "浏览器布局回归空白。",
+            }
+        ]
+    app_module.persist_job_snapshot(seeded_editor_job.job_id, raise_on_error=True)
+
+    page = browser_session.page
+    page.set_viewport_size({"width": 1280, "height": 900})
+    open_editor(browser_session, seeded_editor_job)
+    page.locator(
+        '.segment-item[data-segment-index="0"] .segment-toggle'
+    ).click()
+    page.locator(
+        '.segment-item.is-delete-fragment[data-segment-index="0"]'
+    ).wait_for()
+
+    def transcript_geometry():
+        return page.evaluate(
+            """() => {
+              const deleted = document.querySelector(
+                '.segment-item.is-delete-fragment[data-segment-index="0"]'
+              );
+              const normal = document.querySelector(
+                '.segment-item[data-segment-index="1"]'
+              );
+              const noSpeech = document.querySelector(
+                '.segment-item[data-no-speech-id]'
+              );
+              const toggle = deleted.querySelector('.segment-toggle');
+              const play = deleted.querySelector('.segment-play-button');
+              const time = deleted.querySelector('.segment-time');
+              const text = deleted.querySelector('.segment-text');
+              const textRun = deleted.querySelector('.segment-text-run');
+              const badge = deleted.querySelector('.segment-current-badge');
+              const noSpeechButton = noSpeech.querySelector(
+                '.segment-no-speech-button'
+              );
+              const list = document.querySelector('#segmentList');
+              const summary = document.querySelector('.cut-summary strong');
+              const timelineButton = document.querySelector(
+                '#cutTimelineSplitButton'
+              );
+              const style = element => getComputedStyle(element);
+              const bounds = element => element.getBoundingClientRect();
+              const allItems = [...list.querySelectorAll('.segment-item')];
+              return {
+                row: bounds(deleted).height,
+                minHeight: style(deleted).minHeight,
+                paddingTop: style(deleted).paddingTop,
+                paddingRight: style(deleted).paddingRight,
+                columns: style(deleted).gridTemplateColumns,
+                columnGap: style(deleted).columnGap,
+                toggle: [bounds(toggle).width, bounds(toggle).height],
+                circle: {
+                  width: getComputedStyle(toggle, '::before').width,
+                  height: getComputedStyle(toggle, '::before').height,
+                  border: getComputedStyle(toggle, '::before').borderTopWidth,
+                },
+                play: [bounds(play).width, bounds(play).height],
+                playIcon: style(play.querySelector('iconify-icon')).fontSize,
+                timeFont: style(time).fontSize,
+                textFont: style(text).fontSize,
+                textLineHeight: style(text).lineHeight,
+                textMinHeight: style(text).minHeight,
+                textRunMinHeight: style(textRun).minHeight,
+                textRunPaddingTop: style(textRun).paddingTop,
+                textRunGap: style(textRun).gap,
+                badgeFont: style(badge).fontSize,
+                noSpeechMinHeight: style(noSpeechButton).minHeight,
+                noSpeechIcon: style(
+                  noSpeechButton.querySelector('iconify-icon')
+                ).fontSize,
+                normalHeight: bounds(normal).height,
+                noSpeechHeight: bounds(noSpeech).height,
+                fullWidth: allItems.every(
+                  item => Math.abs(bounds(item).width - bounds(list).width) <= 1
+                ),
+                itemOverflow: allItems.some(
+                  item => item.scrollWidth > item.clientWidth + 1
+                ),
+                textOverflow:
+                  normal.querySelector('.segment-text').scrollWidth
+                    > normal.querySelector('.segment-text').clientWidth + 1,
+                summaryFont: style(summary).fontSize,
+                timelineButton: [
+                  bounds(timelineButton).width,
+                  bounds(timelineButton).height,
+                ],
+                documentOverflow:
+                  document.documentElement.scrollWidth
+                    - document.documentElement.clientWidth,
+              };
+            }"""
+        )
+
+    desktop = transcript_geometry()
+    assert desktop["row"] == pytest.approx(32, abs=0.1)
+    assert desktop["minHeight"] == "32px"
+    assert desktop["paddingTop"] == "4px"
+    assert desktop["paddingRight"] == "3px"
+    assert desktop["columns"].startswith("22px 26px ")
+    assert desktop["columns"].endswith(" 22px")
+    assert desktop["columnGap"] == "4px"
+    assert desktop["toggle"] == [22, 22]
+    assert desktop["circle"] == {"width": "12px", "height": "12px", "border": "0px"}
+    assert desktop["play"] == [22, 22]
+    assert desktop["playIcon"] == "9px"
+    assert desktop["timeFont"] == "6.5px"
+    assert desktop["textFont"] == "7.5px"
+    assert desktop["textLineHeight"] == "10.875px"
+    assert desktop["textMinHeight"] == "22px"
+    assert desktop["textRunMinHeight"] == "22px"
+    assert desktop["textRunPaddingTop"] == "4px"
+    assert desktop["textRunGap"] == "2.5px"
+    assert desktop["badgeFont"] == "5px"
+    assert desktop["noSpeechMinHeight"] == "22px"
+    assert desktop["noSpeechIcon"] == "8px"
+    assert desktop["normalHeight"] > desktop["row"]
+    assert desktop["noSpeechHeight"] >= desktop["row"]
+    assert desktop["fullWidth"] is True
+    assert desktop["itemOverflow"] is False
+    assert desktop["textOverflow"] is False
+    assert desktop["summaryFont"] == "15px"
+    assert desktop["timelineButton"][0] >= 44
+    assert desktop["timelineButton"][1] >= 44
+    assert desktop["documentOverflow"] <= 1
+
+    # Playback-follow must measure the compact row that is actually rendered.
+    # It may not retain the legacy 64px placeholder/layer geometry.
+    follow_geometry = page.evaluate(
+        """() => {
+          document.querySelector('#transcriptNowPlayingLayer')
+            .dispatchEvent(new WheelEvent('wheel'));
+          const item = document.querySelector(
+            '#segmentList .segment-item[data-segment-index="1"]'
+          );
+          const wasActive = item.classList.contains('is-playback-active');
+          item.classList.add('is-playback-active');
+          const initialHeight = item.getBoundingClientRect().height;
+          const controller = window.TranscriptFollowScroll.createController({
+            layer: document.querySelector('#transcriptNowPlayingLayer'),
+          });
+          const followed = controller.follow(item, 'compact-row-review');
+          const placeholder = document.querySelector(
+            '#segmentList .segment-follow-placeholder'
+          );
+          const layer = document.querySelector('#transcriptNowPlayingLayer');
+          const active = layer.querySelector('.segment-item.is-playback-active');
+          const result = {
+            activeHeight: active.getBoundingClientRect().height,
+            followed,
+            initialHeight,
+            layerHeight: layer.getBoundingClientRect().height,
+            placeholderHeight: placeholder.getBoundingClientRect().height,
+            placeholderButtons: placeholder.querySelectorAll('button').length,
+            activeButtons: active.querySelectorAll('button').length,
+          };
+          controller.reset();
+          if (!wasActive) item.classList.remove('is-playback-active');
+          return result;
+        }"""
+    )
+    assert follow_geometry["followed"] is True
+    assert follow_geometry["initialHeight"] == pytest.approx(
+        desktop["normalHeight"], abs=0.1
+    )
+    assert follow_geometry["activeHeight"] == pytest.approx(
+        desktop["normalHeight"], abs=0.1
+    )
+    assert follow_geometry["layerHeight"] == pytest.approx(
+        desktop["normalHeight"], abs=0.1
+    )
+    assert follow_geometry["placeholderHeight"] == pytest.approx(
+        desktop["normalHeight"], abs=0.1
+    )
+    assert follow_geometry["placeholderButtons"] == 0
+    assert follow_geometry["activeButtons"] > 0
+
+    page.set_viewport_size({"width": 375, "height": 812})
+    mobile = transcript_geometry()
+    assert mobile["toggle"] == [22, 22]
+    assert mobile["play"] == [22, 22]
+    assert mobile["timeFont"] == "6.5px"
+    assert mobile["textFont"] == "7.5px"
+    assert mobile["columns"].startswith("22px ")
+    assert mobile["columns"].endswith(" 22px")
+    assert mobile["normalHeight"] >= desktop["normalHeight"]
+    assert mobile["fullWidth"] is True
+    assert mobile["itemOverflow"] is False
+    assert mobile["textOverflow"] is False
+    assert mobile["summaryFont"] == "15px"
+    assert mobile["timelineButton"][0] >= 44
+    assert mobile["timelineButton"][1] >= 44
+    assert mobile["documentOverflow"] <= 1
 
 
 def test_tool_switch_keeps_selection_preview_and_playback_position(
@@ -2178,6 +2445,59 @@ def test_top_level_pip_prompt_image_controls_and_schema_v2_recovery(
     page.locator('[data-editor-tool="pip"]').click()
     panel = page.locator("#editorPipPanelRoot")
     panel.wait_for(state="visible")
+    compact_geometry = panel.evaluate(
+        """host => {
+          const tool = host.querySelector('.editor-pip-tool');
+          const content = host.querySelector('.editor-pip-tool-panel');
+          const segment = host.querySelector('.pip-segment-option');
+          const radio = segment?.querySelector('input');
+          const mode = host.querySelector('.pip-mode-option');
+          const toolRect = tool.getBoundingClientRect();
+          const contentRect = content.getBoundingClientRect();
+          return {
+            toolWidth: toolRect.width,
+            contentWidth: contentRect.width,
+            segmentHeight: segment.getBoundingClientRect().height,
+            radioWidth: radio.getBoundingClientRect().width,
+            radioHeight: radio.getBoundingClientRect().height,
+            modeHeight: mode.getBoundingClientRect().height,
+            horizontalOverflow: tool.scrollWidth > tool.clientWidth + 1,
+          };
+        }"""
+    )
+    assert compact_geometry["contentWidth"] == pytest.approx(
+        compact_geometry["toolWidth"] - 16,
+        abs=1.5,
+    )
+    assert compact_geometry["segmentHeight"] == pytest.approx(32, abs=0.75)
+    assert compact_geometry["radioWidth"] == pytest.approx(13, abs=0.75)
+    assert compact_geometry["radioHeight"] == pytest.approx(22, abs=0.75)
+    assert compact_geometry["modeHeight"] == pytest.approx(34.5, abs=0.75)
+    assert compact_geometry["horizontalOverflow"] is False
+
+    original_viewport = page.viewport_size
+    page.set_viewport_size({"width": 375, "height": 812})
+    mobile_geometry = panel.evaluate(
+        """host => {
+          const tool = host.querySelector('.editor-pip-tool');
+          const content = host.querySelector('.editor-pip-tool-panel');
+          const segment = host.querySelector('.pip-segment-option');
+          return {
+            toolWidth: tool.getBoundingClientRect().width,
+            contentWidth: content.getBoundingClientRect().width,
+            segmentHeight: segment.getBoundingClientRect().height,
+            horizontalOverflow: tool.scrollWidth > tool.clientWidth + 1,
+          };
+        }"""
+    )
+    assert mobile_geometry["contentWidth"] == pytest.approx(
+        mobile_geometry["toolWidth"] - 12,
+        abs=1.5,
+    )
+    assert mobile_geometry["segmentHeight"] == pytest.approx(32, abs=0.75)
+    assert mobile_geometry["horizontalOverflow"] is False
+    page.set_viewport_size(original_viewport)
+
     segment_list = panel.locator("[data-pip-segments]")
     outer_scroll = panel.locator(".editor-pip-tool").evaluate(
         "tool => tool.scrollTop"
