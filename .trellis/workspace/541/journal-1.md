@@ -614,3 +614,24 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 28: 修复时间轴文案投影丢字
+
+**Date**: 2026-08-26
+**Task**: 修复时间轴文案投影丢字
+**Branch**: `develop`
+
+### Summary
+
+统一语义保留字符到物理剪后时间的前后端投影；cut-draft 返回受 revision 守卫的派生 transcript；修复文字保存 timingRevision 与显式空范围兼容；45 个浏览器和 372 个非浏览器测试通过。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `dbe03a1` | (see git log) |
+
+### Status
+
+[OK] **Completed**
