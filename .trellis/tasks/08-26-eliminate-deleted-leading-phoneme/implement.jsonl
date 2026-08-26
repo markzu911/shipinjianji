@@ -1,0 +1,6 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `py -3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/backend/index.md", "reason": "后端声学边界实现入口与规范导航"}
+{"file": ".trellis/spec/backend/media-and-timeline.md", "reason": "文字语义/物理边界、forced alignment、PCM 与真实媒体契约"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "后端不变量与完整回归要求"}
+{"file": ".trellis/spec/testing/index.md", "reason": "声学矩阵、真实媒体和外部模型隔离要求"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "草稿、预览与 compose 共用权威物理范围"}

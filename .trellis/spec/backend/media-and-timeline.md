@@ -146,6 +146,7 @@ body = { count, existingOverlays, draftTranscript, draftDuration };
 - 后端：`resolve_cut_draft_acoustic_boundaries(media_path, text_ranges, timeline_ranges, segments, duration)`
 - 后端：`align_cut_draft_text_ranges_to_audio(media_path, text_ranges, segments, duration)`
 - 后端：`refine_shared_character_boundary(left, right, fallback, samples, sample_rate, *, deletion_on_left, allow_token_extension=True)`
+- 后端：`corroborate_forced_deleted_head_with_pcm(retained_limit, forced_candidate, samples, sample_rate) -> (boundary | None, evidence)`
 - 后端：`find_quiet_token_extension_boundary(left, right, fallback, samples, sample_rate, *, deletion_on_left, enabled)`
 - 后端：`resolve_cut_draft_delete_ranges(draft, suggestions, segments, duration, *, use_text_semantic_boundaries=False)`
 - 后端：`normalize_cut_draft_split_points(points, duration)`
@@ -171,6 +172,9 @@ body = { count, existingOverlays, draftTranscript, draftDuration };
 - `fa-zh` 对齐必须使用完整句段文本并校验字符数量/顺序、finite 单调时间、句段包络和相邻字符非坍缩结构；sidecar 的 `validation.valid` 不能替代读取时复验。旧任务只惰性补齐本次范围附近句段。
 - 以下多尺度 RMS、字符走廊和 token 补充规则只用于强制对齐缺失或无效时的保守降级，不能覆盖有效 `fa-zh` 转换。
 - 删除终点只能从语义 fallback 向后移动，删除起点只能向前移动；任何反方向候选均无效。边界移动必须相对 fallback 明显降低多尺度 RMS，fallback 已低但方向侧仍存在更低谷底时不得因固定 RMS 阈值提前停止。
+- 同段、非重复且结构有效的 delete-start 不能把被删字符的 forced start 当作完整声学起音；上一保留字符的 forced end 是不可越过的 hard limit，forced start 只是候选上界。两者之间只有按时间出现“至少两个相邻 `5ms` 低能 block -> 至少两个相邻高能 block -> 至少一次局部相对能量跃升”时，才可把物理起点前移到低能走廊靠近起音一侧的低振幅采样；否则保持 forced candidate，禁止固定毫秒 padding。
+- 同一候选走廊存在多个静音段时必须选择 hard limit 后第一个具有持续起音佐证的静音段，不能倒序选择被删音节内部的后续短停顿。判定使用相对能量并保持非削波增益不变性；均匀低能、轻微噪声、单点尖谷、单调斜坡和立即起音均不构成前移证据。
+- delete-start PCM 佐证成功时诊断记录 `trustReason=forced_deleted_head_pcm_valley`、`forcedCandidate`、`final`、`pcmValleyStart/End`、`pcmAttackStart`、`pcmAdjustment` 和 `retainedSpeechHardLimit`。文字范围与靠近同一转换的 timeline 范围必须复用 shared forced boundary cache，得到相同物理点；`originalStart/originalEnd` 保持语义值。
 - 字符中心走廊只接受相对 fallback 明显改善的内部局部低谷，或同时位于整条走廊谷底的方向端点；固定 RMS 阈值不得改变候选资格，单调斜坡和非谷底字符中心不能充当共享边界。
 - 删除起点可以向前扩展到上一保留字符所属原始 ASR token 的起点，但补充走廊必须出现至少两个采样步长组成的相对低能量谷底，并且该谷底还要比字符中心走廊候选显著更低。token 只限定删除起点的补充声学走廊，不能被整体加入删除范围，也不能用固定毫秒扩张替代。
 - 删除终点禁止越过字符中心走廊继续搜索下一保留字符的 token；下一字说完后的静音不能证明它的起音可以删除。
@@ -202,14 +206,18 @@ body = { count, existingOverlays, draftTranscript, draftDuration };
 | fallback 已安静但方向侧存在显著更低谷底 | 仍使用相对谷底，不因固定 RMS 阈值提前停止 |
 | 方向侧只有单调斜坡、均匀低能量或谷底位于 token 外 | 保持 fallback，不扩大搜索 |
 | 单个保留字符夹在两个删除范围之间 | 禁用两侧 token 补充走廊，保留字符物理核心不被覆盖 |
+| 同段 delete-start 的 forced candidate 晚于真实 PCM 起音，hard limit 后存在持续静音和持续起音 | 物理起点移动到第一条已佐证静音走廊的起音侧，记录 `forced_deleted_head_pcm_valley` |
+| 同段 delete-start 存在多条静音走廊 | 使用 hard limit 后第一条带持续起音和局部跃升的走廊，不选择被删音节内部后续停顿 |
+| 同段 delete-start 只有立即起音、短于两个 block 的凹点、单点、均匀低能、轻噪声或单调斜坡 | 保持 forced candidate；不固定前移、不越过 retained hard limit |
 
 ### 5. Good / Base / Bad Cases
 
 - Good：粗 ASR token 同时包含被删“得”和保留“你”时，用完整句段已知文本对齐取得被删字可靠尾点 `37.810s`；文字 `originalEnd` 仍为语义边界，物理 `end` 不吞后续 quiet gap，也不越过“你”的可靠起音。
 - Good：删除起点前的真实停顿被 ASR 均摊到上一保留字符时间内，字符中心走廊只有较浅低谷时，起点在上一 token 内向前移动到更深且持续的相对谷底，但语义范围不变。
+- Good：forced start 落在被删首字起音之后时，PCM 在 retained hard limit 后先出现持续低能、再出现局部跃升和持续高能；物理 delete-start 移到首条静音走廊尾部，文字语义范围不变。
 - Base：手动范围完全落在完整句段字符之间的 quiet gap 时，物理 `start/end` 等于 `original*`；重复保存命中 sidecar 且边界不继续漂移。
 - Base：删除播放头分割形成的完整 clip 时先验证相邻 anchors，再保持精确端点；普通拖选仍独立使用语音安全吸附。
-- Bad：在短音频窗内只对齐局部文字、把 DashScope token 时间当字符硬包络、把单调衰减的响亮采样点当低谷，或直接把相邻 ASR token 整体扩进删除范围。
+- Bad：在短音频窗内只对齐局部文字、把 DashScope token 时间当字符硬包络、把单调衰减的响亮采样点当低谷、倒序选择被删音节内部静音，或直接把相邻 ASR token 整体扩进删除范围。
 
 ### 6. Tests Required
 
@@ -218,12 +226,14 @@ body = { count, existingOverlays, draftTranscript, draftDuration };
 - 单元测试：删除起点只向前、终点只向后；拒绝单调斜坡和非谷底方向端点，接受相对改善且位于走廊谷底的方向端点，均匀静音或均匀低能量保持不动。
 - 性质测试：同一内部低谷、方向端点和起点 token 补充谷底在多组不削波增益下保持边界稳定；缩小增益后的单调斜坡仍回退，不能因跨过固定 RMS 阈值改变决策。
 - 单元测试：删除起点字符走廊仅有较浅相对低谷而上一 token 内存在更深持续谷底时选择最近谷底点；谷底位于 token 外时回退；删除终点不得吸附到下一保留字符说完后的静音；短保留字符夹在两段删除之间时禁用扩展。
+- 单元测试：forced delete-start 在多组非削波增益下选择相同首条已佐证走廊；文字/timeline 共享 boundary 与诊断且 `original*` 不变；双静音走廊不得选后一个。立即起音、单点、一个 `5ms` 短谷、均匀低能、轻噪声和单调缓升必须保持 forced candidate。
 - 单元测试：自动空白部分/完全覆盖文字、两个自动范围夹住小于 `0.12s` 的保留词、手动范围只删除词的部分时，断言保留片段不被合并穿越。
 - API 测试：草稿 PUT 返回校准后的 `start/end`、原始语义边界和重算的相邻静音，并验证前后两侧保留文字限制、分析失败安全回退与重复 PUT 幂等。
 - API 测试：历史草稿缺少 split 字段时恢复为空；split point clamp/sort/dedupe；合法 exact 不触发 alignment/PCM；伪造 key、非相邻 anchors、speech-safe identity 和重复 exact 均返回 `400`。
 - 生成回归：`process_cut_job` 与组合生成不得再次调用边界吸附，最终 `ranges` 等于已保存草稿物理范围；物理范围延长时 `transcriptRanges` 仍只删除选中的语义文字；revision 过期、缺失草稿和空权威草稿分别断言冲突/拒绝。
 - 前端契约：校准响应原子更新 text/timeline 和当前撤销快照，键盘微调同步 `original*`，旧请求响应不能覆盖并发新编辑，生成必须等待稳定保存队列；真实浏览器验证刷新、立即生成、公共预览/compose revision 和 375px。
 - 真实媒体 gate：产品 resolver + FFmpeg/AAC 重生成后，二次 ASR 不再返回被删音节，下一保留字 PCM 相关、lag 和 RMS 不退化；人耳盲听仍是发布前人工门槛。
+- 首音残片 gate：全文 ASR 不能作为唯一通过条件；必须记录源时间 hard limit/candidate/final、成片拼接前 `20-40ms` 短窗能量与峰值，并提供局部试听片段确认被删首音消失且下一保留表达完整。
 
 ### 7. Wrong vs Correct
 
@@ -268,6 +278,19 @@ segment = ensure_acoustic_alignment_cache(
     segment_indexes={affected_segment_index},
 )
 physical_end = resolve_cut_draft_acoustic_boundaries(...)[0][0]["end"]
+```
+
+```python
+# Wrong: forced start 可能已经落在被删首字的低能起音之后。
+physical_start = deleted_character["_forcedStart"]
+
+# Correct: 保留字 forced end 是 hard limit，首条持续静音/起音走廊决定物理点。
+physical_start, evidence = corroborate_forced_deleted_head_with_pcm(
+    retained_character["_forcedEnd"],
+    deleted_character["_forcedStart"],
+    samples,
+    sample_rate,
+)
 ```
 
 ```python

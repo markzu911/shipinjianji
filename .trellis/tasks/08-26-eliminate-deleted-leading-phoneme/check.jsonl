@@ -1,0 +1,5 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `py -3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/backend/media-and-timeline.md", "reason": "核对 delete-start、retained hard limit 与共享 resolver 契约"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "核对兼容、不变量和全量测试门槛"}
+{"file": ".trellis/spec/testing/index.md", "reason": "核对声学回归矩阵、真实媒体与增益稳定性"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "核对跨层数据流和语义/物理范围所有权"}
