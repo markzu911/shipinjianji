@@ -268,6 +268,11 @@ def test_cut_interaction_long_fixture_performance_and_work_counts(
           const items = [...document.querySelectorAll(
             '#cutFrameTimelineThumbnails .frame-timeline-thumb'
           )].filter(item => !item.hidden);
+          const positions = items.map(item => ({
+            left: Number.parseFloat(item.style.left),
+            right: Number.parseFloat(item.style.left)
+              + Number.parseFloat(item.style.width),
+          })).sort((left, right) => left.left - right.left);
           return {
             allPositioned: items.every(
               item => item.style.position === 'absolute'
@@ -284,6 +289,12 @@ def test_cut_interaction_long_fixture_performance_and_work_counts(
               const sourcePercent = Number(item.dataset.sourceTime) / duration * 100;
               return Math.abs(Number.parseFloat(item.style.left) - sourcePercent) > 0.1;
             }),
+            continuousCoverage: positions.length > 0
+              && Math.abs(positions[0].left) <= 0.1
+              && Math.abs(positions.at(-1).right - 100) <= 0.1
+              && positions.slice(1).every((position, index) =>
+                Math.abs(position.left - positions[index].right) <= 0.1
+              ),
           };
         }"""
     )
@@ -292,6 +303,7 @@ def test_cut_interaction_long_fixture_performance_and_work_counts(
         "allVisible": True,
         "allHaveFrames": True,
         "remapped": True,
+        "continuousCoverage": True,
     }
     assert page.locator("#segmentList .segment-item").count() >= 60
     assert len(page.locator("#segmentList").inner_text().replace("\n", "")) >= 600
@@ -1323,6 +1335,10 @@ def test_transcript_rows_use_half_scale_geometry_without_horizontal_overflow(
               const noSpeechButton = noSpeech.querySelector(
                 '.segment-no-speech-button'
               );
+              const noSpeechTitle = noSpeechButton.querySelector('strong');
+              const noSpeechMeta = noSpeechButton.querySelector(
+                '.segment-no-speech-meta'
+              );
               const list = document.querySelector('#segmentList');
               const summary = document.querySelector('.cut-summary strong');
               const timelineButton = document.querySelector(
@@ -1343,6 +1359,7 @@ def test_transcript_rows_use_half_scale_geometry_without_horizontal_overflow(
                   width: getComputedStyle(toggle, '::before').width,
                   height: getComputedStyle(toggle, '::before').height,
                   border: getComputedStyle(toggle, '::before').borderTopWidth,
+                  font: getComputedStyle(toggle, '::before').fontSize,
                 },
                 play: [bounds(play).width, bounds(play).height],
                 playIcon: style(play.querySelector('iconify-icon')).fontSize,
@@ -1358,6 +1375,8 @@ def test_transcript_rows_use_half_scale_geometry_without_horizontal_overflow(
                 noSpeechIcon: style(
                   noSpeechButton.querySelector('iconify-icon')
                 ).fontSize,
+                noSpeechTitleFont: style(noSpeechTitle).fontSize,
+                noSpeechMetaFont: style(noSpeechMeta).fontSize,
                 normalHeight: bounds(normal).height,
                 noSpeechHeight: bounds(noSpeech).height,
                 fullWidth: allItems.every(
@@ -1365,6 +1384,9 @@ def test_transcript_rows_use_half_scale_geometry_without_horizontal_overflow(
                 ),
                 itemOverflow: allItems.some(
                   item => item.scrollWidth > item.clientWidth + 1
+                ),
+                rowClipping: allItems.some(
+                  item => item.scrollHeight > item.clientHeight + 1
                 ),
                 textOverflow:
                   normal.querySelector('.segment-text').scrollWidth
@@ -1390,23 +1412,31 @@ def test_transcript_rows_use_half_scale_geometry_without_horizontal_overflow(
     assert desktop["columns"].endswith(" 22px")
     assert desktop["columnGap"] == "4px"
     assert desktop["toggle"] == [22, 22]
-    assert desktop["circle"] == {"width": "12px", "height": "12px", "border": "0px"}
+    assert desktop["circle"] == {
+        "width": "12px",
+        "height": "12px",
+        "border": "0px",
+        "font": "10px",
+    }
     assert desktop["play"] == [22, 22]
-    assert desktop["playIcon"] == "9px"
-    assert desktop["timeFont"] == "6.5px"
-    assert desktop["textFont"] == "7.5px"
-    assert desktop["textLineHeight"] == "10.875px"
+    assert desktop["playIcon"] == "11px"
+    assert desktop["timeFont"] == "9px"
+    assert desktop["textFont"] == "10px"
+    assert desktop["textLineHeight"] == "13.5px"
     assert desktop["textMinHeight"] == "22px"
     assert desktop["textRunMinHeight"] == "22px"
-    assert desktop["textRunPaddingTop"] == "4px"
+    assert desktop["textRunPaddingTop"] == "2px"
     assert desktop["textRunGap"] == "2.5px"
-    assert desktop["badgeFont"] == "5px"
+    assert desktop["badgeFont"] == "7px"
     assert desktop["noSpeechMinHeight"] == "22px"
-    assert desktop["noSpeechIcon"] == "8px"
+    assert desktop["noSpeechIcon"] == "10px"
+    assert desktop["noSpeechTitleFont"] == "9px"
+    assert desktop["noSpeechMetaFont"] == "8px"
     assert desktop["normalHeight"] > desktop["row"]
     assert desktop["noSpeechHeight"] >= desktop["row"]
     assert desktop["fullWidth"] is True
     assert desktop["itemOverflow"] is False
+    assert desktop["rowClipping"] is False
     assert desktop["textOverflow"] is False
     assert desktop["summaryFont"] == "15px"
     assert desktop["timelineButton"][0] >= 44
@@ -1468,18 +1498,77 @@ def test_transcript_rows_use_half_scale_geometry_without_horizontal_overflow(
     mobile = transcript_geometry()
     assert mobile["toggle"] == [22, 22]
     assert mobile["play"] == [22, 22]
-    assert mobile["timeFont"] == "6.5px"
-    assert mobile["textFont"] == "7.5px"
+    assert mobile["timeFont"] == "9px"
+    assert mobile["textFont"] == "10px"
     assert mobile["columns"].startswith("22px ")
     assert mobile["columns"].endswith(" 22px")
     assert mobile["normalHeight"] >= desktop["normalHeight"]
     assert mobile["fullWidth"] is True
     assert mobile["itemOverflow"] is False
+    assert mobile["rowClipping"] is False
     assert mobile["textOverflow"] is False
     assert mobile["summaryFont"] == "15px"
     assert mobile["timelineButton"][0] >= 44
     assert mobile["timelineButton"][1] >= 44
     assert mobile["documentOverflow"] <= 1
+
+    page.locator(
+        '#segmentList .segment-item.is-delete-fragment[data-segment-index="0"] '
+        '.segment-restore-button'
+    ).click()
+    restored_item = page.locator(
+        '#segmentList .segment-item[data-segment-index="0"]'
+        ':not(.is-delete-fragment)'
+    )
+    restored_item.wait_for(state="visible")
+    restored_geometry = restored_item.evaluate(
+        """item => {
+          const bounds = item.getBoundingClientRect();
+          const text = item.querySelector('.segment-text');
+          return {
+            height: bounds.height,
+            textFont: getComputedStyle(text).fontSize,
+            clipping: item.scrollHeight > item.clientHeight + 1,
+            overflow: item.scrollWidth > item.clientWidth + 1,
+          };
+        }"""
+    )
+    assert restored_geometry["height"] >= 32
+    assert restored_geometry["textFont"] == "10px"
+    assert restored_geometry["clipping"] is False
+    assert restored_geometry["overflow"] is False
+
+    page.locator(
+        '#segmentList .segment-item.is-no-speech-fragment.is-delete-fragment '
+        '.segment-toggle'
+    ).click()
+    restored_no_speech = page.locator(
+        '#segmentList .segment-item.is-no-speech-fragment.is-restored-no-speech'
+    )
+    restored_no_speech.wait_for(state="visible")
+    restored_no_speech_geometry = restored_no_speech.evaluate(
+        """item => {
+          const button = item.querySelector('.segment-no-speech-button');
+          return {
+            titleFont: getComputedStyle(button.querySelector('strong')).fontSize,
+            metaFont: getComputedStyle(
+              button.querySelector('.segment-no-speech-meta')
+            ).fontSize,
+            iconFont: getComputedStyle(
+              button.querySelector('iconify-icon')
+            ).fontSize,
+            clipping: item.scrollHeight > item.clientHeight + 1,
+            overflow: item.scrollWidth > item.clientWidth + 1,
+          };
+        }"""
+    )
+    assert restored_no_speech_geometry == {
+        "titleFont": "9px",
+        "metaFont": "8px",
+        "iconFont": "10px",
+        "clipping": False,
+        "overflow": False,
+    }
 
 
 def test_tool_switch_keeps_selection_preview_and_playback_position(
@@ -2451,16 +2540,76 @@ def test_top_level_pip_prompt_image_controls_and_schema_v2_recovery(
           const content = host.querySelector('.editor-pip-tool-panel');
           const segment = host.querySelector('.pip-segment-option');
           const radio = segment?.querySelector('input');
+          const segmentText = segment?.querySelector('strong');
+          const segmentTime = segment?.querySelector('time');
           const mode = host.querySelector('.pip-mode-option');
+          const modeRadio = mode?.querySelector('input[type="radio"]');
+          const modeHelp = mode?.querySelector('small');
+          const title = host.querySelector('#editorPipTitle');
+          const legend = host.querySelector('legend');
+          const aspect = host.querySelector('[data-pip-aspect]');
+          const action = host.querySelector('[data-pip-generate]');
+          const numberInput = host.querySelector('[data-pip-range="start"]');
+          const prompt = host.querySelector('[data-pip-prompt]');
+          const resultCount = host.querySelector('[data-pip-count]');
+          const sectionStatus = host.querySelector('[data-pip-segment-time]');
+          const sectionTitle = host.querySelector('.pip-section-title-row h3');
+          const emptyState = host.querySelector('[data-pip-empty]');
           const toolRect = tool.getBoundingClientRect();
           const contentRect = content.getBoundingClientRect();
+          const segmentRect = segment.getBoundingClientRect();
+          const radioRect = radio.getBoundingClientRect();
+          const timeRect = segmentTime.getBoundingClientRect();
+          const textRect = segmentText.getBoundingClientRect();
+          const contentStyle = getComputedStyle(content);
+          const segmentTextStyle = getComputedStyle(segmentText);
           return {
             toolWidth: toolRect.width,
             contentWidth: contentRect.width,
+            zoom: Number.parseFloat(contentStyle.zoom),
+            fontFamily: contentStyle.fontFamily,
+            fontWeight: contentStyle.fontWeight,
+            titleFontWeight: getComputedStyle(title).fontWeight,
+            legendFontWeight: getComputedStyle(legend).fontWeight,
+            strongFontWeight: getComputedStyle(segmentText).fontWeight,
+            helperFontWeight: getComputedStyle(modeHelp).fontWeight,
+            resultCountFontSize: getComputedStyle(resultCount).fontSize,
+            sectionStatusFontSize: getComputedStyle(sectionStatus).fontSize,
+            sectionTitleFontSize: getComputedStyle(sectionTitle).fontSize,
+            segmentTimeFontSize: getComputedStyle(segmentTime).fontSize,
+            segmentStrongFontSize: getComputedStyle(segmentText).fontSize,
+            helperFontSize: getComputedStyle(modeHelp).fontSize,
+            legendFontSize: getComputedStyle(legend).fontSize,
+            selectFontSize: getComputedStyle(aspect).fontSize,
+            buttonFontSize: getComputedStyle(action).fontSize,
+            inputFontSize: getComputedStyle(numberInput).fontSize,
+            textareaFontSize: getComputedStyle(prompt).fontSize,
+            emptyFontSize: getComputedStyle(emptyState).fontSize,
+            selectFontFamily: getComputedStyle(aspect).fontFamily,
+            buttonFontFamily: getComputedStyle(action).fontFamily,
+            inputFontFamily: getComputedStyle(numberInput).fontFamily,
+            radioFontFamily: getComputedStyle(radio).fontFamily,
+            textareaFontFamily: getComputedStyle(prompt).fontFamily,
             segmentHeight: segment.getBoundingClientRect().height,
             radioWidth: radio.getBoundingClientRect().width,
             radioHeight: radio.getBoundingClientRect().height,
+            radioLeftInset: radioRect.left - segmentRect.left,
+            radioFullyVisible: radioRect.left >= segmentRect.left &&
+              radioRect.right <= segmentRect.right,
+            timeTextGap: textRect.left - timeRect.right,
+            timeBeforeText: timeRect.right < textRect.left,
+            timeOverflow: segmentTime.scrollWidth > segmentTime.clientWidth + 1,
+            strongEllipsis: {
+              overflow: segmentTextStyle.overflow,
+              textOverflow: segmentTextStyle.textOverflow,
+              whiteSpace: segmentTextStyle.whiteSpace,
+            },
             modeHeight: mode.getBoundingClientRect().height,
+            modeRadioWidth: modeRadio.getBoundingClientRect().width,
+            modeRadioHeight: modeRadio.getBoundingClientRect().height,
+            rowClipping: [...host.querySelectorAll('.pip-segment-option')].some(
+              item => item.scrollHeight > item.clientHeight + 1
+            ),
             horizontalOverflow: tool.scrollWidth > tool.clientWidth + 1,
           };
         }"""
@@ -2469,10 +2618,44 @@ def test_top_level_pip_prompt_image_controls_and_schema_v2_recovery(
         compact_geometry["toolWidth"] - 16,
         abs=1.5,
     )
-    assert compact_geometry["segmentHeight"] == pytest.approx(32, abs=0.75)
-    assert compact_geometry["radioWidth"] == pytest.approx(13, abs=0.75)
-    assert compact_geometry["radioHeight"] == pytest.approx(22, abs=0.75)
-    assert compact_geometry["modeHeight"] == pytest.approx(34.5, abs=0.75)
+    assert compact_geometry["zoom"] == pytest.approx(0.6)
+    assert "Microsoft YaHei UI" in compact_geometry["fontFamily"]
+    for control in ("button", "input", "radio", "select", "textarea"):
+        assert compact_geometry[f"{control}FontFamily"] == compact_geometry["fontFamily"]
+    assert compact_geometry["fontWeight"] == "500"
+    assert compact_geometry["titleFontWeight"] == "700"
+    assert compact_geometry["legendFontWeight"] == "700"
+    assert compact_geometry["strongFontWeight"] == "700"
+    assert compact_geometry["helperFontWeight"] == "500"
+    assert compact_geometry["resultCountFontSize"] == "16px"
+    assert compact_geometry["sectionStatusFontSize"] == "16px"
+    assert compact_geometry["sectionTitleFontSize"] == "18px"
+    assert compact_geometry["segmentTimeFontSize"] == "15px"
+    assert compact_geometry["segmentStrongFontSize"] == "17px"
+    assert compact_geometry["helperFontSize"] == "15px"
+    assert compact_geometry["legendFontSize"] == "16px"
+    assert compact_geometry["selectFontSize"] == "16px"
+    assert compact_geometry["buttonFontSize"] == "16px"
+    assert compact_geometry["inputFontSize"] == "16px"
+    assert compact_geometry["textareaFontSize"] == "16px"
+    assert compact_geometry["emptyFontSize"] == "16px"
+    assert compact_geometry["segmentHeight"] == pytest.approx(38.4, abs=0.75)
+    assert compact_geometry["radioWidth"] == pytest.approx(15.6, abs=0.75)
+    assert compact_geometry["radioHeight"] == pytest.approx(15.6, abs=0.75)
+    assert compact_geometry["radioLeftInset"] >= 8
+    assert compact_geometry["radioFullyVisible"] is True
+    assert compact_geometry["timeTextGap"] == pytest.approx(7.2, abs=0.5)
+    assert compact_geometry["timeBeforeText"] is True
+    assert compact_geometry["timeOverflow"] is False
+    assert compact_geometry["strongEllipsis"] == {
+        "overflow": "hidden",
+        "textOverflow": "ellipsis",
+        "whiteSpace": "nowrap",
+    }
+    assert compact_geometry["modeHeight"] == pytest.approx(39.6, abs=0.75)
+    assert compact_geometry["modeRadioWidth"] == pytest.approx(15.6, abs=0.75)
+    assert compact_geometry["modeRadioHeight"] == pytest.approx(15.6, abs=0.75)
+    assert compact_geometry["rowClipping"] is False
     assert compact_geometry["horizontalOverflow"] is False
 
     original_viewport = page.viewport_size
@@ -2482,10 +2665,54 @@ def test_top_level_pip_prompt_image_controls_and_schema_v2_recovery(
           const tool = host.querySelector('.editor-pip-tool');
           const content = host.querySelector('.editor-pip-tool-panel');
           const segment = host.querySelector('.pip-segment-option');
+          const radio = segment?.querySelector('input[type="radio"]');
+          const segmentText = segment?.querySelector('strong');
+          const segmentTime = segment?.querySelector('time');
+          const modeRadio = host.querySelector('.pip-mode-option input[type="radio"]');
+          const aspect = host.querySelector('[data-pip-aspect]');
+          const action = host.querySelector('[data-pip-generate]');
+          const numberInput = host.querySelector('[data-pip-range="start"]');
+          const prompt = host.querySelector('[data-pip-prompt]');
+          const contentStyle = getComputedStyle(content);
+          const segmentRect = segment.getBoundingClientRect();
+          const radioRect = radio.getBoundingClientRect();
+          const timeRect = segmentTime.getBoundingClientRect();
+          const textRect = segmentText.getBoundingClientRect();
+          const segmentTextStyle = getComputedStyle(segmentText);
           return {
             toolWidth: tool.getBoundingClientRect().width,
             contentWidth: content.getBoundingClientRect().width,
+            zoom: Number.parseFloat(contentStyle.zoom),
+            fontFamily: contentStyle.fontFamily,
+            fontWeight: contentStyle.fontWeight,
+            strongFontWeight: getComputedStyle(segmentText).fontWeight,
+            segmentTimeFontSize: getComputedStyle(segmentTime).fontSize,
+            segmentStrongFontSize: getComputedStyle(segmentText).fontSize,
+            buttonFontSize: getComputedStyle(action).fontSize,
+            buttonFontFamily: getComputedStyle(action).fontFamily,
+            inputFontFamily: getComputedStyle(numberInput).fontFamily,
+            radioFontFamily: getComputedStyle(radio).fontFamily,
+            selectFontFamily: getComputedStyle(aspect).fontFamily,
+            textareaFontFamily: getComputedStyle(prompt).fontFamily,
             segmentHeight: segment.getBoundingClientRect().height,
+            radioWidth: radio.getBoundingClientRect().width,
+            radioHeight: radio.getBoundingClientRect().height,
+            radioLeftInset: radioRect.left - segmentRect.left,
+            radioFullyVisible: radioRect.left >= segmentRect.left &&
+              radioRect.right <= segmentRect.right,
+            timeTextGap: textRect.left - timeRect.right,
+            timeBeforeText: timeRect.right < textRect.left,
+            timeOverflow: segmentTime.scrollWidth > segmentTime.clientWidth + 1,
+            strongEllipsis: {
+              overflow: segmentTextStyle.overflow,
+              textOverflow: segmentTextStyle.textOverflow,
+              whiteSpace: segmentTextStyle.whiteSpace,
+            },
+            modeRadioWidth: modeRadio.getBoundingClientRect().width,
+            modeRadioHeight: modeRadio.getBoundingClientRect().height,
+            rowClipping: [...host.querySelectorAll('.pip-segment-option')].some(
+              item => item.scrollHeight > item.clientHeight + 1
+            ),
             horizontalOverflow: tool.scrollWidth > tool.clientWidth + 1,
           };
         }"""
@@ -2494,7 +2721,31 @@ def test_top_level_pip_prompt_image_controls_and_schema_v2_recovery(
         mobile_geometry["toolWidth"] - 12,
         abs=1.5,
     )
-    assert mobile_geometry["segmentHeight"] == pytest.approx(32, abs=0.75)
+    assert mobile_geometry["zoom"] == pytest.approx(0.6)
+    assert "Microsoft YaHei UI" in mobile_geometry["fontFamily"]
+    for control in ("button", "input", "radio", "select", "textarea"):
+        assert mobile_geometry[f"{control}FontFamily"] == mobile_geometry["fontFamily"]
+    assert mobile_geometry["fontWeight"] == "500"
+    assert mobile_geometry["strongFontWeight"] == "700"
+    assert mobile_geometry["segmentTimeFontSize"] == "15px"
+    assert mobile_geometry["segmentStrongFontSize"] == "17px"
+    assert mobile_geometry["buttonFontSize"] == "16px"
+    assert mobile_geometry["segmentHeight"] == pytest.approx(38.4, abs=0.75)
+    assert mobile_geometry["radioWidth"] == pytest.approx(15.6, abs=0.75)
+    assert mobile_geometry["radioHeight"] == pytest.approx(15.6, abs=0.75)
+    assert mobile_geometry["radioLeftInset"] >= 8
+    assert mobile_geometry["radioFullyVisible"] is True
+    assert mobile_geometry["timeTextGap"] == pytest.approx(7.2, abs=0.5)
+    assert mobile_geometry["timeBeforeText"] is True
+    assert mobile_geometry["timeOverflow"] is False
+    assert mobile_geometry["strongEllipsis"] == {
+        "overflow": "hidden",
+        "textOverflow": "ellipsis",
+        "whiteSpace": "nowrap",
+    }
+    assert mobile_geometry["modeRadioWidth"] == pytest.approx(15.6, abs=0.75)
+    assert mobile_geometry["modeRadioHeight"] == pytest.approx(15.6, abs=0.75)
+    assert mobile_geometry["rowClipping"] is False
     assert mobile_geometry["horizontalOverflow"] is False
     page.set_viewport_size(original_viewport)
 
@@ -2547,6 +2798,66 @@ def test_top_level_pip_prompt_image_controls_and_schema_v2_recovery(
         f'.pip-generated-card[data-picture-id="{generated_id}"]'
     )
     generated_card.wait_for(state="visible")
+    asset_typography = generated_card.evaluate(
+        """card => {
+          const style = element => getComputedStyle(element);
+          const time = card.querySelector('time');
+          const toggle = card.querySelector('.pip-enabled-toggle');
+          const copy = card.querySelector('.pip-generated-content > p');
+          const label = card.querySelector('.pip-item-controls label');
+          const select = card.querySelector('.pip-item-controls select');
+          return {
+            timeFontSize: style(time).fontSize,
+            toggleFontSize: style(toggle).fontSize,
+            copyFontSize: style(copy).fontSize,
+            labelFontSize: style(label).fontSize,
+            selectFontSize: style(select).fontSize,
+            horizontalOverflow: card.scrollWidth > card.clientWidth + 1,
+            verticalClipping: card.scrollHeight > card.clientHeight + 1,
+          };
+        }"""
+    )
+    assert asset_typography == {
+        "timeFontSize": "15px",
+        "toggleFontSize": "16px",
+        "copyFontSize": "16px",
+        "labelFontSize": "16px",
+        "selectFontSize": "16px",
+        "horizontalOverflow": False,
+        "verticalClipping": False,
+    }
+    page.set_viewport_size({"width": 375, "height": 812})
+    mobile_asset_typography = generated_card.evaluate(
+        """card => {
+          const style = element => getComputedStyle(element);
+          const tool = card.closest('.editor-pip-tool');
+          return {
+            timeFontSize: style(card.querySelector('time')).fontSize,
+            toggleFontSize: style(card.querySelector('.pip-enabled-toggle')).fontSize,
+            copyFontSize: style(card.querySelector('.pip-generated-content > p')).fontSize,
+            labelFontSize: style(card.querySelector('.pip-item-controls label')).fontSize,
+            selectFontSize: style(card.querySelector('.pip-item-controls select')).fontSize,
+            horizontalOverflow: card.scrollWidth > card.clientWidth + 1,
+            verticalClipping: card.scrollHeight > card.clientHeight + 1,
+            toolOverflow: tool.scrollWidth > tool.clientWidth + 1,
+            documentOverflow:
+              document.documentElement.scrollWidth
+                - document.documentElement.clientWidth,
+          };
+        }"""
+    )
+    assert mobile_asset_typography == {
+        "timeFontSize": "15px",
+        "toggleFontSize": "16px",
+        "copyFontSize": "16px",
+        "labelFontSize": "16px",
+        "selectFontSize": "16px",
+        "horizontalOverflow": False,
+        "verticalClipping": False,
+        "toolOverflow": False,
+        "documentOverflow": 0,
+    }
+    page.set_viewport_size(original_viewport)
     page.wait_for_function(
         """id => window.EditorSuite.projectSnapshot().project.pip.overlays
           .some(item => String(item.assetId) === id)""",
@@ -2823,6 +3134,30 @@ def test_top_level_pip_video_polling_completes_and_preserves_failed_asset(
         }""",
         arg=completed_id,
     )
+    completed_typography = completed_card.evaluate(
+        """card => ({
+          badgeFontSize: getComputedStyle(
+            card.querySelector('.pip-video-badge')
+          ).fontSize,
+          timeFontSize: getComputedStyle(card.querySelector('time')).fontSize,
+          toggleFontSize: getComputedStyle(
+            card.querySelector('.pip-enabled-toggle')
+          ).fontSize,
+          copyFontSize: getComputedStyle(
+            card.querySelector('.pip-generated-content > p')
+          ).fontSize,
+          horizontalOverflow: card.scrollWidth > card.clientWidth + 1,
+          verticalClipping: card.scrollHeight > card.clientHeight + 1,
+        })"""
+    )
+    assert completed_typography == {
+        "badgeFontSize": "15px",
+        "timeFontSize": "15px",
+        "toggleFontSize": "16px",
+        "copyFontSize": "16px",
+        "horizontalOverflow": False,
+        "verticalClipping": False,
+    }
     completed = page.evaluate(
         """() => {
           const snapshot = window.EditorSuite.projectSnapshot();
@@ -2846,6 +3181,30 @@ def test_top_level_pip_video_polling_completes_and_preserves_failed_asset(
     assert "is-failed" in (failed_card.get_attribute("class") or "")
     assert "浏览器 mock 视频生成失败" in failed_card.inner_text()
     assert failed_card.get_by_role("checkbox").is_disabled()
+    failed_typography = failed_card.evaluate(
+        """card => ({
+          placeholderFontSize: getComputedStyle(
+            card.querySelector('.pip-asset-placeholder')
+          ).fontSize,
+          timeFontSize: getComputedStyle(card.querySelector('time')).fontSize,
+          toggleFontSize: getComputedStyle(
+            card.querySelector('.pip-enabled-toggle')
+          ).fontSize,
+          copyFontSize: getComputedStyle(
+            card.querySelector('.pip-generated-content > p')
+          ).fontSize,
+          horizontalOverflow: card.scrollWidth > card.clientWidth + 1,
+          verticalClipping: card.scrollHeight > card.clientHeight + 1,
+        })"""
+    )
+    assert failed_typography == {
+        "placeholderFontSize": "16px",
+        "timeFontSize": "15px",
+        "toggleFontSize": "16px",
+        "copyFontSize": "16px",
+        "horizontalOverflow": False,
+        "verticalClipping": False,
+    }
     failed = page.evaluate(
         """id => {
           const snapshot = window.EditorSuite.projectSnapshot();
@@ -3382,6 +3741,113 @@ def test_b1_atomic_timeline_transaction_and_narrow_workspace(
         "pendingRanges": 0,
     }
 
+    page.set_viewport_size({"width": 1912, "height": 948})
+    wide_layout = page.evaluate(
+        """() => {
+          const bounds = selector => document.querySelector(selector)
+            .getBoundingClientRect();
+          const header = bounds('.header-inner');
+          const shell = bounds('.page-shell');
+          const result = bounds('#resultCard');
+          return {
+            viewportWidth: document.documentElement.clientWidth,
+            headerLeft: header.left,
+            headerRight: header.right,
+            shellLeft: shell.left,
+            shellRight: shell.right,
+            resultLeft: result.left,
+            resultRight: result.right,
+            horizontalOverflow: document.documentElement.scrollWidth
+              > document.documentElement.clientWidth + 1,
+          };
+        }"""
+    )
+    assert wide_layout["headerLeft"] == pytest.approx(0, abs=0.75)
+    assert wide_layout["headerRight"] == pytest.approx(
+        wide_layout["viewportWidth"], abs=0.75
+    )
+    assert wide_layout["shellLeft"] == pytest.approx(0, abs=0.75)
+    assert wide_layout["shellRight"] == pytest.approx(
+        wide_layout["viewportWidth"], abs=0.75
+    )
+    assert wide_layout["resultLeft"] == pytest.approx(0, abs=0.75)
+    assert wide_layout["resultRight"] == pytest.approx(
+        wide_layout["viewportWidth"], abs=0.75
+    )
+    assert wide_layout["horizontalOverflow"] is False
+
+    preview_selectors = (
+        "#cutVideoStage",
+        "#cutPreviewVideo",
+        "#editorSuitePreviewOverlay",
+        ".editor-suite-preview-canvas",
+    )
+    preview_geometry = page.evaluate(
+        """selectors => Object.fromEntries(selectors.map(selector => {
+          const rect = document.querySelector(selector).getBoundingClientRect();
+          return [selector, {
+            left: rect.left,
+            top: rect.top,
+            width: rect.width,
+            height: rect.height,
+          }];
+        }))""",
+        preview_selectors,
+    )
+    for tool in ("art", "pip", "cut"):
+        page.locator(f'[data-editor-tool="{tool}"]').click()
+        current_geometry = page.evaluate(
+            """selectors => Object.fromEntries(selectors.map(selector => {
+              const rect = document.querySelector(selector).getBoundingClientRect();
+              return [selector, {
+                left: rect.left,
+                top: rect.top,
+                width: rect.width,
+                height: rect.height,
+              }];
+            }))""",
+            preview_selectors,
+        )
+        for selector in preview_selectors:
+            for dimension in ("left", "top", "width", "height"):
+                assert current_geometry[selector][dimension] == pytest.approx(
+                    preview_geometry[selector][dimension], abs=0.75
+                )
+
+    timeline_geometry = page.evaluate(
+        """() => {
+          const track = document.querySelector('#cutFrameTimelineTrack');
+          const layer = document.querySelector('#editorSuiteTimelineLayer');
+          const thumbnails = document.querySelector('#cutFrameTimelineThumbnails');
+          const text = document.querySelector('#cutFrameTimelineText');
+          const visibleThumb = [...thumbnails.children].find(item => !item.hidden);
+          const style = getComputedStyle(track);
+          return {
+            trackHeight: track.getBoundingClientRect().height,
+            layerHeight: layer.getBoundingClientRect().height,
+            rulerHeight: Number.parseFloat(
+              style.getPropertyValue('--frame-timeline-ruler-height')
+            ),
+            textHeight: text.getBoundingClientRect().height,
+            thumbnailHeight: visibleThumb?.getBoundingClientRect().height || 0,
+            layerRows: Number.parseFloat(layer.style.height) / 26,
+          };
+        }"""
+    )
+    assert timeline_geometry["rulerHeight"] == pytest.approx(15, abs=0.75)
+    assert timeline_geometry["textHeight"] == pytest.approx(26, abs=0.75)
+    assert timeline_geometry["layerRows"] >= 1
+    assert timeline_geometry["layerRows"] == pytest.approx(
+        round(timeline_geometry["layerRows"]), abs=0.01
+    )
+    assert timeline_geometry["layerHeight"] == pytest.approx(
+        timeline_geometry["layerRows"] * 26, abs=0.75
+    )
+    assert timeline_geometry["trackHeight"] == pytest.approx(
+        63 + timeline_geometry["layerRows"] * 26, abs=0.75
+    )
+    assert timeline_geometry["thumbnailHeight"] > 0
+
     page.set_viewport_size({"width": 375, "height": 812})
     for tool in ("art", "pip", "cut"):
         page.locator(f'[data-editor-tool="{tool}"]').click()
@@ -3574,6 +4040,36 @@ def test_b1_atomic_timeline_transaction_and_narrow_workspace(
         arg=committed["start"],
     )
     assert base_media_mutations(page) == {"srcWrites": 0, "loadCalls": 0}
+
+
+@pytest.mark.parametrize("route", ("/settings", "/fonts", "/font-manager"))
+def test_compact_support_pages_remain_responsive_without_overflow(
+    browser_session,
+    route,
+):
+    page = browser_session.page
+    for viewport in (
+        {"width": 1912, "height": 948},
+        {"width": 375, "height": 812},
+    ):
+        page.set_viewport_size(viewport)
+        page.goto(f"{browser_session.base_url}{route}")
+        page.locator("#main").wait_for(state="visible")
+        geometry = page.evaluate(
+            """() => {
+              const main = document.querySelector('#main').getBoundingClientRect();
+              return {
+                mainWidth: main.width,
+                viewportWidth: document.documentElement.clientWidth,
+                documentOverflow: document.documentElement.scrollWidth
+                  - document.documentElement.clientWidth,
+                bodyOverflow: document.body.scrollWidth - document.body.clientWidth,
+              };
+            }"""
+        )
+        assert geometry["mainWidth"] <= geometry["viewportWidth"] + 1
+        assert geometry["documentOverflow"] <= 1
+        assert geometry["bodyOverflow"] <= 1
 
 
 def test_template_deep_link_applies_to_selected_manual_overlay_once(

@@ -42,7 +42,10 @@ sessionStorage[`editor-suite:project-draft:${jobId}`] = {
 - schema v2 不保存 assets；艺术字同时保存活动 `overlays` 和撤销剪辑所需的内部 `suppressedOverlays`。恢复前先从当前 job 建立注册表，再按当前 cut reconcile art 并原子恢复 art+pip+selection。未知 asset、跨两个艺术字集合的重复 id、disabled overlay、无效数值/范围/source 或非空未知 selection 使整份 v2 草稿失效。schema v1 继续只恢复 art，pip 保持服务端状态。
 - `/picture-in-picture` 只返回 307 到 `/?tool=pip`，保留 `job/source` 等 query、覆盖冲突 `tool` 并删除 `embedded`；目标页面必须激活 `#editorPipPanelRoot`，运行 DOM 中 iframe 数量为 0。
 - `picture-in-picture.html/js` 不存在。PipTool、公共预览、时间线和 compose 必须继续共享同一个 Store frame，禁止恢复第二个 video、storage、message 或生成 runtime。
-- 顶层 `.editor-pip-tool-panel` 是一个明确的紧凑密度例外：其全部内部 UI 以 `zoom: 0.5` 显示，但自身保持 `width: 100%`，外层隐藏横向溢出并负责纵向滚动；不得用 `width: 200%` 二次补偿，因为 Chromium 已在 zoom 布局中补偿百分比宽度。
+- 顶层 `.editor-pip-tool-panel` 是一个明确的紧凑密度例外：其全部内部 UI 以 `zoom: 0.6` 显示，但自身保持 `width: 100%`，外层隐藏横向溢出并负责纵向滚动；不得用宽度二次补偿，因为 Chromium 已在 zoom 布局中补偿百分比宽度。
+- 顶层面板使用 `Microsoft YaHei UI / PingFang SC / Noto Sans CJK SC / Source Han Sans SC / system-ui` 跨平台中文 UI 字体栈并启用 `optimizeLegibility`；正文和辅助文字权重固定为 500，标题、`strong` 与图例固定为 700，避免 0.6 缩放后由 650/750 合成字重造成笔画发虚。缩放前字号下限统一为 small/time 15px、普通状态与表单控件 16px、主要选项 strong 17px；生成素材卡的时间、状态、说明、label/select 同样必须覆盖，不能只修初始表单。此规则只作用于 inspector，不能改变 zoom、预览或时间轴几何。
+- PiP 文案选项在限定面板内使用 `64px minmax(0, 1fr)` 的时间/正文列和 12px gap；时间必须完整容纳 `MM:SS.d`，正文保持单行 ellipsis，桌面与 375px 下都必须满足 `time.right < strong.left`、视觉间距约 7.2px 且圆形 radio 完整位于行内。
+- 紧凑画中画面板内，通用的 `button/input/select` 最小触控高度不得改变 radio 的长宽比；radio 必须显式保持等宽等高，44px 触控区域由其外层 label/card 承担。浏览器测试必须同时断言桌面和 375px 下容器铺满、无横向溢出且文案/模式 radio 为正方形。
 - 缩放容器内基于 `getBoundingClientRect()` 计算的视觉滚动差值，写回 `scrollTop` 前必须除以 `getBoundingClientRect().height / offsetHeight` 的有效比例；禁止直接把视觉像素当作逻辑滚动像素。
 
 ### 4. Validation & Error Matrix
@@ -68,7 +71,7 @@ sessionStorage[`editor-suite:project-draft:${jobId}`] = {
 
 - Node：asset/overlay 分离、稳定 id、source filter、pending/failed、严格草稿校验、15% 最小和大于 100% 的有限 width。
 - Store：art+pip+timeline+selection 一次原子恢复，revision/timingRevision 矩阵和 compose width 一致。
-- 浏览器：prompt/image/video 全部 mock；覆盖 completed/failed、enable/disable、selection、position、range、175%、v2/v1 reload、无效 selection、迟到响应、历史 URL 重定向、iframe 为 0，以及画中画面板 50% 实际几何、滚动换算和 375px 无溢出。
+- 浏览器：prompt/image/video 全部 mock；覆盖 completed/failed、enable/disable、selection、position、range、175%、v2/v1 reload、无效 selection、迟到响应、历史 URL 重定向、iframe 为 0，以及画中画面板 60% 实际几何、computed 中文 UI 字体/500/700 权重、15/16/17px 字号下限、初始与生成素材卡无裁切、滚动换算和 375px 无溢出。
 - 后端：normalize 接受 175%、拒绝非有限/过小值；真实 FFmpeg 样片断言超大 overlay 的中心裁切。
 
 ### 7. Wrong vs Correct

@@ -51,8 +51,8 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
 
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
-    assert "/app.js?v=20260825-01" in page_response.text
-    assert "/styles.css?v=20260825-03" in page_response.text
+    assert "/app.js?v=20260825-02" in page_response.text
+    assert "/styles.css?v=20260825-11" in page_response.text
     assert "/transcript-follow-scroll.js?v=20260818-03" in page_response.text
     assert "/ui-feedback.js?v=20260807-03" in page_response.text
     assert "/timeline-model.js?v=20260810-01" in page_response.text
@@ -62,7 +62,7 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     assert "/editor-art-model.js?v=20260820-01" in page_response.text
     assert "/editor-art-renderer.js?v=20260819-01" in page_response.text
     assert "/editor-preview-compositor.js?v=20260820-01" in page_response.text
-    assert "/editor-timeline-controller.js?v=20260820-02" in page_response.text
+    assert "/editor-timeline-controller.js?v=20260825-03" in page_response.text
     assert "/editor-art-tool.js?v=20260821-02" in page_response.text
     assert "/editor-pip-tool.js?v=20260825-01" in page_response.text
     assert "/editor-suite.js?v=20260823-01" in page_response.text
@@ -725,7 +725,10 @@ def test_cut_range_and_segment_frontend_contracts():
         styles_response.text
     )
     assert "min-height: 32px" in styles_response.text
-    assert "font-size: 7.5px" in styles_response.text
+    assert ".segment-time {" in styles_response.text
+    assert "font-size: 9px" in styles_response.text
+    assert ".segment-text {" in styles_response.text
+    assert "font-size: 10px" in styles_response.text
     assert "width: 22px" in styles_response.text
     assert "height: 22px" in styles_response.text
     assert "text-shadow: 0 0 6px" in styles_response.text
@@ -831,7 +834,53 @@ def test_top_level_art_and_pip_tools_are_the_only_editor_runtime():
     assert "window.PipTool.mount(pipPanelRoot, createPipToolServices())" in suite
     assert ".editor-pip-tool {\n  width: 100%;" in styles
     assert "overflow-x: hidden;\n  overflow-y: auto;\n  padding: 8px;" in styles
-    assert ".editor-pip-tool-panel {\n  width: 100%;\n  zoom: 0.5;\n}" in styles
+    assert (
+        ".editor-pip-tool-panel {\n"
+        "  --pip-readable-small-font: 15px;\n"
+        "  --pip-readable-regular-font: 16px;\n"
+        "  --pip-readable-strong-font: 17px;\n"
+        "  width: 100%;\n"
+        "  max-width: none;\n"
+        "  box-sizing: border-box;\n"
+        "  zoom: 0.6;\n"
+        "  font-family:\n"
+        '    "Microsoft YaHei UI",\n'
+        '    "PingFang SC",\n'
+        '    "Noto Sans CJK SC",\n'
+        '    "Source Han Sans SC",\n'
+        "    system-ui,\n"
+        "    sans-serif;\n"
+        "  font-weight: 500;\n"
+        "  font-size: var(--pip-readable-regular-font);\n"
+        "  text-rendering: optimizeLegibility;\n"
+        "}"
+    ) in styles
+    assert (
+        ".editor-pip-tool-panel :is(h1, h2, h3, h4, h5, h6, strong, legend),\n"
+        ".editor-pip-tool-panel .step-label {\n"
+        "  font-weight: 700;\n"
+        "}"
+    ) in styles
+    assert (
+        ".editor-pip-tool-panel :is(small, time) {\n"
+        "  font-weight: 500;\n"
+        "  font-size: var(--pip-readable-small-font);\n"
+        "  line-height: 1.3;\n"
+        "}"
+    ) in styles
+    assert (
+        ".editor-pip-tool-panel .pip-segment-option > span {\n"
+        "  grid-template-columns: 64px minmax(0, 1fr);\n"
+        "  gap: 12px;\n"
+        "}"
+    ) in styles
+    assert (
+        '.editor-pip-tool input[type="radio"] {\n'
+        "  width: 26px;\n"
+        "  height: 26px;\n"
+        "  min-width: 26px;\n"
+        "  min-height: 26px;"
+    ) in styles
     assert "@media (max-width: 720px)" in styles
     assert ".editor-pip-tool {\n    padding: 6px;\n  }" in styles
     assert "restoreEditorDraft(projectSnapshot())" in suite
@@ -1034,7 +1083,7 @@ def test_art_template_library_frontend_contracts():
     art_tool_response = responses["/editor-art-tool.js"]
 
     assert template_page_response.status_code == 200
-    assert "/styles.css?v=20260825-03" in template_page_response.text
+    assert "/styles.css?v=20260825-11" in template_page_response.text
     assert "/art-template-library.js?v=20260819-01" in template_page_response.text
     assert "当前模板主色" in template_page_response.text
     assert 'id="templateCardGrid"' in template_page_response.text
@@ -1095,7 +1144,7 @@ def test_font_manager_frontend_contracts():
     font_script_response = responses["/font-manager.js"]
 
     assert font_page_response.status_code == 200
-    assert "/styles.css?v=20260825-03" in font_page_response.text
+    assert "/styles.css?v=20260825-11" in font_page_response.text
     assert "/font-manager.js?v=" in font_page_response.text
     assert 'id="fontUploadForm"' in font_page_response.text
     assert 'id="fontCardGrid"' in font_page_response.text
@@ -1200,6 +1249,7 @@ let cutSplitPoints = [];
 let selectedSplitClipKey = "";
 let nextTimelineRangeId = 1;
 let selectedTimelineRangeId = null;
+let transcriptCharacterUnitsCache = null;
 let timelineRangeInProgress = false;
 let timelineRangeConfirmationOpen = false;
 let cutHistoryLastState = null;
@@ -1830,6 +1880,7 @@ const getNoSpeechRange = () => null;
 let timelineDeleteRanges = [];
 let timelineRangeInProgress = false;
 let selectedTimelineRangeId = null;
+let transcriptCharacterUnitsCache = null;
 let mergedCutSelectionCache = null;
 let semanticCutDeleteRangesCache = null;
 ${{source}}
@@ -3460,3 +3511,95 @@ def test_realtime_effect_timeline_and_inspector_contracts():
     assert "grid-template-columns: repeat(3, minmax(0, 1fr))" in styles[
         art_tabs_start:art_tabs_end
     ]
+
+
+def test_compact_ui_density_preserves_preview_and_uses_shared_timeline_geometry():
+    root = Path(__file__).resolve().parents[2]
+    styles = (root / "web" / "styles.css").read_text(encoding="utf-8")
+    timeline = (root / "web" / "editor-timeline-controller.js").read_text(
+        encoding="utf-8"
+    )
+    for page_name in (
+        "index.html",
+        "settings.html",
+        "font-manager.html",
+        "font-library.html",
+    ):
+        page = (root / "web" / page_name).read_text(encoding="utf-8")
+        assert "/styles.css?v=20260825-11" in page
+    index_page = (root / "web" / "index.html").read_text(encoding="utf-8")
+    assert "/editor-timeline-controller.js?v=20260825-03" in index_page
+
+    for token in (
+        "--ui-compact-control-height: 36px;",
+        "--ui-compact-control-height-small: 30px;",
+        "--ui-compact-panel-padding: 12px;",
+        "--ui-compact-gap: 8px;",
+        "--ui-compact-font: 12px;",
+        "--ui-compact-font-small: 10px;",
+        "--timeline-ruler-height-compact: 15px;",
+        "--timeline-row-height-compact: 26px;",
+        "--timeline-base-track-height-compact: 78px;",
+        "--timeline-layer-track-height-compact: 63px;",
+    ):
+        assert token in styles
+
+    density_start = styles.index("/* Compact application density")
+    density_end = styles.index("/* Compact timeline geometry", density_start)
+    density_rules = styles[density_start:density_end]
+    for preview_selector in (
+        ".text-editor-preview-pane",
+        ".cut-preview-panel",
+        "#cutPreviewPlayer",
+        ".cut-video-stage",
+        "#cutPreviewVideo",
+        ".editor-suite-preview-canvas",
+    ):
+        assert preview_selector not in density_rules
+    assert "zoom:" not in density_rules
+    assert "transform: scale(" not in density_rules
+    assert "/* Compact transcript controls keep half-scale geometry" in styles
+    for transcript_type_contract in (
+        ".segment-time {",
+        "font-size: 9px;",
+        ".segment-current-badge {",
+        "font-size: 7px;",
+        ".segment-text {",
+        "font-size: 10px;",
+        ".segment-no-speech-copy strong {",
+        ".segment-no-speech-meta {",
+        "font-size: 8px;",
+    ):
+        assert transcript_type_contract in styles
+    assert ".editor-pip-tool-panel {\n  --pip-readable-small-font: 15px;" in styles
+    assert "zoom: 0.6;" in styles
+    assert '"Microsoft YaHei UI",' in styles
+    assert '"Noto Sans CJK SC",' in styles
+    assert (
+        "font-weight: 500;\n"
+        "  font-size: var(--pip-readable-regular-font);\n"
+        "  text-rendering: optimizeLegibility;"
+    ) in styles
+    assert ".editor-pip-tool-panel .step-label {\n  font-weight: 700;" in styles
+    for pip_type_contract in (
+        "--pip-readable-small-font: 15px;",
+        "--pip-readable-regular-font: 16px;",
+        "--pip-readable-strong-font: 17px;",
+        ".editor-pip-tool-panel .pip-asset-status,",
+        ".editor-pip-tool-panel .pip-generated-content > p,",
+        ".editor-pip-tool-panel .pip-video-badge {",
+    ):
+        assert pip_type_contract in styles
+
+    for timeline_contract in (
+        "--frame-timeline-ruler-height: var(--timeline-ruler-height-compact);",
+        "--cut-timeline-text-height: var(--timeline-row-height-compact);",
+        "--editor-timeline-track-height: var(--timeline-base-track-height-compact);",
+        "--editor-timeline-track-height: 89px;",
+        "--editor-timeline-track-height: var(--timeline-layer-track-height-compact);",
+    ):
+        assert timeline_contract in styles
+    assert "const TIMELINE_ROW_HEIGHT = 26;" in timeline
+    assert "const TIMELINE_EFFECT_BASE_HEIGHT = 63;" in timeline
+    assert "rowCount * TIMELINE_ROW_HEIGHT" in timeline
+    assert "TIMELINE_EFFECT_BASE_HEIGHT + rowCount * TIMELINE_ROW_HEIGHT" in timeline

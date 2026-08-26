@@ -19,9 +19,45 @@
 
 - 保持现有安静、工具型工作台风格，复用 `web/styles.css` 的 token 和组件类。
 - 桌面 Chrome/Edge 与 375px 窄屏都必须可完成核心流程，无横向页面溢出和控件重叠。
+- 主编辑器进入 `body.has-result` 后，桌面端（`>=1001px`）的 `.header-inner`、`.page-shell` 和结果面板必须占满视口宽度，不再受 `--editor-width` 限制；上传/处理中页面、素材库和窄屏继续保留各自安全边距。浏览器回归至少覆盖 1912px 左右边界均为视口边界，以及 375px 无横向溢出。
 - 固定格式元素（视频舞台、时间线、轨道、图层列表）使用稳定尺寸/比例，动态标签不得引发布局跳动。
 - 时间轴子项从 grid flow 改为绝对定位以投影剪后时间时，必须同时定义横向位置/宽度和纵向 `inset`/高度；背景图或内容数据存在不代表元素可见。真实浏览器回归必须断言可见项的 `getBoundingClientRect().height > 0` 且与所属轨道高度一致。
+- 时间轴缩略帧可以继续按源视频时间缓存，但投影到剪后时间轴时只能使用保留区采样帧，并按相邻可见帧的剪后时间中点从 `0%` 到 `100%` 连续铺设；开头删除、交错删除和结尾删除都不得留下空白。删除或恢复只重算投影，不能因此重新创建 extractor 或增加抽帧次数。
 - 不新增解释功能的营销文案；状态文字只说明当前结果、错误和可执行下一步。
+
+### 全应用紧凑密度与预览锁定
+
+应用操作界面的紧凑密度由 `styles.css` 根级 token 和限定作用域的组件规则统一投影；禁止对 `html`、`body`、工作区或预览祖先使用全局 `zoom` / `transform: scale()`。紧凑化优先减少 padding、margin、gap 和次级字号，移动端主要输入与按钮仍保持约 `44px` 命中高度。
+
+```css
+:root {
+  --ui-compact-control-height: 36px;
+  --ui-compact-control-height-small: 30px;
+  --ui-compact-panel-padding: 12px;
+  --ui-compact-gap: 8px;
+  --timeline-ruler-height-compact: 15px;
+  --timeline-row-height-compact: 26px;
+  --timeline-base-track-height-compact: 78px;
+  --timeline-layer-track-height-compact: 63px;
+}
+```
+
+`.segment-item` 的紧凑行与 22px 控件几何是已确认的局部例外，但文字不能继续按 50% 缩小：正文不得低于 10px、时间 9px、播放状态 7px、删除/空白标题 9px、meta 8px，图标与勾选字形为 10–11px；短文案行保持约 32px，换行和空白说明行按内容自然增高且不得裁切。`.editor-pip-tool-panel { zoom: 0.6 }` 同样不得被新的 compact 规则二次缩放；面板固定使用适合小字号中文 UI 的 `Microsoft YaHei UI / PingFang SC / Noto Sans CJK SC / Source Han Sans SC / system-ui` 字体栈，正文与辅助文字使用 500，标题和 `strong` 使用真实 700，禁止依赖 650/750 合成字重。其缩放前字号下限为 small/time 15px、普通文字与控件 16px、主要选项 strong 17px，使视觉字号约为 9/9.6/10.2px。PiP 文案行的时间列固定为 64px，正文继续 `minmax(0, 1fr)` 和 ellipsis，两列逻辑 gap 为 12px（视觉约 7.2px），最长 `MM:SS.d` 不能与正文重叠。radio/checkbox 必须显式保持等宽等高，外层 label/card 承担命中区域。
+
+以下公共预览矩形及其 contain/cover、pointer mapping 必须保持不变：`.text-editor-preview-pane`、`.cut-preview-panel`、`#cutPreviewPlayer`、`#cutVideoStage`、`#cutPreviewVideo`、`#editorSuitePreviewOverlay`、`.editor-suite-preview-canvas`。紧凑样式区块不得包含这些选择器，也不能通过改变桌面工作区列比例间接缩小预览。
+
+公共时间轴只压缩纵向几何，不改变宽度或时间映射。无效果轨时使用 `15px ruler + 26px 文案轨 + 78px 总高`；有 `n` 行效果时，controller 与 CSS 必须共同满足：
+
+```javascript
+const TIMELINE_ROW_HEIGHT = 26;
+const TIMELINE_EFFECT_BASE_HEIGHT = 63;
+const layerHeight = rowCount * TIMELINE_ROW_HEIGHT;
+const trackHeight = TIMELINE_EFFECT_BASE_HEIGHT + layerHeight;
+```
+
+艺术字/画中画独立图层时间轴总高为 `63px`。修改任一数值时必须同步 CSS token、`editor-timeline-controller.js`、静态契约和真实浏览器多行效果轨断言，不能只改外壳高度造成 clip 或缩略帧裁切。
+
+浏览器回归至少覆盖：1912px 下预览 panel/stage/video/canvas 的改动前后矩形误差不超过 `1px`；无效果/一行/多行轨道实际高度和所有子层 `height > 0`；375px 无横向溢出、radio 为正方形且主要控件命中高度不低于 `44px`；工具切换期间基础 video identity、`srcWrites/loadCalls` 和 source/edited time 映射不变。
 
 ### 设备预览安全区
 

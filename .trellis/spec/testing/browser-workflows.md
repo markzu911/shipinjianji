@@ -35,7 +35,7 @@ seeded_editor_job(sample_video) -> SeededEditorJob
 
 - 刷新恢复：执行可见删除操作，等待草稿保存，再核对 UI、cut draft JSON 和时间映射。
 - 时间轴分割：连续播放头分割后核对 source anchor、structure revision 与不变的 `timingRevision`；覆盖精确删除、全删后无 marker/占位/焦点目标、内部 Store 结构保留、撤销/重做、刷新、键盘焦点、Store `cut:split-structure` 轨道、普通拖选取消及 375px。纯分割期间基础 video `srcWrites/loadCalls` 和 extractor 创建数都必须为 0。
-- 时间轴缩略帧：除检查 data URL、绝对横向定位和剪后时间重映射外，还必须检查至少一个可见帧，且每个可见帧的实际高度大于 0 并等于缩略图层高度；禁止只断言图片已生成或 `left/width` 已设置。
+- 时间轴缩略帧：除检查 data URL、绝对横向定位和剪后时间重映射外，还必须检查至少一个可见帧、每个可见帧的实际高度大于 0 并等于缩略图层高度，以及开头/交错删除后可见帧从 `0%` 到 `100%` 连续无缝覆盖；禁止只断言图片已生成或 `left/width` 已设置。删除或恢复后的纯投影更新不得新建 extractor。
 - 工具切换：cut/art/pip 始终保持同一 document、基础 video、公共预览和公共时间线；隐藏 panel 必须 inert。
 - 文字保存：暂停/播放两种状态都保持 document/video/ArtTool/PipTool identity、src、currentTime、play state 和 art/pip 时间；新文案通过顶层 Store 进入艺术字与 compose。
 - 统一生成：用 `expect_response` 捕获真实 compose 响应，断言请求字段来自同一个 editor frame。
@@ -138,6 +138,7 @@ assert base_media_mutations(page) == {"srcWrites": 0, "loadCalls": 0}
 - 175% 同时保留在 Store、草稿、公共预览和 compose；schema v2 非空未知 selection 使整份草稿失效，schema v1 只恢复 art。
 - deactivate/job 切换后的迟到 create/poll response 为 no-op，不得增加 revision 或加入 asset。
 - 历史 `/picture-in-picture` 重定向后使用同一个 PipTool 和基础 video；不再测试 feature flag fallback 或独立编辑页。
+- 顶层画中画设置面板固定使用 `zoom: 0.6`；桌面和 375px 测试必须断言 computed zoom、中文 UI `fontFamily`、正文 500/标题与 `strong` 700、small/time 15px、普通状态/控件 16px、主要选项 strong 17px、60% 后的行/radio 实际几何、时间列完整显示且 `time.right < strong.left`、两列视觉间距约 7.2px、正文 ellipsis、初始表单与生成素材卡无裁切、容器满宽和无横向溢出，预览与时间轴矩形不得随面板密度或字体变化。
 
 ### 3. Tests Required
 
@@ -146,6 +147,8 @@ assert base_media_mutations(page) == {"srcWrites": 0, "loadCalls": 0}
 - create response 忽略 abort 并迟到返回，断言 no-op。
 - schema v1 art-only reload，pip 服务端 baseline 不变。
 - 历史 pip URL、桌面/375px、iframe 为 0、无横向溢出。
+- 文案列表正文 10px、时间 9px、播放状态 7px、删除/空白标题 9px、meta 8px、图标/勾选 10–11px；桌面和 375px 均断言短行约 32px、长文案自然增高、无横向溢出和纵向裁切。
+- 画中画设置面板 60% computed geometry、中文 UI 字体与 500/700 权重、15/16/17px 字号下限、radio 等宽等高、生成素材卡无裁切，以及公共 preview/timeline 几何不变。
 
 ### 4. Wrong vs Correct
 

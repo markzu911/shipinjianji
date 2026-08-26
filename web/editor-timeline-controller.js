@@ -8,6 +8,8 @@
   const DEFAULT_STEP = 0.1;
   const DEFAULT_HISTORY_LIMIT = 100;
   const DRAG_THRESHOLD = 3;
+  const TIMELINE_ROW_HEIGHT = 26;
+  const TIMELINE_EFFECT_BASE_HEIGHT = 63;
 
   function clone(value) {
     return JSON.parse(JSON.stringify(value));
@@ -110,7 +112,7 @@
           segment.dataset.timelineTrackIndex = String(trackIndex);
           segment.dataset.timelineLaneIndex = String(laneIndex);
           segment.dataset.timelineEditable = String(Boolean(clip.editable));
-          segment.style.top = `${(rowCount + laneIndex) * 30 + 2}px`;
+          segment.style.top = `${(rowCount + laneIndex) * TIMELINE_ROW_HEIGHT + 2}px`;
           segment.style.left = `${duration > 0 ? (clip.start / duration) * 100 : 0}%`;
           segment.style.width = `${
             duration > 0 ? Math.max(0.25, ((clip.end - clip.start) / duration) * 100) : 0
@@ -149,14 +151,18 @@
 
       layer.replaceChildren(...fragments);
       layer.hidden = fragments.length === 0;
-      layer.style.height = fragments.length ? `${rowCount * 30}px` : "";
+      const layerHeight = rowCount * TIMELINE_ROW_HEIGHT;
+      layer.style.height = fragments.length ? `${layerHeight}px` : "";
       layer.dataset.projectRevision = String(frame.revision);
       layer.dataset.timingRevision = String(frame.timingRevision);
       track?.classList?.toggle("has-effect-track", fragments.length > 0);
       if (track?.style) {
         if (fragments.length) {
-          track.style.setProperty("--editor-layer-timeline-height", `${rowCount * 30}px`);
-          track.style.setProperty("--editor-timeline-track-height", `${74 + rowCount * 30}px`);
+          track.style.setProperty("--editor-layer-timeline-height", `${layerHeight}px`);
+          track.style.setProperty(
+            "--editor-timeline-track-height",
+            `${TIMELINE_EFFECT_BASE_HEIGHT + rowCount * TIMELINE_ROW_HEIGHT}px`,
+          );
         } else {
           track.style.removeProperty("--editor-layer-timeline-height");
           track.style.removeProperty("--editor-timeline-track-height");

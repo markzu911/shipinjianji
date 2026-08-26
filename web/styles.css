@@ -28,6 +28,16 @@
   --editor-width: 1320px;
   --editor-timeline-track-height: 112px;
   --editor-timeline-ruler-height: 28px;
+  --ui-compact-control-height: 36px;
+  --ui-compact-control-height-small: 30px;
+  --ui-compact-panel-padding: 12px;
+  --ui-compact-gap: 8px;
+  --ui-compact-font: 12px;
+  --ui-compact-font-small: 10px;
+  --timeline-ruler-height-compact: 15px;
+  --timeline-row-height-compact: 26px;
+  --timeline-base-track-height-compact: 78px;
+  --timeline-layer-track-height-compact: 63px;
 }
 
 .editor-suite-slot {
@@ -2407,7 +2417,7 @@ h1 {
   pointer-events: none;
 }
 
-/* Compact transcript rows use exactly half of the legacy 64/44/15px geometry. */
+/* Compact transcript controls keep half-scale geometry; type stays readable. */
 .segment-item {
   min-height: 32px;
   padding: 4px 3px;
@@ -2479,7 +2489,7 @@ h1 {
 .segment-time {
   color: var(--text-muted);
   font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
-  font-size: 6.5px;
+  font-size: 9px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -2487,7 +2497,7 @@ h1 {
 .segment-current-badge {
   width: max-content;
   color: var(--primary);
-  font-size: 5px;
+  font-size: 7px;
   font-weight: 800;
   letter-spacing: 0.08em;
   line-height: 1.2;
@@ -2554,7 +2564,7 @@ h1 {
 }
 
 .segment-play-button iconify-icon {
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .segment-play-button:hover:not(:disabled) {
@@ -2586,8 +2596,8 @@ h1 {
   flex-wrap: wrap;
   color: #c7d2db;
   background: transparent;
-  font-size: 7.5px;
-  line-height: 1.45;
+  font-size: 10px;
+  line-height: 1.35;
   overflow-wrap: anywhere;
   white-space: normal;
 }
@@ -2596,7 +2606,7 @@ h1 {
   max-width: 100%;
   min-height: 22px;
   margin: 0;
-  padding: 4px 1.5px;
+  padding: 2px 1.5px;
   display: inline-flex;
   align-items: center;
   gap: 2.5px;
@@ -2639,7 +2649,7 @@ h1 {
 
 .segment-no-speech-button iconify-icon {
   flex: 0 0 auto;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .segment-no-speech-copy {
@@ -2650,14 +2660,15 @@ h1 {
 
 .segment-no-speech-copy strong {
   color: inherit;
-  font-size: 7px;
-  font-weight: 780;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.2;
 }
 
 .segment-no-speech-meta {
   color: var(--text-muted);
-  font-size: 5.5px;
-  line-height: 1.35;
+  font-size: 8px;
+  line-height: 1.25;
 }
 
 .segment-restore-button .segment-no-speech-meta {
@@ -2675,7 +2686,7 @@ h1 {
 
 .segment-restore-button iconify-icon {
   flex: 0 0 auto;
-  font-size: 8px;
+  font-size: 10px;
 }
 
 .segment-text-run-label,
@@ -2732,7 +2743,7 @@ h1 {
   color: #fff;
   background: var(--danger);
   border-radius: 50%;
-  font-size: 7.5px;
+  font-size: 10px;
   font-weight: 800;
   line-height: 1;
 }
@@ -2837,7 +2848,7 @@ h1 {
   transition: border-color 180ms ease, box-shadow 180ms ease;
 }
 
-.has-cut-selection .cut-toolbar {
+.cut-toolbar.has-cut-selection {
   border-color: rgba(255, 107, 120, 0.5);
   box-shadow: 0 20px 52px rgba(0, 0, 0, 0.4);
 }
@@ -10328,13 +10339,14 @@ body:not(.has-result) #uploadCard {
   }
 
   body.has-result .header-inner {
+    width: 100%;
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto;
     gap: 12px;
   }
 
   body.has-result .page-shell {
-    width: min(var(--editor-width), calc(100% - 32px));
+    width: 100%;
     height: calc(100dvh - 65px);
     padding: 12px 0 16px;
     display: grid;
@@ -11894,6 +11906,7 @@ input[type="range"] {
 .editor-pip-tool {
   width: 100%;
   height: 100%;
+  box-sizing: border-box;
   min-width: 0;
   min-height: 0;
   overflow-x: hidden;
@@ -11903,8 +11916,75 @@ input[type="range"] {
 }
 
 .editor-pip-tool-panel {
+  --pip-readable-small-font: 15px;
+  --pip-readable-regular-font: 16px;
+  --pip-readable-strong-font: 17px;
   width: 100%;
-  zoom: 0.5;
+  max-width: none;
+  box-sizing: border-box;
+  zoom: 0.6;
+  font-family:
+    "Microsoft YaHei UI",
+    "PingFang SC",
+    "Noto Sans CJK SC",
+    "Source Han Sans SC",
+    system-ui,
+    sans-serif;
+  font-weight: 500;
+  font-size: var(--pip-readable-regular-font);
+  text-rendering: optimizeLegibility;
+}
+
+.editor-pip-tool-panel :is(h1, h2, h3, h4, h5, h6, strong, legend),
+.editor-pip-tool-panel .step-label {
+  font-weight: 700;
+}
+
+.editor-pip-tool-panel :is(small, time) {
+  font-weight: 500;
+  font-size: var(--pip-readable-small-font);
+  line-height: 1.3;
+}
+
+.editor-pip-tool-panel :is(label, legend, button, input, select, textarea),
+.editor-pip-tool-panel .step-label,
+.editor-pip-tool-panel .result-chip,
+.editor-pip-tool-panel .pip-section-title-row > span,
+.editor-pip-tool-panel .pip-inline-progress,
+.editor-pip-tool-panel .pip-form-message,
+.editor-pip-tool-panel .pip-empty-state,
+.editor-pip-tool-panel .pip-asset-placeholder,
+.editor-pip-tool-panel .pip-asset-status,
+.editor-pip-tool-panel .pip-enabled-toggle,
+.editor-pip-tool-panel .pip-generated-content > p,
+.editor-pip-tool-panel .pip-item-controls label,
+.editor-pip-tool-panel .pip-output-progress .progress-heading,
+.editor-pip-tool-panel .pip-result-actions > * {
+  font-size: var(--pip-readable-regular-font);
+}
+
+.editor-pip-tool-panel h3 {
+  font-size: 18px;
+}
+
+.editor-pip-tool-panel :is(
+  .pip-segment-option strong,
+  .pip-mode-option strong,
+  .pip-aspect-ratio-option strong,
+  .pip-time-settings-heading strong,
+  .pip-output-result > strong
+) {
+  font-size: var(--pip-readable-strong-font);
+  line-height: 1.3;
+}
+
+.editor-pip-tool-panel .pip-video-badge {
+  font-size: var(--pip-readable-small-font);
+}
+
+.editor-pip-tool-panel .pip-segment-option > span {
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 12px;
 }
 
 .editor-pip-tool-panel,
@@ -11955,6 +12035,15 @@ input[type="range"] {
 .editor-pip-tool input,
 .editor-pip-tool select {
   min-height: 44px;
+}
+
+.editor-pip-tool input[type="radio"] {
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  min-height: 26px;
+  box-sizing: border-box;
+  margin: 0;
 }
 
 .editor-art-tool-tabs {
@@ -13863,5 +13952,539 @@ video.douyin-base-video {
 @media (prefers-reduced-motion: reduce) {
   .art-character.is-character-bounce {
     animation: none !important;
+  }
+}
+
+/* Compact application density ------------------------------------------------
+   Keep this projection scoped to application chrome and inspector content.
+   Preview geometry and the existing transcript/PiP density exceptions remain
+   owned by their dedicated rules above. */
+.editor-suite-nav {
+  min-height: 60px;
+  padding: 6px 8px;
+  gap: var(--ui-compact-gap);
+  border-radius: 12px;
+}
+
+.editor-suite-copy {
+  padding-inline: 4px;
+}
+
+.editor-suite-copy > strong {
+  font-size: 14px;
+}
+
+.editor-suite-copy > small,
+.editor-suite-tool small {
+  font-size: var(--ui-compact-font-small);
+}
+
+.editor-suite-tools {
+  gap: 6px;
+}
+
+.editor-suite-tool {
+  min-height: 44px;
+  padding: 5px 8px;
+  gap: 7px;
+  border-radius: 9px;
+}
+
+.editor-suite-index {
+  width: 26px;
+  height: 26px;
+  font-size: 11px;
+}
+
+.editor-suite-tool strong,
+.editor-suite-project-state,
+.editor-suite-generate-button {
+  font-size: var(--ui-compact-font);
+}
+
+.editor-suite-generate-button {
+  min-height: 44px;
+  padding: 6px 10px;
+}
+
+.text-editor-panel.segments-block,
+.text-editor-panel.direct-tools-panel {
+  padding: var(--ui-compact-panel-padding);
+}
+
+.text-editor-panel.segments-block {
+  padding-top: var(--ui-compact-panel-padding);
+}
+
+.text-editor-panel .editor-heading {
+  margin-bottom: 12px;
+}
+
+.text-editor-panel .editor-heading h3,
+.text-editor-panel .cut-result-heading h3 {
+  font-size: 16px;
+}
+
+.text-editor-panel .segment-heading-actions {
+  gap: var(--ui-compact-gap);
+}
+
+.text-editor-panel .cut-draft-save-status {
+  min-width: 124px;
+  min-height: 26px;
+  padding: 4px 8px;
+  font-size: var(--ui-compact-font-small);
+}
+
+.text-editor-panel .cut-summary {
+  margin-bottom: 8px;
+  padding: 10px 12px;
+}
+
+.editor-art-tool {
+  padding: var(--ui-compact-panel-padding);
+  font-size: var(--ui-compact-font);
+}
+
+.editor-art-tool-tabs {
+  top: calc(-1 * var(--ui-compact-panel-padding));
+  margin: calc(-1 * var(--ui-compact-panel-padding))
+    calc(-1 * var(--ui-compact-panel-padding)) 10px;
+  padding: 8px var(--ui-compact-panel-padding);
+}
+
+.editor-art-tool-panel > * + * {
+  margin-top: 10px;
+}
+
+.editor-art-overlay-list {
+  max-height: 210px;
+}
+
+.editor-art-overlay-list .overlay-list-item {
+  min-height: var(--ui-compact-control-height);
+  padding: 6px 8px;
+}
+
+.editor-art-controls {
+  margin-top: 10px;
+}
+
+.art-template-select {
+  gap: 6px;
+}
+
+.art-template-trigger,
+.art-template-option {
+  min-height: 48px;
+  gap: 8px;
+  padding: 4px 8px;
+}
+
+.art-template-listbox {
+  padding: 4px;
+}
+
+.editor-art-transcript-section {
+  gap: var(--ui-compact-gap);
+  padding-block: 10px;
+}
+
+.editor-art-selection-empty {
+  min-height: 56px;
+  padding: 10px 6px;
+}
+
+body:not(.has-result) .panel {
+  padding: 20px;
+}
+
+body:not(.has-result) .panel-heading {
+  margin-bottom: 16px;
+  gap: 16px;
+}
+
+body:not(.has-result) .drop-zone {
+  min-height: 264px;
+  padding: 24px;
+}
+
+.settings-shell {
+  padding: 20px 0 32px;
+}
+
+.settings-heading {
+  margin-bottom: 16px;
+  gap: 16px;
+}
+
+.settings-heading h1 {
+  margin-bottom: 5px;
+  font-size: clamp(26px, 4vw, 38px);
+}
+
+.settings-summary span {
+  min-height: var(--ui-compact-control-height-small);
+  padding: 5px 9px;
+  font-size: var(--ui-compact-font-small);
+}
+
+.provider-settings {
+  gap: 12px;
+}
+
+.provider-card {
+  padding: 14px;
+}
+
+.provider-card-heading {
+  gap: 9px;
+}
+
+.provider-card-heading h2 {
+  font-size: 18px;
+}
+
+.provider-icon {
+  width: var(--ui-compact-control-height);
+  height: var(--ui-compact-control-height);
+}
+
+.provider-status {
+  min-height: 28px;
+  padding: 4px 7px;
+  font-size: var(--ui-compact-font-small);
+}
+
+.provider-models,
+.provider-request-urls {
+  padding: 10px;
+}
+
+.provider-models {
+  margin: 12px 0;
+}
+
+.provider-request-urls {
+  margin-bottom: 12px;
+}
+
+.provider-model-list,
+.provider-url-list {
+  gap: var(--ui-compact-gap);
+}
+
+.provider-config-field {
+  gap: 4px;
+  font-size: var(--ui-compact-font);
+}
+
+.provider-config-field input,
+.credential-input-wrap input,
+.credential-save-button,
+.credential-visibility-button,
+.credential-clear-button {
+  min-height: var(--ui-compact-control-height);
+}
+
+.credential-visibility-button {
+  width: var(--ui-compact-control-height);
+  height: var(--ui-compact-control-height);
+}
+
+.credential-input-wrap input {
+  padding-block: 6px;
+  padding-right: 40px;
+  font-size: var(--ui-compact-font);
+}
+
+.credential-save-button {
+  padding: 6px 10px;
+}
+
+.credential-help,
+.credential-feedback {
+  margin-top: 5px;
+  min-height: 16px;
+  font-size: var(--ui-compact-font-small);
+}
+
+.credential-clear-button {
+  margin-top: 4px;
+}
+
+.settings-security-note {
+  margin-top: 12px;
+  padding: 10px 12px;
+  gap: var(--ui-compact-gap);
+  font-size: var(--ui-compact-font);
+}
+
+.font-library-shell,
+.template-library-shell {
+  padding-block: 14px 22px;
+}
+
+.font-library-heading,
+.template-library-heading {
+  margin-bottom: 12px;
+  gap: 16px;
+}
+
+.font-library-heading h1,
+.template-library-heading h1 {
+  font-size: clamp(26px, 3.2vw, 38px);
+}
+
+.font-library-stats,
+.template-library-stats {
+  gap: 6px;
+}
+
+.font-library-stats span,
+.template-library-stats span,
+.template-library-stats button {
+  min-height: var(--ui-compact-control-height-small);
+  padding: 4px 9px;
+  font-size: var(--ui-compact-font-small);
+}
+
+.font-preview-toolbar,
+.template-preview-toolbar {
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  gap: var(--ui-compact-gap);
+}
+
+.font-preview-toolbar input[type="text"],
+.font-preview-toolbar input[type="search"],
+.font-preview-toolbar input[type="range"],
+.template-preview-toolbar input,
+.template-preview-toolbar select {
+  min-height: var(--ui-compact-control-height);
+}
+
+.font-library-workspace,
+.template-library-workspace {
+  gap: 12px;
+}
+
+.font-library-workspace > .panel,
+.template-catalog-panel,
+.template-detail-panel {
+  padding: var(--ui-compact-panel-padding);
+}
+
+.font-panel-heading,
+.template-catalog-heading {
+  margin-bottom: 10px;
+  gap: var(--ui-compact-gap);
+}
+
+.font-panel-heading h2,
+.library-dialog-heading h2 {
+  font-size: 18px;
+}
+
+.font-drop-zone {
+  min-height: 168px;
+  padding: 16px 12px;
+}
+
+.font-upload-icon {
+  width: 44px;
+  height: 44px;
+}
+
+.font-file-summary,
+.font-upload-note {
+  padding: 8px 10px;
+}
+
+.font-upload-note {
+  margin-top: 10px;
+  font-size: var(--ui-compact-font);
+}
+
+.font-source-filters button,
+.template-category-filters button {
+  min-height: var(--ui-compact-control-height-small);
+  padding: 4px 8px;
+  font-size: var(--ui-compact-font);
+}
+
+.font-card-grid,
+.template-card-grid {
+  gap: var(--ui-compact-gap);
+}
+
+.font-card {
+  min-height: 190px;
+  padding: 10px;
+}
+
+.font-card-actions,
+.template-card-actions,
+.template-manage-actions {
+  gap: 6px;
+}
+
+.font-card-actions button,
+.template-card-actions button {
+  min-height: var(--ui-compact-control-height);
+  padding: 5px 8px;
+}
+
+.font-metadata,
+.font-detail-actions {
+  margin-top: 10px;
+  gap: 6px;
+}
+
+.font-metadata div {
+  padding: 7px 9px;
+}
+
+.template-card {
+  padding: 8px;
+  grid-template-rows: 106px auto var(--ui-compact-control-height);
+  gap: 7px;
+}
+
+.template-card-copy strong {
+  margin-bottom: 2px;
+  font-size: 13px;
+}
+
+.template-card-copy small {
+  min-height: 30px;
+  font-size: var(--ui-compact-font-small);
+}
+
+.template-detail-copy,
+.template-metadata,
+.template-color-summary {
+  margin-bottom: 10px;
+}
+
+.template-color-summary {
+  gap: 6px;
+}
+
+.template-color-summary span {
+  min-height: var(--ui-compact-control-height);
+  padding: 6px 8px;
+}
+
+.library-dialog-card {
+  padding: 14px;
+  gap: 12px;
+}
+
+.dialog-close-button {
+  width: var(--ui-compact-control-height);
+  height: var(--ui-compact-control-height);
+}
+
+.template-file-drop {
+  min-height: 144px;
+  padding: 18px;
+}
+
+.template-format-help {
+  padding: 10px 11px;
+}
+
+.library-dialog-actions {
+  gap: var(--ui-compact-gap);
+}
+
+.library-dialog-actions button {
+  min-height: var(--ui-compact-control-height);
+}
+
+/* Compact timeline geometry -------------------------------------------------- */
+.cut-frame-timeline .cut-frame-timeline-track {
+  --frame-timeline-ruler-height: var(--timeline-ruler-height-compact);
+  --cut-timeline-text-height: var(--timeline-row-height-compact);
+  --editor-layer-timeline-height: var(--timeline-row-height-compact);
+  --editor-timeline-track-height: var(--timeline-base-track-height-compact);
+}
+
+.cut-frame-timeline .cut-frame-timeline-track.has-effect-track {
+  --editor-timeline-track-height: 89px;
+}
+
+.cut-frame-timeline .frame-timeline-tick-label {
+  top: -6px;
+}
+
+.editor-suite-timeline-layer {
+  height: var(--editor-layer-timeline-height, var(--timeline-row-height-compact));
+}
+
+.editor-suite-timeline-layer .frame-timeline-segment,
+.editor-suite-timeline-layer .pip-timeline-segment,
+.editor-suite-timeline-layer .cut-timeline-delete-range {
+  height: calc(var(--timeline-row-height-compact) - 4px);
+}
+
+.editor-layer-timeline .editor-layer-timeline-track {
+  --frame-timeline-ruler-height: var(--timeline-ruler-height-compact);
+  --editor-layer-timeline-height: var(--timeline-row-height-compact);
+  --editor-timeline-track-height: var(--timeline-layer-track-height-compact);
+}
+
+.editor-layer-timeline .frame-timeline-segment,
+.editor-layer-timeline .pip-timeline-segment {
+  height: calc(var(--timeline-row-height-compact) - 4px);
+}
+
+@media (max-width: 720px) {
+  .editor-suite-nav {
+    padding: 6px;
+  }
+
+  .editor-art-tool {
+    padding: 10px;
+  }
+
+  .editor-art-tool-tabs {
+    top: -10px;
+    margin: -10px -10px 10px;
+    padding: 8px 10px;
+  }
+
+  .settings-shell,
+  .font-library-shell,
+  .template-library-shell {
+    width: calc(100% - 20px);
+  }
+
+  .provider-config-field input,
+  .credential-input-wrap input,
+  .credential-save-button,
+  .credential-visibility-button,
+  .credential-clear-button,
+  .font-preview-toolbar input[type="text"],
+  .font-preview-toolbar input[type="search"],
+  .font-preview-toolbar input[type="range"],
+  .template-preview-toolbar input,
+  .template-preview-toolbar select,
+  .font-card-actions button,
+  .template-card-actions button,
+  .dialog-close-button,
+  .library-dialog-actions button {
+    min-height: 44px;
+  }
+
+  .credential-visibility-button,
+  .dialog-close-button {
+    width: 44px;
+    height: 44px;
+  }
+
+  .provider-card {
+    padding: var(--ui-compact-panel-padding);
   }
 }

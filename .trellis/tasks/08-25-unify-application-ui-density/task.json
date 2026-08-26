@@ -1,0 +1,31 @@
+{
+  "id": "unify-application-ui-density",
+  "name": "unify-application-ui-density",
+  "title": "统一全应用 UI 密度",
+  "description": "参考紧凑型文案界面统一全应用操作 UI 密度；预览区域保持不变，时间轴纵向几何约缩小 15%。",
+  "status": "in_progress",
+  "dev_type": "frontend",
+  "scope": "web UI density and timeline vertical geometry",
+  "package": "web",
+  "priority": "P2",
+  "creator": "541",
+  "assignee": "541",
+  "createdAt": "2026-08-25",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": "08-13-project-optimization-audit",
+  "relatedFiles": [
+    "web/styles.css",
+    "web/editor-timeline-controller.js",
+    "tests/app/test_frontend_contracts.py",
+    "tests/app/browser/test_editor_workflows.py"
+  ],
+  "notes": "",
+  "meta": {}
+}

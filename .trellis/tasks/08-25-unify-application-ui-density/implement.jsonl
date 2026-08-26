@@ -1,0 +1,7 @@
+{"file":".trellis/spec/guides/project-overview.md","reason":"确认原生多页面前端、公共样式所有权、运行入口和最小改动边界。"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"实施紧凑密度、文案列表 10/9/7/9/8px 可读下限、画中画中文小字号清晰度、预览安全区、时间轴几何、圆形控件和响应式。"}
+{"file":".trellis/spec/frontend/picture-in-picture-runtime.md","reason":"保留顶层画中画 60% 局部密度例外、500/700 中文 UI 字重及 15/16/17px 字号下限，并锁定 64px 时间列、12px gap、正文 ellipsis。"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"保证展示层改动不改变媒体 source、source/edited 时间映射和公共时间轴语义。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"按真实 Chromium 验证 preview identity、几何、375px、时间轴子层和基础 video 不重载。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"锁定单一 preview canvas 坐标权威、工具切换和跨层无状态变更。"}
+{"file":".trellis/tasks/08-25-unify-application-ui-density/research/current-ui-density-and-timeline-geometry.md","reason":"注入当前页面密度、预览不可缩放边界、CSS/JS 动态时间轴数值和测试锚点。"}

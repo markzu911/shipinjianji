@@ -55,6 +55,7 @@ const mergeSegmentDownButton = document.querySelector(
 );
 const clearSelectionButton = document.querySelector("#clearSelectionButton");
 const generateCutButton = document.querySelector("#generateCutButton");
+const cutToolbar = document.querySelector(".cut-toolbar");
 const outputCutSummary = document.querySelector("#outputCutSummary");
 const outputCutSelectionDetail = document.querySelector(
   "#outputCutSelectionDetail",
@@ -222,6 +223,7 @@ let transcriptPlaybackCursor = -1;
 let transcriptPlaybackActiveCursor = -1;
 let transcriptPlaybackLastTime = Number.NEGATIVE_INFINITY;
 let cutPlaybackFrameClock = null;
+let transcriptCharacterUnitsCache = null;
 let editedTimelineSpansCache = null;
 let mergedCutSelectionCache = null;
 let semanticCutDeleteRangesCache = null;
@@ -477,6 +479,9 @@ function getSegmentTokens(segment) {
 }
 
 function getTranscriptCharacterUnits(segments = null) {
+  if (!Array.isArray(segments) && transcriptCharacterUnitsCache !== null) {
+    return transcriptCharacterUnitsCache;
+  }
   const sourceSegments = Array.isArray(segments)
     ? segments
     : currentSegments.length
@@ -492,9 +497,11 @@ function getTranscriptCharacterUnits(segments = null) {
       units.push(token);
     }
   }
-  return units.sort(
+  const sortedUnits = units.sort(
     (left, right) => left.start - right.start || left.end - right.end,
   );
+  if (!Array.isArray(segments)) transcriptCharacterUnitsCache = sortedUnits;
+  return sortedUnits;
 }
 
 const EDITABLE_CLAUSE_ENDINGS = /[\u3002\uff01\uff1f\u2026\uff0c\u3001\uff1b\uff1a.!?,;:]$/u;
@@ -1281,6 +1288,7 @@ async function applyEditableSegmentOperation(action) {
       throw new Error(result.detail || "分段调整失败，请重试。");
     }
     currentEditableSegments = result.editableSegments || currentEditableSegments;
+    transcriptCharacterUnitsCache = null;
     syncCorrectedWords();
     renderCutSegments();
     renderCutTimelineTextSegments();
@@ -1335,6 +1343,7 @@ async function saveSegmentText() {
       throw new Error("文字已保存，但当前项目已切换，未覆盖新项目状态。");
     }
     currentEditableSegments = result.editableSegments || currentEditableSegments;
+    transcriptCharacterUnitsCache = null;
     syncCorrectedWords();
     renderCutSegments();
     renderCutTimelineTextSegments();
@@ -3585,10 +3594,7 @@ function commitSelectionSummary() {
     cutControlsLocked || merged.length === 0;
   updateTimelineRangeConfirmation();
   updateOriginalSourceActionsVisibility();
-  document.body.classList.toggle(
-    "has-cut-selection",
-    hasCutSelection(),
-  );
+  cutToolbar.classList.toggle("has-cut-selection", hasCutSelection());
   stepStarted = recordCutPerformanceStep(breakdown, "summaryDom", stepStarted);
   updateImmediateCutSelectionFeedback();
   stepStarted = recordCutPerformanceStep(
@@ -4622,27 +4628,55 @@ function renderCutTimelineThumbnailFrames(cache, total) {
     cutFrameTimelineThumbnails.replaceChildren(fragment);
     cutFrameTimelineThumbnails.dataset.cacheSignature = cache.signature;
   }
-  const deleted = getMergedSelection();
   const spans = getEditedTimelineSpans();
-  cache.frames.forEach((frame, index) => {
-    const item = cutFrameTimelineThumbnails.children[index];
-    const deletedFrame = deleted.some(
-      (range) =>
-        frame.sourceTime >= range.start && frame.sourceTime < range.end,
+  const projectedFrames = cache.frames
+    .map((frame, index) => ({
+      frame,
+      index,
+      editedTime: sourceTimeToEditedTime(frame.sourceTime, spans),
+    }))
+    .filter(({ frame }) =>
+      spans.some((span, spanIndex) =>
+        frame.sourceTime >= span.sourceStart - CUT_SPEECH_BOUNDARY_EPSILON &&
+        (frame.sourceTime < span.sourceEnd - CUT_SPEECH_BOUNDARY_EPSILON ||
+          (spanIndex === spans.length - 1 &&
+            Math.abs(span.sourceEnd - cache.sourceDuration) <=
+              CUT_SPEECH_BOUNDARY_EPSILON &&
+            frame.sourceTime <=
+              span.sourceEnd + CUT_SPEECH_BOUNDARY_EPSILON))
+      )
     );
-    const previousSourceTime = cache.frames[index - 1]?.sourceTime;
-    const nextSourceTime = cache.frames[index + 1]?.sourceTime;
-    const sourceStart = Number.isFinite(previousSourceTime)
-      ? (previousSourceTime + frame.sourceTime) / 2
-      : 0;
-    const sourceEnd = Number.isFinite(nextSourceTime)
-      ? (frame.sourceTime + nextSourceTime) / 2
-      : cache.sourceDuration;
-    const editedStart = sourceTimeToEditedTime(sourceStart, spans);
-    const editedEnd = sourceTimeToEditedTime(sourceEnd, spans);
-    item.hidden =
-      deletedFrame || editedEnd - editedStart <= CUT_SPEECH_BOUNDARY_EPSILON;
+  if (projectedFrames.length === 0) {
+    const targetSourceTime = editedTimeToSourceTime(total / 2, spans);
+    const representative = cache.frames.reduce(
+      (closest, frame, index) =>
+        Math.abs(frame.sourceTime - targetSourceTime) < closest.distance
+          ? { frame, index, distance: Math.abs(frame.sourceTime - targetSourceTime) }
+          : closest,
+      { frame: cache.frames[0], index: 0, distance: Number.POSITIVE_INFINITY },
+    );
+    projectedFrames.push({
+      frame: representative.frame,
+      index: representative.index,
+      editedTime: total / 2,
+    });
+  }
+  cache.frames.forEach((_frame, index) => {
+    const item = cutFrameTimelineThumbnails.children[index];
+    item.hidden = true;
     item.style.position = "absolute";
+  });
+  projectedFrames.forEach(({ index, editedTime }, projectedIndex) => {
+    const item = cutFrameTimelineThumbnails.children[index];
+    const previousEditedTime = projectedFrames[projectedIndex - 1]?.editedTime;
+    const nextEditedTime = projectedFrames[projectedIndex + 1]?.editedTime;
+    const editedStart = Number.isFinite(previousEditedTime)
+      ? (previousEditedTime + editedTime) / 2
+      : 0;
+    const editedEnd = Number.isFinite(nextEditedTime)
+      ? (editedTime + nextEditedTime) / 2
+      : total;
+    item.hidden = editedEnd - editedStart <= CUT_SPEECH_BOUNDARY_EPSILON;
     item.style.left = `${(editedStart / total) * 100}%`;
     item.style.width = `${Math.max(0, ((editedEnd - editedStart) / total) * 100)}%`;
   });
@@ -5716,6 +5750,7 @@ function resetToUpload() {
   forgetJob();
   currentSegments = [];
   currentEditableSegments = [];
+  transcriptCharacterUnitsCache = null;
   currentAudioQuietRanges = [];
   currentSuggestions = [];
   currentNoSpeechSuggestions = [];
@@ -5742,7 +5777,8 @@ function resetToUpload() {
   noSpeechPreviewEnd = null;
   cutSelectionPreviewEnd = null;
   transcriptPreviewRange = null;
-  document.body.classList.remove("has-result", "has-cut-selection");
+  document.body.classList.remove("has-result");
+  cutToolbar.classList.remove("has-cut-selection");
   clearSelectedFile();
   startButton.querySelector("span").textContent = "开始提取文字";
   clearFormError();
@@ -5905,6 +5941,7 @@ function renderResult(job) {
     segments,
     result.editableSegments,
   );
+  transcriptCharacterUnitsCache = null;
   currentAudioQuietRanges = (result.audioQuietRanges || []).flatMap((range) => {
     const start = Number(range?.start);
     const end = Number(range?.end);
