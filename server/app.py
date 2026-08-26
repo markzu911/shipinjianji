@@ -3934,6 +3934,106 @@ def corroborate_repeated_transition_with_pcm(
     )
 
 
+def corroborate_forced_deleted_head_with_pcm(
+    retained_limit: float,
+    forced_candidate: float,
+    samples: array,
+    sample_rate: int,
+) -> tuple[float | None, dict[str, Any]]:
+    """Move a trusted delete-start to the last quiet edge before its attack."""
+    evidence: dict[str, Any] = {
+        "pcmCorroborated": False,
+        "pcmValleyStart": None,
+        "pcmValleyEnd": None,
+        "pcmAttackStart": None,
+        "retainedSpeechHardLimit": None,
+    }
+    if not samples or sample_rate <= 0:
+        return None, evidence
+    try:
+        retained_limit = float(retained_limit)
+        forced_candidate = float(forced_candidate)
+    except (TypeError, ValueError):
+        return None, evidence
+    if (
+        not math.isfinite(retained_limit)
+        or not math.isfinite(forced_candidate)
+        or retained_limit < 0.0
+        or forced_candidate > len(samples) / sample_rate
+        or retained_limit >= forced_candidate
+    ):
+        return None, evidence
+
+    step = max(1, round(CUT_BOUNDARY_STEP_SECONDS * sample_rate))
+    block = step
+    probe_end = min(
+        len(samples) / sample_rate,
+        forced_candidate + min(CUT_CHARACTER_BOUNDARY_WINDOWS_SECONDS),
+    )
+    first = math.ceil((retained_limit * sample_rate + block) / step) * step
+    last = math.floor(probe_end * sample_rate / step) * step
+    positions = list(range(first, last + 1, step))
+
+    def trailing_block_rms(position: int) -> float:
+        start = max(0, position - block)
+        end = min(len(samples), position)
+        if end <= start:
+            return float("inf")
+        energy = sum(int(sample) * int(sample) for sample in samples[start:end])
+        return math.sqrt(energy / (end - start))
+
+    curve = [(position, trailing_block_rms(position)) for position in positions]
+    if len(curve) < 4:
+        return None, evidence
+    for attack_index in range(2, len(curve) - 1):
+        attack_start = curve[attack_index][0] / sample_rate
+        if attack_start > forced_candidate + 0.001:
+            break
+        quiet_rms = max(curve[attack_index - 2][1], curve[attack_index - 1][1])
+        attack_rms = min(curve[attack_index][1], curve[attack_index + 1][1])
+        if (
+            not math.isfinite(quiet_rms)
+            or not math.isfinite(attack_rms)
+            or quiet_rms
+            >= attack_rms * CUT_EXTENDED_VALLEY_IMPROVEMENT
+            or not boundary_rms_is_meaningfully_lower(
+                curve[attack_index - 1][1],
+                curve[attack_index][1],
+            )
+        ):
+            continue
+        quiet_ceiling = attack_rms * CUT_EXTENDED_VALLEY_IMPROVEMENT
+        start_index = attack_index - 2
+        while (
+            start_index > 0
+            and math.isfinite(curve[start_index - 1][1])
+            and curve[start_index - 1][1] <= quiet_ceiling
+        ):
+            start_index -= 1
+        end_index = attack_index - 1
+        valley_start = curve[start_index][0] / sample_rate
+        valley_end = curve[end_index][0] / sample_rate
+        boundary = snap_to_low_amplitude_sample(
+            samples,
+            sample_rate,
+            valley_end,
+            max(valley_start, valley_end - CUT_BOUNDARY_STEP_SECONDS * 2),
+            valley_end,
+        )
+        boundary = round(max(retained_limit, min(boundary, forced_candidate)), 3)
+        evidence.update(
+            {
+                "pcmCorroborated": True,
+                "pcmValleyStart": round(valley_start, 3),
+                "pcmValleyEnd": round(valley_end, 3),
+                "pcmAttackStart": round(attack_start, 3),
+                "retainedSpeechHardLimit": round(retained_limit, 3),
+            }
+        )
+        return boundary, evidence
+    return None, evidence
+
+
 def corroborate_repeat_retained_limit_with_pcm(
     fallback: float,
     retained_limit: float | None,
@@ -4629,6 +4729,7 @@ def forced_alignment_transition_boundary(
         "pcmCorroborated": False,
         "pcmValleyStart": None,
         "pcmValleyEnd": None,
+        "pcmAttackStart": None,
         "pcmGapCorroborated": False,
         "pcmGapStart": None,
         "pcmGapEnd": None,
@@ -4827,6 +4928,25 @@ def forced_alignment_transition_boundary(
             }
         )
         return corroborated, diagnostic
+    if transition_scope == "same_segment" and not deletion_on_left:
+        corroborated, evidence = corroborate_forced_deleted_head_with_pcm(
+            left_end,
+            candidate,
+            samples,
+            sample_rate,
+        )
+        if corroborated is not None:
+            diagnostic.update(evidence)
+            diagnostic.update(
+                {
+                    "final": round(corroborated, 3),
+                    "boundaryTrustworthy": True,
+                    "trustReason": "forced_deleted_head_pcm_valley",
+                    "pcmAdjustment": round(corroborated - candidate, 6),
+                    "fallbackReason": None,
+                }
+            )
+            return corroborated, diagnostic
     corridor_start = (
         candidate
         if deletion_on_left
