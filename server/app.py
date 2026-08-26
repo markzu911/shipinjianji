@@ -45,6 +45,8 @@ from .acoustic_alignment import (
     MODEL_REVISION as ACOUSTIC_ALIGNMENT_MODEL_REVISION,
     AlignmentFailure,
     ensure_acoustic_alignment_cache,
+    load_acoustic_alignment_cache,
+    validate_segment_alignment,
 )
 from .history_repository import (
     HISTORY_KINDS,
@@ -3439,7 +3441,21 @@ def transcript_acoustic_character_units(
         and isinstance(item.get("characters"), list)
     }
     for segment_index, segment in enumerate(segments):
-        semantic_units = transcript_segment_character_units(segment)
+        semantic_units: list[dict[str, Any]] = []
+        for source_item_index, item in enumerate(
+            transcript_segment_timed_items(segment, require_text=True)
+        ):
+            semantic_units.extend(
+                {
+                    **unit,
+                    "_sourceItemIndex": source_item_index,
+                }
+                for unit in split_timed_text_units(
+                    str(item.get("text") or ""),
+                    float(item["start"]),
+                    float(item["end"]),
+                )
+            )
         semantic_characters = [
             spoken_text_characters(str(unit.get("text") or ""))
             for unit in semantic_units
@@ -3527,6 +3543,7 @@ def transcript_acoustic_character_units(
                 **copy.deepcopy(unit),
                 "_segmentIndex": segment_index,
                 "_characterIndex": character_index,
+                "_segmentSpokenIndex": character_index,
                 "_segmentCharacterCount": len(semantic_units),
             }
             if mapping_valid:
@@ -5691,9 +5708,13 @@ def build_retained_transcript(
     output_duration: float,
     timeline_delete_ranges: list[dict[str, float]] | None = None,
     audio_quiet_ranges: list[dict[str, float]] | None = None,
+    alignment_cache: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    retained_segments: list[dict[str, Any]] = []
-    timeline_ranges = timeline_delete_ranges or delete_ranges
+    timeline_ranges = (
+        timeline_delete_ranges
+        if timeline_delete_ranges is not None
+        else delete_ranges
+    )
 
     def is_deleted(start: float, end: float) -> bool:
         return any(
@@ -5701,138 +5722,192 @@ def build_retained_transcript(
             for item in delete_ranges
         )
 
-    def map_retained_timed_items(
-        source_items: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        retained_items: list[dict[str, Any]] = []
-        for item in source_items:
-            start = float(item["start"])
-            end = float(item["end"])
-            units = split_timed_text_units(str(item["text"]), start, end)
-            retained_units = [
-                unit
-                for unit in units
-                if not is_deleted(float(unit["start"]), float(unit["end"]))
+    acoustic_units = transcript_acoustic_character_units(segments, alignment_cache)
+    forced_projection_segments: set[int] = set()
+    for segment_index in {
+        int(unit["_segmentIndex"])
+        for unit in acoustic_units
+    }:
+        segment_units = [
+            unit
+            for unit in acoustic_units
+            if int(unit["_segmentIndex"]) == segment_index
+        ]
+        valid = bool(segment_units)
+        try:
+            envelope_start = float(segments[segment_index].get("start"))
+            envelope_end = float(segments[segment_index].get("end"))
+            reference_characters = [
+                spoken_text_characters(str(unit.get("text") or ""))[0]
+                for unit in segment_units
+                if len(spoken_text_characters(str(unit.get("text") or ""))) == 1
             ]
-            if not retained_units:
-                continue
-            if len(retained_units) == len(units):
-                mapped_start = timeline_after_deletions(start, timeline_ranges)
-                mapped_end = timeline_after_deletions(end, timeline_ranges)
-                if mapped_end <= mapped_start:
-                    continue
-                retained_items.append(
-                    {
-                        **{
-                            key: copy.deepcopy(value)
-                            for key, value in item.items()
-                            if key not in {"start", "end"}
-                        },
-                        "text": str(item["text"]),
-                        "start": mapped_start,
-                        "end": mapped_end,
-                    }
+            if len(reference_characters) != len(segment_units):
+                valid = False
+            else:
+                validate_segment_alignment(
+                    reference_characters,
+                    [
+                        {
+                            "text": reference_characters[index],
+                            "start": float(unit["_forcedStart"]) - envelope_start,
+                            "end": float(unit["_forcedEnd"]) - envelope_start,
+                        }
+                        for index, unit in enumerate(segment_units)
+                    ],
+                    envelope_start,
+                    envelope_end,
                 )
-                continue
-            for unit in retained_units:
-                mapped_start = timeline_after_deletions(
-                    float(unit["start"]), timeline_ranges
-                )
-                mapped_end = timeline_after_deletions(
-                    float(unit["end"]), timeline_ranges
-                )
-                if mapped_end <= mapped_start:
-                    continue
-                retained_items.append(
+        except (AlignmentFailure, IndexError, KeyError, TypeError, ValueError):
+            valid = False
+        if valid:
+            forced_projection_segments.add(segment_index)
+
+    retained_units: list[dict[str, Any]] = []
+    for unit in acoustic_units:
+        semantic_start = float(unit["start"])
+        semantic_end = float(unit["end"])
+        if is_deleted(semantic_start, semantic_end):
+            continue
+        use_forced = int(unit["_segmentIndex"]) in forced_projection_segments
+        source_start = float(unit["_forcedStart"] if use_forced else semantic_start)
+        source_end = float(unit["_forcedEnd"] if use_forced else semantic_end)
+        preferred_start = max(
+            0.0,
+            min(output_duration, timeline_after_deletions(source_start, timeline_ranges)),
+        )
+        preferred_end = max(
+            0.0,
+            min(output_duration, timeline_after_deletions(source_end, timeline_ranges)),
+        )
+        retained_units.append(
+            {
+                "text": str(unit.get("text") or ""),
+                "preferredStart": preferred_start,
+                "preferredEnd": preferred_end,
+                "sourceStart": round(source_start, 6),
+                "sourceEnd": round(source_end, 6),
+                "segmentIndex": int(unit["_segmentIndex"]),
+                "sourceItemIndex": int(unit.get("_sourceItemIndex", 0)),
+                "spokenIndex": int(unit.get("_segmentSpokenIndex", 0)),
+            }
+        )
+
+    projected_by_segment: dict[int, list[dict[str, Any]]] = {}
+    retained_count = len(retained_units)
+    minimum_duration = (
+        min(0.000001, output_duration / (retained_count * 2))
+        if retained_count and output_duration > 0
+        else 0.0
+    )
+    cursor = 0.0
+    for index, unit in enumerate(retained_units):
+        remaining_count = retained_count - index - 1
+        latest_end = max(0.0, output_duration - remaining_count * minimum_duration)
+        latest_start = max(0.0, latest_end - minimum_duration)
+        mapped_start = max(
+            cursor,
+            min(float(unit["preferredStart"]), latest_start),
+        )
+        mapped_end = min(
+            latest_end,
+            max(float(unit["preferredEnd"]), mapped_start + minimum_duration),
+        )
+        cursor = mapped_end
+        segment_index = int(unit["segmentIndex"])
+        projected_by_segment.setdefault(segment_index, []).append(
+            {
+                **{
+                    key: value
+                    for key, value in unit.items()
+                    if key not in {"preferredStart", "preferredEnd", "segmentIndex"}
+                },
+                "start": round(mapped_start, 9),
+                "end": round(mapped_end, 9),
+            }
+        )
+
+    def aggregate_units(
+        projected_units: list[dict[str, Any]],
+        group_indexes: dict[int, int],
+    ) -> list[dict[str, Any]]:
+        aggregated: list[dict[str, Any]] = []
+        previous_spoken_index: int | None = None
+        previous_group_index: int | None = None
+        for unit in projected_units:
+            spoken_index = int(unit["spokenIndex"])
+            group_index = group_indexes.get(spoken_index, spoken_index)
+            if (
+                aggregated
+                and group_index == previous_group_index
+                and previous_spoken_index is not None
+                and spoken_index == previous_spoken_index + 1
+            ):
+                aggregated[-1]["text"] += unit["text"]
+                aggregated[-1]["end"] = unit["end"]
+                aggregated[-1]["sourceEnd"] = unit["sourceEnd"]
+            else:
+                aggregated.append(
                     {
                         "text": unit["text"],
-                        "start": mapped_start,
-                        "end": mapped_end,
+                        "start": unit["start"],
+                        "end": unit["end"],
+                        "sourceStart": unit["sourceStart"],
+                        "sourceEnd": unit["sourceEnd"],
                     }
                 )
-        return retained_items
+            previous_spoken_index = spoken_index
+            previous_group_index = group_index
+        return aggregated
 
-    for source_segment in segments:
-        source_words = source_segment.get("words") or []
-        retained_words = map_retained_timed_items(source_words)
-        source_asr_words = source_segment.get("asrWords")
-        retained_asr_words = (
-            map_retained_timed_items(source_asr_words)
-            if isinstance(source_asr_words, list)
+    def item_group_indexes(items: list[dict[str, Any]]) -> dict[int, int] | None:
+        indexes: dict[int, int] = {}
+        characters: list[str] = []
+        for item_index, item in enumerate(items):
+            for character in spoken_text_characters(str(item.get("text") or "")):
+                indexes[len(characters)] = item_index
+                characters.append(character)
+        return indexes if characters else None
+
+    retained_segments: list[dict[str, Any]] = []
+    for segment_index, source_segment in enumerate(segments):
+        projected_units = projected_by_segment.get(segment_index) or []
+        if not projected_units:
+            continue
+        source_words = source_segment.get("words")
+        word_groups = (
+            item_group_indexes(source_words)
+            if isinstance(source_words, list) and source_words
             else None
         )
-
-        if retained_words:
-            retained_segment = {
-                "id": len(retained_segments),
-                "start": retained_words[0]["start"],
-                "end": retained_words[-1]["end"],
-                "text": "".join(word["text"] for word in retained_words),
-                "words": retained_words,
+        if word_groups is None:
+            word_groups = {
+                int(unit["spokenIndex"]): int(unit["sourceItemIndex"])
+                for unit in projected_units
             }
-            if retained_asr_words is not None:
-                retained_segment["asrWords"] = retained_asr_words
-            retained_segments.append(retained_segment)
-            continue
-
-        if source_words:
-            continue
-
-        start = float(source_segment.get("start", 0))
-        end = float(source_segment.get("end", start))
-        units = split_timed_text_units(
-            str(source_segment.get("text", "")), start, end
+        retained_words = aggregate_units(projected_units, word_groups)
+        source_asr_words = source_segment.get("asrWords")
+        asr_groups = (
+            item_group_indexes(source_asr_words)
+            if isinstance(source_asr_words, list) and source_asr_words
+            else None
         )
-        retained_units = [
-            unit
-            for unit in units
-            if not is_deleted(float(unit["start"]), float(unit["end"]))
-        ]
-        if not retained_units:
-            continue
-        if len(retained_units) != len(units):
-            mapped_words: list[dict[str, Any]] = []
-            for unit in retained_units:
-                mapped_start = timeline_after_deletions(
-                    float(unit["start"]), timeline_ranges
-                )
-                mapped_end = timeline_after_deletions(
-                    float(unit["end"]), timeline_ranges
-                )
-                if mapped_end <= mapped_start:
-                    continue
-                mapped_words.append(
-                    {
-                        "text": unit["text"],
-                        "start": mapped_start,
-                        "end": mapped_end,
-                    }
-                )
-            if not mapped_words:
-                continue
-            retained_segments.append(
-                {
-                    "id": len(retained_segments),
-                    "start": mapped_words[0]["start"],
-                    "end": mapped_words[-1]["end"],
-                    "text": "".join(word["text"] for word in mapped_words),
-                    "words": mapped_words,
-                }
+        retained_segment = {
+            "id": len(retained_segments),
+            "start": retained_words[0]["start"],
+            "end": retained_words[-1]["end"],
+            "sourceStart": projected_units[0]["sourceStart"],
+            "sourceEnd": projected_units[-1]["sourceEnd"],
+            "sourceSegmentIndex": segment_index,
+            "text": "".join(unit["text"] for unit in projected_units),
+            "words": retained_words,
+        }
+        if isinstance(source_asr_words, list):
+            retained_segment["asrWords"] = aggregate_units(
+                projected_units,
+                asr_groups or word_groups,
             )
-            continue
-        mapped_start = timeline_after_deletions(start, timeline_ranges)
-        mapped_end = timeline_after_deletions(end, timeline_ranges)
-        if mapped_end <= mapped_start:
-            continue
-        retained_segments.append(
-            {
-                "id": len(retained_segments),
-                "start": mapped_start,
-                "end": mapped_end,
-                "text": str(source_segment.get("text", "")),
-                "words": [],
-            }
-        )
+        retained_segments.append(retained_segment)
 
     mapped_quiet_ranges: list[list[float]] = []
     source_duration = output_duration + sum(
@@ -5869,6 +5944,83 @@ def build_retained_transcript(
             if end - start >= AUDIO_TIMING_QUIET_MIN_SECONDS
         ],
     }
+
+
+def load_existing_job_acoustic_alignment(
+    media_path: Path | None,
+    segments: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if media_path is None:
+        return None
+    return load_acoustic_alignment_cache(media_path, segments, media_path.parent)
+
+
+def load_existing_edit_acoustic_alignment(job_id: str) -> dict[str, Any] | None:
+    """Snapshot edit inputs under the job lock, then read the sidecar outside it."""
+    with JOBS_LOCK:
+        job = JOBS.get(job_id) or {}
+        if (job.get("edit") or {}).get("status") != "completed":
+            return None
+        media_path = JOB_FILES.get(job_id)
+        segments = copy.deepcopy((job.get("result") or {}).get("segments") or [])
+    return load_existing_job_acoustic_alignment(media_path, segments)
+
+
+def build_existing_edit_retained_transcript(
+    segments: list[dict[str, Any]],
+    edit: dict[str, Any],
+    audio_quiet_ranges: list[dict[str, Any]],
+    alignment_cache: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if edit.get("status") != "completed":
+        return None
+    transcript_ranges = edit.get("transcriptRanges")
+    if not isinstance(transcript_ranges, list):
+        transcript_ranges = (
+            edit.get("requestedRanges") or edit.get("ranges") or []
+        )
+    return build_retained_transcript(
+        segments,
+        transcript_ranges,
+        float(edit.get("outputDuration") or 0),
+        timeline_delete_ranges=edit.get("ranges") or [],
+        audio_quiet_ranges=audio_quiet_ranges,
+        alignment_cache=alignment_cache,
+    )
+
+
+def build_cut_draft_retained_transcript(
+    segments: list[dict[str, Any]],
+    suggestions: list[dict[str, Any]],
+    duration: float,
+    draft: dict[str, Any] | None,
+    media_path: Path | None,
+) -> dict[str, Any]:
+    media_ranges = resolve_cut_draft_delete_ranges(
+        draft,
+        suggestions,
+        segments,
+        duration,
+    )
+    semantic_ranges = resolve_cut_draft_delete_ranges(
+        draft,
+        suggestions,
+        segments,
+        duration,
+        use_text_semantic_boundaries=True,
+    )
+    output_duration = round(
+        duration
+        - sum(float(item["end"]) - float(item["start"]) for item in media_ranges),
+        3,
+    )
+    return build_retained_transcript(
+        segments,
+        semantic_ranges,
+        output_duration,
+        timeline_delete_ranges=media_ranges,
+        alignment_cache=load_existing_job_acoustic_alignment(media_path, segments),
+    )
 
 
 def align_transcript_text_to_segments(
@@ -11812,6 +11964,10 @@ def process_cut_job(
             output_duration,
             timeline_delete_ranges=media_ranges,
             audio_quiet_ranges=source_result.get("audioQuietRanges") or [],
+            alignment_cache=load_existing_job_acoustic_alignment(
+                video_path,
+                source_segments,
+            ),
         )
         try:
             edited_samples = decode_cut_audio_samples(attempt_output_path)
@@ -12093,6 +12249,10 @@ def process_preview_composition_job(
             output_duration,
             timeline_delete_ranges=media_ranges,
             audio_quiet_ranges=source_result.get("audioQuietRanges") or [],
+            alignment_cache=load_existing_job_acoustic_alignment(
+                video_path,
+                source_segments,
+            ),
         )
         try:
             edited_samples = decode_cut_audio_samples(edited_attempt_path)
@@ -13406,7 +13566,26 @@ def get_cut_draft(job_id: str) -> dict[str, Any]:
     exists, draft = hydrate_job_cut_draft(job_id)
     if not exists:
         raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
-    return {"cutDraft": draft}
+    with JOBS_LOCK:
+        job = JOBS.get(job_id) or {}
+        duration = float(job.get("duration") or 0)
+        result = copy.deepcopy(job.get("result") or {})
+        media_path = JOB_FILES.get(job_id)
+    retained_transcript = (
+        build_cut_draft_retained_transcript(
+            result.get("segments") or [],
+            result.get("suggestions") or [],
+            duration,
+            draft,
+            media_path,
+        )
+        if duration > 0
+        else None
+    )
+    return {
+        "cutDraft": draft,
+        "retainedTranscript": retained_transcript,
+    }
 
 
 @app.put("/api/transcriptions/{job_id}/cut-draft")
@@ -13430,6 +13609,9 @@ def update_cut_draft(
         video_path = JOB_FILES.get(job_id)
         source_segments = copy.deepcopy(
             (job.get("result") or {}).get("segments") or []
+        )
+        source_suggestions = copy.deepcopy(
+            (job.get("result") or {}).get("suggestions") or []
         )
     if current_draft is None:
         current_draft = load_cut_draft(job_id)
@@ -13578,6 +13760,13 @@ def update_cut_draft(
             job["cutDraft"] = draft
             job["updatedAt"] = draft["updatedAt"]
             response = {"cutDraft": copy.deepcopy(draft)}
+    response["retainedTranscript"] = build_cut_draft_retained_transcript(
+        source_segments,
+        source_suggestions,
+        duration,
+        draft,
+        video_path,
+    )
     # cut-draft.json is the authoritative durable write. Refresh only the
     # project-state metadata after the response so split/selection interactions
     # never wait for a second full snapshot fsync.
@@ -13617,6 +13806,7 @@ def update_transcript_word(
     corrected_text = request.text.strip()
     if not corrected_text:
         raise HTTPException(status_code=400, detail="修正后的文字不能为空。")
+    alignment_cache = load_existing_edit_acoustic_alignment(job_id)
 
     with JOBS_LOCK:
         job = JOBS.get(job_id)
@@ -13656,18 +13846,13 @@ def update_transcript_word(
             str(item.get("text") or "") for item in segments
         )
 
-        edit_transcript = None
-        if edit.get("status") == "completed":
-            edit_transcript = build_retained_transcript(
-                segments,
-                edit.get("transcriptRanges")
-                or edit.get("requestedRanges")
-                or edit.get("ranges")
-                or [],
-                float(edit.get("outputDuration") or 0),
-                timeline_delete_ranges=edit.get("ranges") or [],
-                audio_quiet_ranges=result.get("audioQuietRanges") or [],
-            )
+        edit_transcript = build_existing_edit_retained_transcript(
+            segments,
+            edit,
+            result.get("audioQuietRanges") or [],
+            alignment_cache,
+        )
+        if edit_transcript is not None:
             edit["transcript"] = edit_transcript
             edit["updatedAt"] = utc_now()
 
@@ -13694,6 +13879,7 @@ def update_transcript_text(
     job_id: str,
     request: TranscriptTextUpdate,
 ) -> dict[str, Any]:
+    alignment_cache = load_existing_edit_acoustic_alignment(job_id)
     with JOBS_LOCK:
         job = JOBS.get(job_id)
         if job is None:
@@ -13725,18 +13911,13 @@ def update_transcript_text(
             str(segment.get("text") or "") for segment in segments
         )
 
-        edit_transcript = None
-        if edit.get("status") == "completed":
-            edit_transcript = build_retained_transcript(
-                segments,
-                edit.get("transcriptRanges")
-                or edit.get("requestedRanges")
-                or edit.get("ranges")
-                or [],
-                float(edit.get("outputDuration") or 0),
-                timeline_delete_ranges=edit.get("ranges") or [],
-                audio_quiet_ranges=result.get("audioQuietRanges") or [],
-            )
+        edit_transcript = build_existing_edit_retained_transcript(
+            segments,
+            edit,
+            result.get("audioQuietRanges") or [],
+            alignment_cache,
+        )
+        if edit_transcript is not None:
             edit["transcript"] = edit_transcript
             edit["updatedAt"] = utc_now()
 
@@ -13765,6 +13946,11 @@ def update_editable_transcript_segments(
     job_id: str,
     request: TranscriptSegmentOperation,
 ) -> dict[str, Any]:
+    alignment_cache = (
+        load_existing_edit_acoustic_alignment(job_id)
+        if request.action == "text"
+        else None
+    )
     with JOBS_LOCK:
         job = JOBS.get(job_id)
         if job is None:
@@ -13820,6 +14006,15 @@ def update_editable_transcript_segments(
                     float(source_segment.get("end") or 0),
                     source_segment.get("text") or "",
                 )
+            edit_transcript = build_existing_edit_retained_transcript(
+                source_segments,
+                edit,
+                result.get("audioQuietRanges") or [],
+                alignment_cache,
+            )
+            if edit_transcript is not None:
+                edit["transcript"] = edit_transcript
+                edit["updatedAt"] = utc_now()
         job["updatedAt"] = utc_now()
         response = {"editableSegments": copy.deepcopy(updated_segments)}
     try:

@@ -822,6 +822,27 @@
           : clone(transcript.editableSegments || project.editableSegments);
         project.art = mergedArt;
         project.job = mergeJobText(project.job, payload.job, mergedArt);
+        if (isObject(payload.cutTranscript)) {
+          project.cut = normalizeCut({
+            ...project.cut,
+            transcript: payload.cutTranscript,
+          });
+          project.timeline = replaceTimelineKind(
+            project.timeline,
+            "cut",
+            {
+              duration: project.cut.duration,
+              tracks: [
+                ...cutTimelineTracks(project.cut),
+                ...project.timeline.tracks.filter(
+                  (track) =>
+                    track.kind === "cut" && track.id !== "cut:transcript",
+                ),
+              ],
+            },
+            timelineApi,
+          );
+        }
         serverVersion = String(
           payload.serverVersion || payload.job?.updatedAt || serverVersion,
         );
@@ -1012,6 +1033,7 @@
         }) === stableSignature(state);
       const timingChanged =
         action.type !== ACTIONS.CUT_STRUCTURE_CHANGED &&
+        action.type !== ACTIONS.TRANSCRIPT_TEXT_CHANGED &&
         ((action.type === ACTIONS.PROJECT_HYDRATED && jobId !== state.jobId) ||
           projectTimingSignature(project) !== projectTimingSignature(state.project));
       return owned({

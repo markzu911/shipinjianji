@@ -510,6 +510,62 @@ def ensure_acoustic_alignment_cache(
         )
 
 
+def load_acoustic_alignment_cache(
+    media_path: Path,
+    segments: list[dict[str, Any]],
+    job_directory: Path,
+) -> dict[str, Any] | None:
+    """Read and revalidate an existing sidecar without running alignment."""
+    if not media_path.is_file():
+        return None
+    try:
+        source_hash = source_fingerprint(media_path)
+    except OSError:
+        return None
+    cached = _load_sidecar(alignment_sidecar_path(job_directory), source_hash)
+    if not cached:
+        return None
+    cached_records = {
+        str(item.get("segmentKey")): item
+        for item in cached.get("segments") or []
+        if isinstance(item, dict) and item.get("segmentKey")
+    }
+    records: list[dict[str, Any]] = []
+    for segment_index, segment in enumerate(segments):
+        try:
+            reference, envelope_start, envelope_end = _segment_reference(segment)
+        except AlignmentFailure:
+            continue
+        segment_key, text_fingerprint = _segment_key(
+            source_hash,
+            reference,
+            envelope_start,
+            envelope_end,
+        )
+        record = _validated_cached_record(
+            cached_records.get(segment_key),
+            segment_index=segment_index,
+            segment_key=segment_key,
+            text_fingerprint=text_fingerprint,
+            reference=reference,
+            envelope_start=envelope_start,
+            envelope_end=envelope_end,
+        )
+        if record is not None:
+            records.append(record)
+    if not records:
+        return None
+    return {
+        **cached,
+        "segments": records,
+        "summary": {
+            **(cached.get("summary") or {}),
+            "validSegmentCount": len(records),
+            "reusedSegmentCount": len(records),
+        },
+    }
+
+
 def _ensure_acoustic_alignment_cache_unlocked(
     media_path: Path,
     segments: list[dict[str, Any]],

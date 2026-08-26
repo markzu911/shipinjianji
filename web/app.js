@@ -246,6 +246,7 @@ let cutDraftAcknowledged = null;
 let cutDraftFailedSignature = "";
 let cutDraftSaveGeneration = 0;
 let cutDraftNeedsServerSync = false;
+let serverRetainedProjection = null;
 let automaticNoSpeechInitialized = false;
 let originalSourceActionsAllowed = true;
 let historyVersions = [];
@@ -1345,9 +1346,22 @@ async function saveSegmentText() {
     currentEditableSegments = result.editableSegments || currentEditableSegments;
     transcriptCharacterUnitsCache = null;
     syncCorrectedWords();
+    invalidateCutPlaybackStructure();
     renderCutSegments();
     renderCutTimelineTextSegments();
-    updateSelectionSummary();
+    const projectionSignature = cutDraftSemanticSignature(
+      buildPersistedCutDraftPayload(),
+    );
+    const projectionRevision = cutDraftRevision;
+    if (
+      await loadServerRetainedProjection(
+        textSaveJobId,
+        projectionSignature,
+        projectionRevision,
+      )
+    ) {
+      renderCutTimelineTextSegments();
+    }
     const readProject = async () => {
       const jobResponse = await fetch(
         `/api/transcriptions/${encodeURIComponent(textSaveJobId)}`,
@@ -1359,18 +1373,22 @@ async function saveSegmentText() {
       return jobPayload;
     };
     const jobPayload = await readProject();
+    let cutTranscript = buildLiveCutDraftState().transcript;
     let applied = window.EditorSuite.applyTranscriptTextEffect(
       textSaveEffect,
       jobPayload,
+      cutTranscript,
     );
     if (!applied.accepted) {
       const refreshEffect = window.EditorSuite.beginProjectEffect(
         "transcript-refresh",
       );
       const refreshedJob = await readProject();
+      cutTranscript = buildLiveCutDraftState().transcript;
       applied = window.EditorSuite.applyTranscriptTextEffect(
         refreshEffect,
         refreshedJob,
+        cutTranscript,
       );
     }
     if (!applied.accepted) {
@@ -1926,6 +1944,7 @@ function invalidateCutTimelineScale() {
 }
 
 function invalidateCutPlaybackStructure() {
+  serverRetainedProjection = null;
   editedTimelineSpansCache = null;
   mergedCutSelectionCache = null;
   semanticCutDeleteRangesCache = null;
@@ -2163,60 +2182,90 @@ function getRetainedSegmentParts(
   const segmentStart = Number(segment.start) || 0;
   const segmentEnd = Number(segment.end) || segmentStart;
   const displayEnd = Math.max(segmentEnd, Number(coverageEnd) || segmentEnd);
-  const tokens = getSegmentTokens(segment);
-  const parts = [];
-  for (const span of spans) {
-    const sourceStart = Math.max(segmentStart, span.sourceStart);
-    const sourceEnd = Math.min(displayEnd, span.sourceEnd);
-    if (sourceEnd <= sourceStart) continue;
-    const retainedWords = [];
-    for (const token of tokens) {
-      const start = Number(token.start) || 0;
-      const end = Number(token.end) || start;
-      const midpoint = start + (end - start) / 2;
-      const semanticallyDeleted = semanticDeleteRanges.some(
-        (range) =>
-          midpoint >= Number(range.start) && midpoint < Number(range.end),
+  const tokens = getSegmentTokens(segment).filter((token) => {
+    const start = Number(token.start) || 0;
+    const end = Number(token.end) || start;
+    return !semanticDeleteRanges.some(
+      (range) =>
+        start < Number(range.end) - CUT_SPEECH_BOUNDARY_EPSILON &&
+        end > Number(range.start) + CUT_SPEECH_BOUNDARY_EPSILON,
+    );
+  });
+  const wordsBySpan = new Map();
+  for (const token of tokens) {
+    const start = Number(token.start) || 0;
+    const end = Number(token.end) || start;
+    const candidates = spans.map((span, spanIndex) => ({
+      span,
+      spanIndex,
+      overlap: Math.max(
+        0,
+        Math.min(end, span.sourceEnd) - Math.max(start, span.sourceStart),
+      ),
+      distance: Math.min(
+        Math.abs(end - span.sourceStart),
+        Math.abs(start - span.sourceEnd),
+      ),
+    }));
+    const selected = candidates.sort(
+      (left, right) =>
+        right.overlap - left.overlap ||
+        left.distance - right.distance ||
+        left.spanIndex - right.spanIndex,
+    )[0];
+    if (!selected) continue;
+    const { span, spanIndex } = selected;
+    let wordStart = Math.max(start, span.sourceStart);
+    let wordEnd = Math.min(end, span.sourceEnd);
+    if (wordEnd <= wordStart + CUT_SPEECH_BOUNDARY_EPSILON) {
+      const duration = Math.max(
+        CUT_SPEECH_BOUNDARY_EPSILON,
+        Math.min(end - start, span.sourceEnd - span.sourceStart),
       );
       if (
-        semanticallyDeleted ||
-        end <= sourceStart + CUT_SPEECH_BOUNDARY_EPSILON ||
-        start >= sourceEnd - CUT_SPEECH_BOUNDARY_EPSILON
+        end <= span.sourceStart ||
+        selected.distance === Math.abs(end - span.sourceStart)
       ) {
-        continue;
-      }
-      const wordStart = Math.max(start, sourceStart);
-      const wordEnd = Math.min(end, sourceEnd);
-      const parentStart = Number(token.parentWordStart);
-      const parentEnd = Number(token.parentWordEnd);
-      const previous = retainedWords.at(-1);
-      if (
-        previous &&
-        Number.isFinite(parentStart) &&
-        Number.isFinite(parentEnd) &&
-        previous.parentWordStart === parentStart &&
-        previous.parentWordEnd === parentEnd &&
-        wordStart <= previous.end + CUT_SPEECH_BOUNDARY_EPSILON
-      ) {
-        previous.text += String(token.text || "");
-        previous.end = wordEnd;
+        wordStart = span.sourceStart;
+        wordEnd = Math.min(span.sourceEnd, wordStart + duration);
       } else {
-        retainedWords.push({
-          text: String(token.text || ""),
-          start: wordStart,
-          end: wordEnd,
-          parentWordStart: Number.isFinite(parentStart) ? parentStart : start,
-          parentWordEnd: Number.isFinite(parentEnd) ? parentEnd : end,
-        });
+        wordEnd = span.sourceEnd;
+        wordStart = Math.max(span.sourceStart, wordEnd - duration);
       }
     }
-    const text = retainedWords.length
-      ? retainedWords.map((word) => String(word.text || "")).join("")
-      : tokens.length === 0 &&
-          sourceStart <= segmentStart + 0.001 &&
-          sourceEnd >= segmentEnd - 0.001
-        ? String(segment.text || "")
-        : "";
+    const retainedWords = wordsBySpan.get(spanIndex) || [];
+    const parentStart = Number(token.parentWordStart);
+    const parentEnd = Number(token.parentWordEnd);
+    const previous = retainedWords.at(-1);
+    if (
+      previous &&
+      Number.isFinite(parentStart) &&
+      Number.isFinite(parentEnd) &&
+      previous.parentWordStart === parentStart &&
+      previous.parentWordEnd === parentEnd &&
+      wordStart <= previous.end + CUT_SPEECH_BOUNDARY_EPSILON
+    ) {
+      previous.text += String(token.text || "");
+      previous.end = wordEnd;
+    } else {
+      retainedWords.push({
+        text: String(token.text || ""),
+        start: wordStart,
+        end: wordEnd,
+        parentWordStart: Number.isFinite(parentStart) ? parentStart : start,
+        parentWordEnd: Number.isFinite(parentEnd) ? parentEnd : end,
+      });
+    }
+    wordsBySpan.set(spanIndex, retainedWords);
+  }
+  const parts = [];
+  for (const [spanIndex, retainedWords] of [...wordsBySpan.entries()].sort(
+    (left, right) => left[0] - right[0],
+  )) {
+    const span = spans[spanIndex];
+    const sourceStart = retainedWords[0].start;
+    const sourceEnd = retainedWords.at(-1).end;
+    const text = retainedWords.map((word) => String(word.text || "")).join("");
     if (!text.trim()) continue;
     const editedStart = span.editedStart + sourceStart - span.sourceStart;
     const editedWords = retainedWords
@@ -2245,31 +2294,36 @@ function getRetainedSegmentParts(
       words: editedWords,
     });
   }
+  if (parts.length === 0 && tokens.length === 0 && String(segment.text || "").trim()) {
+    const span = spans.find(
+      (item) => item.sourceStart <= segmentStart && item.sourceEnd >= segmentEnd,
+    );
+    if (span) {
+      parts.push({
+        sourceStart: segmentStart,
+        sourceEnd: segmentEnd,
+        editedStart: span.editedStart + segmentStart - span.sourceStart,
+        editedEnd: span.editedStart + segmentEnd - span.sourceStart,
+        text: String(segment.text || ""),
+        words: [],
+      });
+    }
+  }
   return parts;
 }
 
 function getActiveTranscriptSegmentIndex(
   currentTime = cutPreviewVideo.currentTime || 0,
-  spans = getEditedTimelineSpans(),
+  _spans = getEditedTimelineSpans(),
 ) {
   const sourceTime = Number(currentTime);
   if (!Number.isFinite(sourceTime)) return -1;
-  for (const [segmentIndex, segment] of currentEditableSegments.entries()) {
-    const parts = getRetainedSegmentParts(
-      segment,
-      spans,
-      getEditableSegmentCoverageEnd(segmentIndex),
-    );
-    if (
-      parts.some(
-        ({ sourceStart, sourceEnd }) =>
-          sourceTime >= sourceStart && sourceTime < sourceEnd,
-      )
-    ) {
-      return segmentIndex;
-    }
-  }
-  return -1;
+  const segment = (getCurrentRetainedProjection().segments || []).find(
+    (item) =>
+      sourceTime >= Number(item.sourceStart) &&
+      sourceTime < Number(item.sourceEnd),
+  );
+  return segment ? Number(segment.sourceSegmentIndex) || 0 : -1;
 }
 
 function updateActiveTranscriptSegment(
@@ -2336,6 +2390,23 @@ function hasUncommittedCutSelection() {
 }
 
 function buildLiveCutDraftState() {
+  const transcript = getCurrentRetainedProjection();
+  const spans = getEditedTimelineSpans();
+  return {
+    active: hasUncommittedCutSelection(),
+    cutDraftRevision,
+    ranges: getMergedSelection().map(({ start, end }) => ({ start, end })),
+    splitPoints: cutSplitPoints.map((point) => ({ ...point })),
+    sourceDuration: cutTimelineDuration(),
+    duration: editedCutTimelineDuration(spans),
+    transcript: {
+      ...transcript,
+      audioQuietRanges: getEditedAudioQuietRanges(spans),
+    },
+  };
+}
+
+function buildLocalRetainedProjection() {
   const spans = getEditedTimelineSpans();
   const semanticDeleteRanges = getCurrentSemanticDeleteRanges();
   const segments = currentEditableSegments.flatMap((segment, segmentIndex) =>
@@ -2346,6 +2417,7 @@ function buildLiveCutDraftState() {
       semanticDeleteRanges,
     ).map((part, partIndex) => ({
       id: `cut-draft-${segmentIndex}-${partIndex}`,
+      sourceSegmentIndex: segmentIndex,
       text: String(part.text || ""),
       start: part.editedStart,
       end: part.editedEnd,
@@ -2355,18 +2427,45 @@ function buildLiveCutDraftState() {
     })),
   );
   return {
-    active: hasUncommittedCutSelection(),
-    cutDraftRevision,
-    ranges: getMergedSelection().map(({ start, end }) => ({ start, end })),
-    splitPoints: cutSplitPoints.map((point) => ({ ...point })),
-    sourceDuration: cutTimelineDuration(),
+    text: segments.map((segment) => segment.text).join("\n"),
+    segments,
     duration: editedCutTimelineDuration(spans),
-    transcript: {
-      text: segments.map((segment) => segment.text).join("\n"),
-      segments,
-      audioQuietRanges: getEditedAudioQuietRanges(spans),
-    },
   };
+}
+
+function getCurrentRetainedProjection() {
+  const signature = cutDraftSemanticSignature(buildPersistedCutDraftPayload());
+  if (
+    serverRetainedProjection?.jobId === currentJobId &&
+    serverRetainedProjection.signature === signature &&
+    serverRetainedProjection.revision === cutDraftRevision
+  ) {
+    return serverRetainedProjection.transcript;
+  }
+  return buildLocalRetainedProjection();
+}
+
+function applyServerRetainedProjection(
+  transcript,
+  { jobId, signature, revision },
+) {
+  const numericRevision = Number(revision) || 0;
+  if (
+    !transcript ||
+    !Array.isArray(transcript.segments) ||
+    jobId !== currentJobId ||
+    numericRevision !== cutDraftRevision ||
+    signature !== cutDraftSemanticSignature(buildPersistedCutDraftPayload())
+  ) {
+    return false;
+  }
+  serverRetainedProjection = {
+    jobId,
+    signature,
+    revision: numericRevision,
+    transcript,
+  };
+  return true;
 }
 
 function syncEditorSuiteCutDraftState(
@@ -2777,9 +2876,15 @@ function reconcileCurrentCutHistorySnapshot() {
   scheduleLocalCutHistorySave();
 }
 
-function applyPersistedCutDraftAlignment(draft, expectedSignature) {
+function applyPersistedCutDraftAlignment(
+  draft,
+  expectedSignature,
+  retainedTranscript = null,
+  expectedJobId = null,
+) {
   if (
     !draft ||
+    (expectedJobId !== null && expectedJobId !== currentJobId) ||
     cutDraftSemanticSignature(buildPersistedCutDraftPayload()) !==
       expectedSignature
   ) {
@@ -2887,6 +2992,13 @@ function applyPersistedCutDraftAlignment(draft, expectedSignature) {
       cutHistoryReplaying = false;
     }
     reconcileCurrentCutHistorySnapshot();
+  }
+  if (retainedTranscript) {
+    return applyServerRetainedProjection(retainedTranscript, {
+      jobId: expectedJobId,
+      signature: expectedSignature,
+      revision: draft.revision,
+    });
   }
   return true;
 }
@@ -3011,11 +3123,17 @@ async function persistCutDraft() {
         cutDraftDesired?.jobId === request.jobId &&
         cutDraftDesired.signature === request.signature;
       if (stillDesired) {
-        if (!applyPersistedCutDraftAlignment(serverDraft, request.signature)) {
+        if (!applyPersistedCutDraftAlignment(
+          serverDraft,
+          request.signature,
+          result.retainedTranscript,
+          request.jobId,
+        )) {
           throw new Error("服务器返回的剪辑范围无法安全应用。");
         }
         saveLocalCutDraft(serverDraft, request.jobId);
         syncEditorSuiteCutDraftState();
+        renderCutTimelineTextSegments();
         cutCommitExternallySynced = true;
         setCutDraftSaveStatus("剪辑草稿已保存", "success");
       }
@@ -3117,6 +3235,53 @@ async function clearPersistedCutDraft(jobId) {
   if (!response.ok) {
     throw new Error(result.detail || "剪辑草稿清除失败。请稍后重试。");
   }
+}
+
+async function loadServerRetainedProjection(
+  jobId,
+  expectedSignature,
+  expectedRevision,
+) {
+  try {
+    const response = await fetch(
+      `/api/transcriptions/${encodeURIComponent(jobId)}/cut-draft`,
+      { cache: "no-store" },
+    );
+    const result = await response.json();
+    if (!response.ok) return false;
+    const draft = result.cutDraft;
+    if (
+      Number(draft?.revision) !== Number(expectedRevision) ||
+      cutDraftSemanticSignature(draft || {}) !== expectedSignature
+    ) {
+      return false;
+    }
+    const applied = applyServerRetainedProjection(result.retainedTranscript, {
+      jobId,
+      signature: expectedSignature,
+      revision: expectedRevision,
+    });
+    return applied;
+  } catch {
+    return false;
+  }
+}
+
+async function refreshServerRetainedProjection(
+  jobId,
+  expectedSignature,
+  expectedRevision,
+) {
+  const applied = await loadServerRetainedProjection(
+    jobId,
+    expectedSignature,
+    expectedRevision,
+  );
+  if (applied) {
+    syncEditorSuiteCutDraftState();
+    renderCutTimelineTextSegments();
+  }
+  return applied;
 }
 
 function cutHistoryStorageKey(jobId = currentJobId) {
@@ -4442,40 +4607,38 @@ function renderCutTimelineTextSegments() {
   const spans = getEditedTimelineSpans();
   const total = editedCutTimelineDuration(spans);
   if (total <= 0) return;
-  const semanticDeleteRanges = getCurrentSemanticDeleteRanges();
+  const projection = getCurrentRetainedProjection();
 
-  currentEditableSegments.forEach((segment, segmentIndex) => {
-    for (const part of getRetainedSegmentParts(
-      segment,
-      spans,
-      getEditableSegmentCoverageEnd(segmentIndex),
-      semanticDeleteRanges,
-    )) {
-      const item = document.createElement("span");
-      item.className = "cut-timeline-text-segment";
-      item.dataset.segmentIndex = String(segmentIndex);
-      item.dataset.sourceStart = String(part.sourceStart);
-      item.dataset.sourceEnd = String(part.sourceEnd);
-      item.style.left = `${(part.editedStart / total) * 100}%`;
-      item.style.width = `${Math.max(0.2, ((part.editedEnd - part.editedStart) / total) * 100)}%`;
-      const label = document.createElement("span");
-      label.className = "cut-timeline-text-segment-label";
-      label.textContent = String(part.text || "暂无文字").replace(/\s+/g, " ");
-      const editedRange = formatCutRange(part.editedStart, part.editedEnd);
-      item.title = `${editedRange} ${label.textContent}`;
-      item.setAttribute(
-        "aria-label",
-        `剪辑后 ${editedRange} ${label.textContent}`,
-      );
-      item.append(label);
-      cutFrameTimelineText.append(item);
-      cutTimelineTextPlaybackEntries.push({
-        element: item,
-        end: part.sourceEnd,
-        start: part.sourceStart,
-      });
-    }
-  });
+  for (const part of projection.segments || []) {
+    const segmentIndex = Number(part.sourceSegmentIndex) || 0;
+    const editedStart = Number(part.start) || 0;
+    const editedEnd = Number(part.end) || editedStart;
+    const sourceStart = Number(part.sourceStart);
+    const sourceEnd = Number(part.sourceEnd);
+    const item = document.createElement("span");
+    item.className = "cut-timeline-text-segment";
+    item.dataset.segmentIndex = String(segmentIndex);
+    item.dataset.sourceStart = String(sourceStart);
+    item.dataset.sourceEnd = String(sourceEnd);
+    item.style.left = `${(editedStart / total) * 100}%`;
+    item.style.width = `${Math.max(0.2, ((editedEnd - editedStart) / total) * 100)}%`;
+    const label = document.createElement("span");
+    label.className = "cut-timeline-text-segment-label";
+    label.textContent = String(part.text || "暂无文字").replace(/\s+/g, " ");
+    const editedRange = formatCutRange(editedStart, editedEnd);
+    item.title = `${editedRange} ${label.textContent}`;
+    item.setAttribute(
+      "aria-label",
+      `剪辑后 ${editedRange} ${label.textContent}`,
+    );
+    item.append(label);
+    cutFrameTimelineText.append(item);
+    cutTimelineTextPlaybackEntries.push({
+      element: item,
+      end: sourceEnd,
+      start: sourceStart,
+    });
+  }
   cutTimelineTextPlaybackEntries.sort((left, right) =>
     left.start - right.start || left.end - right.end,
   );
@@ -6022,6 +6185,13 @@ function renderResult(job) {
     cutDraftLastSignature = "";
     cutDraftAcknowledged = null;
     scheduleCutDraftSave();
+  }
+  if (persistedDraft !== null && cutDraftRevision > 0) {
+    void refreshServerRetainedProjection(
+      currentJobId,
+      cutDraftSemanticSignature(buildPersistedCutDraftPayload()),
+      cutDraftRevision,
+    );
   }
 
   progressCard.hidden = true;

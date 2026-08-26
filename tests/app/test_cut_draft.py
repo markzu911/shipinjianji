@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import math
 from array import array
 from pathlib import Path
 
@@ -233,6 +235,9 @@ def test_cut_draft_is_persisted_versioned_restored_and_cleared(
             json=payload,
         )
         draft_file_exists_after_save = app_module.cut_draft_path(job_id).is_file()
+        stored_draft_text = app_module.cut_draft_path(job_id).read_text(
+            encoding="utf-8"
+        )
         stale = client.put(
             f"/api/transcriptions/{job_id}/cut-draft",
             json=payload,
@@ -251,7 +256,16 @@ def test_cut_draft_is_persisted_versioned_restored_and_cleared(
         )
 
     assert saved.status_code == 200
+    assert saved.json()["retainedTranscript"] == {
+        "text": "",
+        "segments": [],
+        "duration": 6.5,
+        "audioQuietRanges": [],
+    }
     draft = saved.json()["cutDraft"]
+    assert "retainedTranscript" not in draft
+    assert "retainedTranscript" not in stored_draft_text
+    assert "retainedTranscript" not in app_module.CutDraftRequest.model_fields
     assert draft["schemaVersion"] == 1
     assert draft["revision"] == 1
     assert draft["automaticNoSpeechInitialized"] is True
@@ -276,6 +290,7 @@ def test_cut_draft_is_persisted_versioned_restored_and_cleared(
     assert "其他页面更新" in stale.json()["detail"]
     assert restored.status_code == 200
     assert restored.json()["cutDraft"] == draft
+    assert restored.json()["retainedTranscript"] == saved.json()["retainedTranscript"]
     assert rendered_job.json()["cutDraft"] == draft
     assert cleared.status_code == 200
     assert cleared.json() == {"status": "cleared"}
@@ -1423,7 +1438,13 @@ def test_editable_transcript_segments_can_update_text_and_sync_source():
                     source_segments
                 ),
             },
-            "edit": None,
+            "edit": {
+                "status": "completed",
+                "ranges": [{"start": 0.4, "end": 0.8}],
+                "transcriptRanges": [{"start": 0.4, "end": 0.8}],
+                "outputDuration": 1.0,
+                "transcript": {"text": "旧的剪后文案"},
+            },
             "art": None,
         }
 
@@ -1442,6 +1463,14 @@ def test_editable_transcript_segments_can_update_text_and_sync_source():
         "".join(word["text"] for word in job["result"]["segments"][0]["words"])
     ) == app_module.content_characters("少年应怀凌云志。")
     assert job["result"]["text"] == "少年应怀凌云志。"
+    expected_edit_transcript = app_module.build_retained_transcript(
+        job["result"]["segments"],
+        job["edit"]["transcriptRanges"],
+        job["edit"]["outputDuration"],
+        timeline_delete_ranges=job["edit"]["ranges"],
+    )
+    assert job["edit"]["transcript"] == expected_edit_transcript
+    assert job["edit"]["transcript"]["text"] != "旧的剪后文案"
 
 
 def test_editing_text_keeps_track_timeline_stable():
@@ -1703,8 +1732,20 @@ def test_retained_transcript_does_not_drop_next_natural_word_character():
 
     assert retained["text"] == "一起给"
     assert retained["segments"][0]["asrWords"] == [
-        {"text": "一", "start": 0.0, "end": 0.2},
-        {"text": "起给", "start": 0.2, "end": 0.6},
+        {
+            "text": "一",
+            "start": 0.0,
+            "end": 0.2,
+            "sourceStart": 0.6,
+            "sourceEnd": 0.8,
+        },
+        {
+            "text": "起给",
+            "start": 0.2,
+            "end": 0.6,
+            "sourceStart": 0.8,
+            "sourceEnd": 1.2,
+        },
     ]
 
     de_ni_segments = [
@@ -1732,11 +1773,233 @@ def test_retained_transcript_does_not_drop_next_natural_word_character():
 
     assert retained_de_ni["text"] == "你"
     assert retained_de_ni["segments"][0]["words"] == [
-        {"text": "你", "start": 0.0, "end": 0.2}
+        {
+            "text": "你",
+            "start": 0.0,
+            "end": 0.2,
+            "sourceStart": 0.4,
+            "sourceEnd": 0.6,
+        }
     ]
     assert retained_de_ni["segments"][0]["asrWords"] == [
-        {"text": "你", "start": 0.0, "end": 0.2}
+        {
+            "text": "你",
+            "start": 0.0,
+            "end": 0.2,
+            "sourceStart": 0.4,
+            "sourceEnd": 0.6,
+        }
     ]
+
+
+def test_retained_transcript_keeps_semantic_text_when_coarse_time_is_in_media_cut():
+    segments = [
+        {
+            "start": 27.0,
+            "end": 31.0,
+            "text": "所有人一起给一起给你画",
+            "words": [
+                {"text": "所有人", "start": 27.0, "end": 28.454},
+                {"text": "一起给", "start": 28.454, "end": 29.171},
+                {"text": "一起", "start": 29.171, "end": 29.649},
+                {"text": "给你画", "start": 29.649, "end": 31.0},
+            ],
+        }
+    ]
+    semantic_ranges = [{"start": 28.454, "end": 29.171}]
+    media_ranges = [{"start": 28.299, "end": 29.807}]
+
+    retained = app_module.build_retained_transcript(
+        segments,
+        semantic_ranges,
+        29.492,
+        timeline_delete_ranges=media_ranges,
+    )
+
+    assert retained["text"] == "所有人一起给你画"
+    assert "".join(
+        word["text"] for word in retained["segments"][0]["words"]
+    ) == "所有人一起给你画"
+    assert all(
+        math.isfinite(word[boundary])
+        for word in retained["segments"][0]["words"]
+        for boundary in ("start", "end")
+    )
+    assert all(
+        word["end"] > word["start"]
+        for word in retained["segments"][0]["words"]
+    )
+
+
+def test_retained_transcript_uses_valid_forced_timing_and_rejects_bad_order():
+    text = "你身边你身边人人都觉得你身边人人都觉得"
+    segments = [
+        {
+            "start": 33.16,
+            "end": 42.5,
+            "text": text,
+            "words": [
+                {"text": "你身边你身边人人都觉得", "start": 33.16, "end": 37.12},
+                {"text": "你", "start": 37.12, "end": 37.48},
+                {"text": "身边人人都觉得", "start": 37.48, "end": 42.5},
+            ],
+        }
+    ]
+    forced_characters = []
+    for index, character in enumerate(text):
+        if index < 10:
+            start = 33.2 + index * 0.44
+        elif index == 10:
+            start = 37.65
+        elif index == 11:
+            start = 39.85
+        else:
+            start = 40.05 + (index - 12) * 0.28
+        forced_characters.append(
+            {"text": character, "start": round(start, 3), "end": round(start + 0.18, 3)}
+        )
+    alignment_cache = {
+        "segments": [
+            {
+                "segmentIndex": 0,
+                "validation": {"valid": True},
+                "characters": forced_characters,
+            }
+        ]
+    }
+    semantic_ranges = [{"start": 33.16, "end": 37.12}]
+    media_ranges = [{"start": 32.73, "end": 37.79}]
+
+    retained = app_module.build_retained_transcript(
+        segments,
+        semantic_ranges,
+        37.44,
+        timeline_delete_ranges=media_ranges,
+        alignment_cache=alignment_cache,
+    )
+    assert retained["text"].startswith("你身边人人都觉得")
+    assert retained["segments"][0]["sourceStart"] == pytest.approx(39.85)
+    assert retained["segments"][0]["start"] == pytest.approx(34.79)
+    assert retained["segments"][0]["words"][0]["sourceStart"] == pytest.approx(
+        39.85
+    )
+    assert retained["segments"][0]["words"][0]["sourceEnd"] == pytest.approx(
+        40.03
+    )
+
+    malformed = copy.deepcopy(alignment_cache)
+    malformed["segments"][0]["characters"][12]["start"] = 35.0
+    fallback = app_module.build_retained_transcript(
+        segments,
+        semantic_ranges,
+        37.44,
+        timeline_delete_ranges=media_ranges,
+        alignment_cache=malformed,
+    )
+    assert fallback["text"].startswith("你身边人人都觉得")
+    assert fallback["segments"][0]["sourceStart"] == pytest.approx(37.12)
+
+    non_monotonic_end = copy.deepcopy(alignment_cache)
+    non_monotonic_end["segments"][0]["characters"][11]["end"] = 40.5
+    rejected_end = app_module.build_retained_transcript(
+        segments,
+        semantic_ranges,
+        37.44,
+        timeline_delete_ranges=media_ranges,
+        alignment_cache=non_monotonic_end,
+    )
+    assert rejected_end["segments"][0]["sourceStart"] == pytest.approx(37.12)
+
+    outside_envelope = copy.deepcopy(alignment_cache)
+    outside_envelope["segments"][0]["characters"][-1]["end"] = 43.0
+    rejected_envelope = app_module.build_retained_transcript(
+        segments,
+        semantic_ranges,
+        37.44,
+        timeline_delete_ranges=media_ranges,
+        alignment_cache=outside_envelope,
+    )
+    assert rejected_envelope["segments"][0]["sourceStart"] == pytest.approx(
+        37.12
+    )
+
+
+def test_retained_transcript_distributes_multiple_collapsed_tail_characters():
+    retained = app_module.build_retained_transcript(
+        [
+            {
+                "start": 0.0,
+                "end": 10.0,
+                "text": "前删一起",
+                "words": [
+                    {"text": "前", "start": 0.0, "end": 1.0},
+                    {"text": "删", "start": 8.0, "end": 9.0},
+                    {"text": "一", "start": 9.0, "end": 9.5},
+                    {"text": "起", "start": 9.5, "end": 10.0},
+                ],
+            }
+        ],
+        [{"start": 8.0, "end": 9.0}],
+        8.0,
+        timeline_delete_ranges=[{"start": 8.0, "end": 10.0}],
+    )
+
+    assert retained["text"] == "前一起"
+    tail_words = retained["segments"][0]["words"][-2:]
+    assert [word["text"] for word in tail_words] == ["一", "起"]
+    assert all(word["end"] > word["start"] for word in tail_words)
+    assert tail_words[0]["end"] <= tail_words[1]["start"]
+    assert tail_words[1]["end"] <= retained["duration"]
+
+
+def test_retained_transcript_honors_explicit_empty_physical_ranges():
+    retained = app_module.build_retained_transcript(
+        [
+            {
+                "start": 0.0,
+                "end": 1.0,
+                "text": "甲乙",
+                "words": [
+                    {"text": "甲", "start": 0.0, "end": 0.5},
+                    {"text": "乙", "start": 0.5, "end": 1.0},
+                ],
+            }
+        ],
+        [{"start": 0.0, "end": 0.5}],
+        1.0,
+        timeline_delete_ranges=[],
+    )
+
+    assert retained["text"] == "乙"
+    assert retained["segments"][0]["start"] == pytest.approx(0.5)
+
+
+def test_completed_edit_preserves_explicit_empty_semantic_ranges():
+    retained = app_module.build_existing_edit_retained_transcript(
+        [
+            {
+                "start": 0.0,
+                "end": 1.0,
+                "text": "甲乙",
+                "words": [
+                    {"text": "甲", "start": 0.0, "end": 0.5},
+                    {"text": "乙", "start": 0.5, "end": 1.0},
+                ],
+            }
+        ],
+        {
+            "status": "completed",
+            "ranges": [{"start": 0.0, "end": 0.5}],
+            "requestedRanges": [{"start": 0.0, "end": 0.5}],
+            "transcriptRanges": [],
+            "outputDuration": 0.5,
+        },
+        [],
+        None,
+    )
+
+    assert retained is not None
+    assert retained["text"] == "甲乙"
 
 
 def test_quiet_range_is_trimmed_to_the_gap_between_recognized_words():

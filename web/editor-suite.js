@@ -1751,7 +1751,7 @@
     beginProjectEffect: (scope) => projectStore.beginEffect(scope),
     isCurrentProjectEffect: (token) =>
       projectStore.isCurrentEffect(token),
-    applyTranscriptTextEffect: (token, job) => {
+    applyTranscriptTextEffect: (token, job, cutTranscript = null) => {
       if (
         !projectStore ||
         !job?.result ||
@@ -1767,6 +1767,7 @@
           editableSegments: job.result.editableSegments || [],
           serverArt: job.art || null,
           serverVersion: job.updatedAt || "",
+          cutTranscript,
         },
       });
       if (result.accepted) {

@@ -293,6 +293,153 @@ console.log(JSON.stringify({
     assert result["times"] == [1, 3, 1, 3]
 
 
+def test_editor_project_store_text_change_installs_atomic_cut_projection() -> None:
+    result = run_store_script(
+        r"""
+const job = {
+  id: 'job-multi-part', status: 'completed', duration: 20, updatedAt: 'v1',
+  result: { text: '源文案', segments: [], editableSegments: [] },
+  edit: {
+    status: 'completed', outputDuration: 19,
+    requestedRanges: [{ start: 5, end: 6 }],
+    transcript: { text: '旧文案', segments: [
+      { id: 'old', text: '旧文案', start: 1, end: 3, words: [] },
+    ] },
+  },
+  art: { source: 'edited', overlays: [
+    {
+      id: 'art-1', text: '旧文案', trackType: 'transcript', trackId: 'full',
+      start: 1, end: 3, sourceStart: 1, sourceEnd: 3,
+    },
+  ] },
+  pictureInPicture: { source: 'art', overlays: [
+    { id: 'pip-1', assetId: 'asset-1', start: 4, end: 7, sourceStart: 5, sourceEnd: 8 },
+  ] },
+};
+const store = projectStore.createStore({}, { timeline });
+store.dispatch({ type: 'projectHydrated', payload: { job } });
+const hydrated = store.getState();
+store.dispatch({ type: 'cutStructureChanged', payload: {
+  cut: { ...hydrated.project.cut, splitPoints: [{ key: 'split-a', sourceTime: 9 }] },
+  timeline: {
+    duration: 19,
+    tracks: [{
+      id: 'cut:split-structure', kind: 'cut', name: '视频片段', order: 1,
+      clips: [
+        { id: 'split-left', kind: 'cut', start: 0, end: 9, minDuration: 0.001 },
+        { id: 'split-right', kind: 'cut', start: 9, end: 19, minDuration: 0.001 },
+      ],
+    }],
+  },
+} });
+const before = store.getState();
+const cutTranscript = {
+  text: '所有人\n一起\n更新',
+  duration: 19,
+  segments: [
+    {
+      id: 'new-a', sourceSegmentIndex: 7, text: '所有人',
+      start: 1, end: 2, sourceStart: 10, sourceEnd: 11,
+      words: [{ text: '所有人', start: 1, end: 2, sourceStart: 10, sourceEnd: 11 }],
+      asrWords: [
+        { text: '所有', start: 1, end: 1.7, sourceStart: 10, sourceEnd: 10.7 },
+        { text: '人', start: 1.7, end: 2, sourceStart: 10.7, sourceEnd: 11 },
+      ],
+    },
+    {
+      id: 'new-b', sourceSegmentIndex: 7, text: '一起',
+      start: 2, end: 3, sourceStart: 11, sourceEnd: 12,
+      words: [
+        { text: '一', start: 2, end: 2.4, sourceStart: 11, sourceEnd: 11.4 },
+        { text: '起', start: 2.4, end: 3, sourceStart: 11.4, sourceEnd: 12 },
+      ],
+      asrWords: [{ text: '一起', start: 2, end: 3, sourceStart: 11, sourceEnd: 12 }],
+    },
+    {
+      id: 'new-c', sourceSegmentIndex: 8, text: '更新',
+      start: 4, end: 5, sourceStart: 13, sourceEnd: 14,
+      words: [{ text: '更新', start: 4, end: 5, sourceStart: 13, sourceEnd: 14 }],
+      asrWords: [{ text: '更新', start: 4, end: 5, sourceStart: 13, sourceEnd: 14 }],
+    },
+  ],
+};
+const changed = store.dispatch({ type: 'transcriptTextChanged', payload: {
+  transcript: { text: '源文案已更新', segments: [], editableSegments: [] },
+  editableSegments: [],
+  serverArt: { overlays: [{
+    id: 'art-1', text: '源文案已更新',
+    trackType: 'transcript', trackId: 'full',
+  }] },
+  cutTranscript,
+} });
+const after = store.getState();
+const cutTrack = after.project.timeline.tracks
+  .find(track => track.id === 'cut:transcript').clips;
+const times = items => items.map(item => ({
+  start: item.start, end: item.end,
+  sourceStart: item.sourceStart, sourceEnd: item.sourceEnd,
+}));
+console.log(JSON.stringify({
+  changed,
+  beforeRevision: before.revision,
+  afterRevision: after.revision,
+  beforeTimingRevision: before.timingRevision,
+  afterTimingRevision: after.timingRevision,
+  transcript: after.project.cut.transcript,
+  projectionInstalled:
+    JSON.stringify(after.project.cut.transcript) === JSON.stringify(cutTranscript),
+  rangesBefore: before.project.cut.ranges,
+  rangesAfter: after.project.cut.ranges,
+  durationBefore: before.project.cut.duration,
+  durationAfter: after.project.cut.duration,
+  artTimesBefore: times(before.project.art.overlays),
+  artTimesAfter: times(after.project.art.overlays),
+  pipTimesBefore: times(before.project.pip.overlays),
+  pipTimesAfter: times(after.project.pip.overlays),
+  artText: after.project.art.overlays[0].text,
+  cutTrackNames: cutTrack.map(item => item.name),
+  cutTrackTexts: cutTrack.map(item => item.payload.text),
+  cutTrackRanges: cutTrack.map(item => [item.start, item.end]),
+  cutTrackSourceIds: cutTrack.map(item => item.sourceId),
+  cutTrackIds: after.project.timeline.tracks
+    .filter(track => track.kind === 'cut')
+    .map(track => track.id),
+  splitClipRanges: after.project.timeline.tracks
+    .find(track => track.id === 'cut:split-structure')
+    .clips.map(item => [item.start, item.end]),
+}));
+"""
+    )
+
+    assert result["changed"] == {
+        "accepted": True,
+        "revision": result["beforeRevision"] + 1,
+        "timingRevision": result["beforeTimingRevision"],
+    }
+    assert result["afterRevision"] == result["beforeRevision"] + 1
+    assert result["afterTimingRevision"] == result["beforeTimingRevision"]
+    assert result["projectionInstalled"] is True
+    assert result["transcript"]["text"] == "所有人\n一起\n更新"
+    assert [item["text"] for item in result["transcript"]["segments"]] == [
+        "所有人",
+        "一起",
+        "更新",
+    ]
+    assert result["rangesAfter"] == result["rangesBefore"] == [
+        {"start": 5, "end": 6}
+    ]
+    assert result["durationAfter"] == result["durationBefore"] == 19
+    assert result["artTimesAfter"] == result["artTimesBefore"]
+    assert result["pipTimesAfter"] == result["pipTimesBefore"]
+    assert result["artText"] == "源文案已更新"
+    assert result["cutTrackNames"] == ["所有人", "一起", "更新"]
+    assert result["cutTrackTexts"] == result["cutTrackNames"]
+    assert result["cutTrackRanges"] == [[1, 2], [2, 3], [4, 5]]
+    assert result["cutTrackSourceIds"] == ["new-a", "new-b", "new-c"]
+    assert result["cutTrackIds"] == ["cut:transcript", "cut:split-structure"]
+    assert result["splitClipRanges"] == [[0, 9], [9, 19]]
+
+
 def test_editor_project_store_rejects_stale_and_timing_conflicted_effects() -> None:
     result = run_store_script(
         r"""

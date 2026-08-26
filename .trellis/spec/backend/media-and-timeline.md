@@ -57,6 +57,77 @@ x = clamp(main_w * center_x - overlay_w / 2, min_x, max_x)
 
 参考：`server/app.py` 的 `timeline_after_deletions`、`build_retained_transcript`、`render_*`；`tests/test_app.py` 的 cut boundary、art text、picture-in-picture 和 preview composition 用例。
 
+## 场景：语义保留字符投影到物理剪后时间
+
+### 1. Scope / Trigger
+
+- 修改文字删除、手动时间轴删除、cut-draft GET/PUT、剪辑/组合生成、完成稿文案恢复或浏览器公共时间轴时，必须使用本场景。
+- 字符身份与媒体边界属于两层权威：语义范围只决定保留哪些字符，物理范围只负责把已保留字符映射到剪后时间。
+
+### 2. Signatures
+
+- 后端：`build_retained_transcript(segments, delete_ranges, output_duration, timeline_delete_ranges=None, audio_quiet_ranges=None, alignment_cache=None)`。
+- 后端：`load_acoustic_alignment_cache(media_path, segments, job_directory)` 只读并复验已有 sidecar，不运行模型。
+- API：`GET|PUT /api/transcriptions/{job_id}/cut-draft -> {cutDraft, retainedTranscript}`。
+- 前端：`getCurrentRetainedProjection()`、`applyServerRetainedProjection(transcript, {jobId, signature, revision})`、`loadServerRetainedProjection(jobId, signature, revision)`。
+- Store：`transcriptTextChanged` 可携带 `cutTranscript`，在同一 revision 中更新文案和 cut transcript。
+
+### 3. Contracts
+
+- `delete_ranges` 使用 `originalStart/originalEnd` 归一化后的文字和手动时间轴语义范围，只决定字符身份；`timeline_delete_ranges` 使用物理 `start/end`，只执行 `timeline_after_deletions()` 时间扭曲。显式空列表不得按 truthy fallback 回退到另一层范围。
+- 已有 sidecar 只有在字符顺序、finite 单调区间和 segment 包络复验全部通过时才提供 forced timing；无效或缺失时使用粗时间，但不得删除语义保留字符，也不得调用 FunASR 或写 sidecar。
+- `segments/words/asrWords` 输出 edited `start/end` 和成对 `sourceStart/sourceEnd`；segment 还携带 `sourceSegmentIndex`。edited 时间必须有限、正时长、单调且不越过 `duration`。
+- `retainedTranscript` 是 source transcript、草稿 revision 和既有 alignment 的派生响应，不属于 `CutDraftRequest`，不写入 `cut-draft.json`。旧草稿在 GET 时只读重建，不迁移。
+- 浏览器只在 job id、语义 signature 和 revision 同时匹配时安装服务端投影；过期或旧服务响应保持本地语义投影。文字保存应在一次 `transcriptTextChanged` 中原子安装当前投影，不改变 cut ranges、split track、art/PiP source anchors 或 `timingRevision`。
+- `/cuts`、`/compose`、完成 edit 恢复与后续文案修正使用同一 helper；历史 edit 只有在 `transcriptRanges` 字段缺失/无效时才回退 `requestedRanges/ranges`，显式 `transcriptRanges=[]` 表示不删文字。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 结果 |
+| --- | --- |
+| semantic range 删除字符，物理 range 更宽或覆盖下一个粗 token | 仍按 semantic range 保留字符，再用 forced/coarse timing 映射 |
+| 物理映射使一个或多个保留字符坍缩 | 保留全部字符，并在输出时长内分配最小正时长 |
+| sidecar 缺失、文字错序、时间非单调或越出包络 | 整个受影响 segment 回退粗时间，不运行模型 |
+| cut-draft GET/PUT 的 job、signature 或 revision 过期 | 前端拒绝服务端投影，不覆盖当前编辑 |
+| 旧服务不返回 `retainedTranscript` | 使用本地语义投影，保存流程继续兼容 |
+| 完成 edit 显式保存 `transcriptRanges=[]` | 保留全部文字，只用 `ranges` 扭曲时间 |
+| history edit 缺少 `transcriptRanges` | 兼容回退 `requestedRanges/ranges` |
+
+### 5. Good / Base / Bad Cases
+
+- Good：语义只删第一处“一起给”，即使物理范围覆盖下一处“一起”的粗时间，输出仍为“所有人一起给你画”，并优先使用下一处“一起”的有效 forced 起音。
+- Base：无 sidecar 的旧 job 使用粗时间重建相同字符；旧客户端仍可省略新增响应字段。
+- Bad：先与物理 keep span 相交再决定字符身份，或在 mapped end 等于 mapped start 时 `continue`，都会重新造成时间轴丢首字。
+
+### 6. Tests Required
+
+- 后端纯函数：语义/物理范围错位、显式空物理范围、单个与多个坍缩字符、forced 正常/错序/非单调/越包络、跨自然词和 ASR token、source anchors 与 segment identity。
+- API：cut-draft GET/PUT 同 revision 返回派生投影，请求模型和 JSON 文件不包含派生字段，旧草稿/无 sidecar 兼容，过期 revision 冲突。
+- 生成与恢复：`/cuts`、`/compose`、completed edit 文案修正和 history 使用一致文字；显式空 `transcriptRanges` 不回退物理范围。
+- 前端/Store：本地降级不丢字，stale job/signature/revision 被拒绝，文字保存原子更新 cut transcript 且不改变 ranges、split、art/PiP anchors 或 `timingRevision`。
+- 声学回归：物理 ranges、transition resolver、FFmpeg 输入和首字残音边界保持不变。
+
+### 7. Wrong vs Correct
+
+```python
+# Wrong: 空语义范围会错误回退为物理删除范围。
+semantic_ranges = edit.get("transcriptRanges") or edit.get("ranges") or []
+
+# Correct: 只有字段缺失或无效时兼容回退，显式空列表有业务含义。
+semantic_ranges = edit.get("transcriptRanges")
+if not isinstance(semantic_ranges, list):
+    semantic_ranges = edit.get("requestedRanges") or edit.get("ranges") or []
+```
+
+```javascript
+// Wrong: 文字保存后永久停留在本地粗时间投影。
+const cutTranscript = buildLocalRetainedProjection();
+
+// Correct: 先用三重守卫安装服务端派生值，失败才保留本地降级。
+await loadServerRetainedProjection(jobId, signature, revision);
+const cutTranscript = getCurrentRetainedProjection();
+```
+
 ## 场景：实时艺术字草稿使用双时间坐标
 
 ### 1. Scope / Trigger

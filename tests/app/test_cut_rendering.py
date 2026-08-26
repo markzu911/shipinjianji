@@ -34,8 +34,20 @@ def test_retained_transcript_uses_edited_video_timeline():
     assert result["segments"][0]["start"] == 0.0
     assert result["segments"][0]["end"] == 0.7
     assert result["segments"][0]["words"] == [
-        {"text": "保留", "start": 0.0, "end": 0.25},
-        {"text": "保留", "start": 0.25, "end": 0.7},
+        {
+            "text": "保留",
+            "start": 0.0,
+            "end": 0.25,
+            "sourceStart": 0.0,
+            "sourceEnd": 0.25,
+        },
+        {
+            "text": "保留",
+            "start": 0.25,
+            "end": 0.7,
+            "sourceStart": 0.55,
+            "sourceEnd": 1.0,
+        },
     ]
 
 
@@ -114,8 +126,20 @@ def test_retained_transcript_can_remove_one_character_without_losing_the_word():
 
     assert result["text"] == "凌志，"
     assert result["segments"][0]["words"] == [
-        {"text": "凌", "start": 0.0, "end": 0.3},
-        {"text": "志，", "start": 0.3, "end": 0.6},
+        {
+            "text": "凌",
+            "start": 0.0,
+            "end": 0.3,
+            "sourceStart": 0.0,
+            "sourceEnd": 0.3,
+        },
+        {
+            "text": "志，",
+            "start": 0.3,
+            "end": 0.6,
+            "sourceStart": 0.6,
+            "sourceEnd": 0.9,
+        },
     ]
 
 
@@ -248,6 +272,8 @@ def test_cut_endpoint_renders_preview_video(
         "text": "保留",
         "start": 0.25,
         "end": 0.7,
+        "sourceStart": 0.55,
+        "sourceEnd": 1.0,
     }
     assert video_response.status_code == 200
     assert video_response.headers["content-type"] == "video/mp4"
@@ -575,7 +601,13 @@ def test_cut_endpoint_keeps_ni_when_raw_asr_token_crosses_text_boundary(
     assert job["edit"]["transcriptRanges"] == [{"start": 0.0, "end": 0.4}]
     assert job["edit"]["transcript"]["text"] == "你"
     assert job["edit"]["transcript"]["segments"][0]["asrWords"] == [
-        {"text": "你", "start": 0.0, "end": 0.16}
+        {
+            "text": "你",
+            "start": 0.0,
+            "end": 0.16,
+            "sourceStart": 0.4,
+            "sourceEnd": 0.6,
+        }
     ]
 
 

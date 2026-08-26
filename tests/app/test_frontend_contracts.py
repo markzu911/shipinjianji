@@ -2092,7 +2092,7 @@ const parts = functions.getRetainedSegmentParts(
   }},
   [{{ sourceStart: 0.5, sourceEnd: 0.6, editedStart: 0 }}],
   0.6,
-  [{{ start: 0.2, end: 0.42 }}],
+  [{{ start: 0.2, end: 0.4 }}],
 );
 console.log(JSON.stringify(parts));
 """
@@ -2129,6 +2129,199 @@ console.log(JSON.stringify(parts));
             ],
         }
     ]
+
+
+def test_frontend_live_transcript_keeps_tokens_fully_inside_physical_cut():
+    app_source = (Path(__file__).resolve().parents[2] / "web" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    token_start = app_source.index("function splitTextIntoCharacterTokens")
+    token_end = app_source.index("function getTranscriptCharacterUnits", token_start)
+    retained_start = app_source.index("function getRetainedSegmentParts")
+    retained_end = app_source.index(
+        "function getActiveTranscriptSegmentIndex", retained_start
+    )
+    source = "\n".join(
+        [app_source[token_start:token_end], app_source[retained_start:retained_end]]
+    )
+    script = f"""
+const source = {json.dumps(source)};
+const functions = new Function(`
+const CUT_SPEECH_BOUNDARY_EPSILON = 0.001;
+const selectedRanges = new Map();
+const canonicalizeTextDeleteRange = (range) => range;
+const getCommittedTimelineSemanticDeleteRanges = () => [];
+${{source}}
+return {{ getRetainedSegmentParts }};
+`)();
+const parts = functions.getRetainedSegmentParts(
+  {{
+    start: 27.0,
+    end: 31.0,
+    text: "所有人一起给一起给你画",
+    words: [
+      {{ text: "所有人", start: 27.0, end: 28.454 }},
+      {{ text: "一起给", start: 28.454, end: 29.171 }},
+      {{ text: "一起", start: 29.171, end: 29.649 }},
+      {{ text: "给你画", start: 29.649, end: 31.0 }},
+    ],
+  }},
+  [
+    {{ sourceStart: 27.0, sourceEnd: 28.299, editedStart: 27.0 }},
+    {{ sourceStart: 29.807, sourceEnd: 31.0, editedStart: 28.299 }},
+  ],
+  31.0,
+  [{{ start: 28.454, end: 29.171 }}],
+);
+console.log(JSON.stringify(parts));
+"""
+
+    try:
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[2],
+            check=True,
+            capture_output=True,
+            encoding="utf-8",
+            timeout=20,
+        )
+    except FileNotFoundError:
+        pytest.skip("Node.js is required for the frontend transcript unit test.")
+    except subprocess.CalledProcessError as exc:
+        pytest.fail(exc.stderr)
+
+    parts = json.loads(result.stdout)
+    assert "".join(part["text"] for part in parts) == "所有人一起给你画"
+    assert all(
+        word["end"] > word["start"]
+        for part in parts
+        for word in part["words"]
+    )
+
+
+def test_frontend_server_projection_rejects_stale_job_signature_and_revision():
+    app_source = (Path(__file__).resolve().parents[2] / "web" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    guard_start = app_source.index("function applyServerRetainedProjection")
+    guard_end = app_source.index("function syncEditorSuiteCutDraftState", guard_start)
+    source = app_source[guard_start:guard_end]
+    script = f"""
+const source = {json.dumps(source)};
+const functions = new Function(`
+let serverRetainedProjection = null;
+let currentJobId = "job-current";
+let cutDraftRevision = 4;
+const buildPersistedCutDraftPayload = () => ({{ signature: "sig-current" }});
+const cutDraftSemanticSignature = (payload) => payload.signature;
+${{source}}
+return {{
+  applyServerRetainedProjection,
+  current: () => serverRetainedProjection,
+}};
+`)();
+const transcript = {{ text: "所有人一起给你画", segments: [] }};
+const staleJob = functions.applyServerRetainedProjection(transcript, {{
+  jobId: "job-old", signature: "sig-current", revision: 4,
+}});
+const staleSignature = functions.applyServerRetainedProjection(transcript, {{
+  jobId: "job-current", signature: "sig-old", revision: 4,
+}});
+const staleRevision = functions.applyServerRetainedProjection(transcript, {{
+  jobId: "job-current", signature: "sig-current", revision: 3,
+}});
+const accepted = functions.applyServerRetainedProjection(transcript, {{
+  jobId: "job-current", signature: "sig-current", revision: 4,
+}});
+console.log(JSON.stringify({{
+  staleJob, staleSignature, staleRevision, accepted,
+  current: functions.current(),
+}}));
+"""
+
+    try:
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[2],
+            check=True,
+            capture_output=True,
+            encoding="utf-8",
+            timeout=20,
+        )
+    except FileNotFoundError:
+        pytest.skip("Node.js is required for the frontend projection unit test.")
+    except subprocess.CalledProcessError as exc:
+        pytest.fail(exc.stderr)
+
+    payload = json.loads(result.stdout)
+    assert payload["staleJob"] is False
+    assert payload["staleSignature"] is False
+    assert payload["staleRevision"] is False
+    assert payload["accepted"] is True
+    assert payload["current"]["transcript"]["text"] == "所有人一起给你画"
+
+
+def test_frontend_local_projection_preserves_source_segment_identity():
+    app_source = (Path(__file__).resolve().parents[2] / "web" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    token_start = app_source.index("function splitTextIntoCharacterTokens")
+    token_end = app_source.index("function getTranscriptCharacterUnits", token_start)
+    retained_start = app_source.index("function getRetainedSegmentParts")
+    retained_end = app_source.index("function applyServerRetainedProjection", retained_start)
+    source = "\n".join(
+        [app_source[token_start:token_end], app_source[retained_start:retained_end]]
+    )
+    script = f"""
+const source = {json.dumps(source)};
+const functions = new Function(`
+const CUT_SPEECH_BOUNDARY_EPSILON = 0.001;
+const currentEditableSegments = [
+  {{ start: 0, end: 1, text: "第一段", words: [{{ text: "第一段", start: 0, end: 1 }}] }},
+  {{ start: 1, end: 2, text: "第二段", words: [{{ text: "第二段", start: 1, end: 2 }}] }},
+];
+const spans = [{{ sourceStart: 0, sourceEnd: 2, editedStart: 0, editedEnd: 2 }}];
+const getEditedTimelineSpans = () => spans;
+const getCurrentSemanticDeleteRanges = () => [];
+const getEditableSegmentCoverageEnd = (index) => currentEditableSegments[index].end;
+const editedCutTimelineDuration = () => 2;
+const cutDraftSemanticSignature = () => "signature";
+const buildPersistedCutDraftPayload = () => ({{}});
+let serverRetainedProjection = null;
+let currentJobId = "job-current";
+let cutDraftRevision = 1;
+const cutPreviewVideo = {{ currentTime: 1.2 }};
+${{source}}
+return {{
+  buildLocalRetainedProjection,
+  getActiveTranscriptSegmentIndex,
+}};
+`)();
+const projection = functions.buildLocalRetainedProjection();
+console.log(JSON.stringify({{
+  sourceSegmentIndexes: projection.segments.map(item => item.sourceSegmentIndex),
+  activeIndex: functions.getActiveTranscriptSegmentIndex(),
+}}));
+"""
+
+    try:
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[2],
+            check=True,
+            capture_output=True,
+            encoding="utf-8",
+            timeout=20,
+        )
+    except FileNotFoundError:
+        pytest.skip("Node.js is required for the frontend projection unit test.")
+    except subprocess.CalledProcessError as exc:
+        pytest.fail(exc.stderr)
+
+    assert json.loads(result.stdout) == {
+        "sourceSegmentIndexes": [0, 1],
+        "activeIndex": 1,
+    }
 
 
 def test_frontend_cut_draft_flush_fails_once_when_server_sync_does_not_commit():
@@ -3441,6 +3634,17 @@ def test_editor_project_store_integration_guards_text_and_compose_state():
     save_source = app_source[save_start:save_end]
     assert 'beginProjectEffect("transcript-save")' in save_source
     assert "applyTranscriptTextEffect" in save_source
+    assert "await loadServerRetainedProjection(" in save_source
+    assert save_source.count(
+        "cutTranscript = buildLiveCutDraftState().transcript"
+    ) == 2
+    refresh_effect = save_source.index('beginProjectEffect(\n        "transcript-refresh"')
+    refreshed_job = save_source.index("const refreshedJob = await readProject()")
+    refreshed_projection = save_source.rindex(
+        "cutTranscript = buildLiveCutDraftState().transcript"
+    )
+    refreshed_apply = save_source.rindex("applyTranscriptTextEffect(")
+    assert refresh_effect < refreshed_job < refreshed_projection < refreshed_apply
     assert "broadcastTranscriptUpdated();" in save_source
     assert "if (textSaveEffect)" not in save_source
     assert "projectStoreEnabled" not in save_source

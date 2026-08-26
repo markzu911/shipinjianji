@@ -1,1 +1,4 @@
-{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `py -3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file":".trellis/spec/backend/media-and-timeline.md","reason":"retained transcript、语义/物理双时间、声学时间与预览/生成共享契约"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"EditorProjectStore、公共时间轴、compose 与单一 frame 投影契约"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"审计 original*、物理 ranges、retained transcript 和草稿 revision 的权威分层"}
+{"file":".trellis/tasks/08-26-investigate-timeline-transcript-mismatch/research/semantic-physical-projection.md","reason":"现场 job 两组丢字证据、首个错误层和必需回归"}

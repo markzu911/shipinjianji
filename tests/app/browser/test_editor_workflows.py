@@ -15,26 +15,32 @@ def open_editor(session, job):
     page.goto(f"{session.base_url}/?job={job.job_id}")
     page.locator("#resultCard").wait_for(state="visible")
     page.locator("#segmentList .segment-item").first.wait_for(state="visible")
+    page.wait_for_load_state("networkidle")
     return page
 
 
 def delete_first_text_segment(page) -> dict[str, object]:
+    expected_range_key = "0.050-0.300"
     delete_button = page.get_by_role(
         "button",
         name=re.compile(r"删除文字：删除片段"),
     )
-    delete_button.click()
-    page.locator("#cutDraftSaveStatus").filter(
-        has_text="剪辑草稿已保存"
-    ).wait_for()
-    return page.evaluate(
-        """async () => {
-          const response = await fetch(
-            `/api/transcriptions/${new URLSearchParams(location.search).get("job")}/cut-draft`
-          );
-          return response.json();
-        }"""
-    )["cutDraft"]
+
+    def is_expected_save(response) -> bool:
+        request = response.request
+        if request.method != "PUT" or not response.url.endswith("/cut-draft"):
+            return False
+        payload = request.post_data_json
+        return any(
+            item.get("key") == expected_range_key
+            for item in payload.get("textRanges", [])
+        )
+
+    with page.expect_response(is_expected_save) as response_info:
+        delete_button.click()
+    response = response_info.value
+    assert response.ok
+    return response.json()["cutDraft"]
 
 
 def wait_for_preview_time(page, expected: float) -> None:
@@ -163,6 +169,9 @@ def route_cut_draft_echo(page, job_id: str) -> None:
     revision = {"value": 1}
 
     def fulfill(route) -> None:
+        if route.request.method != "PUT":
+            route.fallback()
+            return
         request = json.loads(route.request.post_data or "{}")
         revision["value"] += 1
         route.fulfill(
@@ -200,6 +209,9 @@ def route_cut_draft_recording(
     requests: list[dict[str, object]] = []
 
     def fulfill(route) -> None:
+        if route.request.method != "PUT":
+            route.fallback()
+            return
         request = json.loads(route.request.post_data or "{}")
         requests.append(request)
         if len(requests) == 1 and delay_first > 0:
@@ -752,7 +764,8 @@ def install_template_catalog_revision_probe(page) -> None:
               if (
                 snapshot &&
                 (!expectedJobId || snapshot.jobId === expectedJobId) &&
-                snapshot.ui?.activeTool === expectedTool
+                snapshot.ui?.activeTool === expectedTool &&
+                document.querySelector('#cutDraftSaveStatus')?.dataset.tone !== 'saving'
               ) break;
               await new Promise(resolve => window.setTimeout(resolve, 0));
             }
