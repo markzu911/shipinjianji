@@ -591,3 +591,26 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 27: 消除删除文案首字残音
+
+**Date**: 2026-08-26
+**Task**: 消除删除文案首字残音
+**Branch**: `develop`
+
+### Summary
+
+修正同段 delete-start 对 forced start 的直接信任，使用首个持续低能到起音跃升的 PCM 证据清除被删首字残音；补齐增益、失败形态、双走廊和真实媒体回归，并同步媒体时间轴规范。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `f033bd7` | (see git log) |
+| `42e0ded` | (see git log) |
+| `4cf9e72` | (see git log) |
+
+### Status
+
+[OK] **Completed**

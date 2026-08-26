@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 26
-- **Last Active**: 2026-08-25
+- **Total Sessions**: 27
+- **Last Active**: 2026-08-26
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~593 | Active |
+| `journal-1.md` | ~616 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 27 | 2026-08-26 | 消除删除文案首字残音 | `f033bd7`, `42e0ded`, `4cf9e72` | `develop` |
 | 26 | 2026-08-25 | 紧凑编辑布局与时间轴帧预览修复 | `cc24366`, `b9ef052`, `d6c3d99` | `develop` |
 | 25 | 2026-08-24 | 任务重启恢复与失败重试 | `9da6b7c`, `554d46c`, `3f611f9`, `218c4c6` | `develop` |
 | 24 | 2026-08-23 | 实现时间轴分割与精确片段删除 | `184b080`, `ee90b83`, `74e166c` | `develop` |
