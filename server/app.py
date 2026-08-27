@@ -4056,9 +4056,16 @@ def corroborate_forced_deleted_head_with_pcm(
 
     step = max(1, round(CUT_BOUNDARY_STEP_SECONDS * sample_rate))
     block = step
+    step_seconds = step / sample_rate
+    required_attack_blocks = 2
+    latest_adjacent_attack_start = (
+        forced_candidate + step_seconds * required_attack_blocks
+    )
     probe_end = min(
         len(samples) / sample_rate,
         forced_candidate + min(CUT_CHARACTER_BOUNDARY_WINDOWS_SECONDS),
+        latest_adjacent_attack_start
+        + step_seconds * (required_attack_blocks - 1),
     )
     first = math.ceil((retained_limit * sample_rate + block) / step) * step
     last = math.floor(probe_end * sample_rate / step) * step
@@ -4077,7 +4084,7 @@ def corroborate_forced_deleted_head_with_pcm(
         return None, evidence
     for attack_index in range(2, len(curve) - 1):
         attack_start = curve[attack_index][0] / sample_rate
-        if attack_start > forced_candidate + 0.001:
+        if attack_start > latest_adjacent_attack_start:
             break
         quiet_rms = max(curve[attack_index - 2][1], curve[attack_index - 1][1])
         attack_rms = min(curve[attack_index][1], curve[attack_index + 1][1])
@@ -4103,14 +4110,26 @@ def corroborate_forced_deleted_head_with_pcm(
         end_index = attack_index - 1
         valley_start = curve[start_index][0] / sample_rate
         valley_end = curve[end_index][0] / sample_rate
-        boundary = snap_to_low_amplitude_sample(
-            samples,
-            sample_rate,
-            valley_end,
-            max(valley_start, valley_end - CUT_BOUNDARY_STEP_SECONDS * 2),
-            valley_end,
-        )
+        if attack_start > forced_candidate:
+            # Later samples only confirm the attack; the cut stays on the
+            # earliest sustained quiet edge that precedes the forced point.
+            boundary = valley_start
+        else:
+            boundary_start = max(
+                valley_start,
+                valley_end - CUT_BOUNDARY_STEP_SECONDS * 2,
+            )
+            boundary_end = valley_end
+            boundary = snap_to_low_amplitude_sample(
+                samples,
+                sample_rate,
+                valley_end,
+                boundary_start,
+                boundary_end,
+            )
         boundary = round(max(retained_limit, min(boundary, forced_candidate)), 3)
+        if not retained_limit <= boundary < forced_candidate:
+            return None, evidence
         evidence.update(
             {
                 "pcmCorroborated": True,
@@ -5025,8 +5044,14 @@ def forced_alignment_transition_boundary(
             samples,
             sample_rate,
         )
+        diagnostic.update(
+            {
+                key: value
+                for key, value in evidence.items()
+                if key != "retainedSpeechHardLimit" or value is not None
+            }
+        )
         if corroborated is not None:
-            diagnostic.update(evidence)
             diagnostic.update(
                 {
                     "final": round(corroborated, 3),
@@ -5037,6 +5062,16 @@ def forced_alignment_transition_boundary(
                 }
             )
             return corroborated, diagnostic
+        diagnostic.update(
+            {
+                "forcedFallbackReason": (
+                    "forced_deleted_head_pcm_not_corroborated"
+                ),
+                "fallbackReason": "forced_deleted_head_pcm_not_corroborated",
+                "trustReason": "forced_deleted_head_pcm_not_corroborated",
+            }
+        )
+        return None, diagnostic
     corridor_start = (
         candidate
         if deletion_on_left
@@ -5383,6 +5418,18 @@ def resolve_adjacent_character_boundary(
                 deletion_on_left=deletion_on_left,
                 allow_token_extension=True,
             )
+            if (
+                not deletion_on_left
+                and diagnostic.get("forcedFallbackReason")
+                == "forced_deleted_head_pcm_not_corroborated"
+            ):
+                try:
+                    resolved = max(
+                        resolved,
+                        float(diagnostic["retainedSpeechHardLimit"]),
+                    )
+                except (KeyError, TypeError, ValueError):
+                    pass
             diagnostic.update(
                 {
                     "final": round(resolved, 3),
