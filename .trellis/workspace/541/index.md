@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 28
-- **Last Active**: 2026-08-26
+- **Total Sessions**: 29
+- **Last Active**: 2026-08-27
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~637 | Active |
+| `journal-1.md` | ~660 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 29 | 2026-08-27 | ASR VAD 联合声学边界与分段投影 | `7f0aa1f`, `34dd8fd`, `ea592cf` | `master` |
 | 28 | 2026-08-26 | 修复时间轴文案投影丢字 | `dbe03a1` | `develop` |
 | 27 | 2026-08-26 | 消除删除文案首字残音 | `f033bd7`, `42e0ded`, `4cf9e72` | `develop` |
 | 26 | 2026-08-25 | 紧凑编辑布局与时间轴帧预览修复 | `cc24366`, `b9ef052`, `d6c3d99` | `develop` |

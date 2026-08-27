@@ -635,3 +635,26 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 29: ASR VAD 联合声学边界与分段投影
+
+**Date**: 2026-08-27
+**Task**: ASR VAD 联合声学边界与分段投影
+**Branch**: `master`
+
+### Summary
+
+引入 ASR、FSMN-VAD 与 PCM 联合剪切边界，统一 AI 删除和用户文案拆分的方向性物理切点；修复 retained transcript 忽略 editableSegmentId 导致时间轴文案合并成 ASR 大段的问题，并通过 457 项全量及 48 项浏览器回归。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `7f0aa1f` | (see git log) |
+| `34dd8fd` | (see git log) |
+| `ea592cf` | (see git log) |
+
+### Status
+
+[OK] **Completed**
