@@ -21,6 +21,236 @@ def _build_track_words(tokens: list[str]) -> list[dict[str, object]]:
     ]
 
 
+def test_text_save_preserves_existing_semantic_cue_ownership() -> None:
+    shared = {
+        "trackType": app_module.TRANSCRIPT_ART_TEXT_TRACK_TYPE,
+        "trackId": "transcript-full",
+        "font": "bold",
+        "color": "#FFFFFF",
+    }
+    art = {
+        "status": "completed",
+        "overlays": [
+            {
+                **shared,
+                "id": "cue-first",
+                "text": "前文其实",
+                "start": 0.0,
+                "end": 1.0,
+                "sourceStart": 0.0,
+                "sourceEnd": 1.0,
+                "characterTimings": [
+                    {"start": 0.0, "end": 0.25},
+                    {"start": 0.25, "end": 0.5},
+                    {"start": 0.5, "end": 0.75},
+                    {"start": 0.75, "end": 1.0},
+                ],
+            },
+            {
+                **shared,
+                "id": "cue-second",
+                "text": "该有的后文",
+                "start": 1.0,
+                "end": 3.0,
+                "sourceStart": 1.0,
+                "sourceEnd": 3.0,
+                "characterTimings": [
+                    {"start": 1.0 + index * 0.4, "end": 1.4 + index * 0.4}
+                    for index in range(5)
+                ],
+            },
+        ],
+    }
+    stable_fields = [
+        {
+            key: cue[key]
+            for key in ("id", "start", "end", "sourceStart", "sourceEnd", "font", "color")
+        }
+        for cue in art["overlays"]
+    ]
+
+    app_module.update_transcript_track_text_for_segment(
+        art,
+        0.0,
+        3.0,
+        "前文其实该有的后文",
+        words=[
+            {"text": "前文", "start": 0.0, "end": 0.5},
+            {"text": "其实", "start": 0.5, "end": 1.0},
+            {"text": "该有的", "start": 1.0, "end": 2.2},
+            {"text": "后文", "start": 2.2, "end": 3.0},
+        ],
+    )
+
+    assert [cue["text"] for cue in art["overlays"]] == ["前文其实", "该有的后文"]
+    assert "".join(cue["text"] for cue in art["overlays"]) == "前文其实该有的后文"
+    assert [
+        {
+            key: cue[key]
+            for key in ("id", "start", "end", "sourceStart", "sourceEnd", "font", "color")
+        }
+        for cue in art["overlays"]
+    ] == stable_fields
+    assert [
+        len(cue["characterTimings"])
+        for cue in art["overlays"]
+    ] == [4, 5]
+
+
+def test_text_save_repairs_corrupted_cue_boundaries_with_character_words() -> None:
+    shared = {
+        "trackType": app_module.TRANSCRIPT_ART_TEXT_TRACK_TYPE,
+        "trackId": "transcript-full",
+        "font": "bold",
+    }
+    art = {
+        "status": "completed",
+        "overlays": [
+            {**shared, "id": "first", "text": "前文其", "start": 0, "end": 3},
+            {**shared, "id": "second", "text": "实该", "start": 3, "end": 5},
+            {**shared, "id": "third", "text": "有的后文结束", "start": 5, "end": 11},
+        ],
+    }
+    text = "前文其实该有的后文结束"
+    words = [
+        {"text": value, "start": index, "end": index + 1}
+        for index, value in enumerate(["前文", "其实", "该", "有", "的", "后文", "结束"])
+    ]
+
+    app_module.update_transcript_track_text_for_segment(
+        art,
+        0,
+        11,
+        text,
+        words=words,
+    )
+
+    assert [cue["text"] for cue in art["overlays"]] == [
+        "前文其实",
+        "该有的",
+        "后文结束",
+    ]
+    assert "".join(cue["text"] for cue in art["overlays"]) == text
+
+
+def test_text_save_repairs_unsafe_old_boundary_after_unrelated_edit() -> None:
+    shared = {
+        "trackType": app_module.TRANSCRIPT_ART_TEXT_TRACK_TYPE,
+        "trackId": "transcript-full",
+    }
+    art = {
+        "status": "completed",
+        "overlays": [
+            {**shared, "id": "first", "text": "前文其实该", "start": 0, "end": 5},
+            {**shared, "id": "second", "text": "有的后文结束", "start": 5, "end": 11},
+        ],
+    }
+    text = "前文其实该有的后文结束啦"
+    words = [
+        {"text": value, "start": index, "end": index + 1}
+        for index, value in enumerate(
+            ["前文", "其实", "该", "有", "的", "后文", "结束啦"]
+        )
+    ]
+
+    app_module.update_transcript_track_text_for_segment(
+        art,
+        0,
+        11,
+        text,
+        words=words,
+    )
+
+    texts = [cue["text"] for cue in art["overlays"]]
+    assert texts == ["前文其实", "该有的后文结束啦"]
+    assert "".join(texts) == text
+
+
+def test_text_save_does_not_reorder_manual_overlays() -> None:
+    art = {
+        "status": "completed",
+        "overlays": [
+            {"id": "manual-late", "text": "标题甲", "start": 8, "end": 9},
+            {
+                "id": "cue",
+                "text": "原文",
+                "start": 2,
+                "end": 4,
+                "sourceStart": 2,
+                "sourceEnd": 4,
+                "trackType": app_module.TRANSCRIPT_ART_TEXT_TRACK_TYPE,
+                "trackId": "transcript-full",
+            },
+            {"id": "manual-early", "text": "标题乙", "start": 0, "end": 1},
+        ],
+    }
+
+    app_module.update_transcript_track_text_for_segment(
+        art,
+        2,
+        4,
+        "新文案",
+        words=[{"text": "新文案", "start": 2, "end": 4}],
+    )
+
+    assert [overlay["id"] for overlay in art["overlays"]] == [
+        "manual-late",
+        "cue",
+        "manual-early",
+    ]
+    assert art["overlays"][1]["text"] == "新文案"
+
+
+def test_text_save_suppresses_and_restores_empty_semantic_cues() -> None:
+    shared = {
+        "trackType": app_module.TRANSCRIPT_ART_TEXT_TRACK_TYPE,
+        "trackId": "transcript-full",
+        "font": "bold",
+    }
+    art = {
+        "status": "completed",
+        "overlays": [
+            {**shared, "id": "first", "text": "前文其实", "start": 0, "end": 4},
+            {**shared, "id": "second", "text": "该有的", "start": 4, "end": 7},
+            {**shared, "id": "third", "text": "后文结束", "start": 7, "end": 11},
+        ],
+    }
+
+    app_module.update_transcript_track_text_for_segment(
+        art,
+        0,
+        11,
+        "该有的",
+        words=[{"text": "该有的", "start": 4, "end": 7}],
+    )
+
+    assert [(cue["id"], cue["text"]) for cue in art["overlays"]] == [
+        ("second", "该有的")
+    ]
+    assert [cue["id"] for cue in art["suppressedOverlays"]] == ["first", "third"]
+    assert all(cue["text"] for cue in art["overlays"])
+
+    app_module.update_transcript_track_text_for_segment(
+        art,
+        0,
+        11,
+        "前文其实该有的后文结束",
+        words=[
+            {"text": "前文", "start": 0, "end": 2},
+            {"text": "其实", "start": 2, "end": 4},
+            {"text": "该有的", "start": 4, "end": 7},
+            {"text": "后文结束", "start": 7, "end": 11},
+        ],
+    )
+
+    assert [(cue["id"], cue["text"]) for cue in art["overlays"]] == [
+        ("first", "前文其实"),
+        ("second", "该有的"),
+        ("third", "后文结束"),
+    ]
+    assert art["suppressedOverlays"] == []
+
+
 def test_art_text_formats_horizontal_and_vertical_layouts():
     horizontal = {
         "text": "甲乙丙丁戊",

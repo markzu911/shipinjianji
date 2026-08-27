@@ -997,29 +997,29 @@ def test_user_text_split_projects_directional_boundaries_without_media_reload(
             segment["mediaEnd"] = float(segment["end"])
         if [segment["text"] for segment in segments] != [
             "删除片段",
-            "保",
-            "留文",
-            "案",
+            "其实",
+            "赘词",
+            "该有的",
         ]:
             return segments, []
-        segments[1]["mediaEnd"] = 0.46
-        segments[2]["mediaStart"] = 0.46
-        segments[2]["mediaEnd"] = 0.80
-        segments[3]["mediaStart"] = 0.80
+        segments[1]["mediaEnd"] = 0.52
+        segments[2]["mediaStart"] = 0.52
+        segments[2]["mediaEnd"] = 0.70
+        segments[3]["mediaStart"] = 0.70
         return segments, [
             {
                 "leftEditableSegmentId": segments[1]["id"],
                 "rightEditableSegmentId": segments[2]["id"],
-                "neutral": 0.46,
-                "deleteLeft": 0.47,
-                "deleteRight": 0.44,
+                "neutral": 0.52,
+                "deleteLeft": 0.53,
+                "deleteRight": 0.50,
             },
             {
                 "leftEditableSegmentId": segments[2]["id"],
                 "rightEditableSegmentId": segments[3]["id"],
-                "neutral": 0.80,
-                "deleteLeft": 0.82,
-                "deleteRight": 0.78,
+                "neutral": 0.70,
+                "deleteLeft": 0.72,
+                "deleteRight": 0.68,
             },
         ]
 
@@ -1038,24 +1038,49 @@ def test_user_text_split_projects_directional_boundaries_without_media_reload(
     install_base_media_mutation_probe(page)
 
     page.get_by_role("button", name="编辑文字段：保留内容").click()
-    page.locator("#segmentEditText").fill("保留文案")
+    page.locator("#segmentEditText").fill("其实赘词该有的")
     page.locator("#saveSegmentTextButton").click()
     page.locator("#segmentStructureStatus").filter(
         has_text="项目预览已同步"
     ).wait_for()
-    page.wait_for_function(
-        """() => window.EditorSuite.projectSnapshot().project.art.overlays
-          .filter(item => item.trackType === 'transcript')
-          .sort((left, right) => left.start - right.start)
-          .map(item => item.text).join('') === '删除片段保留文案'"""
+    with app_module.JOBS_LOCK:
+        server_cues = [
+            item["text"]
+            for item in app_module.JOBS[
+                seeded_two_cue_transcript_track_editor_job.job_id
+            ]["art"]["overlays"]
+            if item.get("trackType") == "transcript"
+        ]
+    assert server_cues == ["删除片段", "其实赘词该有的"]
+    after_save = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          return {
+            art: snapshot.project.art.overlays
+              .filter(item => item.trackType === 'transcript')
+              .sort((left, right) => left.start - right.start)
+              .map(item => item.text),
+            cut: (snapshot.project.cut.transcript?.segments || [])
+              .map(item => item.text),
+            source: (snapshot.project.transcript?.segments || [])
+              .map(item => item.text),
+            serverArt: (snapshot.project.job?.art?.overlays || [])
+              .filter(item => item.trackType === 'transcript')
+              .map(item => item.text),
+          };
+        }"""
     )
+    assert after_save["art"] == ["删除片段", "其实赘词该有的"], after_save
+    assert after_save["cut"] == ["删除片段", "其实赘词该有的"]
+    assert after_save["source"] == ["删除片段", "其实赘词该有的"]
+    assert after_save["serverArt"] == ["删除片段", "其实赘词该有的"]
 
-    page.get_by_role("button", name="编辑文字段：保留文案").click()
+    page.get_by_role("button", name="编辑文字段：其实赘词该有的").click()
     edit_text = page.locator("#segmentEditText")
     edit_text.evaluate(
         """element => {
           element.focus();
-          element.setSelectionRange(1, 3);
+          element.setSelectionRange(2, 4);
           element.dispatchEvent(new Event('select', { bubbles: true }));
         }"""
     )
@@ -1075,9 +1100,9 @@ def test_user_text_split_projects_directional_boundaries_without_media_reload(
             float(item.get_attribute("data-display-end")),
         )
 
-    assert displayed_range(1) == pytest.approx((0.35, 0.46))
-    assert displayed_range(2) == pytest.approx((0.46, 0.80))
-    assert displayed_range(3) == pytest.approx((0.80, 0.95))
+    assert displayed_range(1) == pytest.approx((0.35, 0.52))
+    assert displayed_range(2) == pytest.approx((0.52, 0.70))
+    assert displayed_range(3) == pytest.approx((0.70, 0.95))
 
     middle_toggle = page.locator(
         '.segment-item[data-segment-index="2"] .segment-toggle'
@@ -1088,16 +1113,16 @@ def test_user_text_split_projects_directional_boundaries_without_media_reload(
           const item = document.querySelector(
             '.segment-item[data-segment-index="1"]',
           );
-          return item && Math.abs(Number(item.dataset.displayEnd) - 0.44) < 0.0001;
+          return item && Math.abs(Number(item.dataset.displayEnd) - 0.50) < 0.0001;
         }"""
     )
 
-    assert displayed_range(1) == pytest.approx((0.35, 0.44))
-    assert displayed_range(2) == pytest.approx((0.44, 0.82))
-    assert displayed_range(3) == pytest.approx((0.82, 0.95))
-    page.get_by_role("button", name="编辑文字段：案").click()
+    assert displayed_range(1) == pytest.approx((0.35, 0.50))
+    assert displayed_range(2) == pytest.approx((0.50, 0.72))
+    assert displayed_range(3) == pytest.approx((0.72, 0.95))
+    page.get_by_role("button", name="编辑文字段：该有的").click()
     assert page.locator("#segmentEditTime").text_content() == (
-        "00:00.440 — 00:00.570"
+        "00:00.500 — 00:00.730"
     )
     page.locator("#segmentEditClose").click()
     page.wait_for_function(
@@ -1122,7 +1147,7 @@ def test_user_text_split_projects_directional_boundaries_without_media_reload(
           const transcript = items => items
             .filter(item => item.trackType === 'transcript')
             .sort((left, right) => left.start - right.start)
-            .map(item => item.text).join('');
+            .map(item => item.text);
           const artClips = frame.timeline.tracks
             .filter(track => track.id === 'art:transcript:browser-transcript-track')
             .flatMap(track => track.clips);
@@ -1130,26 +1155,27 @@ def test_user_text_split_projects_directional_boundaries_without_media_reload(
             cut: (snapshot.project.cut.transcript?.segments || [])
               .map(item => item.text).join(''),
             art: transcript(snapshot.project.art.overlays),
-            timeline: artClips.map(item => item.payload.text).join(''),
+            timeline: artClips.map(item => item.payload.text),
             preview: transcript(frame.preview.art.overlays),
             compose: frame.composition.artOverlays
               .filter(item => item.trackId === 'browser-transcript-track')
               .sort((left, right) => left.start - right.start)
-              .map(item => item.text).join(''),
+              .map(item => item.text),
             timingCount: snapshot.project.art.overlays
               .filter(item => item.trackType === 'transcript')
               .reduce((count, item) => count + item.characterTimings.length, 0),
           };
         }"""
     )
-    assert projection["cut"] == "删除片段保案"
-    assert projection["art"] == projection["cut"]
-    assert projection["timeline"] == projection["cut"]
-    assert projection["preview"] == projection["cut"]
-    assert projection["compose"] == projection["cut"]
+    assert projection["cut"] == "删除片段其实该有的"
+    expected_cues = ["删除片段", "其实该有的"]
+    assert projection["art"] == expected_cues
+    assert projection["timeline"] == expected_cues
+    assert projection["preview"] == expected_cues
+    assert projection["compose"] == expected_cues
     assert projection["timingCount"] == len(projection["cut"])
-    assert "留文" not in projection["art"]
-    assert "保" in projection["art"] and "案" in projection["art"]
+    assert all("赘词" not in cue for cue in projection["art"])
+    assert any("其实" in cue and "该有的" in cue for cue in projection["art"])
     assert base_media_mutations(page) == {"srcWrites": 0, "loadCalls": 0}
 
 
@@ -2434,11 +2460,13 @@ def test_top_level_art_track_and_ai_draft_commit_atomically(
             content_type="application/json",
             body=(
                 '{"trackId":"browser-full","trackType":"transcript",'
-                '"fontSize":54,"cueCount":2,"cues":['
-                '{"text":"删除片段","start":0.05,"end":0.3,'
+                '"fontSize":54,"cueCount":3,"cues":['
+                '{"text":"前文其实","start":0.05,"end":0.3,'
                 '"sourceStart":0.05,"sourceEnd":0.3},'
-                '{"text":"保留内容","start":0.35,"end":0.95,'
-                '"sourceStart":0.35,"sourceEnd":0.95}]}'
+                '{"text":"该有的","start":0.35,"end":0.6,'
+                '"sourceStart":0.35,"sourceEnd":0.6},'
+                '{"text":"后文结束","start":0.65,"end":0.95,'
+                '"sourceStart":0.65,"sourceEnd":0.95}]}'
             ),
         ),
     )
@@ -2462,7 +2490,7 @@ def test_top_level_art_track_and_ai_draft_commit_atomically(
     assert track_response.value.status == 200
     page.wait_for_function(
         """() => window.EditorSuite.projectSnapshot().project.art.overlays
-          .filter(item => item.trackType === 'transcript').length === 2"""
+          .filter(item => item.trackType === 'transcript').length === 3"""
     )
     assert panel.locator('[data-art-tab="settings"]').get_attribute(
         "aria-selected"
@@ -2485,7 +2513,7 @@ def test_top_level_art_track_and_ai_draft_commit_atomically(
     assert track_state["actions"][0]["timingRevision"] == (
         track_state["actions"][0]["previousTimingRevision"] + 1
     )
-    assert len(track_state["request"]["artOverlays"]) == 3
+    assert len(track_state["request"]["artOverlays"]) == 4
     transcript_ids = [
         item["id"]
         for item in track_state["overlays"]
@@ -2494,17 +2522,20 @@ def test_top_level_art_track_and_ai_draft_commit_atomically(
     page.evaluate(
         """() => window.EditorSuite.setCutDraft({
           active: true,
-          ranges: [{ start: 0.05, end: 0.3 }],
+          ranges: [
+            { start: 0.05, end: 0.3 },
+            { start: 0.65, end: 0.95 },
+          ],
           sourceDuration: 1,
-          duration: 0.75,
+          duration: 0.45,
           transcript: {
-            text: '保留内容',
+            text: '该有的',
             segments: [{
-              id: 'retained', text: '保留内容', start: 0.1, end: 0.7,
-              sourceStart: 0.35, sourceEnd: 0.95,
+              id: 'retained', text: '该有的', start: 0.1, end: 0.35,
+              sourceStart: 0.35, sourceEnd: 0.6,
               words: [{
-                text: '保留内容', start: 0.1, end: 0.7,
-                sourceStart: 0.35, sourceEnd: 0.95,
+                text: '该有的', start: 0.1, end: 0.35,
+                sourceStart: 0.35, sourceEnd: 0.6,
               }],
             }],
           },
@@ -2526,16 +2557,18 @@ def test_top_level_art_track_and_ai_draft_commit_atomically(
             timeline: frame.timeline.tracks.filter(track => track.kind === 'art')
               .flatMap(track => track.clips.map(clip => clip.sourceId)),
             preview: frame.preview.art.overlays.map(item => item.id),
-            composition: frame.composition.artOverlays.map(item => item.text),
+            composition: frame.composition.artOverlays
+              .filter(item => item.trackType === 'transcript')
+              .map(item => item.text),
           };
         }"""
     )
     assert cut_frame["activeTranscript"] == [
-        {"id": transcript_ids[1], "text": "保留内容"}
+        {"id": transcript_ids[1], "text": "该有的"}
     ]
-    assert cut_frame["suppressed"] == [transcript_ids[0]]
+    assert cut_frame["suppressed"] == [transcript_ids[0], transcript_ids[2]]
     assert sorted(cut_frame["timeline"]) == sorted(cut_frame["preview"])
-    assert "删除片段" not in cut_frame["composition"]
+    assert cut_frame["composition"] == ["该有的"]
 
     page.evaluate(
         """() => window.EditorSuite.setCutDraft({
@@ -2544,22 +2577,30 @@ def test_top_level_art_track_and_ai_draft_commit_atomically(
           sourceDuration: 1,
           duration: 1,
           transcript: {
-            text: '删除片段 保留内容',
+            text: '前文其实 该有的 后文结束',
             segments: [
               {
-                id: 'first', text: '删除片段', start: 0.05, end: 0.3,
+                id: 'first', text: '前文其实', start: 0.05, end: 0.3,
                 sourceStart: 0.05, sourceEnd: 0.3,
                 words: [{
-                  text: '删除片段', start: 0.05, end: 0.3,
+                  text: '前文其实', start: 0.05, end: 0.3,
                   sourceStart: 0.05, sourceEnd: 0.3,
                 }],
               },
               {
-                id: 'second', text: '保留内容', start: 0.35, end: 0.95,
-                sourceStart: 0.35, sourceEnd: 0.95,
+                id: 'second', text: '该有的', start: 0.35, end: 0.6,
+                sourceStart: 0.35, sourceEnd: 0.6,
                 words: [{
-                  text: '保留内容', start: 0.35, end: 0.95,
-                  sourceStart: 0.35, sourceEnd: 0.95,
+                  text: '该有的', start: 0.35, end: 0.6,
+                  sourceStart: 0.35, sourceEnd: 0.6,
+                }],
+              },
+              {
+                id: 'third', text: '后文结束', start: 0.65, end: 0.95,
+                sourceStart: 0.65, sourceEnd: 0.95,
+                words: [{
+                  text: '后文结束', start: 0.65, end: 0.95,
+                  sourceStart: 0.65, sourceEnd: 0.95,
                 }],
               },
             ],
@@ -2568,17 +2609,43 @@ def test_top_level_art_track_and_ai_draft_commit_atomically(
     )
     page.wait_for_function(
         """() => window.EditorSuite.projectSnapshot().project.art.overlays
-          .filter(item => item.trackType === 'transcript').length === 2"""
+          .filter(item => item.trackType === 'transcript').length === 3"""
     )
     restored_track = page.evaluate(
-        """() => ({
-          ids: window.EditorSuite.projectSnapshot().project.art.overlays
-            .filter(item => item.trackType === 'transcript').map(item => item.id),
-          suppressed: window.EditorSuite.projectSnapshot().project.art.suppressedOverlays,
-        })"""
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          const frame = window.EditorProjectStore.selectEditorFrame(snapshot);
+          return {
+            cues: snapshot.project.art.overlays
+              .filter(item => item.trackType === 'transcript')
+              .map(item => ({ id: item.id, text: item.text })),
+            suppressed: snapshot.project.art.suppressedOverlays,
+            timeline: frame.timeline.tracks
+              .filter(track => track.id === 'art:transcript:browser-full')
+              .flatMap(track => track.clips.map(clip => clip.sourceId)),
+            preview: frame.preview.art.overlays
+              .filter(item => item.trackType === 'transcript')
+              .map(item => ({ id: item.id, text: item.text })),
+            composition: frame.composition.artOverlays
+              .filter(item => item.trackType === 'transcript')
+              .map(item => item.text),
+          };
+        }"""
     )
-    assert sorted(restored_track["ids"]) == sorted(transcript_ids)
+    assert restored_track["cues"] == [
+        {"id": transcript_ids[0], "text": "前文其实"},
+        {"id": transcript_ids[1], "text": "该有的"},
+        {"id": transcript_ids[2], "text": "后文结束"},
+    ]
     assert restored_track["suppressed"] == []
+    assert sorted(restored_track["timeline"]) == sorted(
+        item["id"] for item in restored_track["preview"]
+    )
+    assert restored_track["composition"] == [
+        "前文其实",
+        "该有的",
+        "后文结束",
+    ]
 
     suggestion_requests: list[dict[str, object]] = []
     suggestion_url = re.compile(

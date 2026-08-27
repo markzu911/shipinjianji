@@ -377,7 +377,10 @@ const fullCueCut = {
 const fullCue = model.reconcileArtWithCut(base, originalCut, fullCueCut).art;
 const restored = model.reconcileArtWithCut(cross, crossCut, {
   ranges: [], sourceDuration: 6, duration: 6,
-  transcript: transcript([['甲乙丙丁', 0, 4, 0, 4]]),
+  transcript: transcript([
+    ['甲乙', 0, 2, 0, 2],
+    ['丙丁', 2, 4, 2, 4],
+  ]),
 }).art;
 console.log(JSON.stringify({
   cross: cross.overlays.map(({ id, text, start, end, characterTimings }) => ({
@@ -502,6 +505,291 @@ console.log(JSON.stringify({
     assert payload["suppressed"] == []
 
 
+def test_editor_art_model_projects_cue_boundaries_without_splitting_words():
+    payload = run_node(
+        r"""
+const model = require('./web/editor-art-model.js');
+const cue = (id, text, start, end) => model.normalizeOverlay({
+  id, text, start, end, sourceStart: start, sourceEnd: end,
+  trackType: 'transcript', trackId: 'full',
+}, { duration: 10 });
+const base = { source: 'original', overlays: [
+  cue('cue-first', '前文其实', 0, 1.8),
+  cue('cue-second', '该有的', 1.8, 3.8),
+  cue('cue-third', '后文结束', 3.8, 10),
+] };
+const words = [
+  ['前文', 0, 1],
+  ['其实', 1, 3],
+  ['该有的', 3, 6],
+  ['后文结束', 6, 10],
+].map(([text, start, end]) => ({
+  text, start, end, sourceStart: start, sourceEnd: end,
+}));
+const cut = {
+  ranges: [], sourceDuration: 10, duration: 10,
+  transcript: { segments: [{
+    text: words.map(item => item.text).join(''),
+    start: 0, end: 10, sourceStart: 0, sourceEnd: 10, words,
+  }] },
+};
+const result = model.reconcileArtWithCut(base, cut, cut).art;
+const cues = result.overlays.filter(item => item.trackId === 'full');
+console.log(JSON.stringify({
+  texts: cues.map(item => item.text),
+  ids: cues.map(item => item.id),
+  concatenated: cues.map(item => item.text).join(''),
+  timingCounts: cues.map(item => item.characterTimings.length),
+  suppressed: result.suppressedOverlays.map(item => item.id),
+}));
+"""
+    )
+
+    assert payload == {
+        "texts": ["前文其实", "该有的", "后文结束"],
+        "ids": ["cue-first", "cue-second", "cue-third"],
+        "concatenated": "前文其实该有的后文结束",
+        "timingCounts": [4, 3, 4],
+        "suppressed": [],
+    }
+
+
+def test_editor_art_model_repairs_corrupted_semantic_boundaries() -> None:
+    payload = run_node(
+        r"""
+const model = require('./web/editor-art-model.js');
+const cue = (id, text, start, end) => model.normalizeOverlay({
+  id, text, start, end, sourceStart: start, sourceEnd: end,
+  trackType: 'transcript', trackId: 'full',
+}, { duration: 11 });
+const base = { source: 'original', overlays: [
+  cue('first', '前文其', 0, 3),
+  cue('second', '实该', 3, 5),
+  cue('third', '有的后文结束', 5, 11),
+] };
+const words = [
+  ['前文', 0, 2], ['其实', 2, 4], ['该', 4, 5], ['有', 5, 6],
+  ['的', 6, 7], ['后文', 7, 9], ['结束', 9, 11],
+].map(([text, start, end]) => ({
+  text, start, end, sourceStart: start, sourceEnd: end,
+}));
+const cut = {
+  ranges: [], sourceDuration: 11, duration: 11,
+  transcript: { segments: [{
+    text: words.map(item => item.text).join(''), start: 0, end: 11,
+    sourceStart: 0, sourceEnd: 11, words,
+  }] },
+};
+const result = model.reconcileArtWithCut(base, cut, cut).art;
+console.log(JSON.stringify({
+  active: result.overlays.filter(item => item.trackId === 'full')
+    .map(item => [item.id, item.text]),
+  suppressed: result.suppressedOverlays.map(item => item.id),
+}));
+"""
+    )
+
+    assert payload == {
+        "active": [
+            ["first", "前文其实"],
+            ["second", "该有的"],
+            ["third", "后文结束"],
+        ],
+        "suppressed": [],
+    }
+
+
+def test_editor_art_model_repairs_unsafe_boundary_after_unrelated_edit() -> None:
+    payload = run_node(
+        r"""
+const model = require('./web/editor-art-model.js');
+const cue = (id, text, start, end) => model.normalizeOverlay({
+  id, text, start, end, sourceStart: start, sourceEnd: end,
+  trackType: 'transcript', trackId: 'full',
+}, { duration: 12 });
+const base = { source: 'original', overlays: [
+  cue('first', '前文其实该', 0, 5),
+  cue('second', '有的后文结束', 5, 11),
+] };
+const words = [
+  ['前文', 0, 2], ['其实', 2, 4], ['该', 4, 5], ['有', 5, 6],
+  ['的', 6, 7], ['后文', 7, 9], ['结束啦', 9, 12],
+].map(([text, start, end]) => ({
+  text, start, end, sourceStart: start, sourceEnd: end,
+}));
+const cut = {
+  ranges: [], sourceDuration: 12, duration: 12,
+  transcript: { segments: [{
+    text: words.map(item => item.text).join(''), start: 0, end: 12,
+    sourceStart: 0, sourceEnd: 12, words,
+  }] },
+};
+const result = model.reconcileArtWithCut(base, cut, cut).art;
+console.log(JSON.stringify({
+  texts: result.overlays.filter(item => item.trackId === 'full')
+    .map(item => item.text),
+  suppressed: result.suppressedOverlays.map(item => item.id),
+}));
+"""
+    )
+
+    assert payload == {
+        "texts": ["前文其实", "该有的后文结束啦"],
+        "suppressed": [],
+    }
+
+
+def test_editor_art_model_diff_projects_insertions_and_deleted_cues() -> None:
+    payload = run_node(
+        r"""
+const model = require('./web/editor-art-model.js');
+const cue = (id, text, start, end) => model.normalizeOverlay({
+  id, text, start, end, trackType: 'transcript', trackId: 'full',
+}, { duration: 11 });
+const base = { source: 'original', overlays: [
+  cue('cue-first', '前文其实', 0, 4),
+  cue('cue-second', '该有的', 4, 7),
+  cue('cue-third', '后文结束', 7, 11),
+] };
+const transcript = words => ({ segments: [{
+  text: words.map(item => item[0]).join(''), start: 0, end: 11,
+  words: words.map(([text, start, end]) => ({ text, start, end })),
+}] });
+const previous = {
+  ranges: [], sourceDuration: 0, duration: 11,
+  transcript: transcript([
+    ['前文', 0, 2], ['其实', 2, 4], ['该有的', 4, 7], ['后文结束', 7, 11],
+  ]),
+};
+const inserted = model.reconcileArtWithCut(base, previous, {
+  ...previous,
+  transcript: transcript([
+    ['前文', 0, 2], ['真的', 2, 4], ['其实', 4, 6],
+    ['该有的', 6, 8.5], ['后文结束', 8.5, 11],
+  ]),
+}).art;
+const deleted = model.reconcileArtWithCut(base, previous, {
+  ...previous,
+  transcript: transcript([
+    ['该有的', 0, 5], ['后文结束', 5, 11],
+  ]),
+}).art;
+const summary = art => ({
+  active: art.overlays.filter(item => item.trackId === 'full')
+    .map(item => [item.id, item.text]),
+  suppressed: art.suppressedOverlays.map(item => item.id),
+});
+console.log(JSON.stringify({ inserted: summary(inserted), deleted: summary(deleted) }));
+"""
+    )
+
+    assert payload == {
+        "inserted": {
+            "active": [
+                ["cue-first", "前文真的其实"],
+                ["cue-second", "该有的"],
+                ["cue-third", "后文结束"],
+            ],
+            "suppressed": [],
+        },
+        "deleted": {
+            "active": [
+                ["cue-second", "该有的"],
+                ["cue-third", "后文结束"],
+            ],
+            "suppressed": ["cue-first"],
+        },
+    }
+
+
+def test_editor_art_model_full_track_does_not_filter_text_by_stale_source_coverage() -> None:
+    payload = run_node(
+        r"""
+const model = require('./web/editor-art-model.js');
+const base = { source: 'original', overlays: [model.normalizeOverlay({
+  id: 'full-cue', text: '轨道外文案全新文', start: 4, end: 8,
+  sourceStart: 4, sourceEnd: 8,
+  trackType: 'transcript', trackId: 'transcript-full',
+}, { duration: 10 })] };
+const cut = {
+  ranges: [], sourceDuration: 10, duration: 10,
+  transcript: { segments: [
+    {
+      text: '轨道外文案', start: 0, end: 3,
+      sourceStart: 0, sourceEnd: 3,
+      words: [{
+        text: '轨道外文案', start: 0, end: 3,
+        sourceStart: 0, sourceEnd: 3,
+      }],
+    },
+    {
+      text: '全新文案', start: 3.5, end: 8.5,
+      sourceStart: 3.5, sourceEnd: 8.5,
+      words: [{
+        text: '全新文案', start: 3.5, end: 8.5,
+        sourceStart: 3.5, sourceEnd: 8.5,
+      }],
+    },
+  ] },
+};
+const result = model.reconcileArtWithCut(base, cut, cut).art;
+console.log(JSON.stringify({
+  active: result.overlays.map(item => [item.id, item.text]),
+  suppressed: result.suppressedOverlays.map(item => item.id),
+}));
+"""
+    )
+
+    assert payload == {
+        "active": [["full-cue", "轨道外文案全新文案"]],
+        "suppressed": [],
+    }
+
+
+def test_editor_art_model_uses_semantic_text_to_scope_legacy_partial_track() -> None:
+    payload = run_node(
+        r"""
+const model = require('./web/editor-art-model.js');
+const base = { source: 'original', overlays: [model.normalizeOverlay({
+  id: 'partial-cue', text: '全新文案', start: 4, end: 8,
+  sourceStart: 4, sourceEnd: 8,
+  trackType: 'transcript', trackId: 'partial-track',
+}, { duration: 10 })] };
+const cut = {
+  ranges: [], sourceDuration: 10, duration: 10,
+  transcript: { segments: [
+    {
+      text: '轨道外文案', start: 0, end: 3,
+      sourceStart: 0, sourceEnd: 3,
+      words: [{
+        text: '轨道外文案', start: 0, end: 3,
+        sourceStart: 0, sourceEnd: 3,
+      }],
+    },
+    {
+      text: '全新文案', start: 3.5, end: 8.5,
+      sourceStart: 3.5, sourceEnd: 8.5,
+      words: [{
+        text: '全新文案', start: 3.5, end: 8.5,
+        sourceStart: 3.5, sourceEnd: 8.5,
+      }],
+    },
+  ] },
+};
+const result = model.reconcileArtWithCut(base, cut, cut).art;
+console.log(JSON.stringify({
+  active: result.overlays.map(item => [item.id, item.text]),
+  suppressed: result.suppressedOverlays.map(item => item.id),
+}));
+"""
+    )
+
+    assert payload == {
+        "active": [["partial-cue", "全新文案"]],
+        "suppressed": [],
+    }
+
+
 def test_editor_art_model_keeps_mixed_anchor_track_order_for_capacity_fallback():
     payload = run_node(
         r"""
@@ -521,7 +809,10 @@ const cut = {
   ranges: [], sourceDuration: 10, duration: 4,
   transcript: { segments: [{
     text: '甲乙丙丁', start: 0, end: 4,
-    words: [{ text: '甲乙丙丁', start: 0, end: 4 }],
+    words: [
+      { text: '甲乙', start: 0, end: 2 },
+      { text: '丙丁', start: 2, end: 4 },
+    ],
   }] },
 };
 const result = model.reconcileArtWithCut(base, cut, cut).art;
@@ -632,8 +923,8 @@ console.log(JSON.stringify({
         "text": "当前文案仍保留",
         "timingCount": 7,
         "timingsValid": True,
-        "sourceRanges": [[0, 2], [2, 4]],
-        "suppressed": [],
+        "sourceRanges": [[0, 2]],
+        "suppressed": ["second"],
     }
 
 

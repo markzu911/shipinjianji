@@ -800,7 +800,10 @@ const fullCue = store.dispatch({ type: 'cutTimingChanged', payload: {
 const afterFullCue = store.getState();
 const undo = store.dispatch({ type: 'cutTimingChanged', payload: {
   active: false, ranges: [], sourceDuration: 6, duration: 6,
-  transcript: transcript([['甲乙丙丁', 0, 4, 0, 4]]),
+  transcript: transcript([
+    ['甲乙', 0, 2, 0, 2],
+    ['丙丁', 2, 4, 2, 4],
+  ]),
 } });
 const afterUndo = store.getState();
 console.log(JSON.stringify({
@@ -845,6 +848,302 @@ console.log(JSON.stringify({
         assert sorted(item["overlayIds"]) == sorted(item["timelineIds"])
         assert len(item["overlayIds"]) == len(item["composeIds"])
     assert "_cutReconciliation" not in result["composeKeys"]
+
+
+def test_transcript_text_echo_reconciles_server_suppression_across_store_consumers() -> None:
+    result = run_store_script(
+        r"""
+global.EditorArtModel = require('./web/editor-art-model.js');
+const model = global.EditorArtModel;
+const store = projectStore.createStore({}, { timeline });
+store.dispatch({ type: 'projectHydrated', payload: { job: {
+  id: 'job-text-suppression', status: 'completed', duration: 6,
+  result: { mediaDuration: 6, text: '前文其实该有的后文结束', segments: [] },
+} } });
+const overlay = (value) => model.normalizeOverlay(value, { duration: 6 });
+const cues = [
+  overlay({
+    id: 'cue-before', text: '前文其实', start: 0, end: 2,
+    sourceStart: 0, sourceEnd: 2, trackType: 'transcript', trackId: 'full',
+    color: '#AA0000', fontSize: 51,
+  }),
+  overlay({
+    id: 'cue-middle', text: '该有的', start: 2, end: 4,
+    sourceStart: 2, sourceEnd: 4, trackType: 'transcript', trackId: 'full',
+    color: '#00AA00', fontSize: 63,
+  }),
+  overlay({
+    id: 'cue-after', text: '后文结束', start: 4, end: 6,
+    sourceStart: 4, sourceEnd: 6, trackType: 'transcript', trackId: 'full',
+    color: '#0000AA', fontSize: 75,
+  }),
+];
+const transcript = (parts) => ({
+  text: parts.map(([text]) => text).join(''),
+  segments: parts.map(([text, start, end, sourceStart, sourceEnd]) => ({
+    text, start, end, sourceStart, sourceEnd,
+    words: [{ text, start, end, sourceStart, sourceEnd }],
+  })),
+});
+const retainedTranscript = transcript([['该有的', 0, 2, 2, 4]]);
+store.dispatch({ type: 'cutTimingChanged', payload: {
+  active: true,
+  ranges: [{ start: 0, end: 2 }, { start: 4, end: 6 }],
+  sourceDuration: 6,
+  duration: 2,
+  transcript: retainedTranscript,
+} });
+const art = { source: 'original', overlays: cues };
+store.dispatch({ type: 'activeToolChanged', payload: { tool: 'art' } });
+store.dispatch({ type: 'artStateChanged', payload: {
+  art,
+  timeline: model.buildTimeline(art, 6, { clipId: 'art:cue-before' }),
+} });
+const serverArt = {
+  source: 'original',
+  overlays: [{ ...cues[1], text: '该有的' }],
+  suppressedOverlays: [cues[0], cues[2]],
+};
+store.dispatch({ type: 'transcriptTextChanged', payload: {
+  transcript: transcript([
+    ['前文其实', 0, 2, 0, 2],
+    ['该有的', 2, 4, 2, 4],
+    ['后文结束', 4, 6, 4, 6],
+  ]),
+  cutTranscript: retainedTranscript,
+  serverArt,
+  job: {
+    id: 'job-text-suppression', updatedAt: 'server-v2',
+    result: { text: '前文其实该有的后文结束', segments: [] },
+    art: serverArt,
+  },
+} });
+
+function frameState() {
+  const snapshot = store.getState();
+  const frame = projectStore.selectEditorFrame(snapshot, timeline);
+  return {
+    active: snapshot.project.art.overlays.map(item => ({
+      id: item.id, text: item.text, color: item.color, fontSize: item.fontSize,
+      baseText: item._cutReconciliation?.overlay?.text || null,
+    })),
+    suppressed: snapshot.project.art.suppressedOverlays.map(item => ({
+      id: item.id, text: item.text, color: item.color, fontSize: item.fontSize,
+      baseText: item._cutReconciliation?.overlay?.text || null,
+    })),
+    jobActiveIds: snapshot.project.job.art.overlays.map(item => item.id),
+    jobSuppressedIds: snapshot.project.job.art.suppressedOverlays.map(item => item.id),
+    activeTimings: snapshot.project.art.overlays.map(item => ({
+      id: item.id,
+      start: item.start,
+      end: item.end,
+      sourceStart: item.sourceStart,
+      sourceEnd: item.sourceEnd,
+      characterTimingCount: item.characterTimings.length,
+    })),
+    selection: snapshot.project.timeline.selection,
+    timelineIds: frame.timeline.tracks.filter(track => track.kind === 'art')
+      .flatMap(track => track.clips.map(clip => clip.sourceId)),
+    previewIds: frame.preview.art.overlays.map(item => item.id),
+    composeTexts: frame.composition.artOverlays.map(item => item.text),
+  };
+}
+
+const afterEcho = frameState();
+store.dispatch({ type: 'cutTimingChanged', payload: {
+  active: false, ranges: [], sourceDuration: 6, duration: 6,
+  transcript: transcript([
+    ['前文其实', 0, 2, 0, 2],
+    ['该有的', 2, 4, 2, 4],
+    ['后文结束', 4, 6, 4, 6],
+  ]),
+} });
+const afterRestore = frameState();
+console.log(JSON.stringify({ afterEcho, afterRestore }));
+"""
+    )
+
+    assert result["afterEcho"] == {
+        "active": [
+            {
+                "id": "cue-middle",
+                "text": "该有的",
+                "color": "#00AA00",
+                "fontSize": 63,
+                "baseText": "该有的",
+            }
+        ],
+        "suppressed": [
+            {
+                "id": "cue-before",
+                "text": "前文其实",
+                "color": "#AA0000",
+                "fontSize": 51,
+                "baseText": "前文其实",
+            },
+            {
+                "id": "cue-after",
+                "text": "后文结束",
+                "color": "#0000AA",
+                "fontSize": 75,
+                "baseText": "后文结束",
+            },
+        ],
+        "jobActiveIds": ["cue-middle"],
+        "jobSuppressedIds": ["cue-before", "cue-after"],
+        "activeTimings": [
+            {
+                "id": "cue-middle",
+                "start": 2,
+                "end": 4,
+                "sourceStart": 2,
+                "sourceEnd": 4,
+                "characterTimingCount": 3,
+            }
+        ],
+        "selection": {
+            "clipId": "art:cue-middle",
+            "trackId": "art:transcript:full",
+        },
+        "timelineIds": ["cue-middle"],
+        "previewIds": ["cue-middle"],
+        "composeTexts": ["该有的"],
+    }
+    assert result["afterRestore"]["active"] == [
+        {
+            "id": "cue-before",
+            "text": "前文其实",
+            "color": "#AA0000",
+            "fontSize": 51,
+            "baseText": "前文其实",
+        },
+        {
+            "id": "cue-middle",
+            "text": "该有的",
+            "color": "#00AA00",
+            "fontSize": 63,
+            "baseText": "该有的",
+        },
+        {
+            "id": "cue-after",
+            "text": "后文结束",
+            "color": "#0000AA",
+            "fontSize": 75,
+            "baseText": "后文结束",
+        },
+    ]
+    assert result["afterRestore"]["suppressed"] == []
+    assert result["afterRestore"]["timelineIds"] == [
+        "cue-before",
+        "cue-middle",
+        "cue-after",
+    ]
+    assert result["afterRestore"]["previewIds"] == [
+        "cue-before",
+        "cue-middle",
+        "cue-after",
+    ]
+    assert result["afterRestore"]["composeTexts"] == [
+        "前文其实",
+        "该有的",
+        "后文结束",
+    ]
+
+
+def test_transcript_text_echo_restores_suppressed_cue_with_stable_timing() -> None:
+    result = run_store_script(
+        r"""
+global.EditorArtModel = require('./web/editor-art-model.js');
+const model = global.EditorArtModel;
+const store = projectStore.createStore({}, { timeline });
+store.dispatch({ type: 'projectHydrated', payload: { job: {
+  id: 'job-restore-suppressed-text', status: 'completed', duration: 6,
+  result: { mediaDuration: 6, text: '前文', segments: [] },
+} } });
+const first = model.normalizeOverlay({
+  id: 'first', text: '前文', start: 0, end: 2,
+  sourceStart: 0, sourceEnd: 2, trackType: 'transcript', trackId: 'full',
+}, { duration: 6 });
+const second = model.normalizeOverlay({
+  id: 'second', text: '后文', start: 4, end: 6,
+  sourceStart: 4, sourceEnd: 6, trackType: 'transcript', trackId: 'full',
+}, { duration: 6 });
+const art = { source: 'original', overlays: [first], suppressedOverlays: [second] };
+store.dispatch({ type: 'artStateChanged', payload: {
+  art,
+  timeline: model.buildTimeline(art, 6, { clipId: 'art:first' }),
+} });
+const transcript = {
+  text: '前文后文',
+  segments: [{
+    text: '前文后文', start: 0, end: 2, sourceStart: 0, sourceEnd: 4,
+    words: [
+      { text: '前文', start: 0, end: 1, sourceStart: 0, sourceEnd: 2 },
+      { text: '后文', start: 1, end: 2, sourceStart: 2, sourceEnd: 4 },
+    ],
+  }],
+};
+const serverArt = { source: 'original', overlays: [first, second] };
+const timingBefore = store.getState().timingRevision;
+store.dispatch({ type: 'transcriptTextChanged', payload: {
+  transcript,
+  cutTranscript: transcript,
+  serverArt,
+  job: {
+    id: 'job-restore-suppressed-text', updatedAt: 'server-v2',
+    result: { text: '前文后文', segments: transcript.segments },
+    art: serverArt,
+  },
+} });
+const snapshot = store.getState();
+const frame = projectStore.selectEditorFrame(snapshot, timeline);
+console.log(JSON.stringify({
+  cues: snapshot.project.art.overlays.map(item => ({
+    id: item.id,
+    text: item.text,
+    start: item.start,
+    end: item.end,
+    sourceStart: item.sourceStart,
+    sourceEnd: item.sourceEnd,
+    timingCount: item.characterTimings.length,
+  })),
+  suppressed: snapshot.project.art.suppressedOverlays.map(item => item.id),
+  timingDelta: snapshot.timingRevision - timingBefore,
+  timelineIds: frame.timeline.tracks.filter(track => track.kind === 'art')
+    .flatMap(track => track.clips.map(clip => clip.sourceId)),
+  previewTexts: frame.preview.art.overlays.map(item => item.text),
+  composeTexts: frame.composition.artOverlays.map(item => item.text),
+}));
+"""
+    )
+
+    assert result == {
+        "cues": [
+            {
+                "id": "first",
+                "text": "前文",
+                "start": 0,
+                "end": 2,
+                "sourceStart": 0,
+                "sourceEnd": 2,
+                "timingCount": 2,
+            },
+            {
+                "id": "second",
+                "text": "后文",
+                "start": 4,
+                "end": 6,
+                "sourceStart": 4,
+                "sourceEnd": 6,
+                "timingCount": 2,
+            },
+        ],
+        "suppressed": [],
+        "timingDelta": 0,
+        "timelineIds": ["first", "second"],
+        "previewTexts": ["前文", "后文"],
+        "composeTexts": ["前文", "后文"],
+    }
 
 
 def test_editor_project_store_conserves_transcript_art_through_local_projection_and_echo() -> None:
