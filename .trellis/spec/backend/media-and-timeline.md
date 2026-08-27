@@ -66,7 +66,7 @@ x = clamp(main_w * center_x - overlay_w / 2, min_x, max_x)
 
 ### 2. Signatures
 
-- 后端：`build_retained_transcript(segments, delete_ranges, output_duration, timeline_delete_ranges=None, audio_quiet_ranges=None, alignment_cache=None)`。
+- 后端：`build_retained_transcript(segments, delete_ranges, output_duration, timeline_delete_ranges=None, audio_quiet_ranges=None, alignment_cache=None, editable_segments=None)`。
 - 后端：`load_acoustic_alignment_cache(media_path, segments, job_directory)` 只读并复验已有 sidecar，不运行模型。
 - API：`GET|PUT /api/transcriptions/{job_id}/cut-draft -> {cutDraft, retainedTranscript}`。
 - 前端：`getCurrentRetainedProjection()`、`applyServerRetainedProjection(transcript, {jobId, signature, revision})`、`loadServerRetainedProjection(jobId, signature, revision)`。
@@ -77,6 +77,8 @@ x = clamp(main_w * center_x - overlay_w / 2, min_x, max_x)
 - `delete_ranges` 使用 `originalStart/originalEnd` 归一化后的文字和手动时间轴语义范围，只决定字符身份；`timeline_delete_ranges` 使用物理 `start/end`，只执行 `timeline_after_deletions()` 时间扭曲。显式空列表不得按 truthy fallback 回退到另一层范围。
 - 已有 sidecar 只有在字符顺序、finite 单调区间和 segment 包络复验全部通过时才提供 forced timing；无效或缺失时使用粗时间，但不得删除语义保留字符，也不得调用 FunASR 或写 sidecar。
 - `segments/words/asrWords` 输出 edited `start/end` 和成对 `sourceStart/sourceEnd`；segment 还携带 `sourceSegmentIndex`。edited 时间必须有限、正时长、单调且不越过 `duration`。
+- `editable_segments` 只有在 spoken-character identity 构成完整、按 source 顺序排列的 source transcript 分区时才启用；每个 retained segment 携带当前数组索引对应的 `editableSegmentId`。缺失、非法、错序或不完整的历史数据必须整体回退 source-segment 分组，不能部分安装或使 API 失败。
+- 同一 editable segment 的内部字符被删除时，删除前后必须输出两个不连续 retained runs；两段可共享 `editableSegmentId`，但不得跨删除洞合并，且各自保留独立 word/source anchors。editable split/merge/text 操作都要同步刷新已有 completed edit 的派生 transcript。
 - `retainedTranscript` 是 source transcript、草稿 revision 和既有 alignment 的派生响应，不属于 `CutDraftRequest`，不写入 `cut-draft.json`。旧草稿在 GET 时只读重建，不迁移。
 - 浏览器只在 job id、语义 signature 和 revision 同时匹配时安装服务端投影；过期或旧服务响应保持本地语义投影。文字保存应在一次 `transcriptTextChanged` 中原子安装当前投影，不改变 cut ranges、split track、art/PiP source anchors 或 `timingRevision`。
 - `/cuts`、`/compose`、完成 edit 恢复与后续文案修正使用同一 helper；历史 edit 只有在 `transcriptRanges` 字段缺失/无效时才回退 `requestedRanges/ranges`，显式 `transcriptRanges=[]` 表示不删文字。
@@ -101,7 +103,7 @@ x = clamp(main_w * center_x - overlay_w / 2, min_x, max_x)
 
 ### 6. Tests Required
 
-- 后端纯函数：语义/物理范围错位、显式空物理范围、单个与多个坍缩字符、forced 正常/错序/非单调/越包络、跨自然词和 ASR token、source anchors 与 segment identity。
+- 后端纯函数：语义/物理范围错位、显式空物理范围、单个与多个坍缩字符、forced 正常/错序/非单调/越包络、跨自然词和 ASR token、source anchors 与 segment identity；另覆盖重复短语、标点、跨 source editable 分区、非法 legacy fallback 和同 editable id 的内部删除多 run。
 - API：cut-draft GET/PUT 同 revision 返回派生投影，请求模型和 JSON 文件不包含派生字段，旧草稿/无 sidecar 兼容，过期 revision 冲突。
 - 生成与恢复：`/cuts`、`/compose`、completed edit 文案修正和 history 使用一致文字；显式空 `transcriptRanges` 不回退物理范围。
 - 前端/Store：本地降级不丢字，stale job/signature/revision 被拒绝，文字保存原子更新 cut transcript 且不改变 ranges、split、art/PiP anchors 或 `timingRevision`。
@@ -449,6 +451,79 @@ boundary, diagnostic = forced_alignment_transition_boundary(
     deletion_on_left=True,
     transition_context=context,
 )
+```
+
+## 场景：相邻字符联合使用 ASR、VAD 与 PCM
+
+### 1. Scope / Trigger
+
+- 修改文字删除、普通 timeline 删除、系统文字分段、用户在“调整文字分段”中的拆分，或公共预览/生成的删除边界时，必须复用本场景。
+- VAD 只校准相邻字符之间的物理切点，不判断口误、不改变 AI 建议，也不改写用户选中的字符身份。
+
+### 2. Signatures
+
+- 后端：`resolve_adjacent_character_boundary(media_path, media_fingerprint, left, right, samples, sample_rate, *, directional_transition_contexts=None, forced_boundary_cache=None, adjacent_boundary_cache=None, vad_cache=None) -> boundary record`。
+- 后端：`enrich_editable_segment_boundaries(media_path, source_segments, editable_segments, *, alignment_cache=None, existing_boundaries=None, samples=None) -> (editableSegments, editableSegmentBoundaries)`。
+- VAD：`analyze_local_voice_activity(audio_path, duration, model_cache_dir) -> {status, reason, speechRanges, vad, modelId, modelRevision}`。
+- API：`PUT /api/transcriptions/{job_id}/editable-segments` additive 返回 `editableSegments` 和 `editableSegmentBoundaries`；`PUT /api/transcriptions/{job_id}/cut-draft` 持久化最终物理范围及 `boundaryDiagnostics`。
+
+### 3. Contracts
+
+- 边界 key 必须包含源媒体 fingerprint、左右 source segment/可发声字符 ordinal/text，以及固定 FA/VAD revision；重复文本不得只按文字缓存。aggressive/fallback 记录还必须匹配 `deleteLeft/deleteRight` 的完整删除上下文，避免重复短语串用旧方向结果。
+- `fa-zh` 确认字符身份与局部声学包络，FSMN-VAD 提供局部 speech/non-speech 证据，PCM 只在两者确认的持续低能走廊中选择精确采样点。VAD 不判断口误，也不改写 `originalStart/originalEnd`。
+- 每个转场保存 `neutral/deleteLeft/deleteRight`。可信静音走廊存在时三者收敛到同一点；VAD 成功但无可信静音时使用方向性 aggressive 点，优先彻底删除被删侧语音；VAD 不可用时使用 FA+PCM fallback，并记录稳定 reason。
+- `editableSegments[].start/end/words` 保持语义 ASR 时间，`mediaStart/mediaEnd` 负责未删除时的中性显示。删除某侧后，被删段和相邻保留段的可见时间必须同时使用同一个方向性物理点；若方向点使显示区间反转，起止点一起回退语义范围。
+- cut draft 是物理删除范围权威。公共预览、`/cuts`、`/compose` 与 FFmpeg 只消费匹配 revision 的已保存 `start/end`，生成阶段不得再次调用 FA、VAD 或 PCM。播放帧回调必须先执行删除区间 seek，再更新旧 source time 对应的视觉状态。
+- `boundaryMode=split_exact` 在解码或声学解析前直接保持精确原始锚点，FA/VAD/PCM 调用数必须为零。
+- VAD 固定使用 `fsmn-vad` / `v2.0.4`、16 kHz 单声道 PCM WAV、CPU 单例和串行推理。局部 WAV 位于 job 目录并在所有退出路径清理；动态 VAD/PCM trust 不写入 `acoustic-alignment.json`。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 结果 |
+| --- | --- |
+| VAD 与 PCM 同时确认持续无声走廊 | `mode=silence`，三个 final 相同且位于交集内 |
+| VAD 成功但字符连续发音或 PCM 不确认静音 | `mode=aggressive`，按删除方向选择不同 final，优先清除被删语音 |
+| 模型下载、校验、加载、推理或局部 WAV 失败 | `mode=fallback`，公开稳定 reason，分段/保存/生成继续；`nonSpeechRanges=[]` |
+| 边界 key 或方向上下文不匹配 | 禁止复用旧 aggressive/fallback 记录，重新解析或安全降级 |
+| 历史 job 缺少新增字段 | 继续按语义时间显示，首次相关操作惰性解析，不批量迁移 |
+| 方向物理点造成 `mediaEnd <= mediaStart` | 两个展示端点一起回退语义范围，不混用一个物理端点和一个语义端点 |
+| `split_exact` 范围合法 | 严格保留 `original*`，不得解码音频或调用模型 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：删除第一处“一起给”时，重复上下文命中正确字符实例；无静音则用 aggressive 起止点完整覆盖被删语音，保留第二处“一起给你”，文案列表、时间轴、预览和 FFmpeg 使用同一拼接点。
+- Base：历史 job 或 VAD 不可用时仍能拆分、保存和生成，诊断明确标记 fallback，且不把未知窗口伪报为静音。
+- Bad：按相同文字复用另一处“一起给”的缓存、把 VAD padding 直接当采样切点、删除后相邻保留段仍显示 neutral，都会重新造成残音或显示与成片不一致。
+
+### 6. Tests Required
+
+- 单元：可信 VAD+PCM 交集、连续语音 aggressive 双方向、VAD fallback、短持续静音、单点谷底、均匀低能、轻噪声、单调缓升和多增益等价。
+- 缓存：重复实例与完整方向上下文隔离；同 key 的文字/timeline/editable 路径一致，不同字符实例不得串用。
+- API/草稿：用户拆分后立即返回中性边界；删除中段后两个相邻保留段同步使用方向点；刷新不漂移，生成阶段 FA/VAD/PCM 新增调用数为零。
+- 浏览器：真实点击“拆分”再删除中段，断言文案、编辑弹窗和公共时间轴端点一致，基础 video `srcWrites/loadCalls` 为零；帧时钟先 seek 再渲染。
+- 精确分割：`split_exact` 的 FA/VAD/PCM/音频解码调用数全部为零。
+- 打包：模型、jobs、history 和任务试听媒体不进入产物或 Git。
+
+### 7. Wrong vs Correct
+
+```python
+# Wrong: VAD 不可用时，未知窗口不能被当成静音证据。
+non_speech_ranges = complement(vad_result.get("speechRanges", []), window)
+
+# Correct: 只有成功推理的公开 speech ranges 才能产生 non-speech。
+non_speech_ranges = (
+    complement(vad_result["speechRanges"], window)
+    if vad_result.get("status") == "completed"
+    else []
+)
+```
+
+```javascript
+// Wrong: 删除后仍用 neutral 显示相邻保留段。
+displayEnd = segment.mediaEnd;
+
+// Correct: 展示、预览和成片共享本次删除方向的物理端点。
+displayEnd = deletedRightSide ? boundary.deleteRight : segment.mediaEnd;
 ```
 
 ## 场景：ASR 原始 word 与展示分词使用双层时间契约

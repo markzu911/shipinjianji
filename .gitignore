@@ -4,6 +4,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .pytest-tmp-*/
+.trellis/tasks/**/tmp-real-gate/
 data/jobs/*
 data/history/*
 data/models/*

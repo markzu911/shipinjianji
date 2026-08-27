@@ -1,0 +1,9 @@
+{"file":".trellis/spec/backend/media-and-timeline.md","reason":"核对同一 boundary key、方向性 final、语义/物理分离、split_exact 隔离和生成零次重解析"}
+{"file":".trellis/spec/backend/persistence-and-jobs.md","reason":"核对模型/PCM 缓存并发、动态边界不污染 FA sidecar、草稿与快照恢复兼容"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"核对所有 VAD/临时音频失败路径可诊断降级且不泄露原始异常"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"核对 finite interval、锁、临时文件、API 兼容和完整后端质量门"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"核对文案拆分后可见时间、删除方向切换、帧时钟 skip、Store revision 与媒体 identity"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"核对 stale response、源/剪后坐标与 preview/compose/FFmpeg 使用同一持久化范围"}
+{"file":".trellis/spec/testing/index.md","reason":"执行 VAD mock、声学合成矩阵、真实媒体、浏览器、打包和全量 pytest 门槛"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"真实验证截图对应文案拆分、刷新、基础视频不 reload、桌面/375px 与无页面错误"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"逐层核对字符 identity、边界记录、cut draft revision、预览和最终生成不漂移"}

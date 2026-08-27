@@ -19,7 +19,7 @@
 - `data/jobs` 是保留期内的可恢复工程工作区，受保留天数、数量上限和运行中保护控制；成功/失败不立即删除整个 job 目录。
 - cleanup 删除前必须复查目录 `mtime_ns` 和 live running 状态，防止与语义更新、attempt promotion 或快照刷新竞态。
 - `data/history` 是最终成片历史，单独受 `HISTORY_MAX_STORED` 控制。
-- `data/models` 保存固定 revision 的本地声学对齐模型；首次在语音附近保存剪辑边界时可下载约 159 MB 的 `fa-zh` 权重。模型下载、校验、加载或推理失败必须可诊断并安全降级，不能阻断转写或草稿保存。
+- `data/models` 保存固定 revision 的本地声学模型；首次在语音附近保存剪辑边界时可下载约 159 MB 的 `fa-zh` 和约 1.7 MB 的 `fsmn-vad` 权重。模型下载、校验、加载或推理失败必须可诊断并安全降级，不能阻断转写、文案拆分、草稿保存或生成。
 - fonts、art templates、position presets 是用户资产，不随 job 清理。
 - 手动/自动清理都必须支持安全目标验证；维护 API 保留 dry-run 预览。
 
@@ -29,7 +29,7 @@
 
 - `PROJECT_FILES` 只列程序、测试、公开文档和 `.env.example`；
 - 包内创建干净 `data/`，不复制本机 jobs、history、模型缓存、自定义模板或 `.env`；
-- Mac 包 README 必须说明 `fa-zh` 首次按需下载、额外 Python 运行时/磁盘开销和失败时的安全降级；Intel 与 Apple Silicon 的依赖安装和真实推理均是发布前实机 gate；
+- Mac 包 README 必须说明 `fa-zh` 与 `fsmn-vad` 首次按需下载、额外 Python 运行时/磁盘开销和失败时的安全降级；Intel 与 Apple Silicon 的依赖安装和真实推理均是发布前实机 gate；
 - 删除 build/dist 前用 `ensure_inside` 确认目标在仓库内；
 - zip 时间戳和路径保持确定性；启动脚本权限位必须保留；
 - 更新包内容后运行 `tests/test_build_mac_package.py`。

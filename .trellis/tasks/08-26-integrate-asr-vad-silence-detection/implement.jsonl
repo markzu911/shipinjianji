@@ -1,0 +1,11 @@
+{"file":".trellis/spec/backend/index.md","reason":"后端开发前检查与媒体、持久化、错误处理规范入口"}
+{"file":".trellis/spec/backend/media-and-timeline.md","reason":"文字语义/物理双层时间、相邻字符 resolver、重复转场、草稿校准与生成零次重对齐契约"}
+{"file":".trellis/spec/backend/persistence-and-jobs.md","reason":"FA sidecar、PCM cache、job result/project snapshot 与 cut-draft 原子持久化边界"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"VAD 模型加载/推理失败的稳定降级、HTTP 错误和临时文件清理规则"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"有限时间区间、语义/物理分离、锁和完整后端回归要求"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"editable segment、草稿保存队列、播放帧时钟、Store 原子更新和基础媒体 identity 契约"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"additive API 字段、stale response 防护、源/剪后时间和预览/compose 同源投影"}
+{"file":".trellis/spec/testing/index.md","reason":"FunASR 外部运行时隔离、声学边界矩阵、真实 FFmpeg 和全量测试门槛"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"用户文案拆分、刷新恢复、唯一媒体运行时和真实浏览器错误门槛"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"边界记录从 ASR/VAD 到 job、草稿、Store、预览和 FFmpeg 的完整数据流"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"复用既有 transition resolver、PCM cache、时间映射和 Store owner，避免第二套边界逻辑"}
