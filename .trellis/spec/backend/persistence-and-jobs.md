@@ -171,6 +171,65 @@ if (
 - `public_job` 是对外投影边界；新增内部字段前确认是否应暴露给浏览器。
 - 运行中工作由 `job_has_running_work` 判定，清理逻辑不得删除这些目录。
 
+## 场景：文案修改使已完成艺术字失效
+
+### 1. Scope / Trigger
+
+已有全文艺术字后通过 `PUT /api/transcriptions/{job_id}/editable-segments` 修改文案时适用。旧 `art-text.mp4` 已过期，但 `art.overlays` 仍是可编辑工程状态；第一次文字保存后的快照必须允许紧接着的拆分和 cut-draft 删除继续持久化。
+
+### 2. Signatures
+
+```python
+update_transcript_track_text_for_segment(
+    art: dict[str, Any],
+    segment_start: float,
+    segment_end: float,
+    new_text: str,
+) -> None
+```
+
+失效后的子任务投影：`status="interrupted"`、`retryable=True`、`outputUrl=None`，并保留 `overlays`。
+
+### 3. Contracts
+
+- 文字只按现有重叠 cue 分配，cue 的 `start/end/sourceStart/sourceEnd` 不移动；全文重新分段由前端 Store reconciliation 负责。
+- 若旧状态不是 `interrupted`，记录 `previousStatus/previousStage`；随后写入合法非运行态 `interrupted`、可重试 stage/error、`interruptedAt/updatedAt`。
+- 不使用 `status: null`，因为 `ProjectRepository` schema v1 会拒绝该子任务；不使用 `queued`，因为本路由没有创建后台 worker。
+- 只清空过期 `outputUrl`；不删除输出文件、overlay、样式或用户媒体，也不自动安排生成。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 处理 |
+| --- | --- |
+| 没有 transcript overlays | no-op，不改变 art 状态 |
+| art 正在 `queued/processing` | editable-segments 路由返回 `409`，不做部分修改 |
+| completed art 文案更新 | 降为 `interrupted + retryable`，快照 shape 校验成功 |
+| 已 interrupted art 再次更新 | 保持 interrupted，刷新文字与时间戳，不把 previousStatus 覆盖成 interrupted |
+| 随后的 split/delete 保存 | 可继续原子覆盖同一 `project-state.json`，不得因子任务状态返回 `500` |
+
+### 5. Good / Base / Bad Cases
+
+- Good：completed 全文艺术字执行“改文字 -> 拆分 -> 删除”，每次 PUT 成功；最终快照可加载，overlay 仍在且输出 URL 为空。
+- Base：没有艺术字的 job 修改/拆分文案，既有路径不变。
+- Bad：把旧成片标记为 `None` 或 `queued`；前者使下一次快照校验失败，后者制造永远没有 worker 消费的运行态。
+
+### 6. Tests Required
+
+- API/repository 回归必须在真实 `data/jobs/<uuid>/source.mp4` 临时目录中连续执行 text PUT 和 split PUT，再通过 `ProjectRepository.load()` 校验 `interrupted/retryable/outputUrl/overlays/editableSegments`。
+- 浏览器回归不得 monkeypatch `persist_job_snapshot`；必须走真实 text/split 快照保存，并继续点击删除直至 Store/preview/compose 守恒断言。
+
+### 7. Wrong vs Correct
+
+```python
+# Wrong: invalid schema state; the next project snapshot fails.
+art["status"] = None
+
+# Correct: legal non-running retry state with editable overlays preserved.
+art["status"] = "interrupted"
+art["retryable"] = True
+art["outputUrl"] = None
+```
+
 ## 场景：工程快照、重启恢复与 attempt 隔离
 
 - `server/project_repository.py` 是 `project-state.json` 的唯一存储边界；只依赖标准库和构造参数，不导入 FastAPI 或 `server.app`。

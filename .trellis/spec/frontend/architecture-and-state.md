@@ -520,6 +520,9 @@ sessionStorage[`editor-suite:project-draft:${jobId}`] = {
 - 实时 AI 建议提交当前 `draftTranscript/draftDuration`，并继续分析原视频：取帧使用原片 `mediaTime`，拼图标签、提示词和建议范围使用剪后 `displayTime`。旧请求没有草稿时沿用原媒体与单时间值路径；确认建议时由唯一 MediaController 为 overlay 补齐 `sourceStart/sourceEnd`。
 - “贴合匹配文案时间”按 `words -> asrWords -> segment` 逐字符建立时间单元，忽略空白与标点，枚举全部短语候选并稳定选择距离当前 overlay 开始时间最近的一处。返回范围使用首尾字符的剪后边界；source anchor 按实际字符边界在对应 item 的 source/edited 区间间映射，不能在已有非均匀 `characterTimings` 时重新按字符序号均分。
 - `CUT_TIMING_CHANGED` 必须在一次 Store transaction 内同步 cut、art、selection 和 timeline。全文轨道按最新剪后 transcript 的字符/word 边界删减和重定时；带 source anchor 的普通艺术字按保留原片范围重映射，完全落入删除区间时移入 `art.suppressedOverlays`；无可靠文案关联的自定义艺术字保持不变。
+- 全文轨道 reconciliation 的最小单元是同一 `trackId` 的所有 active/suppressed cues。`nextCut.transcript` 是字符身份与顺序的唯一权威；旧 cue 的 source/edited anchors 只能选择相邻 cue 的优先分界。分配必须使用一个全轨单调 cursor，把每个当前字符恰好写入一个连续 cue slice；首尾 cue 吸收整体锚点漂移，无可靠 source anchors 时按旧 cue 字符容量确定性降级。提交前必须校验活动 cue 拼接字符和 `characterTimings` 总数都与当前 transcript 相等，禁止返回部分成功的缺字轨道。
+- `TRANSCRIPT_TEXT_CHANGED` 只改文案语义，不增加 `timingRevision` 或移动 cue/source ranges；但必须同时更新活动 cue 和 `_cutReconciliation.overlay` 的文字及逐字 timing 数量，并从同一 Store snapshot 重新派生 art timeline。`saveSegmentText()` 每次读取权威 job（包括 stale effect 的重试读取）后，必须在同一入口同步 `currentSegments`、`currentEditableSegments` 和 editable boundaries，并清空字符 cache，再构建 live cut transcript；否则用户修改后立即拆分/删除会按旧字符时间扩大范围。
+- cut timing 更新暂时缺少 transcript、只带 `{}` 或空 `segments` 占位时，不得把全文艺术字误判为语义全删；继续按稳定 source range 重映射已有 cue。只有显式空 `text` 或实际 segment 投影明确为空才可 suppress 全轨。当前 transcript 有字符但 timing 缺失/无效则按旧 cue 容量构造有限正时长降级，并保留稳定 source anchors。
 - `suppressedOverlays` 是项目内部可逆状态，不进入 preview、公共效果时间轴或 compose DTO，但必须随 schema v2 草稿持久化。撤销文字删除或恢复旧草稿时重新 reconcile，使用稳定 overlay id 恢复；若 selection 指向被隐藏项，只能回退到同一 transcript track 中最近的活动 cue，否则清空。
 
 ### 4. Validation & Error Matrix
@@ -534,17 +537,23 @@ sessionStorage[`editor-suite:project-draft:${jobId}`] = {
 | 旧请求在新请求之后返回 | 旧请求 no-op，不能清理新请求 token/timer/busy |
 | cut 删除完整 transcript cue/带锚点艺术字 | 从活动 overlays、preview、timeline、compose 移除，写入 `suppressedOverlays` |
 | 撤销上述 cut 或恢复早于当前 cut 的草稿 | 在同一 revision 内 reconcile 并用稳定 id 恢复/继续隐藏 |
+| canonical/local cue source start 向任一方向漂移 | 只改变全轨分界偏好；当前保留字符不得丢失、重复或倒序 |
+| 文案保存后立即手动拆分并删除拆出段 | 用新 job source segments 规范删除范围；cut/art/timeline/preview/compose 文本同一 |
+| cut transcript 缺失、`{}` 或只有空 `segments` 占位 | 保留并按 source range 重映射已有 cue，不把不可用投影当成全文删除 |
+| transcript 有当前文字但字符 timing 不可用 | 按旧 cue 容量确定性分配有限正时长，字符和 source anchors 仍守恒 |
 
 ### 5. Good / Base / Bad Cases
 
 - Good：用户修改艺术字文字、时间和坐标，剪辑草稿随后自动保存并改变 job `updatedAt`；刷新仍恢复稳定 id、selection、时间和 compose。
+- Good：canonical cue 比本地拆分投影晚 `0.2s` 开始；“但/你/该/人”等边界首字仍按当前 transcript 单调进入全轨 cues，五个消费者拼接文本一致。
 - Base：首次 hydrate 只有 job id/status，没有完整 result；恢复适配器等待下一次完整响应后再校验。
-- Bad：把根 `job.updatedAt` 直接写进 art 草稿，或进入 `restoreEditorDraft()` 就先 `restoredJobs.add(jobId)`；前者造成无关保存误失效，后者会让并发首轮吞掉有效草稿。
+- Bad：把根 `job.updatedAt` 直接写进 art 草稿，或让每个旧 cue 独立按 source midpoint 过滤新字符；前者造成无关保存误失效，后者会在合法锚点漂移时系统性吞掉段首字。
 
 ### 6. Tests Required
 
 - Node/静态：ArtTool 不包含 storage/message/video/timeline store；重复 mount/destroy 可撤销；Store 原子恢复覆盖错误 job/version、等价 no-op、cut-to-art 删减/撤销和陈旧草稿 reconcile；整轨 style-only 更新对 cue 身份、文字、编辑/源时间、字符 timing 和 timing revision 做前后快照。
-- 真实浏览器：同轨多 cue 只显示一个入口，manual 仍逐项显示；代表 cue 选择稳定，整轨/manual 控件往返恢复；style 一次 revision 且 timing 不变，删除整轨从 preview/timeline/compose 同时消失，仅有整轨时删除后恢复空选择文案；375px 无溢出且入口不少于 44px。另需覆盖 cutDraft 自动保存后 reload 仍恢复 art、`tool=art` 保留且媒体同页不发生 `src/load()`。
+- ArtModel/Store：用双向 source anchor 漂移和缺失/mixed anchors 断言全轨字符、顺序、timing 数量守恒；覆盖 text-only 更新后的 reconciliation base、suppressed 恢复、selection、manual overlay 和相同 timing signature server echo。
+- 真实浏览器：同轨多 cue 只显示一个入口，manual 仍逐项显示；代表 cue 选择稳定，整轨/manual 控件往返恢复；style 一次 revision 且 timing 不变，删除整轨从 preview/timeline/compose 同时消失，仅有整轨时删除后恢复空选择文案；375px 无溢出且入口不少于 44px。另需真实点击“修改文案 -> 拆分 -> 删除拆出段”，断言 cut/art/timeline/preview/compose 文本守恒、方向边界采用新字符时间、cutDraft 自动保存后 reload 仍恢复 art、`tool=art` 保留且媒体同页不发生 `src/load()`。
 - effect 竞态：让旧全文轨道请求忽略 abort 并迟到返回，断言旧响应 0 revision、0 overlay，新请求仍恰好提交 1 revision。
 - 历史 URL/模板兼容：307 后顶层 art root 可用，manual/全文轨道/无 selection/无效参数均按单次 handoff 契约运行，DOM 中 iframe 数量始终为 0。
 
@@ -573,6 +582,16 @@ for (const overlay of art.overlays) renderOverlayEntry(overlay);
 
 // Correct: group only the inspector view and keep cue data unchanged.
 for (const entry of overlayListEntries(art.overlays)) renderOverlayEntry(entry);
+```
+
+```javascript
+// Wrong: each old cue independently decides which current characters exist.
+const cueUnits = nextUnits.filter(unit => midpoint(unit) >= cue.sourceStart);
+
+// Correct: the current transcript owns character identity; old anchors only
+// choose monotonic boundaries for one complete track partition.
+const partition = partitionTranscriptTrack(trackCues, nextUnits);
+assertTrackCharactersConserved(partition, nextUnits);
 ```
 
 ## 禁止事项

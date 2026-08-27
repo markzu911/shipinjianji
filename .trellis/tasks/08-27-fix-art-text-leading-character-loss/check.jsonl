@@ -1,0 +1,4 @@
+{"file":".trellis/tasks/08-27-fix-art-text-leading-character-loss/research/implementation-contracts.md","reason":"复核语义字符守恒、Store timingRevision、preview/compose 同源和浏览器门槛"}
+{"file":".trellis/spec/testing/index.md","reason":"执行规定的前端、艺术字、cut 与完整应用测试"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"真实浏览器修改、拆分、删除及媒体不重载验证"}
+{"file":".trellis/tasks/08-27-fix-art-text-leading-character-loss/research/root-cause.md","reason":"独立对照真实故障时间值和一般性防复发条件"}

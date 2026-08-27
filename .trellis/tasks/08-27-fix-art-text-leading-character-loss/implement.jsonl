@@ -1,0 +1,4 @@
+{"file":".trellis/tasks/08-27-fix-art-text-leading-character-loss/research/implementation-contracts.md","reason":"未截断的字符身份、物理时间、Store 原子性和测试契约摘要"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"跨 cut transcript、ArtModel、Store、preview 与 compose 的数据流检查"}
+{"file":".trellis/spec/testing/index.md","reason":"ArtModel、ProjectStore、艺术字、cut draft 与浏览器回归选择"}
+{"file":".trellis/tasks/08-27-fix-art-text-leading-character-loss/research/root-cause.md","reason":"真实锚点漂移复现、触发顺序和已确认根因"}
