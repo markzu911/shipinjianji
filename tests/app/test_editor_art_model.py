@@ -451,6 +451,192 @@ console.log(JSON.stringify({
     ]
 
 
+def test_editor_art_model_conserves_track_characters_across_source_anchor_drift():
+    payload = run_node(
+        r"""
+const model = require('./web/editor-art-model.js');
+const cue = (id, text, start, end) => model.normalizeOverlay({
+  id, text, start, end, sourceStart: start, sourceEnd: end,
+  trackType: 'transcript', trackId: 'full',
+}, { duration: 30 });
+const base = { source: 'original', overlays: [
+  cue('cue-dan', '但后来我才发现', 14.13, 15.45),
+  cue('cue-ni', '你能看到的选项', 15.81, 17.0),
+  cue('cue-gai', '该有的想法', 17.39, 18.4),
+  cue('cue-ren', '人这辈子最难突破', 22.19, 24.3),
+] };
+const segment = (text, start, end, sourceStart = start, sourceEnd = end) => ({
+  text, start, end, sourceStart, sourceEnd,
+  words: [{ text, start, end, sourceStart, sourceEnd }],
+});
+const previousCut = { ranges: [], sourceDuration: 30, duration: 30 };
+const nextCut = {
+  ranges: [{ start: 18.4, end: 21.9 }], sourceDuration: 30, duration: 26.5,
+  transcript: { segments: [
+    segment('但后来我才发现', 13.90, 15.40),
+    segment('你能看到的选项', 15.55, 17.00),
+    segment('该有的想法', 17.19, 18.39),
+    segment('人这辈子最难突破', 18.40, 20.80, 21.90, 24.30),
+  ] },
+};
+const result = model.reconcileArtWithCut(base, previousCut, nextCut).art;
+const transcriptCues = result.overlays.filter(item => item.trackId === 'full');
+console.log(JSON.stringify({
+  texts: transcriptCues.map(item => item.text),
+  timingCounts: transcriptCues.map(item => item.characterTimings.length),
+  concatenated: transcriptCues.map(item => item.text).join(''),
+  expected: nextCut.transcript.segments.map(item => item.text).join(''),
+  suppressed: result.suppressedOverlays.map(item => item.id),
+}));
+"""
+    )
+
+    assert payload["texts"] == [
+        "但后来我才发现",
+        "你能看到的选项",
+        "该有的想法",
+        "人这辈子最难突破",
+    ]
+    assert payload["timingCounts"] == [7, 7, 5, 8]
+    assert payload["concatenated"] == payload["expected"]
+    assert payload["suppressed"] == []
+
+
+def test_editor_art_model_keeps_mixed_anchor_track_order_for_capacity_fallback():
+    payload = run_node(
+        r"""
+const model = require('./web/editor-art-model.js');
+const base = { source: 'original', overlays: [
+  model.normalizeOverlay({
+    id: 'legacy-no-source', text: '甲乙', start: 0, end: 2,
+    trackType: 'transcript', trackId: 'full',
+  }, { duration: 4 }),
+  model.normalizeOverlay({
+    id: 'source-anchored', text: '丙丁', start: 2, end: 4,
+    sourceStart: 8, sourceEnd: 10,
+    trackType: 'transcript', trackId: 'full',
+  }, { duration: 4 }),
+] };
+const cut = {
+  ranges: [], sourceDuration: 10, duration: 4,
+  transcript: { segments: [{
+    text: '甲乙丙丁', start: 0, end: 4,
+    words: [{ text: '甲乙丙丁', start: 0, end: 4 }],
+  }] },
+};
+const result = model.reconcileArtWithCut(base, cut, cut).art;
+console.log(JSON.stringify(result.overlays.map(item => ({
+  id: item.id,
+  text: item.text,
+  timingCount: item.characterTimings.length,
+}))));
+"""
+    )
+
+    assert payload == [
+        {"id": "legacy-no-source", "text": "甲乙", "timingCount": 2},
+        {"id": "source-anchored", "text": "丙丁", "timingCount": 2},
+    ]
+
+
+def test_editor_art_model_missing_transcript_projection_preserves_retained_cues():
+    payload = run_node(
+        r"""
+const model = require('./web/editor-art-model.js');
+const cue = (id, text, start, end) => model.normalizeOverlay({
+  id, text, start, end, sourceStart: start, sourceEnd: end,
+  trackType: 'transcript', trackId: 'full',
+}, { duration: 4 });
+const base = { source: 'original', overlays: [
+  cue('retained', '保留文案', 0, 2),
+  cue('deleted', '删除文案', 2, 4),
+] };
+const previous = { ranges: [], sourceDuration: 4, duration: 4 };
+const next = { ranges: [{ start: 2, end: 4 }], sourceDuration: 4, duration: 2 };
+const reconcile = transcript => model.reconcileArtWithCut(
+  base, previous, { ...next, ...(transcript === undefined ? {} : { transcript }) },
+).art;
+const result = reconcile(undefined);
+const emptyObject = reconcile({});
+const emptySegments = reconcile({ segments: [] });
+const explicitEmpty = reconcile({ text: '', segments: [] });
+console.log(JSON.stringify({
+  active: result.overlays.map(item => ({
+    id: item.id, text: item.text, start: item.start, end: item.end,
+    timingCount: item.characterTimings.length,
+  })),
+  suppressed: result.suppressedOverlays.map(item => item.id),
+  emptyObjectActive: emptyObject.overlays.map(item => item.id),
+  emptySegmentsActive: emptySegments.overlays.map(item => item.id),
+  explicitEmptyActive: explicitEmpty.overlays.map(item => item.id),
+  explicitEmptySuppressed: explicitEmpty.suppressedOverlays.map(item => item.id),
+}));
+"""
+    )
+
+    assert payload == {
+        "active": [
+            {
+                "id": "retained",
+                "text": "保留文案",
+                "start": 0,
+                "end": 2,
+                "timingCount": 4,
+            }
+        ],
+        "suppressed": ["deleted"],
+        "emptyObjectActive": ["retained"],
+        "emptySegmentsActive": ["retained"],
+        "explicitEmptyActive": [],
+        "explicitEmptySuppressed": ["retained", "deleted"],
+    }
+
+
+def test_editor_art_model_invalid_transcript_timing_still_conserves_current_text():
+    payload = run_node(
+        r"""
+const model = require('./web/editor-art-model.js');
+const cue = (id, text, start, end) => model.normalizeOverlay({
+  id, text, start, end, sourceStart: start, sourceEnd: end,
+  trackType: 'transcript', trackId: 'full',
+}, { duration: 4 });
+const base = { source: 'original', overlays: [
+  cue('first', '旧文', 0, 2),
+  cue('second', '案字', 2, 4),
+] };
+const currentText = '当前文案仍保留';
+const result = model.reconcileArtWithCut(
+  base,
+  { ranges: [], sourceDuration: 4, duration: 4 },
+  {
+    ranges: [], sourceDuration: 4, duration: 4,
+    transcript: { text: currentText, segments: [{ text: currentText }] },
+  },
+).art;
+const cues = result.overlays.filter(item => item.trackId === 'full');
+const timings = cues.flatMap(item => item.characterTimings);
+console.log(JSON.stringify({
+  text: cues.map(item => item.text).join(''),
+  timingCount: timings.length,
+  timingsValid: timings.every((timing, index) =>
+    Number.isFinite(timing.start) && Number.isFinite(timing.end) &&
+    timing.end > timing.start &&
+    (!index || timing.start >= timings[index - 1].end - 0.000001)),
+  sourceRanges: cues.map(item => [item.sourceStart, item.sourceEnd]),
+  suppressed: result.suppressedOverlays.map(item => item.id),
+}));
+"""
+    )
+
+    assert payload == {
+        "text": "当前文案仍保留",
+        "timingCount": 7,
+        "timingsValid": True,
+        "sourceRanges": [[0, 2], [2, 4]],
+        "suppressed": [],
+    }
+
+
 def test_editor_art_model_reconciliation_preserves_word_spaces_without_punctuation():
     payload = run_node(
         r"""

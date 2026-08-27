@@ -293,6 +293,103 @@ console.log(JSON.stringify({
     assert result["times"] == [1, 3, 1, 3]
 
 
+def test_editor_project_store_text_merge_updates_reconciliation_baseline() -> None:
+    result = run_store_script(
+        r"""
+global.EditorArtModel = require('./web/editor-art-model.js');
+const model = global.EditorArtModel;
+const store = projectStore.createStore({}, { timeline });
+store.dispatch({ type: 'projectHydrated', payload: { job: {
+  id: 'job-text-baseline', status: 'completed', duration: 4,
+  result: { mediaDuration: 4, text: '旧文案', segments: [] },
+} } });
+const base = model.normalizeOverlay({
+  id: 'cue', text: '旧文案', start: 1, end: 3,
+  sourceStart: 1, sourceEnd: 3,
+  trackType: 'transcript', trackId: 'full',
+}, { duration: 4 });
+const deletedBase = model.normalizeOverlay({
+  id: 'deleted-cue', text: '已删除原文', start: 2, end: 3,
+  sourceStart: 2, sourceEnd: 3,
+  trackType: 'transcript', trackId: 'full',
+}, { duration: 4 });
+const art = { source: 'original', overlays: [{
+  ...base,
+  _cutReconciliation: { version: 1, overlay: { ...base } },
+}], suppressedOverlays: [{
+  ...deletedBase,
+  _cutReconciliation: { version: 1, overlay: { ...deletedBase } },
+}] };
+store.dispatch({ type: 'artStateChanged', payload: {
+  art,
+  timeline: model.buildTimeline(art, 4, { clipId: 'art:cue' }),
+} });
+const before = store.getState();
+store.dispatch({ type: 'transcriptTextChanged', payload: {
+  transcript: { text: '修改后的文案', segments: [] },
+  serverArt: { overlays: [{
+    id: 'cue', text: '修改后的文案', start: 1, end: 3,
+    sourceStart: 1, sourceEnd: 3,
+    trackType: 'transcript', trackId: 'full',
+  }] },
+} });
+const after = store.getState();
+const overlay = after.project.art.overlays[0];
+const suppressed = after.project.art.suppressedOverlays[0];
+const frame = projectStore.selectEditorFrame(after, timeline);
+const timelineClip = frame.timeline.tracks
+  .flatMap(track => track.clips)
+  .find(clip => clip.id === 'art:cue');
+console.log(JSON.stringify({
+  timingRevisionBefore: before.timingRevision,
+  timingRevisionAfter: after.timingRevision,
+  visible: {
+    text: overlay.text,
+    timingCount: overlay.characterTimings.length,
+    start: overlay.start,
+    end: overlay.end,
+    sourceStart: overlay.sourceStart,
+    sourceEnd: overlay.sourceEnd,
+  },
+  baseline: {
+    text: overlay._cutReconciliation.overlay.text,
+    timingCount: overlay._cutReconciliation.overlay.characterTimings.length,
+    start: overlay._cutReconciliation.overlay.start,
+    end: overlay._cutReconciliation.overlay.end,
+    sourceStart: overlay._cutReconciliation.overlay.sourceStart,
+    sourceEnd: overlay._cutReconciliation.overlay.sourceEnd,
+  },
+  timelineText: {
+    name: timelineClip.name,
+    payload: timelineClip.payload.text,
+  },
+  previewText: frame.preview.art.overlays.find(item => item.id === 'cue').text,
+  composeText: frame.composition.artOverlays.find(item => item.trackId === 'full').text,
+  suppressedText: suppressed.text,
+  suppressedBaselineText: suppressed._cutReconciliation.overlay.text,
+}));
+"""
+    )
+
+    assert result["timingRevisionAfter"] == result["timingRevisionBefore"]
+    assert result["visible"] == {
+        "text": "修改后的文案",
+        "timingCount": 6,
+        "start": 1,
+        "end": 3,
+        "sourceStart": 1,
+        "sourceEnd": 3,
+    }
+    assert result["baseline"] == result["visible"]
+    assert result["timelineText"] == {
+        "name": "修改后的文案",
+        "payload": "修改后的文案",
+    }
+    assert result["previewText"] == result["composeText"] == "修改后的文案"
+    assert result["suppressedText"] == "已删除原文"
+    assert result["suppressedBaselineText"] == "已删除原文"
+
+
 def test_editor_project_store_text_change_installs_atomic_cut_projection() -> None:
     result = run_store_script(
         r"""
@@ -748,6 +845,149 @@ console.log(JSON.stringify({
         assert sorted(item["overlayIds"]) == sorted(item["timelineIds"])
         assert len(item["overlayIds"]) == len(item["composeIds"])
     assert "_cutReconciliation" not in result["composeKeys"]
+
+
+def test_editor_project_store_conserves_transcript_art_through_local_projection_and_echo() -> None:
+    result = run_store_script(
+        r"""
+global.EditorArtModel = require('./web/editor-art-model.js');
+const model = global.EditorArtModel;
+const store = projectStore.createStore({}, { timeline });
+store.dispatch({ type: 'projectHydrated', payload: { job: {
+  id: 'job-track-conservation', status: 'completed', duration: 30,
+  result: { mediaDuration: 30, text: '原始文案', segments: [] },
+} } });
+const cue = (id, text, start, end) => model.normalizeOverlay({
+  id, text, start, end, sourceStart: start, sourceEnd: end,
+  trackType: 'transcript', trackId: 'full',
+}, { duration: 30 });
+const art = { source: 'original', overlays: [
+  cue('cue-dan', '但后来我才发现', 14.13, 15.45),
+  cue('cue-ni', '你能看到的选项', 15.81, 17.0),
+  cue('cue-gai', '该有的想法', 17.39, 18.4),
+  cue('cue-ren', '人这辈子最难突破', 22.19, 24.3),
+  model.normalizeOverlay({
+    id: 'manual', text: '手动标题', start: 5, end: 6,
+    sourceStart: 5, sourceEnd: 6,
+  }, { duration: 30 }),
+] };
+store.dispatch({ type: 'artStateChanged', payload: {
+  art,
+  timeline: model.buildTimeline(art, 30, { clipId: 'art:cue-dan' }),
+} });
+const segment = (text, start, end, sourceStart = start, sourceEnd = end) => ({
+  text, start, end, sourceStart, sourceEnd,
+  words: [{ text, start, end, sourceStart, sourceEnd }],
+});
+const canonicalTranscript = { segments: [
+  segment('但后来我才发现', 14.13, 15.45),
+  segment('你能看到的选项', 15.81, 17.0),
+  segment('该有的想法', 17.39, 18.4),
+  segment('人这辈子最难突破', 22.19, 24.3),
+] };
+store.dispatch({ type: 'cutTimingChanged', payload: {
+  active: true, ranges: [{ start: 25, end: 26 }],
+  sourceDuration: 30, duration: 29, transcript: canonicalTranscript,
+} });
+const editedTexts = [
+  ['cue-dan', '但后来我才觉察', 14.13, 15.45],
+  ['cue-ni', '你能看到的选项', 15.81, 17.0],
+  ['cue-gai', '该有的想法', 17.39, 18.4],
+  ['cue-ren', '人这辈子最难突破', 22.19, 24.3],
+];
+store.dispatch({ type: 'transcriptTextChanged', payload: {
+  transcript: { text: editedTexts.map(item => item[1]).join(''), segments: [] },
+  serverArt: { overlays: editedTexts.map(([id, text, start, end]) => ({
+    id, text, start, end, sourceStart: start, sourceEnd: end,
+    trackType: 'transcript', trackId: 'full',
+  })) },
+} });
+const localTranscript = { segments: [
+  segment('但后来我才觉察', 13.90, 15.40),
+  segment('你能看到的选项', 15.55, 17.00),
+  segment('该有的想法', 17.19, 18.39),
+  segment('人这辈子最难突破', 18.40, 20.80, 21.90, 24.30),
+] };
+store.dispatch({ type: 'cutTimingChanged', payload: {
+  active: true, ranges: [{ start: 18.4, end: 21.9 }],
+  sourceDuration: 30, duration: 26.5, transcript: localTranscript,
+} });
+const afterLocal = store.getState();
+const localArt = JSON.stringify(afterLocal.project.art);
+const localTimingRevision = afterLocal.timingRevision;
+const frame = projectStore.selectEditorFrame(afterLocal, timeline);
+const echo = store.dispatch({ type: 'cutTimingChanged', payload: {
+  active: true, ranges: [{ start: 18.4, end: 21.9 }],
+  sourceDuration: 30, duration: 26.5,
+  transcript: { segments: [
+    segment('但后来我才觉察', 14.13, 15.45),
+    segment('你能看到的选项', 15.81, 17.0),
+    segment('该有的想法', 17.39, 18.4),
+    segment('人这辈子最难突破', 18.4, 20.8, 22.19, 24.3),
+  ] },
+} });
+const afterEcho = store.getState();
+store.dispatch({ type: 'cutTimingChanged', payload: {
+  active: true, ranges: [{ start: 17.19, end: 21.9 }],
+  sourceDuration: 30, duration: 25.29,
+  transcript: { segments: [
+    segment('但后来我才觉察', 13.90, 15.40),
+    segment('你能看到的选项', 15.55, 17.00),
+    segment('人这辈子最难突破', 17.19, 19.59, 21.90, 24.30),
+  ] },
+} });
+const afterDelete = store.getState();
+store.dispatch({ type: 'cutTimingChanged', payload: {
+  active: true, ranges: [{ start: 18.4, end: 21.9 }],
+  sourceDuration: 30, duration: 26.5, transcript: localTranscript,
+} });
+const afterRestore = store.getState();
+const trackText = artState => artState.overlays
+  .filter(item => item.trackId === 'full')
+  .map(item => item.text).join('');
+console.log(JSON.stringify({
+  localText: trackText(afterLocal.project.art),
+  expectedLocalText: localTranscript.segments.map(item => item.text).join(''),
+  localTimingCount: afterLocal.project.art.overlays
+    .filter(item => item.trackId === 'full')
+    .reduce((count, item) => count + item.characterTimings.length, 0),
+  previewText: frame.preview.art.overlays
+    .filter(item => item.trackId === 'full').map(item => item.text).join(''),
+  composeText: frame.composition.artOverlays
+    .filter(item => item.trackId === 'full').map(item => item.text).join(''),
+  manual: afterLocal.project.art.overlays.find(item => item.id === 'manual'),
+  echo,
+  echoTimingRevision: afterEcho.timingRevision,
+  localTimingRevision,
+  echoArtUnchanged: JSON.stringify(afterEcho.project.art) === localArt,
+  deletedText: trackText(afterDelete.project.art),
+  deletedSuppressed: afterDelete.project.art.suppressedOverlays.map(item => item.id),
+  restoredText: trackText(afterRestore.project.art),
+  restoredSuppressed: afterRestore.project.art.suppressedOverlays.map(item => item.id),
+  restoredBaselineText: afterRestore.project.art.overlays
+    .find(item => item.id === 'cue-dan')._cutReconciliation.overlay.text,
+}));
+"""
+    )
+
+    assert result["localText"] == result["expectedLocalText"]
+    assert result["localTimingCount"] == len(result["expectedLocalText"])
+    assert result["previewText"] == result["localText"]
+    assert result["composeText"] == result["localText"]
+    assert result["manual"]["text"] == "手动标题"
+    assert [result["manual"][key] for key in ("start", "end", "sourceStart", "sourceEnd")] == [
+        5,
+        6,
+        5,
+        6,
+    ]
+    assert result["echo"]["accepted"] is True
+    assert result["echoArtUnchanged"] is True
+    assert result["deletedText"] == "但后来我才觉察你能看到的选项人这辈子最难突破"
+    assert "cue-gai" in result["deletedSuppressed"]
+    assert result["restoredText"] == result["localText"]
+    assert result["restoredSuppressed"] == []
+    assert result["restoredBaselineText"] == "但后来我才觉察"
 
 
 def test_editor_project_store_does_not_retime_art_for_transcript_only_cut_update() -> None:

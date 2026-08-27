@@ -1983,8 +1983,23 @@ def test_editable_transcript_segments_can_update_text_and_sync_source():
     assert job["edit"]["transcript"]["text"] != "旧的剪后文案"
 
 
-def test_editing_text_keeps_track_timeline_stable():
+def test_editing_text_keeps_track_timeline_stable_and_snapshot_persistable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
     job_id = "66666666-6666-6666-8666-666666666666"
+    job_dir = tmp_path / "jobs" / job_id
+    job_dir.mkdir(parents=True)
+    source_path = job_dir / "source.mp4"
+    source_path.write_bytes(b"persistable-source")
+    monkeypatch.setattr(
+        app_module,
+        "enrich_editable_segment_boundaries",
+        lambda _media_path, _source_segments, editable_segments, **_kwargs: (
+            app_module.normalize_editable_segment_ids(editable_segments),
+            [],
+        ),
+    )
     source_segments = [
         {
             "id": 0,
@@ -2047,6 +2062,7 @@ def test_editing_text_keeps_track_timeline_stable():
             "art": {"overlays": track_overlays, "status": "completed"},
             "edit": None,
         }
+        app_module.JOB_FILES[job_id] = source_path
     try:
         with TestClient(app_module.app) as client:
             response = client.put(
@@ -2057,7 +2073,17 @@ def test_editing_text_keeps_track_timeline_stable():
                     "text": "我们相信AI很厉害。",
                 },
             )
+            split_response = client.put(
+                f"/api/transcriptions/{job_id}/editable-segments",
+                json={
+                    "segmentIndex": 0,
+                    "action": "split",
+                    "selectionStart": 2,
+                    "selectionEnd": 4,
+                },
+            )
         assert response.status_code == 200
+        assert split_response.status_code == 200
         with app_module.JOBS_LOCK:
             job = app_module.JOBS[job_id]
         cue_a = job["art"]["overlays"][0]
@@ -2073,11 +2099,21 @@ def test_editing_text_keeps_track_timeline_stable():
         assert cue_b["start"] == 1.0
         assert cue_b["end"] == 2.0
         # The old rendered art video is stale; it must be regenerated.
-        assert job["art"]["status"] is None
+        assert job["art"]["status"] == "interrupted"
+        assert job["art"]["retryable"] is True
         assert job["art"]["outputUrl"] is None
+        persisted = app_module._project_repository().load(job_id)["job"]
+        assert persisted["art"]["status"] == "interrupted"
+        assert persisted["art"]["retryable"] is True
+        assert persisted["art"]["overlays"] == job["art"]["overlays"]
+        assert [
+            segment["text"]
+            for segment in persisted["result"]["editableSegments"]
+        ] == ["我们", "相信", "AI很厉害。", "第二段内容。"]
     finally:
         with app_module.JOBS_LOCK:
             app_module.JOBS.pop(job_id, None)
+            app_module.JOB_FILES.pop(job_id, None)
 
 
 def test_delete_ranges_are_merged_and_cannot_remove_everything():

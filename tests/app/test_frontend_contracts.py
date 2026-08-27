@@ -51,15 +51,15 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
 
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
-    assert "/app.js?v=20260826-01" in page_response.text
+    assert "/app.js?v=20260827-01" in page_response.text
     assert "/styles.css?v=20260825-11" in page_response.text
     assert "/transcript-follow-scroll.js?v=20260818-03" in page_response.text
     assert "/ui-feedback.js?v=20260807-03" in page_response.text
     assert "/timeline-model.js?v=20260810-01" in page_response.text
     assert "/editor-pip-model.js?v=20260819-01" in page_response.text
-    assert "/editor-project-store.js?v=20260822-01" in page_response.text
+    assert "/editor-project-store.js?v=20260827-01" in page_response.text
     assert "/editor-media-controller.js?v=20260819-01" in page_response.text
-    assert "/editor-art-model.js?v=20260820-01" in page_response.text
+    assert "/editor-art-model.js?v=20260827-01" in page_response.text
     assert "/editor-art-renderer.js?v=20260819-01" in page_response.text
     assert "/editor-preview-compositor.js?v=20260820-01" in page_response.text
     assert "/editor-timeline-controller.js?v=20260825-03" in page_response.text
@@ -3773,16 +3773,30 @@ def test_editor_project_store_integration_guards_text_and_compose_state():
     assert 'beginProjectEffect("transcript-save")' in save_source
     assert "applyTranscriptTextEffect" in save_source
     assert "await loadServerRetainedProjection(" in save_source
+    assert "syncTextSaveSourceSegments(jobPayload);" in save_source
+    assert "syncTextSaveSourceSegments(refreshedJob);" in save_source
+    assert "currentSegments = source.segments;" in save_source
+    assert "currentEditableSegments = resolveEditableSegments(" in save_source
+    assert "source.editableSegmentBoundaries" in save_source
     assert save_source.count(
         "cutTranscript = buildLiveCutDraftState().transcript"
     ) == 2
     refresh_effect = save_source.index('beginProjectEffect(\n        "transcript-refresh"')
     refreshed_job = save_source.index("const refreshedJob = await readProject()")
+    refreshed_segments = save_source.index(
+        "syncTextSaveSourceSegments(refreshedJob);"
+    )
     refreshed_projection = save_source.rindex(
         "cutTranscript = buildLiveCutDraftState().transcript"
     )
     refreshed_apply = save_source.rindex("applyTranscriptTextEffect(")
-    assert refresh_effect < refreshed_job < refreshed_projection < refreshed_apply
+    assert (
+        refresh_effect
+        < refreshed_job
+        < refreshed_segments
+        < refreshed_projection
+        < refreshed_apply
+    )
     assert "broadcastTranscriptUpdated();" in save_source
     assert "if (textSaveEffect)" not in save_source
     assert "projectStoreEnabled" not in save_source

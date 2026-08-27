@@ -982,7 +982,7 @@ def test_server_projection_keeps_disjoint_runs_for_one_editable_segment(
 
 def test_user_text_split_projects_directional_boundaries_without_media_reload(
     browser_session,
-    seeded_editor_job,
+    seeded_two_cue_transcript_track_editor_job,
     monkeypatch: pytest.MonkeyPatch,
 ):
     def deterministic_boundaries(
@@ -998,8 +998,8 @@ def test_user_text_split_projects_directional_boundaries_without_media_reload(
         if [segment["text"] for segment in segments] != [
             "删除片段",
             "保",
-            "留内",
-            "容",
+            "留文",
+            "案",
         ]:
             return segments, []
         segments[1]["mediaEnd"] = 0.46
@@ -1008,15 +1008,15 @@ def test_user_text_split_projects_directional_boundaries_without_media_reload(
         segments[3]["mediaStart"] = 0.80
         return segments, [
             {
-                "leftEditableSegmentId": 1,
-                "rightEditableSegmentId": 2,
+                "leftEditableSegmentId": segments[1]["id"],
+                "rightEditableSegmentId": segments[2]["id"],
                 "neutral": 0.46,
                 "deleteLeft": 0.47,
                 "deleteRight": 0.44,
             },
             {
-                "leftEditableSegmentId": 2,
-                "rightEditableSegmentId": 3,
+                "leftEditableSegmentId": segments[2]["id"],
+                "rightEditableSegmentId": segments[3]["id"],
                 "neutral": 0.80,
                 "deleteLeft": 0.82,
                 "deleteRight": 0.78,
@@ -1028,12 +1028,29 @@ def test_user_text_split_projects_directional_boundaries_without_media_reload(
         "enrich_editable_segment_boundaries",
         deterministic_boundaries,
     )
+    app_module.persist_job_snapshot(
+        seeded_two_cue_transcript_track_editor_job.job_id,
+        raise_on_error=True,
+    )
     page = browser_session.page
-    route_cut_draft_echo(page, seeded_editor_job.job_id)
-    page = open_editor(browser_session, seeded_editor_job)
+    route_cut_draft_echo(page, seeded_two_cue_transcript_track_editor_job.job_id)
+    page = open_editor(browser_session, seeded_two_cue_transcript_track_editor_job)
     install_base_media_mutation_probe(page)
 
     page.get_by_role("button", name="编辑文字段：保留内容").click()
+    page.locator("#segmentEditText").fill("保留文案")
+    page.locator("#saveSegmentTextButton").click()
+    page.locator("#segmentStructureStatus").filter(
+        has_text="项目预览已同步"
+    ).wait_for()
+    page.wait_for_function(
+        """() => window.EditorSuite.projectSnapshot().project.art.overlays
+          .filter(item => item.trackType === 'transcript')
+          .sort((left, right) => left.start - right.start)
+          .map(item => item.text).join('') === '删除片段保留文案'"""
+    )
+
+    page.get_by_role("button", name="编辑文字段：保留文案").click()
     edit_text = page.locator("#segmentEditText")
     edit_text.evaluate(
         """element => {
@@ -1042,7 +1059,13 @@ def test_user_text_split_projects_directional_boundaries_without_media_reload(
           element.dispatchEvent(new Event('select', { bubbles: true }));
         }"""
     )
-    page.get_by_role("button", name="拆分", exact=True).click()
+    with page.expect_response(
+        lambda response: response.request.method == "PUT"
+        and response.url.endswith("/editable-segments")
+    ) as split_response_info:
+        page.get_by_role("button", name="拆分", exact=True).click()
+    split_response = split_response_info.value
+    assert split_response.ok, split_response.text()
     page.locator("#segmentEditDialog").wait_for(state="hidden")
 
     def displayed_range(index: int) -> tuple[float, float]:
@@ -1061,18 +1084,72 @@ def test_user_text_split_projects_directional_boundaries_without_media_reload(
     ).first
     middle_toggle.click()
     page.wait_for_function(
-        """() => document.querySelector(
-          '.segment-item[data-segment-index="2"] .segment-toggle'
-        )?.getAttribute('aria-label')?.startsWith('恢复')"""
+        """() => {
+          const item = document.querySelector(
+            '.segment-item[data-segment-index="1"]',
+          );
+          return item && Math.abs(Number(item.dataset.displayEnd) - 0.44) < 0.0001;
+        }"""
     )
 
     assert displayed_range(1) == pytest.approx((0.35, 0.44))
     assert displayed_range(2) == pytest.approx((0.44, 0.82))
     assert displayed_range(3) == pytest.approx((0.82, 0.95))
-    page.get_by_role("button", name="编辑文字段：容").click()
+    page.get_by_role("button", name="编辑文字段：案").click()
     assert page.locator("#segmentEditTime").text_content() == (
         "00:00.440 — 00:00.570"
     )
+    page.locator("#segmentEditClose").click()
+    page.wait_for_function(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          const chars = value => [...String(value || '')]
+            .filter(character => !/\\s/u.test(character) && !/\\p{P}/u.test(character))
+            .join('');
+          const cutText = (snapshot.project.cut.transcript?.segments || [])
+            .map(item => item.text).join('');
+          const artText = snapshot.project.art.overlays
+            .filter(item => item.trackType === 'transcript')
+            .sort((left, right) => left.start - right.start)
+            .map(item => item.text).join('');
+          return chars(artText) === chars(cutText);
+        }"""
+    )
+    projection = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          const frame = window.EditorProjectStore.selectEditorFrame(snapshot);
+          const transcript = items => items
+            .filter(item => item.trackType === 'transcript')
+            .sort((left, right) => left.start - right.start)
+            .map(item => item.text).join('');
+          const artClips = frame.timeline.tracks
+            .filter(track => track.id === 'art:transcript:browser-transcript-track')
+            .flatMap(track => track.clips);
+          return {
+            cut: (snapshot.project.cut.transcript?.segments || [])
+              .map(item => item.text).join(''),
+            art: transcript(snapshot.project.art.overlays),
+            timeline: artClips.map(item => item.payload.text).join(''),
+            preview: transcript(frame.preview.art.overlays),
+            compose: frame.composition.artOverlays
+              .filter(item => item.trackId === 'browser-transcript-track')
+              .sort((left, right) => left.start - right.start)
+              .map(item => item.text).join(''),
+            timingCount: snapshot.project.art.overlays
+              .filter(item => item.trackType === 'transcript')
+              .reduce((count, item) => count + item.characterTimings.length, 0),
+          };
+        }"""
+    )
+    assert projection["cut"] == "删除片段保案"
+    assert projection["art"] == projection["cut"]
+    assert projection["timeline"] == projection["cut"]
+    assert projection["preview"] == projection["cut"]
+    assert projection["compose"] == projection["cut"]
+    assert projection["timingCount"] == len(projection["cut"])
+    assert "留文" not in projection["art"]
+    assert "保" in projection["art"] and "案" in projection["art"]
     assert base_media_mutations(page) == {"srcWrites": 0, "loadCalls": 0}
 
 
