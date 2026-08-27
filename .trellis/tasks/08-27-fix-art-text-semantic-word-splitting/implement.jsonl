@@ -1,0 +1,6 @@
+{"file":".trellis/spec/guides/project-overview.md","reason":"确认单页本地编辑器技术栈、目录与预览/导出共享契约。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"约束语义身份、source/edited timing、Store 与持久化的跨层数据流。"}
+{"file":".trellis/spec/backend/persistence-and-jobs.md","reason":"约束文案修改后的艺术字 cue 同步、稳定时间和 interrupted 持久化状态。"}
+{"file":".trellis/spec/testing/index.md","reason":"确定 ArtModel、ProjectStore、艺术字与浏览器回归范围。"}
+{"file":".trellis/tasks/08-27-fix-art-text-semantic-word-splitting/research/root-cause.md","reason":"提供两层任意字符切分的最小复现、根因与预防契约。"}
+{"file":".trellis/tasks/08-27-fix-art-text-semantic-word-splitting/research/implementation-contracts.md","reason":"提供未截断的 Store、持久化、时间投影和测试实施契约。"}

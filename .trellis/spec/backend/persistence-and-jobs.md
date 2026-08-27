@@ -185,6 +185,8 @@ update_transcript_track_text_for_segment(
     segment_start: float,
     segment_end: float,
     new_text: str,
+    *,
+    words: list[dict[str, Any]] | None = None,
 ) -> None
 ```
 
@@ -192,7 +194,10 @@ update_transcript_track_text_for_segment(
 
 ### 3. Contracts
 
-- 文字只按现有重叠 cue 分配，cue 的 `start/end/sourceStart/sourceEnd` 不移动；全文重新分段由前端 Store reconciliation 负责。
+- 当前文案字符决定存在性，现有 cue 文本决定上一版已接受语义分区，`words` 只提供合法自然词边界；禁止再按 cue 时长比例或字符中点切分新文案。
+- 旧/新文本先做单调差分：相同字符块保持原 cue 归属，插入/替换只在受影响区选择合法词边界；旧边界落在自然词内部或形成已有规则拒绝的弱起始时，存在安全内部候选就必须修复。没有安全内部候选时保留必要归属或 suppress 空 cue，不硬拆词凑 cue 数量。
+- cue 的 `id/start/end/sourceStart/sourceEnd` 和样式不移动；`characterTimings` 数量随新 cue 文本重建。空 cue 进入 `suppressedOverlays`，恢复后复用原 ID、时间和样式。
+- 只允许同一 transcript track 的 cue 在其既有槽位内按 source 排序；手动艺术字的数组顺序、相对层级和选择语义不得因文字保存改变。
 - 若旧状态不是 `interrupted`，记录 `previousStatus/previousStage`；随后写入合法非运行态 `interrupted`、可重试 stage/error、`interruptedAt/updatedAt`。
 - 不使用 `status: null`，因为 `ProjectRepository` schema v1 会拒绝该子任务；不使用 `queued`，因为本路由没有创建后台 worker。
 - 只清空过期 `outputUrl`；不删除输出文件、overlay、样式或用户媒体，也不自动安排生成。
@@ -206,28 +211,31 @@ update_transcript_track_text_for_segment(
 | completed art 文案更新 | 降为 `interrupted + retryable`，快照 shape 校验成功 |
 | 已 interrupted art 再次更新 | 保持 interrupted，刷新文字与时间戳，不把 previousStatus 覆盖成 interrupted |
 | 随后的 split/delete 保存 | 可继续原子覆盖同一 `project-state.json`，不得因子任务状态返回 `500` |
+| 新字符无法完整、单调地分配到 cue | 抛出确定性错误，不持久化部分 cue 文本或部分工程快照 |
 
 ### 5. Good / Base / Bad Cases
 
-- Good：completed 全文艺术字执行“改文字 -> 拆分 -> 删除”，每次 PUT 成功；最终快照可加载，overlay 仍在且输出 URL 为空。
+- Good：completed 全文艺术字执行“改文字 -> 拆分 -> 删除”，每次 PUT 成功；“其实”“该有的”等自然词不跨 cue，最终快照可加载，overlay 仍在且输出 URL 为空。
 - Base：没有艺术字的 job 修改/拆分文案，既有路径不变。
-- Bad：把旧成片标记为 `None` 或 `queued`；前者使下一次快照校验失败，后者制造永远没有 worker 消费的运行态。
+- Bad：按 source 时长比例把新字符分摊到 cue，或为了排序文案 cue 重排手动 overlay；前者会拆词，后者会改变无关艺术字层级。把旧成片标记为 `None` 或 `queued` 同样非法。
 
 ### 6. Tests Required
 
-- API/repository 回归必须在真实 `data/jobs/<uuid>/source.mp4` 临时目录中连续执行 text PUT 和 split PUT，再通过 `ProjectRepository.load()` 校验 `interrupted/retryable/outputUrl/overlays/editableSegments`。
-- 浏览器回归不得 monkeypatch `persist_job_snapshot`；必须走真实 text/split 快照保存，并继续点击删除直至 Store/preview/compose 守恒断言。
+- 纯函数回归覆盖未修改词块归属、词内旧坏边界、其他位置发生编辑后的坏边界修复、完整替换、重复短语、cue suppress/restore、稳定 ID/时间/样式和手动 overlay 顺序。
+- API/repository 回归必须在真实 `data/jobs/<uuid>/source.mp4` 临时目录中连续执行 text PUT 和 split PUT，再通过 `ProjectRepository.load()` 校验 `interrupted/retryable/outputUrl/overlays/suppressedOverlays/editableSegments`。
+- 浏览器回归不得 monkeypatch `persist_job_snapshot`；必须走真实 text/split 快照保存，并继续点击删除直至 Store/preview/timeline/compose 的 cue 数组和拼接字符同时守恒。
 
 ### 7. Wrong vs Correct
 
 ```python
-# Wrong: invalid schema state; the next project snapshot fails.
-art["status"] = None
+# Wrong: physical duration is not a semantic boundary.
+count = round(len(new_text) * cue_duration / total_duration)
+cue["text"] = new_text[:count]
 
-# Correct: legal non-running retry state with editable overlays preserved.
-art["status"] = "interrupted"
-art["retryable"] = True
-art["outputUrl"] = None
+# Correct: project accepted cue boundaries through the text diff, then choose
+# only among current natural-word boundaries.
+boundaries = project_semantic_cue_boundaries(old_cues, new_text, words)
+assert "".join(partition(new_text, boundaries)) == content_characters(new_text)
 ```
 
 ## 场景：工程快照、重启恢复与 attempt 隔离

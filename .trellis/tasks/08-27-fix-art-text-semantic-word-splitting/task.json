@@ -1,0 +1,28 @@
+{
+  "id": "fix-art-text-semantic-word-splitting",
+  "name": "fix-art-text-semantic-word-splitting",
+  "title": "修复艺术字语义词被拆分",
+  "description": "",
+  "status": "in_progress",
+  "dev_type": null,
+  "scope": "cross-layer",
+  "package": null,
+  "priority": "P2",
+  "creator": "541",
+  "assignee": "541",
+  "createdAt": "2026-08-27",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {
+    "diagnosis": "confirmed-two-boundary-regressions"
+  }
+}

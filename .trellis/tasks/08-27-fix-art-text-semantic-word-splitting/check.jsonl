@@ -1,0 +1,7 @@
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"检查语义身份、时间投影、Store/持久化跨层一致性。"}
+{"file":".trellis/spec/backend/persistence-and-jobs.md","reason":"检查文本保存稳定时间、合法子任务状态与连续快照覆盖。"}
+{"file":".trellis/spec/testing/index.md","reason":"执行完整测试矩阵并避免静态字符串替代行为断言。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"检查真实 edit/split/delete 工作流、媒体 identity 和网络隔离。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"检查后端错误边界、代码质量和 diff hygiene。"}
+{"file":".trellis/tasks/08-27-fix-art-text-semantic-word-splitting/research/root-cause.md","reason":"按已确认的两层根因验证修复没有只覆盖单个示例。"}
+{"file":".trellis/tasks/08-27-fix-art-text-semantic-word-splitting/research/implementation-contracts.md","reason":"按未截断契约检查 Store、持久化、时间投影与浏览器链路。"}
