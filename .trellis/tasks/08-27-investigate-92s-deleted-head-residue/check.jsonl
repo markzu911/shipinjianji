@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/guides/project-overview.md", "reason": "复核修改范围、开发环境约束和项目现状"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "复核动态 trust、跨层边界消费和生成零次重解析"}
+{"file": ".trellis/spec/backend/media-and-timeline.md", "reason": "复核语义/物理时间层、预览和 FFmpeg 一致性"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "执行后端质量门、真实媒体与 diff hygiene 检查"}
+{"file": ".trellis/spec/testing/index.md", "reason": "复核同段/重复/跨段反例、参数化和完整测试覆盖"}

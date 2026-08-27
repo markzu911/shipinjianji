@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/guides/project-overview.md", "reason": "项目结构、开发运行方式和源时间/剪后时间核心约束"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "强制对齐动态 trust、语义范围与物理范围、预览和导出一致性检查"}
+{"file": ".trellis/spec/backend/media-and-timeline.md", "reason": "声学边界、cut draft、retained transcript 和 FFmpeg 的媒体时间轴契约"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "后端媒体边界不变量、最小修改和完整验证要求"}
+{"file": ".trellis/spec/testing/index.md", "reason": "音频边界参数化、真实媒体和完整应用回归规范"}
