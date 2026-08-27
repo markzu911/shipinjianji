@@ -658,3 +658,26 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 30: 修复被删首字跨候选点残音
+
+**Date**: 2026-08-27
+**Task**: 修复被删首字跨候选点残音
+**Branch**: `develop`
+
+### Summary
+
+通用修复同段 delete-start 需要候选点后 PCM block 才能确认起音时的首字残音；限定 lookahead、保持失败 trust 与 hard limit，覆盖文字、时间轴和用户文案拆分；真实源片返回 118.995s，完整测试 462 项通过。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `5a515ec` | (see git log) |
+| `e4109cc` | (see git log) |
+| `a61d3af` | (see git log) |
+
+### Status
+
+[OK] **Completed**
