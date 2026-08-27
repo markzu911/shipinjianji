@@ -432,70 +432,259 @@
       };
     }
 
-    function reconcileTranscriptOverlay(
-      overlay,
+    function transcriptTrackEntry(overlay, previousCut, index) {
+      const base = transcriptReconciliationBase(overlay, previousCut);
+      const sourceRange = overlaySourceRange(base, previousCut);
+      return { overlay, base, sourceRange, index };
+    }
+
+    function transcriptTrackEntryOrder(left, right) {
+      const leftSource = left.sourceRange?.start;
+      const rightSource = right.sourceRange?.start;
+      if (Number.isFinite(leftSource) && Number.isFinite(rightSource)) {
+        return leftSource - rightSource || left.index - right.index;
+      }
+      return finiteNumber(left.base?.start) - finiteNumber(right.base?.start) ||
+        left.index - right.index;
+    }
+
+    function transcriptSemanticCharacters(transcript) {
+      const segments = Array.isArray(transcript?.segments)
+        ? transcript.segments
+        : [];
+      const texts = segments.length
+        ? segments.map((segment) => String(segment?.text || ""))
+        : [String(transcript?.text || "")];
+      const characters = [];
+      let pendingWhitespace = false;
+      for (const text of texts) {
+        for (const character of [...text]) {
+          if (/\s/u.test(character)) {
+            pendingWhitespace = pendingWhitespace || characters.length > 0;
+            continue;
+          }
+          if (/\p{P}/u.test(character)) continue;
+          characters.push({
+            character,
+            separatorBefore: pendingWhitespace ? " " : "",
+          });
+          pendingWhitespace = false;
+        }
+      }
+      return characters;
+    }
+
+    function fallbackTranscriptTrackUnits(transcript, entries, nextCut, duration) {
+      const characters = transcriptSemanticCharacters(transcript);
+      if (!characters.length) return [];
+      const mappedRanges = entries.flatMap((entry) => {
+        const mapped = editedRangeForSourceRange(entry.sourceRange, nextCut);
+        return mapped ? [mapped] : [];
+      });
+      const baseRanges = entries.flatMap((entry) => {
+        const range = validTimedRange(entry.base);
+        return range ? [range] : [];
+      });
+      const ranges = mappedRanges.length ? mappedRanges : baseRanges;
+      let start = ranges.length
+        ? Math.min(...ranges.map((range) => range.start))
+        : 0;
+      let end = ranges.length
+        ? Math.max(...ranges.map((range) => range.end))
+        : duration;
+      start = clamp(start, 0, Math.max(0, duration - 0.02));
+      end = clamp(end, start + 0.02, duration);
+      return characters.map((item, index) => ({
+        ...item,
+        start: start + ((end - start) * index) / characters.length,
+        end: start + ((end - start) * (index + 1)) / characters.length,
+        sourceStart: null,
+        sourceEnd: null,
+      }));
+    }
+
+    function transcriptBoundaryPreference(left, right) {
+      const leftEnd = left.sourceRange?.end;
+      const rightStart = right.sourceRange?.start;
+      if (Number.isFinite(leftEnd) && Number.isFinite(rightStart)) {
+        return (leftEnd + rightStart) / 2;
+      }
+      if (Number.isFinite(leftEnd)) return leftEnd;
+      if (Number.isFinite(rightStart)) return rightStart;
+      return null;
+    }
+
+    function transcriptSourceSplitIndex(units, preference) {
+      if (!Number.isFinite(preference)) return null;
+      let splitIndex = 0;
+      for (const unit of units) {
+        if (!Number.isFinite(unit.sourceStart) || !Number.isFinite(unit.sourceEnd)) {
+          return null;
+        }
+        const midpoint = unit.sourceStart + (unit.sourceEnd - unit.sourceStart) / 2;
+        if (midpoint >= preference) break;
+        splitIndex += 1;
+      }
+      return splitIndex;
+    }
+
+    function transcriptCapacitySplitIndex(entries, boundaryIndex, unitCount) {
+      const capacities = entries.map((entry) => contentCharacters(entry.base?.text).length);
+      const totalCapacity = capacities.reduce((total, count) => total + count, 0);
+      const ratio = totalCapacity
+        ? capacities.slice(0, boundaryIndex + 1)
+            .reduce((total, count) => total + count, 0) / totalCapacity
+        : (boundaryIndex + 1) / entries.length;
+      return Math.round(unitCount * ratio);
+    }
+
+    function partitionTranscriptTrack(entries, units, preferSourceBoundaries = true) {
+      const boundaries = [0];
+      let cursor = 0;
+      for (let index = 0; index < entries.length - 1; index += 1) {
+        const preference = transcriptBoundaryPreference(entries[index], entries[index + 1]);
+        const sourceSplit = preferSourceBoundaries
+          ? transcriptSourceSplitIndex(units, preference)
+          : null;
+        const splitIndex = sourceSplit === null
+          ? transcriptCapacitySplitIndex(entries, index, units.length)
+          : sourceSplit;
+        cursor = clamp(splitIndex, cursor, units.length);
+        boundaries.push(cursor);
+      }
+      boundaries.push(units.length);
+      return entries.map((entry, index) => ({
+        entry,
+        units: units.slice(boundaries[index], boundaries[index + 1]),
+      }));
+    }
+
+    function rebuildTranscriptTrack(partition, duration) {
+      const active = [];
+      const suppressed = [];
+      for (const { entry, units } of partition) {
+        if (!units.length) {
+          suppressed.push(withTranscriptReconciliationBase(
+            clone(entry.overlay),
+            entry.base,
+          ));
+          continue;
+        }
+        const first = units[0];
+        const last = units.at(-1);
+        const hasSourceRange =
+          Number.isFinite(first.sourceStart) &&
+          Number.isFinite(last.sourceEnd) &&
+          last.sourceEnd > first.sourceStart;
+        const fallbackSourceRange = entry.sourceRange;
+        const rebuilt = normalizeOverlay({
+          ...clone(entry.overlay),
+          text: units.map((unit, index) =>
+            `${index ? unit.separatorBefore : ""}${unit.character}`).join(""),
+          start: first.start,
+          end: last.end,
+          sourceStart: hasSourceRange
+            ? first.sourceStart
+            : fallbackSourceRange?.start,
+          sourceEnd: hasSourceRange
+            ? last.sourceEnd
+            : fallbackSourceRange?.end,
+          characterTimings: units.map((unit) => ({
+            start: unit.start,
+            end: unit.end,
+          })),
+        }, { duration });
+        active.push(withTranscriptReconciliationBase(rebuilt, entry.base));
+      }
+      return { active, suppressed };
+    }
+
+    function transcriptTrackConserved(result, units) {
+      const expected = units.map((unit) => unit.character).join("");
+      const actual = result.active
+        .flatMap((overlay) => contentCharacters(overlay.text))
+        .join("");
+      const timingCount = result.active.reduce(
+        (total, overlay) => total + (
+          Array.isArray(overlay.characterTimings) ? overlay.characterTimings.length : 0
+        ),
+        0,
+      );
+      return actual === expected && timingCount === units.length;
+    }
+
+    function reconcileTranscriptTrackWithoutProjection(entries, nextCut, duration) {
+      const active = [];
+      const suppressed = [];
+      for (const entry of entries) {
+        if (!entry.sourceRange) {
+          active.push(withTranscriptReconciliationBase(
+            clone(entry.overlay),
+            entry.base,
+          ));
+          continue;
+        }
+        const retainedRange = editedRangeForSourceRange(entry.sourceRange, nextCut);
+        if (!retainedRange) {
+          suppressed.push(withTranscriptReconciliationBase(
+            clone(entry.overlay),
+            entry.base,
+          ));
+          continue;
+        }
+        const rebuilt = normalizeOverlay({
+          ...clone(entry.overlay),
+          start: retainedRange.start,
+          end: retainedRange.end,
+          characterTimings: [],
+        }, { duration });
+        active.push(withTranscriptReconciliationBase(rebuilt, entry.base));
+      }
+      return { active, suppressed };
+    }
+
+    function reconcileTranscriptTrack(
+      overlays,
       previousCut,
       nextCut,
       displayUnits,
-      reliableSourceUnits,
       duration,
     ) {
-      const base = transcriptReconciliationBase(overlay, previousCut);
-      const sourceRange = overlaySourceRange(base, previousCut);
-      if (!sourceRange) {
-        const exact = exactTranscriptPhraseMatch(
-          nextCut?.transcript,
-          base.text,
-          overlay.start,
+      const entries = overlays
+        .map((overlay, index) => transcriptTrackEntry(overlay, previousCut, index))
+        .sort(transcriptTrackEntryOrder);
+      const transcript = nextCut?.transcript;
+      const semanticCharacters = transcriptSemanticCharacters(transcript);
+      const hasExplicitTranscriptProjection =
+        transcript &&
+        typeof transcript === "object" &&
+        (
+          semanticCharacters.length > 0 ||
+          Object.prototype.hasOwnProperty.call(transcript, "text") ||
+          (Array.isArray(transcript.segments) && transcript.segments.length > 0)
         );
-        if (!exact) {
-          return { active: withTranscriptReconciliationBase(clone(overlay), base) };
-        }
-        const rebuilt = normalizeOverlay({
-          ...clone(overlay),
-          start: exact.first.start,
-          end: exact.last.end,
-          characterTimings: exact.units.map((unit) => ({ start: unit.start, end: unit.end })),
-        }, { duration });
-        return { active: withTranscriptReconciliationBase(rebuilt, base) };
+      if (!hasExplicitTranscriptProjection) {
+        return reconcileTranscriptTrackWithoutProjection(entries, nextCut, duration);
       }
-
-      const retainedRange = editedRangeForSourceRange(sourceRange, nextCut);
-      if (!retainedRange) {
-        return { suppressed: withTranscriptReconciliationBase(clone(overlay), base) };
+      const units = displayUnits.length
+        ? displayUnits
+        : fallbackTranscriptTrackUnits(
+            transcript,
+            entries,
+            nextCut,
+            duration,
+          );
+      let result = rebuildTranscriptTrack(
+        partitionTranscriptTrack(entries, units),
+        duration,
+      );
+      if (!transcriptTrackConserved(result, units)) {
+        result = rebuildTranscriptTrack(
+          partitionTranscriptTrack(entries, units, false),
+          duration,
+        );
       }
-      const matchedUnits = displayUnits.filter((unit) => {
-        if (!Number.isFinite(unit.sourceStart) || !Number.isFinite(unit.sourceEnd)) {
-          return false;
-        }
-        const midpoint = unit.sourceStart + (unit.sourceEnd - unit.sourceStart) / 2;
-        return midpoint >= sourceRange.start - 0.000001 && midpoint < sourceRange.end - 0.000001;
-      });
-      if (!matchedUnits.length && reliableSourceUnits.length) {
-        return { suppressed: withTranscriptReconciliationBase(clone(overlay), base) };
-      }
-
-      const rebuilt = matchedUnits.length
-        ? normalizeOverlay({
-            ...clone(overlay),
-            text: matchedUnits.map((unit, index) =>
-              `${index ? unit.separatorBefore : ""}${unit.character}`).join(""),
-            start: matchedUnits[0].start,
-            end: matchedUnits.at(-1).end,
-            sourceStart: matchedUnits[0].sourceStart,
-            sourceEnd: matchedUnits.at(-1).sourceEnd,
-            characterTimings: matchedUnits.map((unit) => ({
-              start: unit.start,
-              end: unit.end,
-            })),
-          }, { duration })
-        : normalizeOverlay({
-            ...clone(overlay),
-            start: retainedRange.start,
-            end: retainedRange.end,
-            characterTimings: [],
-          }, { duration });
-      return { active: withTranscriptReconciliationBase(rebuilt, base) };
+      return result;
     }
 
     function reconcileAnchoredOverlay(overlay, nextCut, duration) {
@@ -539,9 +728,6 @@
     function reconcileArtWithCut(art = {}, previousCut = {}, nextCut = {}) {
       const duration = Math.max(0.02, finiteNumber(nextCut?.duration, 0.02));
       const displayUnits = transcriptCharacterUnits(nextCut?.transcript);
-      const reliableSourceUnits = displayUnits.filter(
-        (unit) => Number.isFinite(unit.sourceStart) && Number.isFinite(unit.sourceEnd),
-      );
       const byId = new Map();
       for (const overlay of Array.isArray(art?.suppressedOverlays)
         ? art.suppressedOverlays
@@ -554,19 +740,28 @@
 
       const overlays = [];
       const suppressedOverlays = [];
+      const transcriptTracks = new Map();
       for (const overlay of byId.values()) {
-        const result = isTranscriptOverlay(overlay)
-          ? reconcileTranscriptOverlay(
-              overlay,
-              previousCut,
-              nextCut,
-              displayUnits,
-              reliableSourceUnits,
-              duration,
-            )
-          : reconcileAnchoredOverlay(overlay, nextCut, duration);
+        if (isTranscriptOverlay(overlay)) {
+          const trackId = String(overlay.trackId);
+          if (!transcriptTracks.has(trackId)) transcriptTracks.set(trackId, []);
+          transcriptTracks.get(trackId).push(overlay);
+          continue;
+        }
+        const result = reconcileAnchoredOverlay(overlay, nextCut, duration);
         if (result.active) overlays.push(result.active);
         else if (result.suppressed) suppressedOverlays.push(result.suppressed);
+      }
+      for (const trackOverlays of transcriptTracks.values()) {
+        const result = reconcileTranscriptTrack(
+          trackOverlays,
+          previousCut,
+          nextCut,
+          displayUnits,
+          duration,
+        );
+        overlays.push(...result.active);
+        suppressedOverlays.push(...result.suppressed);
       }
       overlays.sort((left, right) => finiteNumber(left.start) - finiteNumber(right.start));
       suppressedOverlays.sort((left, right) => finiteNumber(left.start) - finiteNumber(right.start));

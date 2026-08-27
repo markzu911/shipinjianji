@@ -11995,10 +11995,21 @@ def update_transcript_track_text_for_segment(
             item["text"] = "".join(chars[cursor : cursor + count])
             cursor += count
         # The previously rendered art video used the old subtitles, so it is
-        # now stale and must be regenerated.
-        art["status"] = None
+        # now stale and must be regenerated. Keep the editable overlays while
+        # moving the subjob into a persisted, non-running retry state.
+        now = utc_now()
+        previous_status = str(art.get("status") or "")
+        if previous_status != "interrupted":
+            if previous_status:
+                art["previousStatus"] = previous_status
+            art["previousStage"] = art.get("stage")
+        art["status"] = "interrupted"
+        art["stage"] = "文案已更新，艺术字待重新生成"
+        art["error"] = "文案已更新，请重新生成艺术字视频。"
+        art["retryable"] = True
         art["outputUrl"] = None
-        art["updatedAt"] = utc_now()
+        art["interruptedAt"] = now
+        art["updatedAt"] = now
     except Exception:
         # The subtitle text update is a best-effort enhancement.
         return

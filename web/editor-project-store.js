@@ -8,6 +8,7 @@
     "use strict";
 
     const SCHEMA_VERSION = 1;
+    const CUT_RECONCILIATION_FIELD = "_cutReconciliation";
     const ACTIONS = Object.freeze({
       PROJECT_HYDRATED: "projectHydrated",
       PROJECT_DRAFT_RESTORED: "projectDraftRestored",
@@ -470,6 +471,49 @@
       return `index:${index}`;
     }
 
+    function textCharacterTimings(overlay, text) {
+      const count = [...String(text || "")].filter(
+        (character) => !/\s/u.test(character),
+      ).length;
+      const supplied = Array.isArray(overlay?.characterTimings)
+        ? overlay.characterTimings.flatMap((timing) => {
+            const start = Number(timing?.start);
+            const end = Number(timing?.end);
+            return Number.isFinite(start) && Number.isFinite(end) && end > start
+              ? [{ start, end }]
+              : [];
+          })
+        : [];
+      if (supplied.length === count || !count) return supplied;
+      const start = Number(overlay?.start);
+      const end = Number(overlay?.end);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return [];
+      return Array.from({ length: count }, (_, index) => ({
+        start: start + ((end - start) * index) / count,
+        end: start + ((end - start) * (index + 1)) / count,
+      }));
+    }
+
+    function mergeTranscriptOverlayText(overlay, text) {
+      const next = {
+        ...clone(overlay),
+        text,
+        characterTimings: textCharacterTimings(overlay, text),
+      };
+      const reconciliation = overlay?.[CUT_RECONCILIATION_FIELD];
+      if (isObject(reconciliation?.overlay)) {
+        next[CUT_RECONCILIATION_FIELD] = {
+          ...clone(reconciliation),
+          overlay: {
+            ...clone(reconciliation.overlay),
+            text,
+            characterTimings: textCharacterTimings(reconciliation.overlay, text),
+          },
+        };
+      }
+      return next;
+    }
+
     function mergeArtText(currentArt, serverArt) {
       if (!Array.isArray(serverArt?.overlays) || !serverArt.overlays.length) {
         return clone(currentArt);
@@ -508,26 +552,37 @@
         }
         return bestOverlap > 0.001 ? best : null;
       }
-      const overlays = (currentArt?.overlays || []).map((overlay, index) => {
-        const serverOverlay =
-          serverByKey.get(overlayMatchKey(overlay, index)) ||
-          overlappingServerCue(overlay) ||
-          (overlay?.sourceStart === undefined && overlay?.start === undefined
-            ? serverArt.overlays[index]
-            : null);
-        const transcriptCue =
-          overlay?.trackType === "transcript" ||
-          serverOverlay?.trackType === "transcript";
-        if (
-          !transcriptCue ||
-          !serverOverlay ||
-          serverOverlay.text === undefined
-        ) {
-          return clone(overlay);
-        }
-        return { ...clone(overlay), text: String(serverOverlay.text || "") };
-      });
-      return { ...clone(currentArt), overlays };
+      function mergeOverlays(items, options = {}) {
+        return (items || []).map((overlay, index) => {
+          const serverOverlay =
+            serverByKey.get(overlayMatchKey(overlay, index)) ||
+            (options.allowOverlap ? overlappingServerCue(overlay) : null) ||
+            (options.allowOverlap &&
+            overlay?.sourceStart === undefined &&
+            overlay?.start === undefined
+              ? serverArt.overlays[index]
+              : null);
+          const transcriptCue =
+            overlay?.trackType === "transcript" ||
+            serverOverlay?.trackType === "transcript";
+          if (
+            !transcriptCue ||
+            !serverOverlay ||
+            serverOverlay.text === undefined
+          ) {
+            return clone(overlay);
+          }
+          return mergeTranscriptOverlayText(
+            overlay,
+            String(serverOverlay.text || ""),
+          );
+        });
+      }
+      return {
+        ...clone(currentArt),
+        overlays: mergeOverlays(currentArt?.overlays, { allowOverlap: true }),
+        suppressedOverlays: mergeOverlays(currentArt?.suppressedOverlays),
+      };
     }
 
     function mergeJobText(currentJob, incomingJob, mergedArt) {
@@ -843,6 +898,15 @@
             timelineApi,
           );
         }
+        project.timeline = replaceTimelineKind(
+          project.timeline,
+          "art",
+          {
+            duration: project.cut.duration,
+            tracks: toolTimelineTracks("art", project.art),
+          },
+          timelineApi,
+        );
         serverVersion = String(
           payload.serverVersion || payload.job?.updatedAt || serverVersion,
         );

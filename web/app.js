@@ -1507,7 +1507,23 @@ async function saveSegmentText() {
       }
       return jobPayload;
     };
+    const syncTextSaveSourceSegments = (jobPayload) => {
+      const source = jobPayload?.result;
+      if (!Array.isArray(source?.segments)) return;
+      currentSegments = source.segments;
+      currentEditableSegments = resolveEditableSegments(
+        currentSegments,
+        source.editableSegments,
+      );
+      currentEditableSegmentBoundaries = Array.isArray(
+        source.editableSegmentBoundaries,
+      )
+        ? source.editableSegmentBoundaries
+        : [];
+      transcriptCharacterUnitsCache = null;
+    };
     const jobPayload = await readProject();
+    syncTextSaveSourceSegments(jobPayload);
     let cutTranscript = buildLiveCutDraftState().transcript;
     let applied = window.EditorSuite.applyTranscriptTextEffect(
       textSaveEffect,
@@ -1519,6 +1535,7 @@ async function saveSegmentText() {
         "transcript-refresh",
       );
       const refreshedJob = await readProject();
+      syncTextSaveSourceSegments(refreshedJob);
       cutTranscript = buildLiveCutDraftState().transcript;
       applied = window.EditorSuite.applyTranscriptTextEffect(
         refreshEffect,
