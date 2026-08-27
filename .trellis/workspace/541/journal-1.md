@@ -681,3 +681,26 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 31: 修复文案艺术字首字缺失
+
+**Date**: 2026-08-27
+**Task**: 修复文案艺术字首字缺失
+**Branch**: `master`
+
+### Summary
+
+将全文艺术字改为全轨字符守恒重映射，修复文字保存后的前端状态同步与艺术字快照状态，并补齐模型、Store、持久化和浏览器回归。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `251d2ef` | (see git log) |
+| `a0fa3f0` | (see git log) |
+| `0af1d07` | (see git log) |
+
+### Status
+
+[OK] **Completed**
