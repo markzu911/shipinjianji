@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import math
+import threading
 from array import array
 from pathlib import Path
 
@@ -166,6 +167,131 @@ def test_full_transcript_edits_are_aligned_to_the_matching_words():
     assert refreshed["art"] is None
     assert refreshed["artSuggestion"] is None
     assert refreshed["pictureInPicture"] is None
+
+
+@pytest.mark.parametrize(
+    ("method", "payload"),
+    [
+        (
+            "patch",
+            {"segmentIndex": 0, "wordIndex": 0, "text": "所有们"},
+        ),
+        ("put", {"text": "所有们\n一起"}),
+    ],
+)
+def test_legacy_transcript_edits_refresh_editable_acoustic_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    payload: dict[str, object],
+):
+    job_id = f"44444444-4444-4444-8444-44444444444{0 if method == 'patch' else 1}"
+    stale_boundary = {"key": "stale-character-identity"}
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "status": "completed",
+            "duration": 1.0,
+            "updatedAt": "before-edit",
+            "result": {
+                "text": "所有人\n一起",
+                "segments": [
+                    {
+                        "id": 0,
+                        "start": 0.0,
+                        "end": 0.5,
+                        "text": "所有人",
+                        "words": [{"text": "所有人", "start": 0.0, "end": 0.5}],
+                    },
+                    {
+                        "id": 1,
+                        "start": 0.5,
+                        "end": 1.0,
+                        "text": "一起",
+                        "words": [{"text": "一起", "start": 0.5, "end": 1.0}],
+                    },
+                ],
+                "editableSegmentBoundaries": [stale_boundary],
+            },
+            "edit": None,
+        }
+
+    observed: dict[str, object] = {}
+
+    def fake_enrich(
+        media_path,
+        source_segments,
+        editable_segments,
+        *,
+        alignment_cache=None,
+        existing_boundaries=None,
+        samples=None,
+    ):
+        lock_available: list[bool] = []
+
+        def probe_job_lock() -> None:
+            acquired = app_module.JOBS_LOCK.acquire(timeout=0.5)
+            lock_available.append(acquired)
+            if acquired:
+                app_module.JOBS_LOCK.release()
+
+        probe = threading.Thread(target=probe_job_lock)
+        probe.start()
+        probe.join(timeout=1.0)
+        assert lock_available == [True]
+        observed["sourceText"] = source_segments[0]["text"]
+        observed["existing"] = copy.deepcopy(existing_boundaries)
+        enriched = app_module.normalize_editable_segment_ids(editable_segments)
+        for segment in enriched:
+            segment["mediaStart"] = float(segment["start"])
+            segment["mediaEnd"] = float(segment["end"])
+        enriched[0]["mediaEnd"] = 0.48
+        enriched[1]["mediaStart"] = 0.48
+        return enriched, [
+            {
+                "key": "fresh-character-identity",
+                "left": {"text": "们"},
+                "right": {"text": "一"},
+                "neutral": 0.48,
+                "deleteLeft": 0.49,
+                "deleteRight": 0.47,
+            }
+        ]
+
+    monkeypatch.setattr(
+        app_module,
+        "load_existing_job_acoustic_alignment",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(app_module, "enrich_editable_segment_boundaries", fake_enrich)
+
+    with TestClient(app_module.app) as client:
+        response = getattr(client, method)(
+            f"/api/transcriptions/{job_id}/transcript",
+            json=payload,
+        )
+        refreshed = client.get(f"/api/transcriptions/{job_id}").json()
+
+    assert response.status_code == 200
+    assert observed == {
+        "sourceText": "所有们",
+        "existing": [stale_boundary],
+    }
+    result = response.json()["result"]
+    assert result["editableSegments"][0]["mediaEnd"] == 0.48
+    assert result["editableSegments"][1]["mediaStart"] == 0.48
+    assert result["editableSegmentBoundaries"] == [
+        {
+            "key": "fresh-character-identity",
+            "left": {"text": "们"},
+            "right": {"text": "一"},
+            "neutral": 0.48,
+            "deleteLeft": 0.49,
+            "deleteRight": 0.47,
+        }
+    ]
+    assert refreshed["result"]["editableSegmentBoundaries"] == result[
+        "editableSegmentBoundaries"
+    ]
 
 
 def test_cut_draft_is_persisted_versioned_restored_and_cleared(
@@ -337,6 +463,225 @@ def test_cut_draft_commit_survives_async_snapshot_metadata_failure(
             item["id"] == job_id and "snapshot unavailable" in item["error"]
             for item in app_module.PROJECT_SNAPSHOT_FAILURES
         )
+
+
+def test_retained_transcript_preserves_editable_paragraph_groups() -> None:
+    segments = [
+        {
+            "start": 0.0,
+            "end": 3.0,
+            "text": "人生是自己选出来的，说实话，以前我也这么想。",
+            "words": [
+                {"text": "人生是自己选出来的，", "start": 0.0, "end": 1.2},
+                {"text": "说实话，", "start": 1.2, "end": 1.8},
+                {"text": "以前我也这么想。", "start": 1.8, "end": 3.0},
+            ],
+        }
+    ]
+    editable_segments = app_module.build_editable_transcript_segments(segments)
+
+    retained = app_module.build_retained_transcript(
+        segments,
+        [],
+        3.0,
+        editable_segments=editable_segments,
+    )
+    legacy = app_module.build_retained_transcript(segments, [], 3.0)
+
+    assert [item["text"] for item in retained["segments"]] == [
+        "人生是自己选出来的，",
+        "说实话，",
+        "以前我也这么想。",
+    ]
+    assert [item["editableSegmentId"] for item in retained["segments"]] == [
+        0,
+        1,
+        2,
+    ]
+    assert [item["sourceSegmentIndex"] for item in retained["segments"]] == [
+        0,
+        0,
+        0,
+    ]
+    assert [item["text"] for item in legacy["segments"]] == [
+        "人生是自己选出来的，说实话，以前我也这么想。"
+    ]
+    assert "editableSegmentId" not in legacy["segments"][0]
+
+
+def test_retained_transcript_maps_repeated_punctuation_across_source_segments() -> None:
+    segments = [
+        {
+            "start": 0.0,
+            "end": 2.0,
+            "text": "一起，一起。",
+            "words": [
+                {"text": "一起，", "start": 0.0, "end": 1.0},
+                {"text": "一起。", "start": 1.0, "end": 2.0},
+            ],
+        },
+        {
+            "start": 2.0,
+            "end": 3.0,
+            "text": "给你！",
+            "words": [{"text": "给你！", "start": 2.0, "end": 3.0}],
+        },
+    ]
+    editable_segments = [
+        {"sourceSegmentIndex": 0, "text": "一起，"},
+        {"sourceSegmentIndex": 0, "text": "一起。"},
+        {"sourceSegmentIndex": 1, "text": "给你！"},
+    ]
+
+    retained = app_module.build_retained_transcript(
+        segments,
+        [],
+        3.0,
+        editable_segments=editable_segments,
+    )
+
+    assert [item["text"] for item in retained["segments"]] == [
+        "一起，",
+        "一起。",
+        "给你！",
+    ]
+    assert [item["editableSegmentId"] for item in retained["segments"]] == [
+        0,
+        1,
+        2,
+    ]
+    assert [item["sourceSegmentIndex"] for item in retained["segments"]] == [
+        0,
+        0,
+        1,
+    ]
+
+
+@pytest.mark.parametrize(
+    "editable_segments",
+    [
+        ["invalid"],
+        [{"sourceSegmentIndex": None, "text": "甲乙"}],
+        [{"sourceSegmentIndex": "invalid", "text": "甲乙"}],
+        [{"sourceSegmentIndex": 0.5, "text": "甲乙"}],
+        [
+            {"sourceSegmentIndex": 1, "text": "丙丁"},
+            {"sourceSegmentIndex": 0, "text": "甲乙"},
+        ],
+    ],
+)
+def test_retained_transcript_invalid_editable_partition_uses_legacy_fallback(
+    editable_segments: list[object],
+) -> None:
+    segments = [
+        {
+            "start": 0.0,
+            "end": 1.0,
+            "text": "甲乙",
+            "words": [{"text": "甲乙", "start": 0.0, "end": 1.0}],
+        },
+        {
+            "start": 1.0,
+            "end": 2.0,
+            "text": "丙丁",
+            "words": [{"text": "丙丁", "start": 1.0, "end": 2.0}],
+        },
+    ]
+
+    retained = app_module.build_retained_transcript(
+        segments,
+        [],
+        2.0,
+        editable_segments=editable_segments,
+    )
+
+    assert [item["text"] for item in retained["segments"]] == ["甲乙", "丙丁"]
+    assert all("editableSegmentId" not in item for item in retained["segments"])
+
+
+def test_retained_transcript_does_not_bridge_deleted_editable_characters() -> None:
+    segments = [
+        {
+            "start": 0.0,
+            "end": 1.0,
+            "text": "甲乙丙丁，",
+            "words": [{"text": "甲乙丙丁，", "start": 0.0, "end": 1.0}],
+        }
+    ]
+    editable_segments = app_module.build_editable_transcript_segments(segments)
+
+    retained = app_module.build_retained_transcript(
+        segments,
+        [{"start": 0.5, "end": 0.75}],
+        0.75,
+        editable_segments=editable_segments,
+    )
+
+    assert [item["text"] for item in retained["segments"]] == ["甲乙", "丁，"]
+    assert [item["editableSegmentId"] for item in retained["segments"]] == [0, 0]
+    assert [
+        (item["sourceStart"], item["sourceEnd"])
+        for item in retained["segments"]
+    ] == [(0.0, 0.5), (0.75, 1.0)]
+    assert [
+        [(word["text"], word["sourceStart"], word["sourceEnd"]) for word in item["words"]]
+        for item in retained["segments"]
+    ] == [[("甲乙", 0.0, 0.5)], [("丁，", 0.75, 1.0)]]
+    assert retained["text"] == "甲乙丁，"
+
+
+def test_cut_draft_server_projection_keeps_editable_segments() -> None:
+    job_id = "47474747-4747-4747-8747-474747474747"
+    segments = [
+        {
+            "start": 0.0,
+            "end": 3.0,
+            "text": "人生是自己选出来的，说实话，以前我也这么想。",
+            "words": [
+                {"text": "人生是自己选出来的，", "start": 0.0, "end": 1.2},
+                {"text": "说实话，", "start": 1.2, "end": 1.8},
+                {"text": "以前我也这么想。", "start": 1.8, "end": 3.0},
+            ],
+        }
+    ]
+    editable_segments = app_module.build_editable_transcript_segments(segments)
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "status": "completed",
+            "duration": 3.0,
+            "result": {
+                "text": segments[0]["text"],
+                "segments": segments,
+                "editableSegments": editable_segments,
+                "suggestions": [],
+            },
+            "cutDraft": None,
+        }
+
+    with TestClient(app_module.app) as client:
+        restored = client.get(f"/api/transcriptions/{job_id}/cut-draft")
+        saved = client.put(
+            f"/api/transcriptions/{job_id}/cut-draft",
+            json={
+                "revision": 0,
+                "textRanges": [],
+                "noSpeechRanges": [],
+                "timelineRanges": [],
+            },
+        )
+
+    assert restored.status_code == 200
+    assert saved.status_code == 200
+    expected_texts = [
+        "人生是自己选出来的，",
+        "说实话，",
+        "以前我也这么想。",
+    ]
+    for response in (restored, saved):
+        projected = response.json()["retainedTranscript"]["segments"]
+        assert [item["text"] for item in projected] == expected_texts
+        assert [item["editableSegmentId"] for item in projected] == [0, 1, 2]
 
 
 def test_cut_draft_preserves_explicitly_empty_text_ranges():
@@ -1080,7 +1425,13 @@ def test_cut_draft_put_persists_shared_forced_alignment_for_text_and_timeline(
     assert second_draft["timelineRanges"] == first_draft["timelineRanges"]
     assert second_draft["acousticAlignment"]["reusedSegmentCount"] == 1
     assert alignment_calls == [video_path, video_path]
-    assert forced_boundary_calls == [("得", "你"), ("得", "你")]
+    # Each stable transition resolves both deletion directions once per PUT.
+    assert forced_boundary_calls == [
+        ("得", "你"),
+        ("得", "你"),
+        ("得", "你"),
+        ("得", "你"),
+    ]
 
 
 def test_cut_draft_put_uses_natural_character_boundaries_not_raw_asr_tokens():
@@ -1412,6 +1763,164 @@ def test_editable_transcript_segments_can_split_and_merge_by_selected_text():
     assert merged_segments[0]["end"] == 1.4
 
 
+def test_editable_split_and_merge_refresh_completed_edit_projection() -> None:
+    job_id = "46464646-4646-4464-8464-464646464646"
+    source_segments = [
+        {
+            "id": 0,
+            "start": 0.0,
+            "end": 1.0,
+            "text": "甲乙丙丁",
+            "words": [{"text": "甲乙丙丁", "start": 0.0, "end": 1.0}],
+        }
+    ]
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "status": "completed",
+            "result": {
+                "text": "甲乙丙丁",
+                "segments": source_segments,
+                "editableSegments": app_module.build_editable_transcript_segments(
+                    source_segments
+                ),
+            },
+            "edit": {
+                "status": "completed",
+                "ranges": [],
+                "transcriptRanges": [],
+                "outputDuration": 1.0,
+                "transcript": {"text": "甲乙丙丁", "segments": []},
+            },
+            "art": None,
+        }
+
+    with TestClient(app_module.app) as client:
+        split_response = client.put(
+            f"/api/transcriptions/{job_id}/editable-segments",
+            json={
+                "segmentIndex": 0,
+                "action": "split",
+                "selectionStart": 1,
+                "selectionEnd": 3,
+            },
+        )
+        with app_module.JOBS_LOCK:
+            split_projection = copy.deepcopy(
+                app_module.JOBS[job_id]["edit"]["transcript"]
+            )
+        merge_response = client.put(
+            f"/api/transcriptions/{job_id}/editable-segments",
+            json={"segmentIndex": 1, "action": "merge_up"},
+        )
+        with app_module.JOBS_LOCK:
+            merged_projection = copy.deepcopy(
+                app_module.JOBS[job_id]["edit"]["transcript"]
+            )
+
+    assert split_response.status_code == 200
+    assert [item["text"] for item in split_projection["segments"]] == [
+        "甲",
+        "乙丙",
+        "丁",
+    ]
+    assert [
+        item["editableSegmentId"] for item in split_projection["segments"]
+    ] == [0, 1, 2]
+    assert merge_response.status_code == 200
+    assert [item["text"] for item in merged_projection["segments"]] == [
+        "甲乙丙",
+        "丁",
+    ]
+    assert [
+        item["editableSegmentId"] for item in merged_projection["segments"]
+    ] == [0, 1]
+
+
+def test_user_text_split_persists_neutral_media_boundaries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = "45454545-4545-4454-8454-454545454545"
+    media_path = tmp_path / "source.mp4"
+    media_path.write_bytes(b"source-for-boundary-identity")
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    samples = array("h", [4_000]) * sample_rate
+    monkeypatch.setattr(
+        app_module,
+        "decode_cut_audio_samples",
+        lambda _path: samples,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "analyze_local_voice_activity",
+        lambda *_args: {
+            "status": "completed",
+            "reason": None,
+            "speechRanges": [{"start": 0.0, "end": 1.0}],
+            "vad": "funasr-fsmn-vad",
+            "modelRevision": "v2.0.4",
+        },
+    )
+    source_segments = [
+        {
+            "start": 0.0,
+            "end": 1.0,
+            "text": "所有人一起",
+            "words": [{"text": "所有人一起", "start": 0.0, "end": 1.0}],
+            "asrWords": [{"text": "所有人一起", "start": 0.0, "end": 1.0}],
+        }
+    ]
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "status": "completed",
+            "updatedAt": "2026-08-26T00:00:00+00:00",
+            "result": {
+                "text": "所有人一起",
+                "segments": source_segments,
+                "editableSegments": app_module.build_editable_transcript_segments(
+                    source_segments
+                ),
+            },
+            "edit": None,
+            "art": None,
+        }
+        app_module.JOB_FILES[job_id] = media_path
+
+    with TestClient(app_module.app) as client:
+        response = client.put(
+            f"/api/transcriptions/{job_id}/editable-segments",
+            json={
+                "segmentIndex": 0,
+                "action": "split",
+                "selectionStart": 3,
+                "selectionEnd": 4,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [item["text"] for item in payload["editableSegments"]] == [
+        "所有人",
+        "一",
+        "起",
+    ]
+    assert len(payload["editableSegmentBoundaries"]) == 2
+    first, second = payload["editableSegmentBoundaries"]
+    assert payload["editableSegments"][0]["mediaEnd"] == first["neutral"]
+    assert payload["editableSegments"][1]["mediaStart"] == first["neutral"]
+    assert payload["editableSegments"][1]["mediaEnd"] == second["neutral"]
+    assert payload["editableSegments"][2]["mediaStart"] == second["neutral"]
+    assert payload["editableSegments"][0]["end"] == pytest.approx(0.6)
+    assert payload["editableSegments"][1]["start"] == pytest.approx(0.6)
+    with app_module.JOBS_LOCK:
+        persisted = copy.deepcopy(app_module.JOBS[job_id]["result"])
+    assert persisted["editableSegmentBoundaries"] == payload[
+        "editableSegmentBoundaries"
+    ]
+
+
 def test_editable_transcript_segments_can_update_text_and_sync_source():
     job_id = "55555555-5555-5555-8555-555555555555"
     source_segments = [
@@ -1468,6 +1977,7 @@ def test_editable_transcript_segments_can_update_text_and_sync_source():
         job["edit"]["transcriptRanges"],
         job["edit"]["outputDuration"],
         timeline_delete_ranges=job["edit"]["ranges"],
+        editable_segments=job["result"]["editableSegments"],
     )
     assert job["edit"]["transcript"] == expected_edit_transcript
     assert job["edit"]["transcript"]["text"] != "旧的剪后文案"

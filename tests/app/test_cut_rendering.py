@@ -268,7 +268,11 @@ def test_cut_endpoint_renders_preview_video(
     assert edit["requestedRanges"] == [{"start": 0.25, "end": 0.55}]
     assert edit["outputDuration"] == 0.7
     assert edit["transcript"]["text"] == "保留保留"
-    assert edit["transcript"]["segments"][0]["words"][1] == {
+    assert [
+        segment["editableSegmentId"]
+        for segment in edit["transcript"]["segments"]
+    ] == [0, 0]
+    assert edit["transcript"]["segments"][1]["words"][0] == {
         "text": "保留",
         "start": 0.25,
         "end": 0.7,

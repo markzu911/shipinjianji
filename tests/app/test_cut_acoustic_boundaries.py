@@ -9,6 +9,243 @@ import pytest
 import server.app as app_module
 
 
+def adjacent_units(
+    *,
+    left_end: float = 0.49,
+    right_start: float = 0.53,
+) -> tuple[dict[str, object], dict[str, object]]:
+    validation = {"valid": True, "confidence": 0.99}
+    return (
+        {
+            "text": "人",
+            "start": 0.2,
+            "end": 0.5,
+            "_segmentIndex": 0,
+            "_characterIndex": 0,
+            "_segmentSpokenIndex": 0,
+            "_segmentCharacterCount": 2,
+            "_forcedStart": 0.2,
+            "_forcedEnd": left_end,
+            "_alignmentSource": app_module.ACOUSTIC_ALIGNER_NAME,
+            "_alignmentRevision": app_module.ACOUSTIC_ALIGNMENT_MODEL_REVISION,
+            "_alignmentValidation": validation,
+        },
+        {
+            "text": "一",
+            "start": 0.52,
+            "end": 0.8,
+            "_segmentIndex": 0,
+            "_characterIndex": 1,
+            "_segmentSpokenIndex": 1,
+            "_segmentCharacterCount": 2,
+            "_forcedStart": right_start,
+            "_forcedEnd": 0.8,
+            "_alignmentSource": app_module.ACOUSTIC_ALIGNER_NAME,
+            "_alignmentRevision": app_module.ACOUSTIC_ALIGNMENT_MODEL_REVISION,
+            "_alignmentValidation": validation,
+        },
+    )
+
+
+def test_adjacent_boundary_key_distinguishes_repeated_character_instances() -> None:
+    left, right = adjacent_units()
+    first = app_module.adjacent_character_boundary_key("media", left, right)
+    repeated_right = {**right, "_characterIndex": 4, "_segmentSpokenIndex": 4}
+    second = app_module.adjacent_character_boundary_key(
+        "media",
+        left,
+        repeated_right,
+    )
+
+    assert first != second
+    assert first == app_module.adjacent_character_boundary_key("media", left, right)
+
+
+def test_adjacent_boundary_converges_only_in_vad_and_pcm_silence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    media_path = tmp_path / "source.mp4"
+    media_path.write_bytes(b"source")
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    samples = array("h", [4_000]) * sample_rate
+    samples[round(0.49 * sample_rate) : round(0.53 * sample_rate)] = array(
+        "h",
+        [20],
+    ) * round(0.04 * sample_rate)
+    monkeypatch.setattr(
+        app_module,
+        "analyze_local_voice_activity",
+        lambda *_args: {
+            "status": "completed",
+            "reason": None,
+            "speechRanges": [
+                {"start": 0.0, "end": 0.49},
+                {"start": 0.53, "end": 1.0},
+            ],
+            "vad": "funasr-fsmn-vad",
+            "modelRevision": "v2.0.4",
+        },
+    )
+    left, right = adjacent_units()
+
+    record = app_module.resolve_adjacent_character_boundary(
+        media_path,
+        "media",
+        left,
+        right,
+        samples,
+        sample_rate,
+    )
+
+    assert record["mode"] == "silence"
+    assert record["neutral"] == record["deleteLeft"] == record["deleteRight"]
+    assert 0.49 <= record["neutral"] <= 0.53
+    assert record["diagnostic"]["pcmFloorRanges"]
+    assert not list(tmp_path.glob(".vad-boundary-*.wav"))
+
+
+def test_adjacent_boundary_uses_directional_aggressive_limits_without_silence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    media_path = tmp_path / "source.mp4"
+    media_path.write_bytes(b"source")
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    samples = array("h", [4_000]) * sample_rate
+    monkeypatch.setattr(
+        app_module,
+        "analyze_local_voice_activity",
+        lambda *_args: {
+            "status": "completed",
+            "reason": None,
+            "speechRanges": [{"start": 0.0, "end": 1.0}],
+            "vad": "funasr-fsmn-vad",
+            "modelRevision": "v2.0.4",
+        },
+    )
+    left, right = adjacent_units(left_end=0.56, right_start=0.48)
+
+    record = app_module.resolve_adjacent_character_boundary(
+        media_path,
+        "media",
+        left,
+        right,
+        samples,
+        sample_rate,
+    )
+
+    assert record["mode"] == "aggressive"
+    assert record["deleteLeft"] >= 0.56
+    assert record["deleteRight"] <= 0.48
+    assert record["deleteLeft"] != record["deleteRight"]
+    assert record["diagnostic"]["reason"] == "no_credible_silence_corridor"
+
+
+def test_adjacent_aggressive_boundary_consumes_corroborated_pcm_valley_edges(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    media_path = tmp_path / "source.mp4"
+    media_path.write_bytes(b"source")
+    samples = array("h", [4_000]) * app_module.CUT_BOUNDARY_SAMPLE_RATE
+    monkeypatch.setattr(
+        app_module,
+        "analyze_local_voice_activity",
+        lambda *_args: {
+            "status": "completed",
+            "reason": None,
+            "speechRanges": [{"start": 0.0, "end": 1.0}],
+            "vad": "funasr-fsmn-vad",
+            "modelRevision": "v2.0.4",
+        },
+    )
+
+    def forced_boundary(*_args, deletion_on_left: bool, **_kwargs):
+        if deletion_on_left:
+            return 0.52, {
+                "pcmCorroborated": True,
+                "pcmValleyStart": 0.50,
+                "pcmValleyEnd": 0.55,
+            }
+        return 0.50, {
+            "pcmCorroborated": True,
+            "pcmValleyStart": 0.46,
+            "pcmValleyEnd": 0.51,
+        }
+
+    monkeypatch.setattr(
+        app_module,
+        "cached_forced_alignment_transition_boundary",
+        forced_boundary,
+    )
+    left, right = adjacent_units(left_end=0.54, right_start=0.49)
+
+    record = app_module.resolve_adjacent_character_boundary(
+        media_path,
+        "media",
+        left,
+        right,
+        samples,
+        app_module.CUT_BOUNDARY_SAMPLE_RATE,
+    )
+
+    assert record["mode"] == "aggressive"
+    assert record["deleteLeft"] == 0.55
+    assert record["deleteRight"] == 0.46
+
+
+def test_adjacent_boundary_reports_vad_fallback_without_blocking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    media_path = tmp_path / "source.mp4"
+    media_path.write_bytes(b"source")
+    samples = array("h", [2_000]) * app_module.CUT_BOUNDARY_SAMPLE_RATE
+    monkeypatch.setattr(
+        app_module,
+        "analyze_local_voice_activity",
+        lambda *_args: {
+            "status": "unavailable",
+            "reason": "runtime_unavailable",
+            "speechRanges": [],
+            "vad": "funasr-fsmn-vad",
+            "modelRevision": "v2.0.4",
+        },
+    )
+    left, right = adjacent_units()
+
+    record = app_module.resolve_adjacent_character_boundary(
+        media_path,
+        "media",
+        left,
+        right,
+        samples,
+        app_module.CUT_BOUNDARY_SAMPLE_RATE,
+    )
+
+    assert record["mode"] == "fallback"
+    assert record["diagnostic"]["reason"] == "runtime_unavailable"
+    assert record["diagnostic"]["vad"]["nonSpeechRanges"] == []
+
+
+def test_vad_pcm_silence_boundary_handles_window_at_both_audio_edges() -> None:
+    samples = array("h", [0]) * round(
+        0.04 * app_module.CUT_BOUNDARY_SAMPLE_RATE
+    )
+
+    boundary, floors = app_module.find_vad_pcm_silence_boundary(
+        samples,
+        app_module.CUT_BOUNDARY_SAMPLE_RATE,
+        0.0,
+        0.04,
+        [(0.0, 0.04)],
+    )
+
+    assert boundary is None
+    assert floors == []
+
+
 def test_shared_acoustic_boundary_removes_tail_inside_raw_ge_yi_token(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2284,6 +2521,114 @@ def _ambiguous_repeat_samples(gain: int = 1) -> array:
         valley_end - valley_start
     )
     return samples
+
+
+def test_user_split_repeat_boundary_keeps_directional_context_through_cut_draft(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    media_path = tmp_path / "repeated-source.mp4"
+    media_path.write_bytes(b"repeated-source")
+    segments = _ambiguous_repeat_segments()
+    split_segments = copy.deepcopy(segments)
+    split_segments[0]["words"] = [
+        {"text": "所以说啊所以说啊", "start": 0.0, "end": 0.8}
+    ]
+    split_segments[0]["asrWords"] = copy.deepcopy(split_segments[0]["words"])
+    alignment_cache = _ambiguous_repeat_alignment_cache()
+    samples = _ambiguous_repeat_samples()
+    editable = app_module.apply_transcript_segment_operation(
+        app_module.build_editable_transcript_segments(split_segments),
+        app_module.TranscriptSegmentOperation(
+            segmentIndex=0,
+            action="split",
+            selectionStart=4,
+            selectionEnd=8,
+        ),
+    )
+
+    editable, records = app_module.enrich_editable_segment_boundaries(
+        media_path,
+        split_segments,
+        editable,
+        alignment_cache=alignment_cache,
+        samples=samples,
+    )
+
+    assert [item["text"] for item in editable] == ["所以说啊", "所以说啊"]
+    assert len(records) == 1
+    persisted = records[0]
+    delete_left_context = persisted["directionalContexts"]["deleteLeft"]
+    assert delete_left_context["transitionScope"] == "same_segment"
+    assert delete_left_context["repeatAmbiguous"] is True
+    assert delete_left_context["repeatOverlapText"] == "所以说啊"
+    assert delete_left_context["repeatOverlapLength"] == 4
+    assert delete_left_context["repeatOverlapSpan"] is not None
+    assert delete_left_context["deletedContext"] == "所以说啊"
+    assert delete_left_context["retainedContext"] == "所以说啊"
+    assert 1.08 <= persisted["deleteLeft"] <= 1.18
+
+    incompatible = copy.deepcopy(persisted)
+    incompatible["deleteLeft"] = 0.4
+    incompatible["directionalContexts"]["deleteLeft"][
+        "deletedContext"
+    ] = "不兼容上下文"
+    incompatible["diagnostic"]["forced"]["deleteLeft"].update(
+        {
+            "final": 0.4,
+            "repeatAmbiguous": False,
+            "repeatOverlapText": "",
+            "trustReason": "incompatible_cached_record",
+        }
+    )
+    monkeypatch.setattr(
+        app_module,
+        "load_job_acoustic_alignment",
+        lambda *_args, **_kwargs: (
+            copy.deepcopy(alignment_cache),
+            {"status": "completed"},
+        ),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "decode_cut_draft_audio_samples",
+        lambda _path: samples,
+    )
+
+    aligned, _, diagnostics, _ = app_module.resolve_cut_draft_acoustic_boundaries(
+        media_path,
+        [
+            {
+                "key": "delete-first-repeat",
+                "start": 0.0,
+                "end": 0.4,
+                "originalStart": 0.0,
+                "originalEnd": 0.4,
+            }
+        ],
+        [],
+        segments,
+        2.0,
+        [incompatible],
+    )
+
+    assert aligned[0]["end"] == persisted["deleteLeft"]
+    diagnostic = diagnostics[0]
+    assert diagnostic["repeatAmbiguous"] is True
+    assert diagnostic["repeatOverlapText"] == "所以说啊"
+    assert diagnostic["trustReason"] == "forced_pcm_valley"
+    assert diagnostic["trustReason"] != "incompatible_cached_record"
+    retained = app_module.build_retained_transcript(
+        segments,
+        [{"start": 0.0, "end": 0.4}],
+        2.0 - aligned[0]["end"],
+        timeline_delete_ranges=[
+            {"start": aligned[0]["start"], "end": aligned[0]["end"]}
+        ],
+        alignment_cache=alignment_cache,
+    )
+    assert retained["text"] == "所以说啊"
+    assert retained["segments"][0]["sourceStart"] == pytest.approx(1.3)
 
 
 def _wrong_direction_repeat_alignment_cache() -> dict[str, object]:

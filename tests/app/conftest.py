@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 import server.app as app_module
+from server import voice_activity_detection
 
 
 @pytest.fixture(autouse=True)
@@ -62,6 +63,19 @@ def isolated_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "ensure_acoustic_alignment_cache",
         isolated_acoustic_alignment,
     )
+    monkeypatch.setattr(
+        app_module,
+        "analyze_local_voice_activity",
+        lambda *_args, **_kwargs: {
+            "status": "unavailable",
+            "reason": "test_runtime_isolated",
+            "speechRanges": [],
+            "vad": voice_activity_detection.VAD_NAME,
+            "modelId": voice_activity_detection.MODEL_ID,
+            "modelRevision": voice_activity_detection.MODEL_REVISION,
+        },
+    )
+    voice_activity_detection.clear_voice_activity_runtime_cache()
     with app_module.JOBS_LOCK:
         app_module.JOBS.clear()
         app_module.JOB_FILES.clear()
@@ -71,6 +85,7 @@ def isolated_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     with app_module.JOB_ATTEMPT_LOCKS_GUARD:
         app_module.JOB_ATTEMPT_LOCKS.clear()
     app_module.CUT_DRAFT_PCM_CACHE.clear()
+    voice_activity_detection.clear_voice_activity_runtime_cache()
     yield
     for name, value in runtime_settings.items():
         setattr(app_module, name, value)

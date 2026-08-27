@@ -51,7 +51,7 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
 
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
-    assert "/app.js?v=20260825-02" in page_response.text
+    assert "/app.js?v=20260826-01" in page_response.text
     assert "/styles.css?v=20260825-11" in page_response.text
     assert "/transcript-follow-scroll.js?v=20260818-03" in page_response.text
     assert "/ui-feedback.js?v=20260807-03" in page_response.text
@@ -489,6 +489,19 @@ def test_cut_timeline_and_draft_frontend_contracts():
     assert "beginCutTimelineSelection" in script_response.text
     assert "beginTimelineRangeAdjustment" in script_response.text
     assert "skipSelectedRangeDuringPlayback" in script_response.text
+    frame_skip = "if (skipSelectedRangeDuringPlayback(sourceTime) !== null)"
+    frame_render = "updateCutPlaybackVisualFrame(sourceTime, { followTranscript: true })"
+    assert frame_skip in script_response.text
+    assert script_response.text.index(frame_skip) < script_response.text.index(
+        frame_render
+    )
+    assert "currentEditableSegmentBoundaries" in script_response.text
+    assert "editableBoundaryBefore" in script_response.text
+    assert "editableBoundaryAfter" in script_response.text
+    assert "boundary?.deleteRight" in script_response.text
+    assert "boundary?.deleteLeft" in script_response.text
+    assert "segment?.mediaStart" in script_response.text
+    assert "segment?.mediaEnd" in script_response.text
     assert "时间轴已自动拼接" in script_response.text
     assert "function getEditedTimelineSpans" in script_response.text
     assert "function editedTimeToSourceTime" in script_response.text
@@ -1719,6 +1732,131 @@ console.log(JSON.stringify({{
         "你身",
         "边",
     ]
+
+
+def test_playback_frame_skips_deleted_audio_before_visual_update() -> None:
+    app_source = (Path(__file__).resolve().parents[2] / "web" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    start = app_source.index("function resetCutPlaybackCursors")
+    end = app_source.index("function setupCutPreviewControls", start)
+    source = app_source[start:end]
+    script = f"""
+const source = {json.dumps(source)};
+const events = [];
+const functions = new Function("events", `
+let transcriptPlaybackCursor = 0;
+let transcriptPlaybackActiveCursor = 0;
+let transcriptPlaybackLastTime = 0;
+let cutTimelineTextPlaybackFloorCursor = 0;
+let cutTimelineTextPlaybackCursor = 0;
+let cutTimelineTextPlaybackLastTime = 0;
+const cutPreviewVideo = {{ paused: false, currentTime: 0.5 }};
+const transcriptPreviewRange = null;
+const CUT_SPEECH_BOUNDARY_EPSILON = 0.001;
+const getMergedSelection = () => [{{ start: 0.5, end: 0.8 }}];
+const clamp = (value, minimum, maximum) =>
+  Math.min(maximum, Math.max(minimum, value));
+const cutTimelineDuration = () => 2;
+const cutMediaController = () => ({{
+  seekSource(value, settings) {{
+    events.push("seek:" + value.toFixed(1) + ":" + settings.sync);
+  }},
+}});
+const updateCutTimelineStatus = () => events.push("status");
+const formatCutRange = () => "range";
+const updateCutPlaybackVisualFrame = () => events.push("visual");
+${{source}}
+return {{ handleCutPlaybackMediaFrame }};
+`)(events);
+const result = functions.handleCutPlaybackMediaFrame(0.5);
+console.log(JSON.stringify({{ result, events }}));
+"""
+    try:
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[2],
+            check=True,
+            capture_output=True,
+            encoding="utf-8",
+            timeout=20,
+        )
+    except FileNotFoundError:
+        pytest.skip("Node.js is required for the playback frame test.")
+    except subprocess.CalledProcessError as exc:
+        pytest.fail(exc.stderr)
+
+    payload = json.loads(result.stdout)
+    assert payload["result"] == {"skipped": True}
+    assert payload["events"] == ["seek:0.8:false", "status"]
+
+
+def test_split_into_three_projects_neutral_and_directional_timeline_boundaries() -> None:
+    app_source = (Path(__file__).resolve().parents[2] / "web" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    start = app_source.index("function editableBoundaryBefore")
+    end = app_source.index("function selectedTextRangeKeysAtTime", start)
+    source = app_source[start:end]
+    script = f"""
+const source = {json.dumps(source)};
+const functions = new Function(`
+const CUT_SPEECH_BOUNDARY_EPSILON = 0.001;
+const selectedRanges = new Map();
+const currentEditableSegmentBoundaries = [
+  {{ leftEditableSegmentId: 0, rightEditableSegmentId: 1, neutral: 0.31 }},
+  {{ leftEditableSegmentId: 1, rightEditableSegmentId: 2, neutral: 0.68 }},
+];
+const currentEditableSegments = [
+  {{ id: 0, start: 0, end: 0.33, mediaStart: 0, mediaEnd: 0.31 }},
+  {{ id: 1, start: 0.33, end: 0.67, mediaStart: 0.31, mediaEnd: 0.68 }},
+  {{ id: 2, start: 0.67, end: 1, mediaStart: 0.68, mediaEnd: 1 }},
+];
+${{source}}
+return {{
+  neutralBounds: currentEditableSegments.map(editableSegmentDisplayBounds),
+  deleteMiddleBounds: (() => {{
+    selectedRanges.set("middle", {{
+      start: 0.30,
+      end: 0.69,
+      originalStart: 0.33,
+      originalEnd: 0.67,
+    }});
+    return currentEditableSegments.map(editableSegmentDisplayBounds);
+  }})(),
+}};
+`)();
+console.log(JSON.stringify(functions));
+"""
+    try:
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[2],
+            check=True,
+            capture_output=True,
+            encoding="utf-8",
+            timeout=20,
+        )
+    except FileNotFoundError:
+        pytest.skip("Node.js is required for the editable boundary test.")
+    except subprocess.CalledProcessError as exc:
+        pytest.fail(exc.stderr)
+
+    payload = json.loads(result.stdout)
+    assert [(item["start"], item["end"]) for item in payload["neutralBounds"]] == [
+        (0, 0.31),
+        (0.31, 0.68),
+        (0.68, 1),
+    ]
+    assert [
+        (item["start"], item["end"])
+        for item in payload["deleteMiddleBounds"]
+    ] == [
+        (0, 0.30),
+        (0.30, 0.69),
+        (0.69, 1),
+    ]
+    assert "editableSegmentDisplayBounds(\n        editableSegment" in app_source
 
 
 def test_frontend_removed_rows_use_monotonic_edited_timestamps():

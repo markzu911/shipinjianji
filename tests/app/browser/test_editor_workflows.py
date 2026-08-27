@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import re
 import statistics
@@ -826,6 +827,253 @@ def test_cut_draft_survives_refresh(
         )).json()"""
     )["cutDraft"]
     assert refreshed_draft == saved_draft
+
+
+def test_server_retained_projection_keeps_editable_timeline_paragraphs(
+    browser_session,
+    seeded_editor_job,
+):
+    with app_module.JOBS_LOCK:
+        result = app_module.JOBS[seeded_editor_job.job_id]["result"]
+        result["text"] = "删除片段保留内容"
+        result["segments"] = [
+            {
+                "id": 0,
+                "start": 0.05,
+                "end": 0.95,
+                "text": "删除片段保留内容",
+                "words": [
+                    {"text": "删除", "start": 0.05, "end": 0.17},
+                    {"text": "片段", "start": 0.17, "end": 0.3},
+                    {"text": "保留", "start": 0.35, "end": 0.58},
+                    {"text": "内容", "start": 0.58, "end": 0.95},
+                ],
+            }
+        ]
+        result["editableSegments"] = [
+            {
+                "id": 0,
+                "sourceSegmentIndex": 0,
+                "start": 0.05,
+                "end": 0.3,
+                "text": "删除片段",
+                "words": copy.deepcopy(result["segments"][0]["words"][:2]),
+            },
+            {
+                "id": 1,
+                "sourceSegmentIndex": 0,
+                "start": 0.35,
+                "end": 0.58,
+                "text": "保留",
+                "words": copy.deepcopy(result["segments"][0]["words"][2:3]),
+            },
+            {
+                "id": 2,
+                "sourceSegmentIndex": 0,
+                "start": 0.58,
+                "end": 0.95,
+                "text": "内容",
+                "words": copy.deepcopy(result["segments"][0]["words"][3:]),
+            },
+        ]
+
+    page = open_editor(browser_session, seeded_editor_job)
+    timeline_items = page.locator(
+        "#cutFrameTimelineText .cut-timeline-text-segment-label"
+    )
+    assert timeline_items.all_text_contents() == ["删除片段", "保留", "内容"]
+    install_base_media_mutation_probe(page)
+
+    delete_first_text_segment(page)
+    page.wait_for_function(
+        """() => [...document.querySelectorAll(
+          '#cutFrameTimelineText .cut-timeline-text-segment-label'
+        )].map(item => item.textContent).join('|') === '保留|内容'"""
+    )
+    assert timeline_items.all_text_contents() == ["保留", "内容"]
+    assert base_media_mutations(page) == {"srcWrites": 0, "loadCalls": 0}
+
+    page.reload()
+    page.locator("#resultCard").wait_for(state="visible")
+    page.wait_for_function(
+        """() => [...document.querySelectorAll(
+          '#cutFrameTimelineText .cut-timeline-text-segment-label'
+        )].map(item => item.textContent).join('|') === '保留|内容'"""
+    )
+    assert timeline_items.all_text_contents() == ["保留", "内容"]
+
+
+def test_server_projection_keeps_disjoint_runs_for_one_editable_segment(
+    browser_session,
+    seeded_editor_job,
+):
+    draft = {
+        "schemaVersion": 1,
+        "revision": 1,
+        "automaticNoSpeechInitialized": True,
+        "textRanges": [
+            {
+                "key": "0.465-0.580",
+                "start": 0.465,
+                "end": 0.58,
+                "originalStart": 0.465,
+                "originalEnd": 0.58,
+                "text": "留",
+                "adjacentSilenceBefore": 0.0,
+                "adjacentSilenceAfter": 0.0,
+            }
+        ],
+        "noSpeechRanges": [],
+        "timelineRanges": [],
+        "splitPoints": [],
+        "boundaryDiagnostics": [],
+        "acousticAlignment": {"status": "not_required"},
+        "updatedAt": "2026-08-27T00:00:00+00:00",
+    }
+    with app_module.JOBS_LOCK:
+        job = app_module.JOBS[seeded_editor_job.job_id]
+        result = job["result"]
+        result["editableSegments"] = [
+            {
+                **copy.deepcopy(segment),
+                "sourceSegmentIndex": index,
+            }
+            for index, segment in enumerate(result["segments"])
+        ]
+        job["cutDraft"] = copy.deepcopy(draft)
+    app_module.save_cut_draft(seeded_editor_job.job_id, draft)
+
+    page = open_editor(browser_session, seeded_editor_job)
+    timeline_items = page.locator("#cutFrameTimelineText .cut-timeline-text-segment")
+    page.wait_for_function(
+        """() => [...document.querySelectorAll(
+          '#cutFrameTimelineText .cut-timeline-text-segment-label'
+        )].map(item => item.textContent).join('|') === '删除片段|保|内容'"""
+    )
+
+    assert timeline_items.locator(
+        ".cut-timeline-text-segment-label"
+    ).all_text_contents() == ["删除片段", "保", "内容"]
+    assert timeline_items.evaluate_all(
+        "items => items.map(item => Number(item.dataset.segmentIndex))"
+    ) == [0, 1, 1]
+    source_ranges = timeline_items.evaluate_all(
+        """items => items.map(item => [
+          Number(item.dataset.sourceStart),
+          Number(item.dataset.sourceEnd),
+        ])"""
+    )
+    expected_ranges = [(0.05, 0.3), (0.35, 0.465), (0.58, 0.95)]
+    assert len(source_ranges) == len(expected_ranges)
+    for actual, expected in zip(source_ranges, expected_ranges, strict=True):
+        assert actual == pytest.approx(expected)
+
+    page.reload()
+    page.locator("#resultCard").wait_for(state="visible")
+    page.wait_for_function(
+        """() => [...document.querySelectorAll(
+          '#cutFrameTimelineText .cut-timeline-text-segment-label'
+        )].map(item => item.textContent).join('|') === '删除片段|保|内容'"""
+    )
+    assert timeline_items.locator(
+        ".cut-timeline-text-segment-label"
+    ).all_text_contents() == ["删除片段", "保", "内容"]
+
+
+def test_user_text_split_projects_directional_boundaries_without_media_reload(
+    browser_session,
+    seeded_editor_job,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def deterministic_boundaries(
+        _media_path,
+        _source_segments,
+        editable_segments,
+        **_kwargs,
+    ):
+        segments = app_module.normalize_editable_segment_ids(editable_segments)
+        for segment in segments:
+            segment["mediaStart"] = float(segment["start"])
+            segment["mediaEnd"] = float(segment["end"])
+        if [segment["text"] for segment in segments] != [
+            "删除片段",
+            "保",
+            "留内",
+            "容",
+        ]:
+            return segments, []
+        segments[1]["mediaEnd"] = 0.46
+        segments[2]["mediaStart"] = 0.46
+        segments[2]["mediaEnd"] = 0.80
+        segments[3]["mediaStart"] = 0.80
+        return segments, [
+            {
+                "leftEditableSegmentId": 1,
+                "rightEditableSegmentId": 2,
+                "neutral": 0.46,
+                "deleteLeft": 0.47,
+                "deleteRight": 0.44,
+            },
+            {
+                "leftEditableSegmentId": 2,
+                "rightEditableSegmentId": 3,
+                "neutral": 0.80,
+                "deleteLeft": 0.82,
+                "deleteRight": 0.78,
+            },
+        ]
+
+    monkeypatch.setattr(
+        app_module,
+        "enrich_editable_segment_boundaries",
+        deterministic_boundaries,
+    )
+    page = browser_session.page
+    route_cut_draft_echo(page, seeded_editor_job.job_id)
+    page = open_editor(browser_session, seeded_editor_job)
+    install_base_media_mutation_probe(page)
+
+    page.get_by_role("button", name="编辑文字段：保留内容").click()
+    edit_text = page.locator("#segmentEditText")
+    edit_text.evaluate(
+        """element => {
+          element.focus();
+          element.setSelectionRange(1, 3);
+          element.dispatchEvent(new Event('select', { bubbles: true }));
+        }"""
+    )
+    page.get_by_role("button", name="拆分", exact=True).click()
+    page.locator("#segmentEditDialog").wait_for(state="hidden")
+
+    def displayed_range(index: int) -> tuple[float, float]:
+        item = page.locator(f'.segment-item[data-segment-index="{index}"]').first
+        return (
+            float(item.get_attribute("data-display-start")),
+            float(item.get_attribute("data-display-end")),
+        )
+
+    assert displayed_range(1) == pytest.approx((0.35, 0.46))
+    assert displayed_range(2) == pytest.approx((0.46, 0.80))
+    assert displayed_range(3) == pytest.approx((0.80, 0.95))
+
+    middle_toggle = page.locator(
+        '.segment-item[data-segment-index="2"] .segment-toggle'
+    ).first
+    middle_toggle.click()
+    page.wait_for_function(
+        """() => document.querySelector(
+          '.segment-item[data-segment-index="2"] .segment-toggle'
+        )?.getAttribute('aria-label')?.startsWith('恢复')"""
+    )
+
+    assert displayed_range(1) == pytest.approx((0.35, 0.44))
+    assert displayed_range(2) == pytest.approx((0.44, 0.82))
+    assert displayed_range(3) == pytest.approx((0.82, 0.95))
+    page.get_by_role("button", name="编辑文字段：容").click()
+    assert page.locator("#segmentEditTime").text_content() == (
+        "00:00.440 — 00:00.570"
+    )
+    assert base_media_mutations(page) == {"srcWrites": 0, "loadCalls": 0}
 
 
 def test_timeline_split_exact_clip_delete_restore_history_and_mobile_layout(
