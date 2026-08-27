@@ -18,6 +18,7 @@ import threading
 import time
 import unicodedata
 import uuid
+import wave
 from array import array
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
@@ -46,6 +47,7 @@ from .acoustic_alignment import (
     AlignmentFailure,
     ensure_acoustic_alignment_cache,
     load_acoustic_alignment_cache,
+    source_fingerprint,
     validate_segment_alignment,
 )
 from .history_repository import (
@@ -58,6 +60,11 @@ from .project_repository import (
     PROJECT_REPOSITORY_LOCK,
     ProjectRepository,
     ProjectSnapshotError,
+)
+from .voice_activity_detection import (
+    MODEL_REVISION as VOICE_ACTIVITY_MODEL_REVISION,
+    VAD_NAME as VOICE_ACTIVITY_DETECTOR_NAME,
+    analyze_local_voice_activity,
 )
 from .schemas import (
     ArtPositionPresetCreate,
@@ -340,6 +347,9 @@ CUT_VALLEY_TOLERANCE = 1.10
 CUT_CHARACTER_BOUNDARY_WINDOWS_SECONDS = (0.020, 0.040, 0.080)
 CUT_CHARACTER_BOUNDARY_MIN_IMPROVEMENT = 0.82
 CUT_CHARACTER_BOUNDARY_DISTANCE_PENALTY = 0.12
+CUT_CHARACTER_BOUNDARY_SCHEMA_VERSION = 1
+CUT_VAD_WINDOW_CONTEXT_SECONDS = 0.28
+CUT_VAD_MIN_PCM_FLOOR_SECONDS = 0.015
 CUT_AUDIO_FADE_SECONDS = 0.008
 CUT_AUDIO_LOUDNESS_FILTER = "loudnorm=I=-16:LRA=7:TP=-1.5"
 NO_SPEECH_MIN_GAP_SECONDS = 1.5
@@ -3663,6 +3673,7 @@ def build_acoustic_transition_context(
     left_index: int,
 ) -> dict[str, Any]:
     context: dict[str, Any] = {
+        "transitionScope": None,
         "repeatAmbiguous": False,
         "repeatReason": None,
         "repeatOverlapText": "",
@@ -3750,6 +3761,68 @@ def build_acoustic_transition_context(
         }
     )
     return context
+
+
+def acoustic_transition_context_identity(
+    context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Return the persisted fields that make directional trust reusable."""
+    context = context or {}
+    overlap_span = context.get("repeatOverlapSpan")
+    normalized_span = None
+    if isinstance(overlap_span, dict):
+        try:
+            normalized_span = {
+                key: int(overlap_span[key])
+                for key in (
+                    "leftStartCharacterIndex",
+                    "leftEndCharacterIndex",
+                    "rightStartCharacterIndex",
+                    "rightEndCharacterIndex",
+                )
+            }
+        except (KeyError, TypeError, ValueError):
+            normalized_span = None
+    return {
+        "transitionScope": (
+            str(context.get("transitionScope"))
+            if context.get("transitionScope") is not None
+            else None
+        ),
+        "repeatAmbiguous": bool(context.get("repeatAmbiguous")),
+        "repeatReason": (
+            str(context.get("repeatReason"))
+            if context.get("repeatReason") is not None
+            else None
+        ),
+        "repeatOverlapText": str(context.get("repeatOverlapText") or ""),
+        "repeatOverlapLength": int(context.get("repeatOverlapLength") or 0),
+        "repeatOverlapSpan": normalized_span,
+        "deletedContext": str(context.get("deletedContext") or ""),
+        "retainedContext": str(context.get("retainedContext") or ""),
+    }
+
+
+def build_directional_acoustic_transition_contexts(
+    units: list[dict[str, Any]],
+    deleted: list[bool],
+    left_index: int,
+) -> dict[str, dict[str, Any]]:
+    """Describe the same transition with each adjacent side deleted."""
+    current = build_acoustic_transition_context(units, deleted, left_index)
+    inverted = build_acoustic_transition_context(
+        units,
+        [not value for value in deleted],
+        left_index,
+    )
+    if 0 <= left_index < len(deleted) - 1 and deleted[left_index]:
+        delete_left, delete_right = current, inverted
+    else:
+        delete_left, delete_right = inverted, current
+    return {
+        "deleteLeft": acoustic_transition_context_identity(delete_left),
+        "deleteRight": acoustic_transition_context_identity(delete_right),
+    }
 
 
 def corroborate_transition_with_pcm(
@@ -5014,15 +5087,18 @@ def cached_forced_alignment_transition_boundary(
         tuple[float | None, dict[str, Any]],
     ],
 ) -> tuple[float | None, dict[str, Any]]:
-    transition_context = transition_context or {}
+    transition_context = acoustic_transition_context_identity(transition_context)
     key = (
         int(left.get("_segmentIndex", -1)),
         int(left.get("_characterIndex", -1)),
         deletion_on_left,
         round(fallback, 6),
-        bool(transition_context.get("repeatAmbiguous")),
-        str(transition_context.get("repeatOverlapText") or ""),
-        int(transition_context.get("repeatOverlapLength") or 0),
+        json.dumps(
+            transition_context,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
     )
     cached = boundary_cache.get(key)
     if cached is not None:
@@ -5041,6 +5117,504 @@ def cached_forced_alignment_transition_boundary(
     return boundary, diagnostic
 
 
+def adjacent_character_boundary_key(
+    media_fingerprint: str,
+    left: dict[str, Any],
+    right: dict[str, Any],
+) -> str:
+    identity = {
+        "schemaVersion": CUT_CHARACTER_BOUNDARY_SCHEMA_VERSION,
+        "sourceFingerprint": media_fingerprint,
+        "left": {
+            "segmentIndex": int(left.get("_segmentIndex", -1)),
+            "characterIndex": int(left.get("_segmentSpokenIndex", -1)),
+            "text": str(left.get("text") or ""),
+        },
+        "right": {
+            "segmentIndex": int(right.get("_segmentIndex", -1)),
+            "characterIndex": int(right.get("_segmentSpokenIndex", -1)),
+            "text": str(right.get("text") or ""),
+        },
+        "alignerRevision": ACOUSTIC_ALIGNMENT_MODEL_REVISION,
+        "vadRevision": VOICE_ACTIVITY_MODEL_REVISION,
+    }
+    encoded = json.dumps(
+        identity,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _local_non_speech_ranges(
+    speech_ranges: list[dict[str, Any]],
+    window_start: float,
+    window_end: float,
+) -> list[tuple[float, float]]:
+    cursor = window_start
+    result: list[tuple[float, float]] = []
+    for item in speech_ranges:
+        try:
+            start = window_start + float(item.get("start"))
+            end = window_start + float(item.get("end"))
+        except (AttributeError, TypeError, ValueError):
+            return []
+        start = max(window_start, min(start, window_end))
+        end = max(start, min(end, window_end))
+        if start > cursor + 0.001:
+            result.append((cursor, start))
+        cursor = max(cursor, end)
+    if cursor < window_end - 0.001:
+        result.append((cursor, window_end))
+    return result
+
+
+def _pcm_block_rms(
+    samples: array | ReadOnlyPcmSamples,
+    sample_rate: int,
+    start: float,
+    end: float,
+) -> float:
+    first = max(0, round(start * sample_rate))
+    last = min(len(samples), round(end * sample_rate))
+    if last <= first:
+        return float("inf")
+    energy = sum(int(sample) * int(sample) for sample in samples[first:last])
+    return math.sqrt(energy / (last - first))
+
+
+def find_vad_pcm_silence_boundary(
+    samples: array | ReadOnlyPcmSamples,
+    sample_rate: int,
+    corridor_start: float,
+    corridor_end: float,
+    non_speech_ranges: list[tuple[float, float]],
+) -> tuple[float | None, list[dict[str, float]]]:
+    step_seconds = CUT_BOUNDARY_STEP_SECONDS
+    minimum_blocks = max(
+        2,
+        math.ceil(CUT_VAD_MIN_PCM_FLOOR_SECONDS / step_seconds),
+    )
+    floor_ranges: list[dict[str, float]] = []
+    candidates: list[tuple[float, float]] = []
+    for non_speech_start, non_speech_end in non_speech_ranges:
+        start = max(corridor_start, non_speech_start)
+        end = min(corridor_end, non_speech_end)
+        if end - start < minimum_blocks * step_seconds - 0.001:
+            continue
+        left_reference = _pcm_block_rms(
+            samples,
+            sample_rate,
+            max(0.0, start - 0.04),
+            start,
+        )
+        right_reference = _pcm_block_rms(
+            samples,
+            sample_rate,
+            end,
+            min(len(samples) / sample_rate, end + 0.04),
+        )
+        finite_references = [
+            value
+            for value in (left_reference, right_reference)
+            if math.isfinite(value)
+        ]
+        if not finite_references:
+            continue
+        reference = max(finite_references)
+        if reference <= 1:
+            continue
+        threshold = reference * 0.65
+        blocks: list[tuple[float, float, float]] = []
+        block_start = start
+        while block_start + step_seconds <= end + 0.0005:
+            block_end = min(end, block_start + step_seconds)
+            blocks.append(
+                (
+                    block_start,
+                    block_end,
+                    _pcm_block_rms(
+                        samples,
+                        sample_rate,
+                        block_start,
+                        block_end,
+                    ),
+                )
+            )
+            block_start += step_seconds
+        run: list[tuple[float, float, float]] = []
+        for block in [*blocks, (end, end, float("inf"))]:
+            if block[2] <= threshold:
+                run.append(block)
+                continue
+            if len(run) >= minimum_blocks:
+                floor_start = run[0][0]
+                floor_end = run[-1][1]
+                point = snap_to_low_amplitude_sample(
+                    samples,
+                    sample_rate,
+                    (floor_start + floor_end) / 2,
+                    floor_start,
+                    floor_end,
+                )
+                rms = multiscale_boundary_rms(samples, sample_rate, point)
+                floor_ranges.append(
+                    {
+                        "start": round(floor_start, 6),
+                        "end": round(floor_end, 6),
+                        "point": round(point, 6),
+                        "rms": round(rms, 3),
+                    }
+                )
+                candidates.append((rms, point))
+            run = []
+    if not candidates:
+        return None, floor_ranges
+    _, point = min(candidates, key=lambda item: (item[0], item[1]))
+    return round(point, 6), floor_ranges
+
+
+def _write_local_vad_wav(
+    samples: array | ReadOnlyPcmSamples,
+    sample_rate: int,
+    start: float,
+    end: float,
+    output_path: Path,
+) -> float:
+    first = max(0, round(start * sample_rate))
+    last = min(len(samples), round(end * sample_rate))
+    if last <= first:
+        raise OSError("empty local VAD window")
+    payload = array("h", samples[first:last])
+    if sys.byteorder != "little":
+        payload.byteswap()
+    with wave.open(str(output_path), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(sample_rate)
+        output.writeframes(payload.tobytes())
+    return len(payload) / sample_rate
+
+
+def resolve_adjacent_character_boundary(
+    media_path: Path | None,
+    media_fingerprint: str,
+    left: dict[str, Any],
+    right: dict[str, Any],
+    samples: array | ReadOnlyPcmSamples,
+    sample_rate: int,
+    *,
+    transition_context: dict[str, Any] | None = None,
+    directional_transition_contexts: dict[str, dict[str, Any]] | None = None,
+    forced_boundary_cache: dict[
+        tuple[Any, ...],
+        tuple[float | None, dict[str, Any]],
+    ] | None = None,
+    adjacent_boundary_cache: dict[str, dict[str, Any]] | None = None,
+    vad_cache: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Resolve one semantic transition into neutral and directional cut points."""
+    boundary_key = adjacent_character_boundary_key(
+        media_fingerprint,
+        left,
+        right,
+    )
+    if directional_transition_contexts is None:
+        shared_context = acoustic_transition_context_identity(transition_context)
+        directional_transition_contexts = {
+            "deleteLeft": shared_context,
+            "deleteRight": copy.deepcopy(shared_context),
+        }
+    else:
+        directional_transition_contexts = {
+            direction: acoustic_transition_context_identity(
+                directional_transition_contexts.get(direction)
+            )
+            for direction in ("deleteLeft", "deleteRight")
+        }
+    cached_record = (
+        adjacent_boundary_cache.get(boundary_key)
+        if adjacent_boundary_cache is not None
+        else None
+    )
+    if isinstance(cached_record, dict):
+        cached_contexts = cached_record.get("directionalContexts")
+        contexts_match = bool(
+            isinstance(cached_contexts, dict)
+            and all(
+                acoustic_transition_context_identity(cached_contexts.get(direction))
+                == directional_transition_contexts[direction]
+                for direction in ("deleteLeft", "deleteRight")
+            )
+        )
+        cached_mode = cached_record.get("mode")
+        if cached_mode == "silence" or (
+            cached_mode in {"aggressive", "fallback"} and contexts_match
+        ):
+            return copy.deepcopy(cached_record)
+    forced_boundary_cache = (
+        forced_boundary_cache if forced_boundary_cache is not None else {}
+    )
+    left_fallback = float(left["end"])
+    right_fallback = float(right["start"])
+    semantic_fallback = (left_fallback + right_fallback) / 2
+
+    def directional(deletion_on_left: bool) -> tuple[float, dict[str, Any]]:
+        fallback = left_fallback if deletion_on_left else right_fallback
+        direction = "deleteLeft" if deletion_on_left else "deleteRight"
+        resolved, diagnostic = cached_forced_alignment_transition_boundary(
+            left,
+            right,
+            fallback,
+            samples,
+            sample_rate,
+            deletion_on_left=deletion_on_left,
+            transition_context=directional_transition_contexts[direction],
+            boundary_cache=forced_boundary_cache,
+        )
+        if resolved is None:
+            resolved = refine_shared_character_boundary(
+                left,
+                right,
+                fallback,
+                samples,
+                sample_rate,
+                deletion_on_left=deletion_on_left,
+                allow_token_extension=True,
+            )
+            diagnostic.update(
+                {
+                    "final": round(resolved, 3),
+                    "alignmentSource": diagnostic.get("alignmentSource")
+                    or "waveform",
+                    "fallbackReason": diagnostic.get("fallbackReason")
+                    or "forced_alignment_invalid",
+                }
+            )
+        return float(resolved), diagnostic
+
+    delete_left, delete_left_diagnostic = directional(True)
+    delete_right, delete_right_diagnostic = directional(False)
+    lower = min(delete_left, delete_right)
+    upper = max(delete_left, delete_right)
+    neutral = snap_to_low_amplitude_sample(
+        samples,
+        sample_rate,
+        max(lower, min(semantic_fallback, upper)),
+        lower,
+        upper,
+    )
+
+    left_core_end = float(
+        left.get("_forcedEnd", left.get("_acousticEnd", left["end"]))
+    )
+    right_core_start = float(
+        right.get("_forcedStart", right.get("_acousticStart", right["start"]))
+    )
+    audio_duration = len(samples) / sample_rate if sample_rate > 0 else 0.0
+    window_start = max(
+        0.0,
+        min(
+            float(left.get("_forcedStart", left.get("start", left_fallback))),
+            left_fallback,
+        )
+        - CUT_VAD_WINDOW_CONTEXT_SECONDS,
+    )
+    window_end = min(
+        audio_duration,
+        max(
+            float(right.get("_forcedEnd", right.get("end", right_fallback))),
+            right_fallback,
+        )
+        + CUT_VAD_WINDOW_CONTEXT_SECONDS,
+    )
+    vad_result: dict[str, Any]
+    if vad_cache is not None and boundary_key in vad_cache:
+        vad_result = copy.deepcopy(vad_cache[boundary_key])
+    elif media_path is None or not media_path.is_file() or window_end <= window_start:
+        vad_result = {
+            "status": "unavailable",
+            "reason": "source_missing",
+            "speechRanges": [],
+            "vad": VOICE_ACTIVITY_DETECTOR_NAME,
+            "modelRevision": VOICE_ACTIVITY_MODEL_REVISION,
+        }
+    else:
+        local_path = media_path.parent / f".vad-boundary-{uuid.uuid4().hex}.wav"
+        try:
+            local_duration = _write_local_vad_wav(
+                samples,
+                sample_rate,
+                window_start,
+                window_end,
+                local_path,
+            )
+            vad_result = analyze_local_voice_activity(
+                local_path,
+                local_duration,
+                DATA_DIR / "models",
+            )
+        except (OSError, RuntimeError, wave.Error):
+            vad_result = {
+                "status": "unavailable",
+                "reason": "local_audio_failed",
+                "speechRanges": [],
+                "vad": VOICE_ACTIVITY_DETECTOR_NAME,
+                "modelRevision": VOICE_ACTIVITY_MODEL_REVISION,
+            }
+        finally:
+            try:
+                local_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if vad_cache is not None:
+            vad_cache[boundary_key] = copy.deepcopy(vad_result)
+
+    speech_ranges = (
+        vad_result.get("speechRanges")
+        if isinstance(vad_result.get("speechRanges"), list)
+        else []
+    )
+    non_speech_ranges = (
+        _local_non_speech_ranges(
+            speech_ranges,
+            window_start,
+            window_end,
+        )
+        if vad_result.get("status") == "completed"
+        else []
+    )
+    pcm_boundary = None
+    pcm_floor_ranges: list[dict[str, float]] = []
+    if (
+        vad_result.get("status") == "completed"
+        and left_core_end <= right_core_start
+    ):
+        pcm_boundary, pcm_floor_ranges = find_vad_pcm_silence_boundary(
+            samples,
+            sample_rate,
+            left_core_end,
+            right_core_start,
+            non_speech_ranges,
+        )
+
+    if pcm_boundary is not None:
+        mode = "silence"
+        neutral = delete_left = delete_right = pcm_boundary
+        reason = None
+    elif vad_result.get("status") == "completed":
+        mode = "aggressive"
+        reason = "no_credible_silence_corridor"
+        # When speech overlaps, the deletion-side acoustic envelopes are the
+        # directional hard limits. A corroborated PCM valley is consumed from
+        # its outside edge so low-energy deleted onset/tail cannot leak through.
+        if delete_left_diagnostic.get("pcmCorroborated"):
+            try:
+                delete_left = max(
+                    delete_left,
+                    float(delete_left_diagnostic["pcmValleyEnd"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                pass
+        if delete_right_diagnostic.get("pcmCorroborated"):
+            try:
+                delete_right = min(
+                    delete_right,
+                    float(delete_right_diagnostic["pcmValleyStart"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                pass
+        delete_left = max(delete_left, min(left_core_end, audio_duration))
+        delete_right = min(delete_right, max(0.0, right_core_start))
+        delete_left = min(
+            delete_left,
+            float(right.get("_forcedEnd", right.get("end", audio_duration))),
+        )
+        delete_right = max(
+            delete_right,
+            float(left.get("_forcedStart", left.get("start", 0.0))),
+        )
+        lower = min(delete_left, delete_right)
+        upper = max(delete_left, delete_right)
+        neutral = snap_to_low_amplitude_sample(
+            samples,
+            sample_rate,
+            max(lower, min(neutral, upper)),
+            lower,
+            upper,
+        )
+    else:
+        mode = "fallback"
+        reason = str(vad_result.get("reason") or "vad_unavailable")
+
+    left_identity = {
+        "segmentIndex": int(left.get("_segmentIndex", -1)),
+        "characterIndex": int(left.get("_segmentSpokenIndex", -1)),
+        "text": str(left.get("text") or ""),
+    }
+    right_identity = {
+        "segmentIndex": int(right.get("_segmentIndex", -1)),
+        "characterIndex": int(right.get("_segmentSpokenIndex", -1)),
+        "text": str(right.get("text") or ""),
+    }
+    record = {
+        "schemaVersion": CUT_CHARACTER_BOUNDARY_SCHEMA_VERSION,
+        "key": boundary_key,
+        "left": left_identity,
+        "right": right_identity,
+        "directionalContexts": copy.deepcopy(directional_transition_contexts),
+        "semanticFallback": round(semantic_fallback, 3),
+        "neutral": round(neutral, 3),
+        "deleteLeft": round(delete_left, 3),
+        "deleteRight": round(delete_right, 3),
+        "mode": mode,
+        "diagnostic": {
+            "boundaryKey": boundary_key,
+            "transitionScope": acoustic_transition_scope(left, right),
+            "left": left_identity,
+            "right": right_identity,
+            "directionalContexts": copy.deepcopy(directional_transition_contexts),
+            "semanticFallback": round(semantic_fallback, 3),
+            "forced": {
+                "deleteLeft": copy.deepcopy(delete_left_diagnostic),
+                "deleteRight": copy.deepcopy(delete_right_diagnostic),
+            },
+            "vad": {
+                "status": vad_result.get("status"),
+                "reason": vad_result.get("reason"),
+                "detector": vad_result.get("vad") or VOICE_ACTIVITY_DETECTOR_NAME,
+                "modelRevision": vad_result.get("modelRevision")
+                or VOICE_ACTIVITY_MODEL_REVISION,
+                "window": {
+                    "start": round(window_start, 6),
+                    "end": round(window_end, 6),
+                },
+                "speechRanges": [
+                    {
+                        "start": round(window_start + float(item["start"]), 6),
+                        "end": round(window_start + float(item["end"]), 6),
+                    }
+                    for item in speech_ranges
+                ],
+                "nonSpeechRanges": [
+                    {"start": round(start, 6), "end": round(end, 6)}
+                    for start, end in non_speech_ranges
+                ],
+            },
+            "pcmFloorRanges": pcm_floor_ranges,
+            "neutral": round(neutral, 3),
+            "deleteLeft": round(delete_left, 3),
+            "deleteRight": round(delete_right, 3),
+            "mode": mode,
+            "reason": reason,
+        },
+    }
+    if adjacent_boundary_cache is not None:
+        adjacent_boundary_cache[boundary_key] = copy.deepcopy(record)
+    return record
+
+
 def build_shared_acoustic_delete_boundaries(
     segments: list[dict[str, Any]],
     delete_ranges: list[dict[str, float]],
@@ -5053,6 +5627,11 @@ def build_shared_acoustic_delete_boundaries(
         tuple[Any, ...],
         tuple[float | None, dict[str, Any]],
     ] | None = None,
+    *,
+    media_path: Path | None = None,
+    media_fingerprint: str = "unavailable",
+    adjacent_boundary_cache: dict[str, dict[str, Any]] | None = None,
+    vad_cache: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, float]]:
     units = transcript_acoustic_character_units(segments, alignment_cache)
     forced_boundary_cache = forced_boundary_cache if forced_boundary_cache is not None else {}
@@ -5080,51 +5659,44 @@ def build_shared_acoustic_delete_boundaries(
             else float(right["start"])
         )
         deletion_on_left = deleted[left_index]
-        if deletion_on_left:
-            allow_token_extension = bool(
-                left_index + 2 >= len(deleted) or not deleted[left_index + 2]
-            )
-        else:
-            allow_token_extension = bool(
-                left_index == 0 or not deleted[left_index - 1]
-            )
-        transition_context = build_acoustic_transition_context(
+        directional_contexts = build_directional_acoustic_transition_contexts(
             units,
             deleted,
             left_index,
         )
-        forced, diagnostic = cached_forced_alignment_transition_boundary(
+        record = resolve_adjacent_character_boundary(
+            media_path,
+            media_fingerprint,
             left,
             right,
-            fallback,
             samples,
             sample_rate,
-            deletion_on_left=deletion_on_left,
-            transition_context=transition_context,
-            boundary_cache=forced_boundary_cache,
+            directional_transition_contexts=directional_contexts,
+            forced_boundary_cache=forced_boundary_cache,
+            adjacent_boundary_cache=adjacent_boundary_cache,
+            vad_cache=vad_cache,
         )
-        if forced is not None:
-            resolved = forced
-        elif diagnostic.get("repeatAmbiguous") and diagnostic.get("structureValid"):
-            resolved = fallback
-        else:
-            resolved = refine_shared_character_boundary(
-                left,
-                right,
-                fallback,
-                samples,
-                sample_rate,
-                deletion_on_left=deletion_on_left,
-                allow_token_extension=allow_token_extension,
-            )
-            diagnostic.update(
-                {
-                    "final": round(resolved, 3),
-                    "alignmentSource": diagnostic["alignmentSource"] or "waveform",
-                    "fallbackReason": diagnostic["fallbackReason"]
-                    or "forced_alignment_invalid",
-                }
-            )
+        resolved = float(
+            record["deleteLeft"] if deletion_on_left else record["deleteRight"]
+        )
+        direction_key = "deleteLeft" if deletion_on_left else "deleteRight"
+        diagnostic = copy.deepcopy(
+            record["diagnostic"]["forced"][direction_key]
+        )
+        diagnostic.update(
+            {
+                "boundaryKey": record["key"],
+                "neutral": record["neutral"],
+                "deleteLeft": record["deleteLeft"],
+                "deleteRight": record["deleteRight"],
+                "boundaryMode": record["mode"],
+                "vad": copy.deepcopy(record["diagnostic"]["vad"]),
+                "pcmFloorRanges": copy.deepcopy(
+                    record["diagnostic"]["pcmFloorRanges"]
+                ),
+                "final": round(resolved, 3),
+            }
+        )
         boundary_cache[left_index] = resolved
         if diagnostics is not None:
             diagnostics.append(diagnostic)
@@ -5181,6 +5753,10 @@ def build_transcript_delete_boundary_limits(
         tuple[Any, ...],
         tuple[float | None, dict[str, Any]],
     ] | None = None,
+    media_path: Path | None = None,
+    media_fingerprint: str = "unavailable",
+    adjacent_boundary_cache: dict[str, dict[str, Any]] | None = None,
+    vad_cache: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, float]]:
     timed_units = transcript_character_units(segments)
 
@@ -5240,6 +5816,10 @@ def build_transcript_delete_boundary_limits(
             alignment_cache,
             diagnostics,
             forced_boundary_cache,
+            media_path=media_path,
+            media_fingerprint=media_fingerprint,
+            adjacent_boundary_cache=adjacent_boundary_cache,
+            vad_cache=vad_cache,
         )
         for limits_item, shared in zip(limits, shared_boundaries):
             limits_item["start"] = shared["start"]
@@ -5262,6 +5842,9 @@ def align_cut_draft_text_ranges_to_audio(
         tuple[Any, ...],
         tuple[float | None, dict[str, Any]],
     ] | None = None,
+    media_fingerprint: str = "unavailable",
+    adjacent_boundary_cache: dict[str, dict[str, Any]] | None = None,
+    vad_cache: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Align draft media cuts while preserving their exact text semantics."""
     if not text_ranges:
@@ -5328,6 +5911,10 @@ def align_cut_draft_text_ranges_to_audio(
         alignment_cache=alignment_cache,
         diagnostics=diagnostics,
         forced_boundary_cache=forced_boundary_cache,
+        media_path=media_path,
+        media_fingerprint=media_fingerprint,
+        adjacent_boundary_cache=adjacent_boundary_cache,
+        vad_cache=vad_cache,
     )
 
     aligned_ranges: list[dict[str, Any]] = []
@@ -5374,6 +5961,10 @@ def align_cut_draft_timeline_ranges_to_audio(
         tuple[Any, ...],
         tuple[float | None, dict[str, Any]],
     ] | None = None,
+    media_path: Path | None = None,
+    media_fingerprint: str = "unavailable",
+    adjacent_boundary_cache: dict[str, dict[str, Any]] | None = None,
+    vad_cache: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     forced_boundary_cache = forced_boundary_cache if forced_boundary_cache is not None else {}
     units = (
@@ -5469,41 +6060,97 @@ def align_cut_draft_timeline_ranges_to_audio(
                 continue
             left = units[index]
             right = units[index + 1]
-            transition_context = build_acoustic_transition_context(
+            directional_contexts = build_directional_acoustic_transition_contexts(
                 units,
                 deleted_units,
                 index,
             )
             if not deleted_units[index] and deleted_units[index + 1]:
-                boundary, diagnostic = cached_forced_alignment_transition_boundary(
+                record = resolve_adjacent_character_boundary(
+                    media_path,
+                    media_fingerprint,
                     left,
                     right,
-                    float(right["start"]),
                     samples or array("h"),
                     CUT_BOUNDARY_SAMPLE_RATE,
-                    deletion_on_left=False,
-                    transition_context=transition_context,
-                    boundary_cache=forced_boundary_cache,
+                    directional_transition_contexts=directional_contexts,
+                    forced_boundary_cache=forced_boundary_cache,
+                    adjacent_boundary_cache=adjacent_boundary_cache,
+                    vad_cache=vad_cache,
                 )
-                if boundary is not None:
-                    start_candidates.append((boundary, diagnostic))
-                else:
-                    rejected_start_diagnostics.append(diagnostic)
+                boundary = float(record["deleteRight"])
+                diagnostic = copy.deepcopy(
+                    record["diagnostic"]["forced"]["deleteRight"]
+                )
+                diagnostic.update(
+                    {
+                        "boundaryKey": record["key"],
+                        "neutral": record["neutral"],
+                        "deleteLeft": record["deleteLeft"],
+                        "deleteRight": record["deleteRight"],
+                        "boundaryMode": record["mode"],
+                        "boundaryTrustworthy": bool(
+                            diagnostic.get("boundaryTrustworthy")
+                            or record["mode"] in {"silence", "aggressive"}
+                        ),
+                        "trustReason": (
+                            "vad_pcm_silence"
+                            if record["mode"] == "silence"
+                            else "vad_directional_aggressive"
+                            if record["mode"] == "aggressive"
+                            else diagnostic.get("trustReason")
+                        ),
+                        "vad": copy.deepcopy(record["diagnostic"]["vad"]),
+                        "pcmFloorRanges": copy.deepcopy(
+                            record["diagnostic"]["pcmFloorRanges"]
+                        ),
+                        "final": round(boundary, 3),
+                    }
+                )
+                start_candidates.append((boundary, diagnostic))
             elif deleted_units[index] and not deleted_units[index + 1]:
-                boundary, diagnostic = cached_forced_alignment_transition_boundary(
+                record = resolve_adjacent_character_boundary(
+                    media_path,
+                    media_fingerprint,
                     left,
                     right,
-                    float(left["end"]),
                     samples or array("h"),
                     CUT_BOUNDARY_SAMPLE_RATE,
-                    deletion_on_left=True,
-                    transition_context=transition_context,
-                    boundary_cache=forced_boundary_cache,
+                    directional_transition_contexts=directional_contexts,
+                    forced_boundary_cache=forced_boundary_cache,
+                    adjacent_boundary_cache=adjacent_boundary_cache,
+                    vad_cache=vad_cache,
                 )
-                if boundary is not None:
-                    end_candidates.append((boundary, diagnostic))
-                else:
-                    rejected_end_diagnostics.append(diagnostic)
+                boundary = float(record["deleteLeft"])
+                diagnostic = copy.deepcopy(
+                    record["diagnostic"]["forced"]["deleteLeft"]
+                )
+                diagnostic.update(
+                    {
+                        "boundaryKey": record["key"],
+                        "neutral": record["neutral"],
+                        "deleteLeft": record["deleteLeft"],
+                        "deleteRight": record["deleteRight"],
+                        "boundaryMode": record["mode"],
+                        "boundaryTrustworthy": bool(
+                            diagnostic.get("boundaryTrustworthy")
+                            or record["mode"] in {"silence", "aggressive"}
+                        ),
+                        "trustReason": (
+                            "vad_pcm_silence"
+                            if record["mode"] == "silence"
+                            else "vad_directional_aggressive"
+                            if record["mode"] == "aggressive"
+                            else diagnostic.get("trustReason")
+                        ),
+                        "vad": copy.deepcopy(record["diagnostic"]["vad"]),
+                        "pcmFloorRanges": copy.deepcopy(
+                            record["diagnostic"]["pcmFloorRanges"]
+                        ),
+                        "final": round(boundary, 3),
+                    }
+                )
+                end_candidates.append((boundary, diagnostic))
         endpoint_diagnostics: list[dict[str, Any]] = []
         for endpoint, requested, candidates, rejected_diagnostics in (
             (
@@ -5635,6 +6282,7 @@ def resolve_cut_draft_acoustic_boundaries(
     timeline_ranges: list[dict[str, Any]],
     segments: list[dict[str, Any]],
     duration: float,
+    existing_boundaries: list[dict[str, Any]] | None = None,
 ) -> tuple[
     list[dict[str, Any]],
     list[dict[str, Any]],
@@ -5646,6 +6294,12 @@ def resolve_cut_draft_acoustic_boundaries(
         tuple[Any, ...],
         tuple[float | None, dict[str, Any]],
     ] = {}
+    adjacent_boundary_cache: dict[str, dict[str, Any]] = {}
+    for record in existing_boundaries or []:
+        key = str(record.get("key") or "") if isinstance(record, dict) else ""
+        if key and _valid_editable_boundary_record(record, key, duration):
+            adjacent_boundary_cache[key] = copy.deepcopy(record)
+    vad_cache: dict[str, dict[str, Any]] = {}
     speech_safe_timeline_ranges = [
         item
         for item in timeline_ranges
@@ -5672,8 +6326,13 @@ def resolve_cut_draft_acoustic_boundaries(
             "aligner": ACOUSTIC_ALIGNER_NAME,
             "modelRevision": ACOUSTIC_ALIGNMENT_MODEL_REVISION,
         }
-    samples: array | None = None
+    media_fingerprint = "unavailable"
+    samples: array | ReadOnlyPcmSamples | None = None
     if relevant_ranges and media_path is not None and media_path.is_file():
+        try:
+            media_fingerprint = source_fingerprint(media_path)
+        except OSError:
+            media_fingerprint = "unavailable"
         try:
             samples = decode_cut_draft_audio_samples(media_path)
         except (OSError, RuntimeError, subprocess.SubprocessError):
@@ -5687,6 +6346,9 @@ def resolve_cut_draft_acoustic_boundaries(
         samples=samples,
         diagnostics=diagnostics,
         forced_boundary_cache=forced_boundary_cache,
+        media_fingerprint=media_fingerprint,
+        adjacent_boundary_cache=adjacent_boundary_cache,
+        vad_cache=vad_cache,
     )
     aligned_timeline = align_cut_draft_timeline_ranges_to_audio(
         timeline_ranges,
@@ -5696,6 +6358,10 @@ def resolve_cut_draft_acoustic_boundaries(
         samples=samples,
         diagnostics=diagnostics,
         forced_boundary_cache=forced_boundary_cache,
+        media_path=media_path,
+        media_fingerprint=media_fingerprint,
+        adjacent_boundary_cache=adjacent_boundary_cache,
+        vad_cache=vad_cache,
     )
     for diagnostic in diagnostics:
         diagnostic.setdefault("entryType", "text")
@@ -5709,6 +6375,7 @@ def build_retained_transcript(
     timeline_delete_ranges: list[dict[str, float]] | None = None,
     audio_quiet_ranges: list[dict[str, float]] | None = None,
     alignment_cache: dict[str, Any] | None = None,
+    editable_segments: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     timeline_ranges = (
         timeline_delete_ranges
@@ -5723,6 +6390,93 @@ def build_retained_transcript(
         )
 
     acoustic_units = transcript_acoustic_character_units(segments, alignment_cache)
+    editable_unit_ids: dict[tuple[int, int], int] | None = None
+    if isinstance(editable_segments, list) and editable_segments:
+        units_by_segment: dict[int, list[dict[str, Any]]] = {}
+        for unit in acoustic_units:
+            units_by_segment.setdefault(int(unit["_segmentIndex"]), []).append(unit)
+        for source_units in units_by_segment.values():
+            source_units.sort(key=lambda unit: int(unit["_segmentSpokenIndex"]))
+
+        candidate_ids: dict[tuple[int, int], int] = {}
+        cursors: dict[int, int] = {}
+        mapping_valid = True
+        previous_source_index = -1
+        for editable_id, editable_segment in enumerate(editable_segments):
+            if not isinstance(editable_segment, dict):
+                mapping_valid = False
+                break
+            raw_source_index = editable_segment.get("sourceSegmentIndex", -1)
+            if (
+                isinstance(raw_source_index, bool)
+                or (
+                    isinstance(raw_source_index, float)
+                    and (
+                        not math.isfinite(raw_source_index)
+                        or not raw_source_index.is_integer()
+                    )
+                )
+            ):
+                mapping_valid = False
+                break
+            try:
+                source_index = int(raw_source_index)
+            except (TypeError, ValueError):
+                mapping_valid = False
+                break
+            if (
+                source_index < 0
+                or source_index >= len(segments)
+                or source_index < previous_source_index
+            ):
+                mapping_valid = False
+                break
+            previous_source_index = source_index
+            source_units = units_by_segment.get(source_index) or []
+            characters = spoken_text_characters(
+                str(editable_segment.get("text") or "")
+            )
+            cursor = cursors.get(source_index, 0)
+            matched_start = None
+            if characters:
+                for candidate in range(
+                    cursor,
+                    len(source_units) - len(characters) + 1,
+                ):
+                    candidate_characters = [
+                        spoken_text_characters(str(unit.get("text") or ""))
+                        for unit in source_units[
+                            candidate : candidate + len(characters)
+                        ]
+                    ]
+                    if (
+                        all(len(item) == 1 for item in candidate_characters)
+                        and characters == [item[0] for item in candidate_characters]
+                    ):
+                        matched_start = candidate
+                        break
+            if matched_start is None:
+                mapping_valid = False
+                break
+            matched_end = matched_start + len(characters)
+            cursors[source_index] = matched_end
+            for unit in source_units[matched_start:matched_end]:
+                candidate_ids[
+                    (
+                        source_index,
+                        int(unit["_segmentSpokenIndex"]),
+                    )
+                ] = editable_id
+
+        expected_units = {
+            (
+                int(unit["_segmentIndex"]),
+                int(unit["_segmentSpokenIndex"]),
+            )
+            for unit in acoustic_units
+        }
+        if mapping_valid and candidate_ids.keys() == expected_units:
+            editable_unit_ids = candidate_ids
     forced_projection_segments: set[int] = set()
     for segment_index in {
         int(unit["_segmentIndex"])
@@ -5780,18 +6534,24 @@ def build_retained_transcript(
             0.0,
             min(output_duration, timeline_after_deletions(source_end, timeline_ranges)),
         )
-        retained_units.append(
-            {
-                "text": str(unit.get("text") or ""),
-                "preferredStart": preferred_start,
-                "preferredEnd": preferred_end,
-                "sourceStart": round(source_start, 6),
-                "sourceEnd": round(source_end, 6),
-                "segmentIndex": int(unit["_segmentIndex"]),
-                "sourceItemIndex": int(unit.get("_sourceItemIndex", 0)),
-                "spokenIndex": int(unit.get("_segmentSpokenIndex", 0)),
-            }
-        )
+        retained_unit = {
+            "text": str(unit.get("text") or ""),
+            "preferredStart": preferred_start,
+            "preferredEnd": preferred_end,
+            "sourceStart": round(source_start, 6),
+            "sourceEnd": round(source_end, 6),
+            "segmentIndex": int(unit["_segmentIndex"]),
+            "sourceItemIndex": int(unit.get("_sourceItemIndex", 0)),
+            "spokenIndex": int(unit.get("_segmentSpokenIndex", 0)),
+        }
+        if editable_unit_ids is not None:
+            retained_unit["editableSegmentId"] = editable_unit_ids[
+                (
+                    int(unit["_segmentIndex"]),
+                    int(unit.get("_segmentSpokenIndex", 0)),
+                )
+            ]
+        retained_units.append(retained_unit)
 
     projected_by_segment: dict[int, list[dict[str, Any]]] = {}
     retained_count = len(retained_units)
@@ -5869,11 +6629,41 @@ def build_retained_transcript(
                 characters.append(character)
         return indexes if characters else None
 
-    retained_segments: list[dict[str, Any]] = []
-    for segment_index, source_segment in enumerate(segments):
-        projected_units = projected_by_segment.get(segment_index) or []
-        if not projected_units:
+    projected_runs: list[tuple[int, int | None, list[dict[str, Any]]]] = []
+    for segment_index in range(len(segments)):
+        segment_units = projected_by_segment.get(segment_index) or []
+        if not segment_units:
             continue
+        if editable_unit_ids is None:
+            projected_runs.append((segment_index, None, segment_units))
+            continue
+        current_run: list[dict[str, Any]] = []
+        current_editable_id: int | None = None
+        previous_spoken_index: int | None = None
+        for unit in segment_units:
+            editable_id = int(unit["editableSegmentId"])
+            spoken_index = int(unit["spokenIndex"])
+            if (
+                current_run
+                and (
+                    editable_id != current_editable_id
+                    or previous_spoken_index is None
+                    or spoken_index != previous_spoken_index + 1
+                )
+            ):
+                projected_runs.append(
+                    (segment_index, current_editable_id, current_run)
+                )
+                current_run = []
+            current_run.append(unit)
+            current_editable_id = editable_id
+            previous_spoken_index = spoken_index
+        if current_run:
+            projected_runs.append((segment_index, current_editable_id, current_run))
+
+    retained_segments: list[dict[str, Any]] = []
+    for segment_index, editable_segment_id, projected_units in projected_runs:
+        source_segment = segments[segment_index]
         source_words = source_segment.get("words")
         word_groups = (
             item_group_indexes(source_words)
@@ -5902,6 +6692,8 @@ def build_retained_transcript(
             "text": "".join(unit["text"] for unit in projected_units),
             "words": retained_words,
         }
+        if editable_segment_id is not None:
+            retained_segment["editableSegmentId"] = editable_segment_id
         if isinstance(source_asr_words, list):
             retained_segment["asrWords"] = aggregate_units(
                 projected_units,
@@ -5971,6 +6763,7 @@ def build_existing_edit_retained_transcript(
     edit: dict[str, Any],
     audio_quiet_ranges: list[dict[str, Any]],
     alignment_cache: dict[str, Any] | None,
+    editable_segments: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     if edit.get("status") != "completed":
         return None
@@ -5986,6 +6779,7 @@ def build_existing_edit_retained_transcript(
         timeline_delete_ranges=edit.get("ranges") or [],
         audio_quiet_ranges=audio_quiet_ranges,
         alignment_cache=alignment_cache,
+        editable_segments=editable_segments,
     )
 
 
@@ -5995,6 +6789,7 @@ def build_cut_draft_retained_transcript(
     duration: float,
     draft: dict[str, Any] | None,
     media_path: Path | None,
+    editable_segments: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     media_ranges = resolve_cut_draft_delete_ranges(
         draft,
@@ -6020,6 +6815,7 @@ def build_cut_draft_retained_transcript(
         output_duration,
         timeline_delete_ranges=media_ranges,
         alignment_cache=load_existing_job_acoustic_alignment(media_path, segments),
+        editable_segments=editable_segments,
     )
 
 
@@ -10830,6 +11626,176 @@ def apply_transcript_segment_operation(
     return normalize_editable_segment_ids(segments)
 
 
+def _valid_editable_boundary_record(
+    record: Any,
+    expected_key: str,
+    duration: float,
+) -> bool:
+    if not isinstance(record, dict) or record.get("key") != expected_key:
+        return False
+    if record.get("schemaVersion") != CUT_CHARACTER_BOUNDARY_SCHEMA_VERSION:
+        return False
+    try:
+        values = [
+            float(record[field])
+            for field in ("neutral", "deleteLeft", "deleteRight")
+        ]
+    except (KeyError, TypeError, ValueError):
+        return False
+    return all(math.isfinite(value) and 0 <= value <= duration for value in values)
+
+
+def enrich_editable_segment_boundaries(
+    media_path: Path | None,
+    source_segments: list[dict[str, Any]],
+    editable_segments: list[dict[str, Any]],
+    *,
+    alignment_cache: dict[str, Any] | None = None,
+    existing_boundaries: list[dict[str, Any]] | None = None,
+    samples: array | ReadOnlyPcmSamples | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Project editable paragraph edges without mutating semantic ASR timing."""
+    normalized = normalize_editable_segment_ids(editable_segments)
+    if not normalized:
+        return normalized, []
+    duration = max(
+        [float(segment.get("end") or 0) for segment in source_segments]
+        + [0.0]
+    )
+    for segment in normalized:
+        segment["mediaStart"] = float(segment.get("start") or 0)
+        segment["mediaEnd"] = float(segment.get("end") or segment["mediaStart"])
+    if media_path is None or not media_path.is_file():
+        return normalized, []
+    try:
+        fingerprint = source_fingerprint(media_path)
+    except OSError:
+        return normalized, []
+    if samples is None:
+        try:
+            samples = decode_cut_draft_audio_samples(media_path)
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            samples = array("h")
+
+    units = transcript_acoustic_character_units(source_segments, alignment_cache)
+    units_by_segment: dict[int, list[dict[str, Any]]] = {}
+    for unit in units:
+        units_by_segment.setdefault(int(unit.get("_segmentIndex", -1)), []).append(
+            unit
+        )
+    for segment_units in units_by_segment.values():
+        segment_units.sort(key=lambda unit: int(unit.get("_segmentSpokenIndex", -1)))
+
+    cursor_by_source: dict[int, int] = {}
+    editable_unit_ranges: list[tuple[dict[str, Any], dict[str, Any]] | None] = []
+    for segment in normalized:
+        source_index = int(segment.get("sourceSegmentIndex", -1))
+        source_units = units_by_segment.get(source_index) or []
+        characters = spoken_text_characters(str(segment.get("text") or ""))
+        cursor = cursor_by_source.get(source_index, 0)
+        matched_start = None
+        if characters:
+            for candidate in range(cursor, len(source_units) - len(characters) + 1):
+                candidate_characters = [
+                    spoken_text_characters(str(unit.get("text") or ""))
+                    for unit in source_units[candidate : candidate + len(characters)]
+                ]
+                if (
+                    all(len(item) == 1 for item in candidate_characters)
+                    and characters == [item[0] for item in candidate_characters]
+                ):
+                    matched_start = candidate
+                    break
+        if matched_start is None:
+            editable_unit_ranges.append(None)
+            continue
+        matched_end = matched_start + len(characters)
+        cursor_by_source[source_index] = matched_end
+        editable_unit_ranges.append(
+            (source_units[matched_start], source_units[matched_end - 1])
+        )
+
+    existing_by_key = {
+        str(record.get("key")): record
+        for record in existing_boundaries or []
+        if isinstance(record, dict) and record.get("key")
+    }
+    forced_cache: dict[
+        tuple[Any, ...],
+        tuple[float | None, dict[str, Any]],
+    ] = {}
+    adjacent_cache: dict[str, dict[str, Any]] = {
+        key: copy.deepcopy(record)
+        for key, record in existing_by_key.items()
+        if _valid_editable_boundary_record(record, key, duration)
+    }
+    vad_cache: dict[str, dict[str, Any]] = {}
+    records: list[dict[str, Any]] = []
+    unit_indexes = {id(unit): index for index, unit in enumerate(units)}
+    for editable_index in range(len(normalized) - 1):
+        left_range = editable_unit_ranges[editable_index]
+        right_range = editable_unit_ranges[editable_index + 1]
+        if left_range is None or right_range is None:
+            continue
+        left = left_range[1]
+        right = right_range[0]
+        if acoustic_transition_scope(left, right) is None:
+            continue
+        left_first_index = unit_indexes.get(id(left_range[0]), -1)
+        left_index = unit_indexes.get(id(left), -1)
+        right_index = unit_indexes.get(id(right), -1)
+        right_last_index = unit_indexes.get(id(right_range[1]), -1)
+        if not (
+            0 <= left_first_index <= left_index
+            and right_index == left_index + 1
+            and right_index <= right_last_index < len(units)
+        ):
+            continue
+        delete_left_state = [False] * len(units)
+        for unit_index in range(left_first_index, left_index + 1):
+            delete_left_state[unit_index] = True
+        delete_right_state = [False] * len(units)
+        for unit_index in range(right_index, right_last_index + 1):
+            delete_right_state[unit_index] = True
+        directional_contexts = {
+            "deleteLeft": acoustic_transition_context_identity(
+                build_acoustic_transition_context(
+                    units,
+                    delete_left_state,
+                    left_index,
+                )
+            ),
+            "deleteRight": acoustic_transition_context_identity(
+                build_acoustic_transition_context(
+                    units,
+                    delete_right_state,
+                    left_index,
+                )
+            ),
+        }
+        record = resolve_adjacent_character_boundary(
+            media_path,
+            fingerprint,
+            left,
+            right,
+            samples,
+            CUT_BOUNDARY_SAMPLE_RATE,
+            directional_transition_contexts=directional_contexts,
+            forced_boundary_cache=forced_cache,
+            adjacent_boundary_cache=adjacent_cache,
+            vad_cache=vad_cache,
+        )
+        neutral = float(record["neutral"])
+        normalized[editable_index]["mediaEnd"] = neutral
+        normalized[editable_index + 1]["mediaStart"] = neutral
+        record["leftEditableSegmentId"] = int(normalized[editable_index]["id"])
+        record["rightEditableSegmentId"] = int(
+            normalized[editable_index + 1]["id"]
+        )
+        records.append(record)
+    return normalized, records
+
+
 def sync_source_segments_from_editable(
     source_segments: list[dict[str, Any]],
     editable_segments: list[dict[str, Any]],
@@ -11851,6 +12817,16 @@ def process_job(job_id: str, attempt_id: str | None = None) -> None:
             result["segments"],
         )
         result["acousticAlignment"] = alignment_summary
+        (
+            result["editableSegments"],
+            result["editableSegmentBoundaries"],
+        ) = enrich_editable_segment_boundaries(
+            video_path,
+            result["segments"],
+            result["editableSegments"],
+            alignment_cache=alignment_cache,
+            samples=audio_samples,
+        )
         if not update_job(
             job_id,
             expected_attempt_id=attempt_id,
@@ -11968,6 +12944,7 @@ def process_cut_job(
                 video_path,
                 source_segments,
             ),
+            editable_segments=source_result.get("editableSegments") or None,
         )
         try:
             edited_samples = decode_cut_audio_samples(attempt_output_path)
@@ -12253,6 +13230,7 @@ def process_preview_composition_job(
                 video_path,
                 source_segments,
             ),
+            editable_segments=source_result.get("editableSegments") or None,
         )
         try:
             edited_samples = decode_cut_audio_samples(edited_attempt_path)
@@ -13578,6 +14556,7 @@ def get_cut_draft(job_id: str) -> dict[str, Any]:
             duration,
             draft,
             media_path,
+            result.get("editableSegments") or None,
         )
         if duration > 0
         else None
@@ -13609,6 +14588,12 @@ def update_cut_draft(
         video_path = JOB_FILES.get(job_id)
         source_segments = copy.deepcopy(
             (job.get("result") or {}).get("segments") or []
+        )
+        source_editable_segments = copy.deepcopy(
+            (job.get("result") or {}).get("editableSegments") or []
+        )
+        source_boundaries = copy.deepcopy(
+            (job.get("result") or {}).get("editableSegmentBoundaries") or []
         )
         source_suggestions = copy.deepcopy(
             (job.get("result") or {}).get("suggestions") or []
@@ -13701,6 +14686,7 @@ def update_cut_draft(
             timeline_ranges,
             source_segments,
             duration,
+            source_boundaries,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -13766,6 +14752,7 @@ def update_cut_draft(
         duration,
         draft,
         video_path,
+        source_editable_segments,
     )
     # cut-draft.json is the authoritative durable write. Refresh only the
     # project-state metadata after the response so split/selection interactions
@@ -13806,7 +14793,6 @@ def update_transcript_word(
     corrected_text = request.text.strip()
     if not corrected_text:
         raise HTTPException(status_code=400, detail="修正后的文字不能为空。")
-    alignment_cache = load_existing_edit_acoustic_alignment(job_id)
 
     with JOBS_LOCK:
         job = JOBS.get(job_id)
@@ -13824,34 +14810,63 @@ def update_transcript_word(
                 detail="艺术字视频正在生成，请完成后再修改文案。",
             )
 
-        result = job["result"]
-        segments = result.get("segments") or []
-        if request.segmentIndex >= len(segments):
-            raise HTTPException(status_code=404, detail="要修正的文字段不存在。")
-
-        segment = segments[request.segmentIndex]
-        words = segment.get("words") or []
-        if words:
-            if request.wordIndex is None or request.wordIndex >= len(words):
-                raise HTTPException(status_code=404, detail="要修正的词块不存在。")
-            words[request.wordIndex]["text"] = corrected_text
-            segment["text"] = "".join(str(word.get("text") or "") for word in words)
-        else:
-            if request.wordIndex is not None:
-                raise HTTPException(status_code=404, detail="要修正的词块不存在。")
-            segment["text"] = corrected_text
-
-        result["editableSegments"] = build_editable_transcript_segments(segments)
-        result["text"] = "\n".join(
-            str(item.get("text") or "") for item in segments
+        result = copy.deepcopy(job["result"])
+        edit_snapshot = copy.deepcopy(job.get("edit") or {})
+        existing_boundaries = copy.deepcopy(
+            result.get("editableSegmentBoundaries") or []
         )
+        media_path = JOB_FILES.get(job_id)
+        operation_version = str(job.get("updatedAt") or "")
 
-        edit_transcript = build_existing_edit_retained_transcript(
-            segments,
-            edit,
-            result.get("audioQuietRanges") or [],
-            alignment_cache,
-        )
+    segments = result.get("segments") or []
+    if request.segmentIndex >= len(segments):
+        raise HTTPException(status_code=404, detail="要修正的文字段不存在。")
+
+    segment = segments[request.segmentIndex]
+    words = segment.get("words") or []
+    if words:
+        if request.wordIndex is None or request.wordIndex >= len(words):
+            raise HTTPException(status_code=404, detail="要修正的词块不存在。")
+        words[request.wordIndex]["text"] = corrected_text
+        segment["text"] = "".join(str(word.get("text") or "") for word in words)
+    else:
+        if request.wordIndex is not None:
+            raise HTTPException(status_code=404, detail="要修正的词块不存在。")
+        segment["text"] = corrected_text
+
+    result["editableSegments"] = build_editable_transcript_segments(segments)
+    alignment_cache = load_existing_job_acoustic_alignment(media_path, segments)
+    (
+        result["editableSegments"],
+        result["editableSegmentBoundaries"],
+    ) = enrich_editable_segment_boundaries(
+        media_path,
+        segments,
+        result["editableSegments"],
+        alignment_cache=alignment_cache,
+        existing_boundaries=existing_boundaries,
+    )
+    result["text"] = "\n".join(str(item.get("text") or "") for item in segments)
+
+    edit_transcript = build_existing_edit_retained_transcript(
+        segments,
+        edit_snapshot,
+        result.get("audioQuietRanges") or [],
+        alignment_cache,
+        editable_segments=result["editableSegments"],
+    )
+
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+        if str(job.get("updatedAt") or "") != operation_version:
+            raise HTTPException(
+                status_code=409,
+                detail="文案已在其他页面更新，请刷新后继续。",
+            )
+        job["result"] = result
+        edit = job.get("edit") or {}
         if edit_transcript is not None:
             edit["transcript"] = edit_transcript
             edit["updatedAt"] = utc_now()
@@ -13879,7 +14894,6 @@ def update_transcript_text(
     job_id: str,
     request: TranscriptTextUpdate,
 ) -> dict[str, Any]:
-    alignment_cache = load_existing_edit_acoustic_alignment(job_id)
     with JOBS_LOCK:
         job = JOBS.get(job_id)
         if job is None:
@@ -13896,27 +14910,56 @@ def update_transcript_text(
                 detail="艺术字视频正在生成，请完成后再修改文案。",
             )
 
-        result = job["result"]
-        try:
-            segments, changed_count = align_transcript_text_to_segments(
-                result.get("segments") or [],
-                request.text,
+        result = copy.deepcopy(job["result"])
+        edit_snapshot = copy.deepcopy(job.get("edit") or {})
+        existing_boundaries = copy.deepcopy(
+            result.get("editableSegmentBoundaries") or []
+        )
+        media_path = JOB_FILES.get(job_id)
+        operation_version = str(job.get("updatedAt") or "")
+
+    try:
+        segments, changed_count = align_transcript_text_to_segments(
+            result.get("segments") or [],
+            request.text,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    result["segments"] = segments
+    result["editableSegments"] = build_editable_transcript_segments(segments)
+    alignment_cache = load_existing_job_acoustic_alignment(media_path, segments)
+    (
+        result["editableSegments"],
+        result["editableSegmentBoundaries"],
+    ) = enrich_editable_segment_boundaries(
+        media_path,
+        segments,
+        result["editableSegments"],
+        alignment_cache=alignment_cache,
+        existing_boundaries=existing_boundaries,
+    )
+    result["text"] = "\n".join(str(segment.get("text") or "") for segment in segments)
+
+    edit_transcript = build_existing_edit_retained_transcript(
+        segments,
+        edit_snapshot,
+        result.get("audioQuietRanges") or [],
+        alignment_cache,
+        editable_segments=result["editableSegments"],
+    )
+
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+        if str(job.get("updatedAt") or "") != operation_version:
+            raise HTTPException(
+                status_code=409,
+                detail="文案已在其他页面更新，请刷新后继续。",
             )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        result["segments"] = segments
-        result["editableSegments"] = build_editable_transcript_segments(segments)
-        result["text"] = "\n".join(
-            str(segment.get("text") or "") for segment in segments
-        )
-
-        edit_transcript = build_existing_edit_retained_transcript(
-            segments,
-            edit,
-            result.get("audioQuietRanges") or [],
-            alignment_cache,
-        )
+        job["result"] = result
+        edit = job.get("edit") or {}
         if edit_transcript is not None:
             edit["transcript"] = edit_transcript
             edit["updatedAt"] = utc_now()
@@ -13946,11 +14989,6 @@ def update_editable_transcript_segments(
     job_id: str,
     request: TranscriptSegmentOperation,
 ) -> dict[str, Any]:
-    alignment_cache = (
-        load_existing_edit_acoustic_alignment(job_id)
-        if request.action == "text"
-        else None
-    )
     with JOBS_LOCK:
         job = JOBS.get(job_id)
         if job is None:
@@ -13966,38 +15004,77 @@ def update_editable_transcript_segments(
                 status_code=409,
                 detail="艺术字视频正在生成，请完成后再调整分段。",
             )
-
         result = job["result"]
-        editable_segments = result.get("editableSegments") or (
-            build_editable_transcript_segments(result.get("segments") or [])
+        source_segments = copy.deepcopy(result.get("segments") or [])
+        source_audio_quiet_ranges = copy.deepcopy(
+            result.get("audioQuietRanges") or []
         )
-        try:
-            updated_segments = apply_transcript_segment_operation(
-                editable_segments,
-                request,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        editable_segments = copy.deepcopy(
+            result.get("editableSegments")
+            or build_editable_transcript_segments(source_segments)
+        )
+        edit_snapshot = copy.deepcopy(job.get("edit") or {})
+        existing_boundaries = copy.deepcopy(
+            result.get("editableSegmentBoundaries") or []
+        )
+        media_path = JOB_FILES.get(job_id)
+        operation_version = str(job.get("updatedAt") or "")
 
+    try:
+        updated_segments = apply_transcript_segment_operation(
+            editable_segments,
+            request,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if request.action == "text":
+        source_segments = sync_source_segments_from_editable(
+            source_segments,
+            updated_segments,
+        )
+    alignment_cache = load_existing_job_acoustic_alignment(
+        media_path,
+        source_segments,
+    )
+    updated_segments, updated_boundaries = enrich_editable_segment_boundaries(
+        media_path,
+        source_segments,
+        updated_segments,
+        alignment_cache=alignment_cache,
+        existing_boundaries=existing_boundaries,
+    )
+    edit_transcript = build_existing_edit_retained_transcript(
+        source_segments,
+        edit_snapshot,
+        source_audio_quiet_ranges,
+        alignment_cache,
+        editable_segments=updated_segments,
+    )
+
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+        if str(job.get("updatedAt") or "") != operation_version:
+            raise HTTPException(
+                status_code=409,
+                detail="分段已在其他页面更新，请刷新后继续。",
+            )
+        result = job["result"]
         result["editableSegments"] = updated_segments
+        result["editableSegmentBoundaries"] = updated_boundaries
         if request.action == "text":
-            # A text edit changes the actual transcript, so re-sync the ASR
-            # segments and update the overlapping subtitle cues' text while
-            # keeping their times stable.
-            result["segments"] = sync_source_segments_from_editable(
-                result.get("segments") or [],
-                updated_segments,
-            )
+            result["segments"] = source_segments
             result["text"] = "\n".join(
-                str(segment.get("text") or "")
-                for segment in result["segments"]
+                str(segment.get("text") or "") for segment in source_segments
             )
+            # Keep the subtitle track text synchronized without moving cues.
+            edit = job.get("edit") or {}
             existing_art = job.get("art")
             edited_editable = updated_segments[request.segmentIndex]
             source_index = int(
                 edited_editable.get("sourceSegmentIndex", 0) or 0
             )
-            source_segments = result.get("segments") or []
             if existing_art is not None and 0 <= source_index < len(source_segments):
                 source_segment = source_segments[source_index]
                 update_transcript_track_text_for_segment(
@@ -14006,17 +15083,15 @@ def update_editable_transcript_segments(
                     float(source_segment.get("end") or 0),
                     source_segment.get("text") or "",
                 )
-            edit_transcript = build_existing_edit_retained_transcript(
-                source_segments,
-                edit,
-                result.get("audioQuietRanges") or [],
-                alignment_cache,
-            )
-            if edit_transcript is not None:
-                edit["transcript"] = edit_transcript
-                edit["updatedAt"] = utc_now()
+        if edit_transcript is not None:
+            edit = job.get("edit") or {}
+            edit["transcript"] = edit_transcript
+            edit["updatedAt"] = utc_now()
         job["updatedAt"] = utc_now()
-        response = {"editableSegments": copy.deepcopy(updated_segments)}
+        response = {
+            "editableSegments": copy.deepcopy(updated_segments),
+            "editableSegmentBoundaries": copy.deepcopy(updated_boundaries),
+        }
     try:
         persist_job_snapshot(job_id, raise_on_error=True)
     except (OSError, ProjectSnapshotError) as exc:

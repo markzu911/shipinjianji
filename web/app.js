@@ -188,6 +188,7 @@ let generationModalActive = false;
 let currentJobId = null;
 let currentSegments = [];
 let currentEditableSegments = [];
+let currentEditableSegmentBoundaries = [];
 let activeSegmentEditIndex = null;
 let segmentOperationInFlight = false;
 let currentSuggestions = [];
@@ -581,6 +582,91 @@ function resolveEditableSegments(segments, editableSegments) {
     : buildFallbackEditableSegments(segments);
 }
 
+function editableBoundaryBefore(segmentIndex) {
+  return currentEditableSegmentBoundaries.find(
+    (boundary) => Number(boundary?.rightEditableSegmentId) === segmentIndex,
+  ) || null;
+}
+
+function editableBoundaryAfter(segmentIndex) {
+  return currentEditableSegmentBoundaries.find(
+    (boundary) => Number(boundary?.leftEditableSegmentId) === segmentIndex,
+  ) || null;
+}
+
+function editableSegmentDisplayBounds(segment, segmentIndex) {
+  const semanticStart = Number(segment?.start) || 0;
+  const semanticEnd = Number(segment?.end) || semanticStart;
+  let start = Number(segment?.mediaStart);
+  let end = Number(segment?.mediaEnd);
+  if (!Number.isFinite(start)) start = semanticStart;
+  if (!Number.isFinite(end)) end = semanticEnd;
+  for (const selected of selectedRanges.values()) {
+    const originalStart = Number(selected.originalStart ?? selected.start);
+    const originalEnd = Number(selected.originalEnd ?? selected.end);
+    if (
+      Math.abs(originalStart - semanticStart) <= CUT_SPEECH_BOUNDARY_EPSILON
+    ) {
+      start = Number(selected.start);
+    }
+    if (
+      Math.abs(originalEnd - semanticStart) <= CUT_SPEECH_BOUNDARY_EPSILON
+    ) {
+      start = Number(selected.end);
+    }
+    if (
+      Math.abs(originalEnd - semanticEnd) <= CUT_SPEECH_BOUNDARY_EPSILON
+    ) {
+      end = Number(selected.end);
+    }
+    if (
+      Math.abs(originalStart - semanticEnd) <= CUT_SPEECH_BOUNDARY_EPSILON
+    ) {
+      end = Number(selected.start);
+    }
+  }
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+    start = semanticStart;
+    end = semanticEnd;
+  }
+  return { start, end, semanticStart, semanticEnd, segmentIndex };
+}
+
+function applyEditableDirectionalBoundaries(range, segmentIndex) {
+  const segment = currentEditableSegments[segmentIndex];
+  if (!segment) return range;
+  const originalStart = Number(range.originalStart ?? range.start);
+  const originalEnd = Number(range.originalEnd ?? range.end);
+  let start = Number(range.start);
+  let end = Number(range.end);
+  if (
+    Math.abs(originalStart - Number(segment.start)) <=
+    CUT_SPEECH_BOUNDARY_EPSILON
+  ) {
+    const boundary = editableBoundaryBefore(segmentIndex);
+    const directional = Number(boundary?.deleteRight);
+    if (Number.isFinite(directional)) start = directional;
+  }
+  if (
+    Math.abs(originalEnd - Number(segment.end)) <=
+    CUT_SPEECH_BOUNDARY_EPSILON
+  ) {
+    const boundary = editableBoundaryAfter(segmentIndex);
+    const directional = Number(boundary?.deleteLeft);
+    if (Number.isFinite(directional)) end = directional;
+  }
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+    return range;
+  }
+  return {
+    ...range,
+    start,
+    end,
+    originalStart,
+    originalEnd,
+  };
+}
+
 function selectedTextRangeKeysAtTime(sourceTime) {
   return [...selectedRanges.entries()].flatMap(([key, range]) => {
     const start = Number(range.originalStart ?? range.start);
@@ -608,8 +694,18 @@ function suggestionTextRangeKeysAtTime(sourceTime) {
   );
 }
 
-function buildSegmentTextRuns(segment, deletedRanges) {
+function buildSegmentTextRuns(segment, deletedRanges, segmentIndex) {
   const tokens = getSegmentTokens(segment);
+  const displayBounds = typeof editableSegmentDisplayBounds === "function"
+    ? editableSegmentDisplayBounds(segment, segmentIndex)
+    : {
+        start: Number.isFinite(Number(segment?.mediaStart))
+          ? Number(segment.mediaStart)
+          : Number(segment?.start) || 0,
+        end: Number.isFinite(Number(segment?.mediaEnd))
+          ? Number(segment.mediaEnd)
+          : Number(segment?.end) || Number(segment?.start) || 0,
+      };
   const words = tokens.length
     ? tokens
     : [
@@ -620,10 +716,14 @@ function buildSegmentTextRuns(segment, deletedRanges) {
         },
       ];
   const runs = [];
-  for (const word of words) {
-    const start = Number(word.start);
-    const end = Number(word.end);
-    const midpoint = start + (end - start) / 2;
+  for (const [wordIndex, word] of words.entries()) {
+    const semanticStart = Number(word.start);
+    const semanticEnd = Number(word.end);
+    const start = wordIndex === 0 ? displayBounds.start : semanticStart;
+    const end = wordIndex === words.length - 1
+      ? displayBounds.end
+      : semanticEnd;
+    const midpoint = semanticStart + (semanticEnd - semanticStart) / 2;
     const rangeKeys = Number.isFinite(midpoint)
       ? selectedTextRangeKeysAtTime(midpoint)
       : [];
@@ -655,6 +755,9 @@ function buildSegmentTextRuns(segment, deletedRanges) {
     if (canMerge) {
       previous.text += String(word.text || "");
       previous.end = Number.isFinite(end) ? end : previous.end;
+      previous.semanticEnd = Number.isFinite(semanticEnd)
+        ? semanticEnd
+        : previous.semanticEnd;
       previous.rangeKeys = [...new Set([...previous.rangeKeys, ...rangeKeys])];
       previous.suggestionRangeKeys = [
         ...new Set([
@@ -668,6 +771,8 @@ function buildSegmentTextRuns(segment, deletedRanges) {
         text: String(word.text || ""),
         start,
         end,
+        semanticStart,
+        semanticEnd,
         rangeKeys,
         suggestionRangeKeys,
         presentationKey,
@@ -738,6 +843,8 @@ function renderTextSegmentItem(run, segmentIndex, displayIndex) {
   item.dataset.displayKind = run.kind;
   item.dataset.displayStart = String(segmentStart);
   item.dataset.displayEnd = String(segmentEnd);
+  item.dataset.semanticStart = String(run.semanticStart);
+  item.dataset.semanticEnd = String(run.semanticEnd);
   item.dataset.displayText = run.text;
   item.dataset.rangeKeys = JSON.stringify(run.rangeKeys);
   item.dataset.displayKey =
@@ -897,7 +1004,7 @@ function renderCutSegments() {
   const deletedRanges = getCommittedTimelineSemanticDeleteRanges();
   const displayItems = [];
   currentEditableSegments.forEach((segment, segmentIndex) => {
-    for (const run of buildSegmentTextRuns(segment, deletedRanges)) {
+    for (const run of buildSegmentTextRuns(segment, deletedRanges, segmentIndex)) {
       displayItems.push({
         type: "text",
         start: Number(run.start),
@@ -1128,8 +1235,14 @@ function getLiveEditedSegmentTiming(
   segment,
   spans = getEditedTimelineSpans(),
 ) {
-  const segmentStart = Number(segment.start) || 0;
-  const segmentEnd = Number(segment.end) || segmentStart;
+  const semanticStart = Number(segment.start) || 0;
+  const semanticEnd = Number(segment.end) || semanticStart;
+  const segmentStart = Number.isFinite(Number(segment.mediaStart))
+    ? Number(segment.mediaStart)
+    : semanticStart;
+  const segmentEnd = Number.isFinite(Number(segment.mediaEnd))
+    ? Number(segment.mediaEnd)
+    : semanticEnd;
   const parts = spans
     .map((span) => {
       const sourceStart = Math.max(segmentStart, span.sourceStart);
@@ -1223,7 +1336,12 @@ function openSegmentEditDialog(segmentIndex) {
   if (cutControlsLocked || segmentOperationInFlight) return;
   const segment = currentEditableSegments[segmentIndex];
   if (!segment) return;
-  const timing = getLiveEditedSegmentTiming(segment);
+  const displayBounds = editableSegmentDisplayBounds(segment, segmentIndex);
+  const timing = getLiveEditedSegmentTiming({
+    ...segment,
+    mediaStart: displayBounds.start,
+    mediaEnd: displayBounds.end,
+  });
   if (!timing) {
     setSegmentStructureStatus("该段已从当前剪辑时间轴删除。", "error");
     return;
@@ -1264,6 +1382,7 @@ function setSegmentOperationBusy(busy) {
 
 async function applyEditableSegmentOperation(action) {
   if (segmentOperationInFlight || activeSegmentEditIndex === null) return;
+  const operationJobId = currentJobId;
   const payload = {
     segmentIndex: activeSegmentEditIndex,
     action,
@@ -1277,7 +1396,7 @@ async function applyEditableSegmentOperation(action) {
   setSegmentOperationBusy(true);
   try {
     const response = await fetch(
-      `/api/transcriptions/${encodeURIComponent(currentJobId)}/editable-segments`,
+      `/api/transcriptions/${encodeURIComponent(operationJobId)}/editable-segments`,
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -1288,7 +1407,17 @@ async function applyEditableSegmentOperation(action) {
     if (!response.ok) {
       throw new Error(result.detail || "分段调整失败，请重试。");
     }
+    if (currentJobId !== operationJobId) {
+      setSegmentOperationBusy(false);
+      return;
+    }
     currentEditableSegments = result.editableSegments || currentEditableSegments;
+    currentEditableSegmentBoundaries = Array.isArray(
+      result.editableSegmentBoundaries,
+    )
+      ? result.editableSegmentBoundaries
+      : currentEditableSegmentBoundaries;
+    serverRetainedProjection = null;
     transcriptCharacterUnitsCache = null;
     syncCorrectedWords();
     renderCutSegments();
@@ -1344,6 +1473,12 @@ async function saveSegmentText() {
       throw new Error("文字已保存，但当前项目已切换，未覆盖新项目状态。");
     }
     currentEditableSegments = result.editableSegments || currentEditableSegments;
+    currentEditableSegmentBoundaries = Array.isArray(
+      result.editableSegmentBoundaries,
+    )
+      ? result.editableSegmentBoundaries
+      : currentEditableSegmentBoundaries;
+    serverRetainedProjection = null;
     transcriptCharacterUnitsCache = null;
     syncCorrectedWords();
     invalidateCutPlaybackStructure();
@@ -2417,7 +2552,10 @@ function buildLocalRetainedProjection() {
       semanticDeleteRanges,
     ).map((part, partIndex) => ({
       id: `cut-draft-${segmentIndex}-${partIndex}`,
-      sourceSegmentIndex: segmentIndex,
+      editableSegmentId: segmentIndex,
+      sourceSegmentIndex: Number.isFinite(Number(segment.sourceSegmentIndex))
+        ? Number(segment.sourceSegmentIndex)
+        : segmentIndex,
       text: String(part.text || ""),
       start: part.editedStart,
       end: part.editedEnd,
@@ -4608,13 +4746,38 @@ function renderCutTimelineTextSegments() {
   const total = editedCutTimelineDuration(spans);
   if (total <= 0) return;
   const projection = getCurrentRetainedProjection();
+  const usesServerProjection = projection === serverRetainedProjection?.transcript;
 
   for (const part of projection.segments || []) {
     const segmentIndex = Number(part.sourceSegmentIndex) || 0;
-    const editedStart = Number(part.start) || 0;
-    const editedEnd = Number(part.end) || editedStart;
-    const sourceStart = Number(part.sourceStart);
-    const sourceEnd = Number(part.sourceEnd);
+    let editedStart = Number(part.start) || 0;
+    let editedEnd = Number(part.end) || editedStart;
+    let sourceStart = Number(part.sourceStart);
+    let sourceEnd = Number(part.sourceEnd);
+    const editableSegmentId = Number(part.editableSegmentId);
+    const editableSegment = Number.isInteger(editableSegmentId)
+      ? currentEditableSegments[editableSegmentId]
+      : null;
+    if (!usesServerProjection && editableSegment) {
+      const displayBounds = editableSegmentDisplayBounds(
+        editableSegment,
+        editableSegmentId,
+      );
+      const semanticStart = Number(editableSegment.start);
+      const semanticEnd = Number(editableSegment.end);
+      if (
+        Math.abs(sourceStart - semanticStart) <= CUT_SPEECH_BOUNDARY_EPSILON
+      ) {
+        sourceStart = displayBounds.start;
+      }
+      if (
+        Math.abs(sourceEnd - semanticEnd) <= CUT_SPEECH_BOUNDARY_EPSILON
+      ) {
+        sourceEnd = displayBounds.end;
+      }
+      editedStart = sourceTimeToEditedTime(sourceStart, spans);
+      editedEnd = sourceTimeToEditedTime(sourceEnd, spans);
+    }
     const item = document.createElement("span");
     item.className = "cut-timeline-text-segment";
     item.dataset.segmentIndex = String(segmentIndex);
@@ -5321,15 +5484,52 @@ function resetCutPlaybackCursors() {
   cutTimelineTextPlaybackLastTime = Number.NEGATIVE_INFINITY;
 }
 
+function skipSelectedRangeDuringPlayback(
+  sourceTime = cutPreviewVideo.currentTime || 0,
+) {
+  if (cutPreviewVideo.paused) return null;
+  const current = Number(sourceTime) || 0;
+  if (
+    transcriptPreviewRange &&
+    current >= transcriptPreviewRange.start - CUT_SPEECH_BOUNDARY_EPSILON &&
+    current < transcriptPreviewRange.end - CUT_SPEECH_BOUNDARY_EPSILON
+  ) {
+    return null;
+  }
+  const range = getMergedSelection().find(
+    ({ start, end }) => current >= start && current < end - 0.001,
+  );
+  if (!range) return null;
+  const nextTime = clamp(range.end, 0, cutTimelineDuration());
+  if (nextTime <= current) return null;
+  cutMediaController()?.seekSource(nextTime, { sync: false }) ??
+    (cutPreviewVideo.currentTime = nextTime);
+  updateCutTimelineStatus(
+    `剪辑预览已跳过 ${formatCutRange(range.start, range.end)}。`,
+    "success",
+    "preview",
+  );
+  return nextTime;
+}
+
+function handleCutPlaybackMediaFrame(sourceTime) {
+  if (skipSelectedRangeDuringPlayback(sourceTime) !== null) {
+    resetCutPlaybackCursors();
+    return { skipped: true };
+  }
+  updateCutPlaybackVisualFrame(sourceTime, { followTranscript: true });
+  return { skipped: false };
+}
+
 function setupCutPreviewControls() {
   let lastAudibleVolume = 1;
   const safeDuration = () => cutTimelineDuration();
   cutPlaybackFrameClock?.destroy();
   const sharedMedia = cutMediaController();
   if (sharedMedia) {
-    const unsubscribeFrame = sharedMedia.subscribeFrame(({ sourceTime }) => {
-      updateCutPlaybackVisualFrame(sourceTime, { followTranscript: true });
-    });
+    const unsubscribeFrame = sharedMedia.subscribeFrame(({ sourceTime }) =>
+      handleCutPlaybackMediaFrame(sourceTime),
+    );
     const unsubscribeState = sharedMedia.subscribeState(({ reason }) => {
       if (["seeking", "seeked", "ended", "emptied"].includes(reason)) {
         resetCutPlaybackCursors();
@@ -5352,30 +5552,6 @@ function setupCutPreviewControls() {
       },
     };
   }
-  const skipSelectedRangeDuringPlayback = () => {
-    if (cutPreviewVideo.paused) return null;
-    const current = cutPreviewVideo.currentTime || 0;
-    if (
-      transcriptPreviewRange &&
-      current >= transcriptPreviewRange.start - CUT_SPEECH_BOUNDARY_EPSILON &&
-      current < transcriptPreviewRange.end - CUT_SPEECH_BOUNDARY_EPSILON
-    ) {
-      return null;
-    }
-    const range = getMergedSelection().find(
-      ({ start, end }) => current >= start && current < end - 0.001,
-    );
-    if (!range) return null;
-    const nextTime = clamp(range.end, 0, safeDuration());
-    if (nextTime <= current) return null;
-    cutMediaController()?.seekSource(nextTime) ?? (cutPreviewVideo.currentTime = nextTime);
-    updateCutTimelineStatus(
-      `剪辑预览已跳过 ${formatCutRange(range.start, range.end)}。`,
-      "success",
-      "preview",
-    );
-    return nextTime;
-  };
   const updateTime = () => {
     const sourceTotal = safeDuration();
     let current = clamp(
@@ -5913,6 +6089,7 @@ function resetToUpload() {
   forgetJob();
   currentSegments = [];
   currentEditableSegments = [];
+  currentEditableSegmentBoundaries = [];
   transcriptCharacterUnitsCache = null;
   currentAudioQuietRanges = [];
   currentSuggestions = [];
@@ -6104,6 +6281,11 @@ function renderResult(job) {
     segments,
     result.editableSegments,
   );
+  currentEditableSegmentBoundaries = Array.isArray(
+    result.editableSegmentBoundaries,
+  )
+    ? result.editableSegmentBoundaries
+    : [];
   transcriptCharacterUnitsCache = null;
   currentAudioQuietRanges = (result.audioQuietRanges || []).flatMap((range) => {
     const start = Number(range?.start);
@@ -6686,8 +6868,10 @@ function handleTranscriptDisplayClick(event) {
   }
 
   const range = {
-    start: Number(segmentItem.dataset.displayStart),
-    end: Number(segmentItem.dataset.displayEnd),
+    start: Number(segmentItem.dataset.semanticStart),
+    end: Number(segmentItem.dataset.semanticEnd),
+    displayStart: Number(segmentItem.dataset.displayStart),
+    displayEnd: Number(segmentItem.dataset.displayEnd),
     text: String(segmentItem.dataset.displayText || ""),
   };
   if (!Number.isFinite(range.start) || !Number.isFinite(range.end)) return;
@@ -6727,7 +6911,10 @@ function handleTranscriptDisplayClick(event) {
       selectedRanges.delete(selectedKey);
     }
   }
-  const expandedRange = expandRangeToAdjacentSilence(semanticRange);
+  const expandedRange = applyEditableDirectionalBoundaries(
+    expandRangeToAdjacentSilence(semanticRange),
+    Number(segmentItem.dataset.segmentIndex),
+  );
   selectedRanges.set(key, expandedRange);
   updateSelectionSummary();
   scheduleCutPreviewEffect(() => previewSelectedCutRange(expandedRange));
