@@ -1659,15 +1659,19 @@ def _forced_deleted_head_segments() -> list[dict[str, object]]:
     ]
 
 
-def _forced_deleted_head_alignment_cache() -> dict[str, object]:
+def _forced_deleted_head_alignment_cache(
+    *,
+    retained_end: float = 0.5,
+    deleted_start: float = 0.8,
+) -> dict[str, object]:
     return {
         "segments": [
             {
                 "segmentIndex": 0,
                 "validation": {"valid": True},
                 "characters": [
-                    {"text": "人", "start": 0.05, "end": 0.5},
-                    {"text": "一", "start": 0.8, "end": 0.95},
+                    {"text": "人", "start": 0.05, "end": retained_end},
+                    {"text": "一", "start": deleted_start, "end": 0.95},
                     {"text": "留", "start": 0.97, "end": 1.15},
                 ],
             }
@@ -1684,6 +1688,87 @@ def _forced_deleted_head_samples(gain: int = 1) -> array:
         deleted_attack - quiet_start
     )
     return samples
+
+
+def _forced_deleted_head_lookahead_samples(
+    *,
+    onset: float,
+    gain: int,
+    noise: int,
+) -> array:
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    samples = array("h", [4_000 * gain]) * round(1.2 * sample_rate)
+    quiet_start = round(0.5 * sample_rate)
+    attack_start = round(onset * sample_rate)
+    attack_end = round(
+        (onset + app_module.CUT_BOUNDARY_STEP_SECONDS * 3) * sample_rate
+    )
+    for index in range(quiet_start, attack_start):
+        samples[index] = 20 * gain + ((index // 37) % 5 - 2) * noise
+    for index in range(attack_start, attack_end):
+        samples[index] = round(
+            20 * gain
+            + (4_000 * gain - 20 * gain)
+            * (index - attack_start)
+            / max(1, attack_end - attack_start)
+        )
+    return samples
+
+
+@pytest.mark.parametrize(
+    ("candidate_offset", "gain", "noise"),
+    [
+        (-0.003, 1, 0),
+        (0.0, 2, 3),
+        (0.003, 4, 7),
+    ],
+)
+def test_forced_delete_start_uses_post_candidate_blocks_only_as_attack_evidence(
+    candidate_offset: float,
+    gain: int,
+    noise: int,
+):
+    onset = 0.8
+    forced_candidate = onset + candidate_offset
+    corroborated, evidence = app_module.corroborate_forced_deleted_head_with_pcm(
+        0.5,
+        forced_candidate,
+        _forced_deleted_head_lookahead_samples(
+            onset=onset,
+            gain=gain,
+            noise=noise,
+        ),
+        app_module.CUT_BOUNDARY_SAMPLE_RATE,
+    )
+
+    assert corroborated is not None
+    assert 0.5 <= corroborated < forced_candidate
+    assert evidence["pcmCorroborated"] is True
+    assert evidence["pcmValleyStart"] <= corroborated <= evidence["pcmValleyEnd"]
+    assert evidence["pcmAttackStart"] > forced_candidate
+    assert corroborated == evidence["pcmValleyStart"]
+
+
+def test_forced_delete_start_rejects_late_attack_after_post_candidate_quiet_gap():
+    sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
+    samples = array("h", [4_000]) * round(1.2 * sample_rate)
+    quiet_start = round(0.5 * sample_rate)
+    late_attack_start = round(
+        (0.8 + app_module.CUT_BOUNDARY_STEP_SECONDS * 2) * sample_rate
+    )
+    samples[quiet_start:late_attack_start] = array("h", [20]) * (
+        late_attack_start - quiet_start
+    )
+
+    corroborated, evidence = app_module.corroborate_forced_deleted_head_with_pcm(
+        0.5,
+        0.8,
+        samples,
+        sample_rate,
+    )
+
+    assert corroborated is None
+    assert evidence["pcmCorroborated"] is False
 
 
 @pytest.mark.parametrize("gain", [1, 2, 4])
@@ -1753,11 +1838,121 @@ def test_forced_delete_start_clears_early_deleted_head_for_text_and_timeline(
         assert diagnostic["trustReason"] == "forced_deleted_head_pcm_valley"
 
 
+def test_post_candidate_deleted_head_boundary_is_shared_by_text_timeline_and_split(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    media_path = tmp_path / "deleted-head-source.mp4"
+    media_path.write_bytes(b"deleted-head-source")
+    samples = _forced_deleted_head_lookahead_samples(
+        onset=0.8,
+        gain=2,
+        noise=3,
+    )
+    alignment_cache = _forced_deleted_head_alignment_cache(deleted_start=0.803)
+    diagnostics: list[dict[str, object]] = []
+    forced_boundary_cache = {}
+    monkeypatch.setattr(
+        app_module,
+        "analyze_local_voice_activity",
+        lambda *_args, **_kwargs: {
+            "status": "completed",
+            "reason": None,
+            "speechRanges": [{"start": 0.0, "end": 1.2}],
+            "vad": "test-vad",
+            "modelRevision": "test",
+        },
+    )
+    delete_range = {
+        "key": "post-candidate-deleted-head",
+        "start": 0.85,
+        "end": 1.0,
+        "originalStart": 0.85,
+        "originalEnd": 1.0,
+    }
+
+    aligned_text = app_module.align_cut_draft_text_ranges_to_audio(
+        media_path,
+        [delete_range],
+        _forced_deleted_head_segments(),
+        1.2,
+        alignment_cache=alignment_cache,
+        samples=samples,
+        diagnostics=diagnostics,
+        forced_boundary_cache=forced_boundary_cache,
+    )[0]
+    aligned_timeline = app_module.align_cut_draft_timeline_ranges_to_audio(
+        [{**delete_range, "key": "post-candidate-deleted-head-timeline"}],
+        _forced_deleted_head_segments(),
+        1.2,
+        alignment_cache=alignment_cache,
+        samples=samples,
+        diagnostics=diagnostics,
+        forced_boundary_cache=forced_boundary_cache,
+        media_path=media_path,
+    )[0]
+    editable = app_module.apply_transcript_segment_operation(
+        app_module.build_editable_transcript_segments(
+            _forced_deleted_head_segments()
+        ),
+        app_module.TranscriptSegmentOperation(
+            segmentIndex=0,
+            action="split",
+            selectionStart=1,
+            selectionEnd=2,
+        ),
+    )
+    editable, records = app_module.enrich_editable_segment_boundaries(
+        media_path,
+        _forced_deleted_head_segments(),
+        editable,
+        alignment_cache=alignment_cache,
+        samples=samples,
+    )
+
+    split_boundary = next(
+        record
+        for record in records
+        if record["left"]["text"] == "人" and record["right"]["text"] == "一"
+    )
+    assert [item["text"] for item in editable] == ["人", "一", "留"]
+    assert 0.5 <= aligned_text["start"] < 0.803
+    assert aligned_timeline["start"] == aligned_text["start"]
+    assert split_boundary["deleteRight"] == aligned_text["start"]
+    assert split_boundary["mode"] == "aggressive"
+    for diagnostic in (
+        next(
+            item
+            for item in diagnostics
+            if item.get("direction") == "delete_start"
+            and item.get("entryType") != "timeline"
+        ),
+        next(
+            item
+            for item in diagnostics
+            if item.get("endpoint") == "start"
+            and item.get("entryType") == "timeline"
+        ),
+        split_boundary["diagnostic"]["forced"]["deleteRight"],
+    ):
+        assert diagnostic["final"] == aligned_text["start"]
+        assert diagnostic["pcmCorroborated"] is True
+        assert diagnostic["pcmValleyStart"] <= diagnostic["final"]
+        assert diagnostic["final"] <= diagnostic["pcmValleyEnd"]
+        assert diagnostic["pcmAttackStart"] > diagnostic["forcedCandidate"]
+        assert diagnostic["trustReason"] in {
+            "forced_deleted_head_pcm_valley",
+            "vad_directional_aggressive",
+        }
+
+
 @pytest.mark.parametrize(
     "shape",
     ["immediate_onset", "brief_dip", "single_point", "monotonic_rise"],
 )
-def test_forced_delete_start_without_sustained_quiet_keeps_candidate(shape: str):
+def test_forced_delete_start_without_sustained_quiet_uses_protected_fallback(
+    shape: str,
+):
     sample_rate = app_module.CUT_BOUNDARY_SAMPLE_RATE
     samples = array("h", [4_000]) * round(1.2 * sample_rate)
     if shape == "brief_dip":
@@ -1813,16 +2008,25 @@ def test_forced_delete_start_without_sustained_quiet_keeps_candidate(shape: str)
         diagnostics=diagnostics,
     )[0]
 
-    if shape == "monotonic_rise":
-        assert 0.797 <= aligned["start"] <= 0.8
-    else:
-        assert aligned["start"] == 0.8
     diagnostic = next(
         item for item in diagnostics if item.get("direction") == "delete_start"
     )
+    assert 0.5 <= aligned["start"] <= 0.85
     assert diagnostic["retainedSpeechHardLimit"] == 0.5
     assert diagnostic["pcmCorroborated"] is False
-    assert diagnostic["trustReason"] == "forced_transition"
+    assert diagnostic["boundaryTrustworthy"] is False
+    assert (
+        diagnostic["forcedFallbackReason"]
+        == "forced_deleted_head_pcm_not_corroborated"
+    )
+    assert (
+        diagnostic["fallbackReason"]
+        == "forced_deleted_head_pcm_not_corroborated"
+    )
+    assert (
+        diagnostic["trustReason"]
+        == "forced_deleted_head_pcm_not_corroborated"
+    )
 
 
 def test_forced_delete_start_uses_first_corroborated_attack_after_retained_limit():
