@@ -704,3 +704,26 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 32: 修复艺术字语义词拆分
+
+**Date**: 2026-08-27
+**Task**: 修复艺术字语义词拆分
+**Branch**: `master`
+
+### Summary
+
+统一后端文字保存与前端全文艺术字重投影的语义边界契约，修复修改文案后拆分删除导致词内切分，并补齐全链路回归与规范。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `7328c92` | (see git log) |
+| `dca50b4` | (see git log) |
+| `bc4a38a` | (see git log) |
+
+### Status
+
+[OK] **Completed**
