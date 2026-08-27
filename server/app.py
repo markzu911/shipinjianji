@@ -11594,7 +11594,9 @@ def apply_transcript_segment_operation(
         start = float(segment.get("start") or 0)
         end = max(start, float(segment.get("end") or start))
         segment["text"] = new_text
-        segment["words"] = split_timed_text_units(new_text, start, end)
+        segment["words"] = retokenize_words(
+            split_timed_text_units(new_text, start, end)
+        )
         return normalize_editable_segment_ids(segments)
     if operation.action == "merge_up":
         if segment_index == 0:
@@ -11937,82 +11939,278 @@ def update_transcript_track_text_for_segment(
     segment_start: float,
     segment_end: float,
     new_text: str,
+    *,
+    words: list[dict[str, Any]] | None = None,
 ) -> None:
     """Update only the subtitle-track cues that overlap an edited segment.
 
-    The cue TIMES stay exactly as they were; only the text changes, distributed
-    proportionally across the overlapping cues by their source duration. This
-    keeps the existing subtitle timeline stable when the 文案 is edited, instead
-    of re-flowing every cue from a fresh segmentation.
+    Existing cue text owns the semantic partition. Text edits project those
+    boundaries monotonically onto the updated natural words; cue timing and
+    styling remain unchanged.
     """
-    try:
-        overlays = art.get("overlays") or []
-        track_items = [
-            item
-            for item in overlays
-            if item.get("trackType") == TRANSCRIPT_ART_TEXT_TRACK_TYPE
+    overlays = art.get("overlays") or []
+    suppressed_overlays = art.get("suppressedOverlays") or []
+    all_overlays: list[dict[str, Any]] = []
+    seen_overlays: set[int] = set()
+    for item in [*overlays, *suppressed_overlays]:
+        if not isinstance(item, dict) or id(item) in seen_overlays:
+            continue
+        seen_overlays.add(id(item))
+        all_overlays.append(item)
+    active_overlay_ids = {id(item) for item in overlays if isinstance(item, dict)}
+    track_items = [
+        item
+        for item in all_overlays
+        if item.get("trackType") == TRANSCRIPT_ART_TEXT_TRACK_TYPE
+    ]
+    if not track_items:
+        return
+    overlapping = [
+        item
+        for item in track_items
+        if float(item.get("sourceEnd") or item.get("end") or 0) > segment_start
+        and float(item.get("sourceStart") or item.get("start") or 0) < segment_end
+    ]
+    if not overlapping:
+        return
+    overlapping.sort(
+        key=lambda item: (
+            float(item.get("sourceStart") or item.get("start") or 0),
+            float(item.get("sourceEnd") or item.get("end") or 0),
+        )
+    )
+    old_texts = [
+        content_characters(str(item.get("text") or "")) for item in overlapping
+    ]
+    old_characters = list("".join(old_texts))
+    new_characters = list(content_characters(new_text))
+    if not new_characters:
+        return
+
+    semantic_boundaries = {0, len(new_characters)}
+    word_characters = [
+        content_characters(str(word.get("text") or ""))
+        for word in words or []
+        if isinstance(word, dict)
+    ]
+    if "".join(word_characters) == "".join(new_characters):
+        cursor = 0
+        next_word_by_boundary: dict[int, str] = {}
+        for token in word_characters:
+            next_word_by_boundary[cursor] = token
+            cursor += len(token)
+            semantic_boundaries.add(cursor)
+    else:
+        next_word_by_boundary = {}
+        semantic_boundaries.update(
+            sum(len(text) for text in old_texts[:index])
+            for index in range(1, len(old_texts))
+        )
+
+    matcher = difflib.SequenceMatcher(
+        None,
+        old_characters,
+        new_characters,
+        autojunk=False,
+    )
+    opcodes = matcher.get_opcodes()
+
+    def project_boundary(old_boundary: int) -> int:
+        for operation, old_start, old_end, new_start, new_end in opcodes:
+            if old_start <= old_boundary <= old_end:
+                if operation == "equal":
+                    return new_start + old_boundary - old_start
+                if old_end == old_start:
+                    return new_start
+                ratio = (old_boundary - old_start) / (old_end - old_start)
+                return round(new_start + (new_end - new_start) * ratio)
+        return len(new_characters)
+
+    boundaries = [0]
+    old_cursor = 0
+    weak_starters = {
+        "的",
+        "地",
+        "得",
+        "了",
+        "着",
+        "过",
+        "吗",
+        "呢",
+        "啊",
+        "是",
+        "赚",
+        "做",
+        "有",
+        "能",
+        "会",
+        "想",
+        "要",
+        "说",
+        "给",
+        "让",
+        "把",
+        "被",
+        "在",
+        "跟",
+        "就",
+        "都",
+        "觉得",
+        "发现",
+        "认为",
+    }
+
+    def split_is_unsafe(previous: int, candidate: int) -> bool:
+        if candidate <= previous or candidate - previous == 1:
+            return True
+        if len(new_characters) - candidate == 1:
+            return True
+        left_text = "".join(new_characters[previous:candidate])
+        if transcript_art_text_split_is_incomplete(left_text):
+            return True
+        return next_word_by_boundary.get(candidate) in weak_starters
+
+    for old_text in old_texts[:-1]:
+        old_cursor += len(old_text)
+        preference = project_boundary(old_cursor)
+        candidates = [
+            boundary
+            for boundary in semantic_boundaries
+            if boundaries[-1] <= boundary <= len(new_characters)
         ]
-        if not track_items:
-            return
-        overlapping = [
-            item
-            for item in track_items
-            if float(item.get("sourceEnd") or item.get("end") or 0) > segment_start
-            and float(item.get("sourceStart") or item.get("start") or 0) < segment_end
+        all_safe_candidates = [
+            boundary
+            for boundary in candidates
+            if not split_is_unsafe(boundaries[-1], boundary)
         ]
-        if not overlapping:
-            return
-        overlapping.sort(
-            key=lambda item: (
-                float(item.get("sourceStart") or item.get("start") or 0),
-                float(item.get("sourceEnd") or item.get("end") or 0),
+        has_safe_internal_alternative = any(
+            boundaries[-1] < boundary < len(new_characters)
+            for boundary in all_safe_candidates
+        )
+        inherited_is_legal = (
+            preference in semantic_boundaries
+            and (
+                preference == boundaries[-1]
+                or not split_is_unsafe(boundaries[-1], preference)
+                or not has_safe_internal_alternative
             )
         )
-        chars = list(content_characters(new_text))
-        if not chars:
-            return
-        durations = [
-            max(
-                0.001,
-                float(item.get("sourceEnd") or item.get("end") or 0)
-                - float(item.get("sourceStart") or item.get("start") or 0),
-            )
-            for item in overlapping
+        if inherited_is_legal:
+            boundaries.append(preference)
+            continue
+        if preference not in semantic_boundaries:
+            candidates = [boundary for boundary in candidates if boundary >= preference]
+        safe_candidates = [
+            boundary
+            for boundary in candidates
+            if not split_is_unsafe(boundaries[-1], boundary)
         ]
-        total = sum(durations)
-        cursor = 0
-        for index, item in enumerate(overlapping):
-            remaining_chars = len(chars) - cursor
-            remaining_cues = len(overlapping) - index
-            if index == len(overlapping) - 1:
-                count = remaining_chars
-            else:
-                count = round(remaining_chars * durations[index] / total)
-                # Leave at least one character for each cue still to come, and
-                # never strand a cue with no text when the input shrank.
-                count = min(count, remaining_chars - (remaining_cues - 1))
-                count = max(1, count)
-            item["text"] = "".join(chars[cursor : cursor + count])
-            cursor += count
-        # The previously rendered art video used the old subtitles, so it is
-        # now stale and must be regenerated. Keep the editable overlays while
-        # moving the subjob into a persisted, non-running retry state.
-        now = utc_now()
-        previous_status = str(art.get("status") or "")
-        if previous_status != "interrupted":
-            if previous_status:
-                art["previousStatus"] = previous_status
-            art["previousStage"] = art.get("stage")
-        art["status"] = "interrupted"
-        art["stage"] = "文案已更新，艺术字待重新生成"
-        art["error"] = "文案已更新，请重新生成艺术字视频。"
-        art["retryable"] = True
-        art["outputUrl"] = None
-        art["interruptedAt"] = now
-        art["updatedAt"] = now
-    except Exception:
-        # The subtitle text update is a best-effort enhancement.
-        return
+        boundaries.append(
+            min(
+                safe_candidates,
+                key=lambda boundary: (abs(boundary - preference), boundary),
+            )
+            if safe_candidates
+            else boundaries[-1]
+        )
+    boundaries.append(len(new_characters))
+
+    next_texts = [
+        "".join(new_characters[boundaries[index] : boundaries[index + 1]])
+        for index in range(len(overlapping))
+    ]
+    if "".join(next_texts) != "".join(new_characters):
+        raise RuntimeError("艺术字文案字符投影失败。")
+
+    projected_texts = {
+        id(item): text
+        for item, text in zip(overlapping, next_texts, strict=True)
+    }
+    for item, old_text, text in zip(overlapping, old_texts, next_texts, strict=True):
+        if not text:
+            continue
+        item["text"] = text
+        old_timings = item.get("characterTimings") or []
+        if text == old_text and len(old_timings) == len(text):
+            continue
+        start = float(item.get("start") or 0)
+        end = max(start, float(item.get("end") or start))
+        duration = end - start
+        item["characterTimings"] = [
+            {
+                "start": round(start + duration * index / len(text), 6),
+                "end": round(start + duration * (index + 1) / len(text), 6),
+            }
+            for index in range(len(text))
+        ]
+
+    overlapping_ids = {id(item) for item in overlapping}
+    active_items: list[dict[str, Any]] = []
+    suppressed_items: list[dict[str, Any]] = []
+    for item in all_overlays:
+        is_transcript_cue = (
+            item.get("trackType") == TRANSCRIPT_ART_TEXT_TRACK_TYPE
+        )
+        if not is_transcript_cue:
+            (active_items if id(item) in active_overlay_ids else suppressed_items).append(
+                item
+            )
+            continue
+        if id(item) in overlapping_ids:
+            target = active_items if projected_texts.get(id(item)) else suppressed_items
+            target.append(item)
+        elif id(item) in active_overlay_ids:
+            active_items.append(item)
+        else:
+            suppressed_items.append(item)
+
+    def overlay_order(item: dict[str, Any]) -> tuple[float, float]:
+        start = float(item.get("sourceStart") or item.get("start") or 0)
+        end = float(item.get("sourceEnd") or item.get("end") or start)
+        return start, end
+
+    def order_transcript_cues_in_place(
+        items: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Sort cue slots per track without moving unrelated manual overlays."""
+        ordered = list(items)
+        track_ids = list(
+            dict.fromkeys(
+                str(item.get("trackId") or "")
+                for item in ordered
+                if item.get("trackType") == TRANSCRIPT_ART_TEXT_TRACK_TYPE
+            )
+        )
+        for track_id in track_ids:
+            positions = [
+                index
+                for index, item in enumerate(ordered)
+                if item.get("trackType") == TRANSCRIPT_ART_TEXT_TRACK_TYPE
+                and str(item.get("trackId") or "") == track_id
+            ]
+            cues = sorted((ordered[index] for index in positions), key=overlay_order)
+            for index, cue in zip(positions, cues, strict=True):
+                ordered[index] = cue
+        return ordered
+
+    art["overlays"] = order_transcript_cues_in_place(active_items)
+    art["suppressedOverlays"] = order_transcript_cues_in_place(suppressed_items)
+
+    # The previously rendered art video used the old subtitles, so it is now
+    # stale and must be regenerated in a persisted, non-running retry state.
+    now = utc_now()
+    previous_status = str(art.get("status") or "")
+    if previous_status != "interrupted":
+        if previous_status:
+            art["previousStatus"] = previous_status
+        art["previousStage"] = art.get("stage")
+    art["status"] = "interrupted"
+    art["stage"] = "文案已更新，艺术字待重新生成"
+    art["error"] = "文案已更新，请重新生成艺术字视频。"
+    art["retryable"] = True
+    art["outputUrl"] = None
+    art["interruptedAt"] = now
+    art["updatedAt"] = now
 
 
 def polish_punctuation(text: str, api_key: str) -> str | None:
@@ -15140,6 +15338,7 @@ def update_editable_transcript_segments(
                     float(source_segment.get("start") or 0),
                     float(source_segment.get("end") or 0),
                     source_segment.get("text") or "",
+                    words=source_segment.get("words"),
                 )
         if edit_transcript is not None:
             edit = job.get("edit") or {}

@@ -514,6 +514,24 @@
       return next;
     }
 
+    function preserveOverlayTiming(overlay, baseline) {
+      if (!baseline) return clone(overlay);
+      const next = {
+        ...clone(overlay),
+        start: clone(baseline.start),
+        end: clone(baseline.end),
+        characterTimings: textCharacterTimings(baseline, overlay?.text),
+      };
+      for (const field of ["sourceStart", "sourceEnd"]) {
+        if (Object.prototype.hasOwnProperty.call(baseline, field)) {
+          next[field] = clone(baseline[field]);
+        } else {
+          delete next[field];
+        }
+      }
+      return next;
+    }
+
     function mergeArtText(currentArt, serverArt) {
       if (!Array.isArray(serverArt?.overlays) || !serverArt.overlays.length) {
         return clone(currentArt);
@@ -603,6 +621,7 @@
         next.art = {
           ...(next.art || incomingJob.art || {}),
           overlays: clone(mergedArt?.overlays || []),
+          suppressedOverlays: clone(mergedArt?.suppressedOverlays || []),
         };
       }
       return next;
@@ -871,17 +890,50 @@
         const transcript = payload.transcript || payload.job?.result;
         if (!isObject(transcript)) return null;
         const mergedArt = mergeArtText(project.art, payload.serverArt || payload.job?.art);
+        const selectionBeforeTextChange = project.timeline.selection;
+        let artBeforeReconciliation = null;
+        let artReconciliation = null;
         project.transcript = clone(transcript);
         project.editableSegments = Array.isArray(payload.editableSegments)
           ? clone(payload.editableSegments)
           : clone(transcript.editableSegments || project.editableSegments);
         project.art = mergedArt;
-        project.job = mergeJobText(project.job, payload.job, mergedArt);
         if (isObject(payload.cutTranscript)) {
           project.cut = normalizeCut({
             ...project.cut,
             transcript: payload.cutTranscript,
           });
+          artBeforeReconciliation = project.art;
+          artReconciliation = root.EditorArtModel?.reconcileArtWithCut?.(
+            project.art,
+            project.cut,
+            project.cut,
+          ) || null;
+          if (artReconciliation?.art) {
+            const baselineById = new Map(
+              [
+                ...(artBeforeReconciliation?.overlays || []),
+                ...(artBeforeReconciliation?.suppressedOverlays || []),
+              ].map((overlay) => [
+                String(overlay?.id || ""),
+                overlay,
+              ]),
+            );
+            project.art = normalizeTool(
+              {
+                ...artReconciliation.art,
+                overlays: artReconciliation.art.overlays.map((overlay) =>
+                  preserveOverlayTiming(
+                    overlay,
+                    baselineById.get(String(overlay?.id || "")),
+                  ),
+                ),
+              },
+              project.art.source,
+              "art",
+              project.art.assets,
+            );
+          }
           project.timeline = replaceTimelineKind(
             project.timeline,
             "cut",
@@ -898,14 +950,32 @@
             timelineApi,
           );
         }
+        project.job = mergeJobText(project.job, payload.job, project.art);
+        const currentSelection = String(selectionBeforeTextChange?.clipId || "")
+          .startsWith("art:")
+          ? selectionBeforeTextChange
+          : project.timeline.selection;
+        const selectedArtId = String(currentSelection?.clipId || "").startsWith("art:")
+          ? String(currentSelection.clipId).slice(4)
+          : "";
+        const artSelection = artReconciliation?.art
+          ? resolveArtSelection(
+              currentSelection,
+              artBeforeReconciliation,
+              project.art,
+              artReconciliation.activeIds,
+            )
+          : currentSelection;
         project.timeline = replaceTimelineKind(
           project.timeline,
           "art",
           {
             duration: project.cut.duration,
             tracks: toolTimelineTracks("art", project.art),
+            selection: artSelection,
           },
           timelineApi,
+          { acceptIncomingSelection: Boolean(selectedArtId) },
         );
         serverVersion = String(
           payload.serverVersion || payload.job?.updatedAt || serverVersion,

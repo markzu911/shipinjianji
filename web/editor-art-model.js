@@ -9,6 +9,7 @@
 
     const MANUAL_OVERLAY_LIMIT = 20;
     const TRANSCRIPT_TRACK_TYPE = "transcript";
+    const FULL_TRANSCRIPT_TRACK_ID = "transcript-full";
     const CUT_RECONCILIATION_FIELD = "_cutReconciliation";
     const TRANSCRIPT_STYLE_FIELDS = Object.freeze([
       "font", "fontSize", "color", "strokeColor", "strokeWidth", "shadow",
@@ -174,14 +175,21 @@
       for (const [segmentIndex, segment] of (
         Array.isArray(transcript?.segments) ? transcript.segments : []
       ).entries()) {
-        const words = (Array.isArray(segment?.words) ? segment.words : []).filter(
-          (word) => charactersFor(word?.text).length && validTimedRange(word),
-        );
-        const asrWords = (Array.isArray(segment?.asrWords) ? segment.asrWords : []).filter(
-          (word) => charactersFor(word?.text).length && validTimedRange(word),
-        );
-        const items = words.length ? words : asrWords.length ? asrWords : [segment];
-        for (const item of items) {
+        const segmentCharacters = charactersFor(segment?.text).join("");
+        const usableItems = (value) => {
+          const items = (Array.isArray(value) ? value : []).filter(
+            (item) => charactersFor(item?.text).length,
+          );
+          return items.length &&
+            items.every((item) => validTimedRange(item)) &&
+            items.flatMap((item) => charactersFor(item?.text)).join("") === segmentCharacters
+            ? items
+            : null;
+        };
+        const items = usableItems(segment?.words) ||
+          usableItems(segment?.asrWords) ||
+          [segment];
+        for (const [semanticUnitIndex, item] of items.entries()) {
           const characters = [];
           for (const character of [...String(item?.text || "")]) {
             if (/\s/u.test(character)) {
@@ -225,6 +233,7 @@
               sourceStart,
               sourceEnd,
               segmentIndex,
+              semanticUnitIndex,
             });
           }
         }
@@ -452,23 +461,40 @@
       const segments = Array.isArray(transcript?.segments)
         ? transcript.segments
         : [];
-      const texts = segments.length
-        ? segments.map((segment) => String(segment?.text || ""))
-        : [String(transcript?.text || "")];
+      const semanticSegments = segments.length
+        ? segments
+        : [{ text: String(transcript?.text || "") }];
       const characters = [];
       let pendingWhitespace = false;
-      for (const text of texts) {
-        for (const character of [...text]) {
-          if (/\s/u.test(character)) {
-            pendingWhitespace = pendingWhitespace || characters.length > 0;
-            continue;
+      for (const [segmentIndex, segment] of semanticSegments.entries()) {
+        const segmentCharacters = contentCharacters(segment?.text).join("");
+        const semanticItems = (value) => {
+          const items = (Array.isArray(value) ? value : []).filter(
+            (item) => contentCharacters(item?.text).length,
+          );
+          return items.length &&
+            items.flatMap((item) => contentCharacters(item?.text)).join("") === segmentCharacters
+            ? items
+            : null;
+        };
+        const items = semanticItems(segment?.words) ||
+          semanticItems(segment?.asrWords) ||
+          [segment];
+        for (const [semanticUnitIndex, item] of items.entries()) {
+          for (const character of [...String(item?.text || "")]) {
+            if (/\s/u.test(character)) {
+              pendingWhitespace = pendingWhitespace || characters.length > 0;
+              continue;
+            }
+            if (/\p{P}/u.test(character)) continue;
+            characters.push({
+              character,
+              separatorBefore: pendingWhitespace ? " " : "",
+              segmentIndex,
+              semanticUnitIndex,
+            });
+            pendingWhitespace = false;
           }
-          if (/\p{P}/u.test(character)) continue;
-          characters.push({
-            character,
-            separatorBefore: pendingWhitespace ? " " : "",
-          });
-          pendingWhitespace = false;
         }
       }
       return characters;
@@ -538,8 +564,179 @@
       return Math.round(unitCount * ratio);
     }
 
+    function transcriptSemanticSplitIndexes(units) {
+      const boundaries = new Set([0, units.length]);
+      for (let index = 1; index < units.length; index += 1) {
+        const previous = units[index - 1];
+        const current = units[index];
+        if (
+          previous.segmentIndex !== current.segmentIndex ||
+          previous.semanticUnitIndex !== current.semanticUnitIndex
+        ) {
+          boundaries.add(index);
+        }
+      }
+      return [...boundaries].sort((left, right) => left - right);
+    }
+
+    const TRANSCRIPT_INCOMPLETE_ENDINGS = Object.freeze([
+      "这辈子", "最难", "最重要", "最关键", "因为", "如果", "虽然",
+      "但是", "而是", "需要", "应该", "可以", "不能", "不会", "没有",
+      "不是", "想要", "为了", "通过", "正在", "已经", "从来不", "最",
+      "才", "还", "又", "赚", "跟", "到", "被你", "把你", "给你",
+      "让你", "由你", "对你", "过来跟", "这件", "这个", "这种", "那些",
+      "一个", "所有", "第一",
+    ]);
+    const TRANSCRIPT_WEAK_STARTERS = new Set([
+      "的", "地", "得", "了", "着", "过", "吗", "呢", "啊", "是", "赚",
+      "做", "有", "能", "会", "想", "要", "说", "给", "让", "把", "被",
+      "在", "跟", "就", "都", "觉得", "发现", "认为",
+    ]);
+
+    function transcriptSemanticUnitText(units, index) {
+      const first = units[index];
+      if (!first) return "";
+      const characters = [];
+      for (let cursor = index; cursor < units.length; cursor += 1) {
+        const unit = units[cursor];
+        if (
+          unit.segmentIndex !== first.segmentIndex ||
+          unit.semanticUnitIndex !== first.semanticUnitIndex
+        ) {
+          break;
+        }
+        characters.push(unit.character);
+      }
+      return characters.join("");
+    }
+
+    function transcriptSplitIsUnsafe(units, cursor, candidate) {
+      if (candidate <= cursor || candidate - cursor === 1) return true;
+      if (units.length - candidate === 1) return true;
+      const leftText = units.slice(cursor, candidate)
+        .map((unit) => unit.character).join("");
+      if (TRANSCRIPT_INCOMPLETE_ENDINGS.some((ending) => leftText.endsWith(ending))) {
+        return true;
+      }
+      return TRANSCRIPT_WEAK_STARTERS.has(
+        transcriptSemanticUnitText(units, candidate),
+      );
+    }
+
+    function transcriptCharacterMatches(oldCharacters, newCharacters) {
+      const matches = [];
+      let prefix = 0;
+      while (
+        prefix < oldCharacters.length &&
+        prefix < newCharacters.length &&
+        oldCharacters[prefix] === newCharacters[prefix]
+      ) {
+        matches.push([prefix, prefix]);
+        prefix += 1;
+      }
+      let suffix = 0;
+      while (
+        suffix < oldCharacters.length - prefix &&
+        suffix < newCharacters.length - prefix &&
+        oldCharacters[oldCharacters.length - suffix - 1] ===
+          newCharacters[newCharacters.length - suffix - 1]
+      ) {
+        suffix += 1;
+      }
+
+      const oldMiddle = oldCharacters.slice(prefix, oldCharacters.length - suffix);
+      const newMiddle = newCharacters.slice(prefix, newCharacters.length - suffix);
+      const maximumCells = 2_000_000;
+      if (
+        oldMiddle.length &&
+        newMiddle.length &&
+        oldMiddle.length * newMiddle.length <= maximumCells
+      ) {
+        const stride = newMiddle.length + 1;
+        const lengths = new Uint32Array((oldMiddle.length + 1) * stride);
+        for (let oldIndex = oldMiddle.length - 1; oldIndex >= 0; oldIndex -= 1) {
+          for (let newIndex = newMiddle.length - 1; newIndex >= 0; newIndex -= 1) {
+            const offset = oldIndex * stride + newIndex;
+            lengths[offset] = oldMiddle[oldIndex] === newMiddle[newIndex]
+              ? lengths[(oldIndex + 1) * stride + newIndex + 1] + 1
+              : Math.max(
+                  lengths[(oldIndex + 1) * stride + newIndex],
+                  lengths[offset + 1],
+                );
+          }
+        }
+        let oldIndex = 0;
+        let newIndex = 0;
+        while (oldIndex < oldMiddle.length && newIndex < newMiddle.length) {
+          if (
+            oldMiddle[oldIndex] === newMiddle[newIndex] &&
+            lengths[oldIndex * stride + newIndex] ===
+              lengths[(oldIndex + 1) * stride + newIndex + 1] + 1
+          ) {
+            matches.push([prefix + oldIndex, prefix + newIndex]);
+            oldIndex += 1;
+            newIndex += 1;
+          } else if (
+            lengths[(oldIndex + 1) * stride + newIndex] >=
+            lengths[oldIndex * stride + newIndex + 1]
+          ) {
+            oldIndex += 1;
+          } else {
+            newIndex += 1;
+          }
+        }
+      }
+      for (let index = suffix; index > 0; index -= 1) {
+        matches.push([
+          oldCharacters.length - index,
+          newCharacters.length - index,
+        ]);
+      }
+      return matches;
+    }
+
+    function transcriptTrackBoundaryProjections(entries, units) {
+      const oldTexts = entries.map((entry) => contentCharacters(entry.base?.text));
+      const oldCharacters = oldTexts.flat();
+      const newCharacters = units.map((unit) => unit.character);
+      const matches = transcriptCharacterMatches(oldCharacters, newCharacters);
+      let oldCursor = 0;
+      return oldTexts.slice(0, -1).map((text) => {
+        oldCursor += text.length;
+        let lower = 0;
+        let upper = newCharacters.length;
+        for (const [oldIndex, newIndex] of matches) {
+          if (oldIndex < oldCursor) lower = newIndex + 1;
+          else {
+            upper = newIndex;
+            break;
+          }
+        }
+        return {
+          lower: Math.min(lower, upper),
+          upper: Math.max(lower, upper),
+        };
+      });
+    }
+
+    function nearestTranscriptSemanticSplit(candidates, preference, cursor) {
+      const available = candidates.filter((candidate) => candidate >= cursor);
+      if (!available.length) return cursor;
+      return available.reduce((best, candidate) => (
+        Math.abs(candidate - preference) < Math.abs(best - preference) ||
+        (
+          Math.abs(candidate - preference) === Math.abs(best - preference) &&
+          candidate < best
+        )
+          ? candidate
+          : best
+      ));
+    }
+
     function partitionTranscriptTrack(entries, units, preferSourceBoundaries = true) {
       const boundaries = [0];
+      const semanticSplits = transcriptSemanticSplitIndexes(units);
+      const projections = transcriptTrackBoundaryProjections(entries, units);
       let cursor = 0;
       for (let index = 0; index < entries.length - 1; index += 1) {
         const preference = transcriptBoundaryPreference(entries[index], entries[index + 1]);
@@ -549,7 +746,46 @@
         const splitIndex = sourceSplit === null
           ? transcriptCapacitySplitIndex(entries, index, units.length)
           : sourceSplit;
-        cursor = clamp(splitIndex, cursor, units.length);
+        const projection = projections[index];
+        const lower = Math.max(cursor, projection?.lower ?? cursor);
+        const upper = Math.max(lower, projection?.upper ?? units.length);
+        const safeInternalAlternative = semanticSplits.some(
+          (candidate) =>
+            candidate > cursor &&
+            candidate < units.length &&
+            !transcriptSplitIsUnsafe(units, cursor, candidate),
+        );
+        const inheritedIsLegal =
+          lower === upper &&
+          semanticSplits.includes(lower) &&
+          (
+            lower === cursor ||
+            !transcriptSplitIsUnsafe(units, cursor, lower) ||
+            !safeInternalAlternative
+          );
+        if (inheritedIsLegal) {
+          cursor = lower;
+        } else {
+          const projectionIsInsideWord =
+            lower === upper && !semanticSplits.includes(lower);
+          const candidateLower = projectionIsInsideWord ? lower : cursor;
+          const candidateUpper = lower === upper ? units.length : upper;
+          const candidates = semanticSplits.filter(
+            (candidate) =>
+              candidate >= candidateLower &&
+              candidate <= candidateUpper &&
+              !transcriptSplitIsUnsafe(units, cursor, candidate),
+          );
+          cursor = candidates.length
+            ? nearestTranscriptSemanticSplit(
+                candidates,
+                projectionIsInsideWord
+                  ? candidateLower
+                  : clamp(splitIndex, candidateLower, candidateUpper),
+                candidateLower,
+              )
+            : cursor;
+        }
         boundaries.push(cursor);
       }
       boundaries.push(units.length);
@@ -643,12 +879,98 @@
       return { active, suppressed };
     }
 
+    function transcriptUnitsForTrack(entries, units, limitToTrackCoverage = false) {
+      if (!units.length) return units;
+      const fullTranscriptTrack = entries.some(
+        (entry) => String(entry.base?.trackId || "") === FULL_TRANSCRIPT_TRACK_ID,
+      );
+      const target = entries.flatMap((entry) =>
+        contentCharacters(entry.base?.text),
+      );
+      const semanticMatches = [];
+      if (!fullTranscriptTrack && target.length && target.length <= units.length) {
+        for (let index = 0; index <= units.length - target.length; index += 1) {
+          if (
+            target.every(
+              (character, offset) => units[index + offset].character === character,
+            )
+          ) {
+            const end = index + target.length;
+            const startsAtSegmentBoundary =
+              index === 0 ||
+              units[index - 1].segmentIndex !== units[index].segmentIndex;
+            const endsAtSegmentBoundary =
+              end === units.length ||
+              units[end - 1].segmentIndex !== units[end].segmentIndex;
+            if (startsAtSegmentBoundary && endsAtSegmentBoundary) {
+              semanticMatches.push(index);
+            }
+          }
+        }
+      }
+      const ranges = entries.flatMap((entry) =>
+        entry.sourceRange ? [entry.sourceRange] : [],
+      );
+      if (semanticMatches.length) {
+        const trackCenter = ranges.length
+          ? (
+              Math.min(...ranges.map((range) => range.start)) +
+              Math.max(...ranges.map((range) => range.end))
+            ) / 2
+          : null;
+        const matchStart = semanticMatches.reduce((best, candidate) => {
+          if (!Number.isFinite(trackCenter)) return Math.min(best, candidate);
+          const first = units[candidate];
+          const last = units[candidate + target.length - 1];
+          const candidateCenter =
+            Number.isFinite(first.sourceStart) && Number.isFinite(last.sourceEnd)
+              ? (first.sourceStart + last.sourceEnd) / 2
+              : null;
+          const bestFirst = units[best];
+          const bestLast = units[best + target.length - 1];
+          const bestCenter =
+            Number.isFinite(bestFirst.sourceStart) && Number.isFinite(bestLast.sourceEnd)
+              ? (bestFirst.sourceStart + bestLast.sourceEnd) / 2
+              : null;
+          if (!Number.isFinite(candidateCenter)) return best;
+          if (!Number.isFinite(bestCenter)) return candidate;
+          return Math.abs(candidateCenter - trackCenter) < Math.abs(bestCenter - trackCenter)
+            ? candidate
+            : best;
+        });
+        return units.slice(matchStart, matchStart + target.length);
+      }
+      if (
+        fullTranscriptTrack ||
+        !limitToTrackCoverage ||
+        !units.every((unit) =>
+          Number.isFinite(unit.sourceStart) && Number.isFinite(unit.sourceEnd),
+        )
+      ) {
+        return units;
+      }
+      if (!ranges.length) return units;
+      const trackStart = Math.min(...ranges.map((range) => range.start));
+      const trackEnd = Math.max(...ranges.map((range) => range.end));
+      const semanticUnitKey = (unit) =>
+        `${unit.segmentIndex}:${unit.semanticUnitIndex}`;
+      const retainedSemanticUnits = new Set(
+        units
+          .filter(
+            (unit) => unit.sourceEnd > trackStart && unit.sourceStart < trackEnd,
+          )
+          .map(semanticUnitKey),
+      );
+      return units.filter((unit) => retainedSemanticUnits.has(semanticUnitKey(unit)));
+    }
+
     function reconcileTranscriptTrack(
       overlays,
       previousCut,
       nextCut,
       displayUnits,
       duration,
+      limitToTrackCoverage = false,
     ) {
       const entries = overlays
         .map((overlay, index) => transcriptTrackEntry(overlay, previousCut, index))
@@ -666,8 +988,13 @@
       if (!hasExplicitTranscriptProjection) {
         return reconcileTranscriptTrackWithoutProjection(entries, nextCut, duration);
       }
+      const trackUnits = transcriptUnitsForTrack(
+        entries,
+        displayUnits,
+        limitToTrackCoverage,
+      );
       const units = displayUnits.length
-        ? displayUnits
+        ? trackUnits
         : fallbackTranscriptTrackUnits(
             transcript,
             entries,
@@ -759,6 +1086,7 @@
           nextCut,
           displayUnits,
           duration,
+          transcriptTracks.size > 1,
         );
         overlays.push(...result.active);
         suppressedOverlays.push(...result.suppressed);
@@ -1010,7 +1338,7 @@
 
     function buildTranscriptTrack(result = {}, style = {}, current = [], options = {}) {
       const cues = Array.isArray(result.cues) ? result.cues : [];
-      const trackId = String(result.trackId || options.trackId || "transcript-full");
+      const trackId = String(result.trackId || options.trackId || FULL_TRANSCRIPT_TRACK_ID);
       const existing = (Array.isArray(current) ? current : []).filter(
         (overlay) => isTranscriptOverlay(overlay) && overlay.trackId === trackId,
       );
