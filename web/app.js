@@ -2311,29 +2311,13 @@ function getEditedAudioQuietRanges(spans = getEditedTimelineSpans()) {
   return mapped;
 }
 
-function getEditableSegmentCoverageEnd(segmentIndex) {
-  const segment = currentEditableSegments[segmentIndex];
-  const segmentEnd = Number(segment?.end) || Number(segment?.start) || 0;
-  const nextStart = Number(currentEditableSegments[segmentIndex + 1]?.start);
-  if (
-    !Number.isFinite(nextStart) ||
-    nextStart <= segmentEnd ||
-    nextStart - segmentEnd > CUT_TIMELINE_TEXT_GAP_COVERAGE_MAX
-  ) {
-    return segmentEnd;
-  }
-  return nextStart;
-}
-
 function getRetainedSegmentParts(
   segment,
   spans = getEditedTimelineSpans(),
-  coverageEnd = Number(segment.end) || Number(segment.start) || 0,
   semanticDeleteRanges = getCurrentSemanticDeleteRanges(),
 ) {
   const segmentStart = Number(segment.start) || 0;
   const segmentEnd = Number(segment.end) || segmentStart;
-  const displayEnd = Math.max(segmentEnd, Number(coverageEnd) || segmentEnd);
   const tokens = getSegmentTokens(segment).filter((token) => {
     const start = Number(token.start) || 0;
     const end = Number(token.end) || start;
@@ -2565,7 +2549,6 @@ function buildLocalRetainedProjection() {
     getRetainedSegmentParts(
       segment,
       spans,
-      getEditableSegmentCoverageEnd(segmentIndex),
       semanticDeleteRanges,
     ).map((part, partIndex) => ({
       id: `cut-draft-${segmentIndex}-${partIndex}`,
@@ -4022,11 +4005,10 @@ function cutTimelinePixelsPerSecond() {
   let pixelsPerSecond = CUT_TIMELINE_MIN_PIXELS_PER_SECOND;
   const spans = getEditedTimelineSpans();
   const semanticDeleteRanges = getCurrentSemanticDeleteRanges();
-  for (const [segmentIndex, segment] of currentEditableSegments.entries()) {
+  for (const segment of currentEditableSegments) {
     for (const part of getRetainedSegmentParts(
       segment,
       spans,
-      getEditableSegmentCoverageEnd(segmentIndex),
       semanticDeleteRanges,
     )) {
       const duration = Math.max(0.05, part.editedEnd - part.editedStart);
@@ -4753,18 +4735,51 @@ function renderCutTimelineRanges() {
   updateCutTimelineTextStates();
 }
 
+function applyCutTimelineTextLayoutRanges(parts) {
+  const ordered = [...parts].sort((left, right) =>
+    left.editedStart - right.editedStart ||
+    left.editedEnd - right.editedEnd ||
+    left.sourceStart - right.sourceStart,
+  );
+  return ordered.map((part, index) => {
+    const nextEditedStart = Number(ordered[index + 1]?.editedStart);
+    const editedGap = nextEditedStart - part.editedEnd;
+    const arithmeticEpsilon =
+      Number.EPSILON *
+      Math.max(
+        1,
+        Math.abs(nextEditedStart),
+        Math.abs(Number(part.editedEnd) || 0),
+      ) *
+      8;
+    const layoutEnd =
+      Number.isFinite(nextEditedStart) &&
+      editedGap > arithmeticEpsilon &&
+      editedGap <= CUT_TIMELINE_TEXT_GAP_COVERAGE_MAX + arithmeticEpsilon
+        ? nextEditedStart
+        : part.editedEnd;
+    return {
+      ...part,
+      layoutEnd,
+      layoutStart: part.editedStart,
+    };
+  });
+}
+
 function renderCutTimelineTextSegments() {
+  updateCutTimelineScale();
   cutFrameTimelineText.replaceChildren();
   cutTimelineTextPlaybackEntries = [];
   cutTimelineTextPlaybackFloorCursor = -1;
   cutTimelineTextPlaybackCursor = -1;
   cutTimelineTextPlaybackLastTime = Number.NEGATIVE_INFINITY;
+  if (cutTimelineTrackWidthCache <= 0) return;
   const spans = getEditedTimelineSpans();
   const total = editedCutTimelineDuration(spans);
   if (total <= 0) return;
   const projection = getCurrentRetainedProjection();
   const usesServerProjection = projection === serverRetainedProjection?.transcript;
-
+  const layoutParts = [];
   for (const part of projection.segments || []) {
     const segmentIndex = Number(part.sourceSegmentIndex) || 0;
     let editedStart = Number(part.start) || 0;
@@ -4795,13 +4810,35 @@ function renderCutTimelineTextSegments() {
       editedStart = sourceTimeToEditedTime(sourceStart, spans);
       editedEnd = sourceTimeToEditedTime(sourceEnd, spans);
     }
+    layoutParts.push({
+      editedEnd,
+      editedStart,
+      part,
+      segmentIndex,
+      sourceEnd,
+      sourceStart,
+    });
+  }
+  for (const layoutPart of applyCutTimelineTextLayoutRanges(layoutParts)) {
+    const {
+      editedEnd,
+      editedStart,
+      layoutEnd,
+      layoutStart,
+      part,
+      segmentIndex,
+      sourceEnd,
+      sourceStart,
+    } = layoutPart;
     const item = document.createElement("span");
     item.className = "cut-timeline-text-segment";
     item.dataset.segmentIndex = String(segmentIndex);
     item.dataset.sourceStart = String(sourceStart);
     item.dataset.sourceEnd = String(sourceEnd);
-    item.style.left = `${(editedStart / total) * 100}%`;
-    item.style.width = `${Math.max(0.2, ((editedEnd - editedStart) / total) * 100)}%`;
+    item.dataset.layoutStart = String(layoutStart);
+    item.dataset.layoutEnd = String(layoutEnd);
+    item.style.left = `${(layoutStart / total) * 100}%`;
+    item.style.width = `${Math.max(0.2, ((layoutEnd - layoutStart) / total) * 100)}%`;
     const label = document.createElement("span");
     label.className = "cut-timeline-text-segment-label";
     label.textContent = String(part.text || "暂无文字").replace(/\s+/g, " ");
@@ -6377,8 +6414,15 @@ function renderResult(job) {
     cutPreviewVideo.load();
   }
 
+  progressCard.hidden = true;
+  resultCard.hidden = false;
   renderCutSegments();
   updateSelectionSummary();
+  const initialTimelineJobId = currentJobId;
+  window.requestAnimationFrame(() => {
+    if (currentJobId !== initialTimelineJobId || resultCard.hidden) return;
+    renderCutTimelineTextSegments();
+  });
   cutDraftReady = true;
   if (shouldPersistAutomaticDefaults || cutDraftNeedsServerSync) {
     cutDraftLastSignature = "";
@@ -6392,9 +6436,6 @@ function renderResult(job) {
       cutDraftRevision,
     );
   }
-
-  progressCard.hidden = true;
-  resultCard.hidden = false;
   if (job.edit) renderEdit(job.edit);
   resultCard.scrollIntoView({ behavior: "smooth", block: "start" });
   resultCard.focus({ preventScroll: true });
