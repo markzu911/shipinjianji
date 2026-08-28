@@ -6454,67 +6454,56 @@ def build_retained_transcript(
             if not isinstance(editable_segment, dict):
                 mapping_valid = False
                 break
-            raw_source_index = editable_segment.get("sourceSegmentIndex", -1)
-            if (
-                isinstance(raw_source_index, bool)
-                or (
-                    isinstance(raw_source_index, float)
-                    and (
-                        not math.isfinite(raw_source_index)
-                        or not raw_source_index.is_integer()
-                    )
-                )
-            ):
-                mapping_valid = False
-                break
-            try:
-                source_index = int(raw_source_index)
-            except (TypeError, ValueError):
-                mapping_valid = False
-                break
-            if (
-                source_index < 0
-                or source_index >= len(segments)
-                or source_index < previous_source_index
-            ):
-                mapping_valid = False
-                break
-            previous_source_index = source_index
-            source_units = units_by_segment.get(source_index) or []
-            characters = spoken_text_characters(
-                str(editable_segment.get("text") or "")
+            source_parts = editable_segment_source_parts(
+                editable_segment,
+                segments,
             )
-            cursor = cursors.get(source_index, 0)
-            matched_start = None
-            if characters:
-                for candidate in range(
-                    cursor,
-                    len(source_units) - len(characters) + 1,
-                ):
-                    candidate_characters = [
-                        spoken_text_characters(str(unit.get("text") or ""))
-                        for unit in source_units[
-                            candidate : candidate + len(characters)
-                        ]
-                    ]
-                    if (
-                        all(len(item) == 1 for item in candidate_characters)
-                        and characters == [item[0] for item in candidate_characters]
-                    ):
-                        matched_start = candidate
-                        break
-            if matched_start is None:
+            if not source_parts:
                 mapping_valid = False
                 break
-            matched_end = matched_start + len(characters)
-            cursors[source_index] = matched_end
-            for unit in source_units[matched_start:matched_end]:
-                candidate_ids[
-                    (
-                        source_index,
-                        int(unit["_segmentSpokenIndex"]),
-                    )
-                ] = editable_id
+            for source_index, source_text in source_parts:
+                if (
+                    source_index >= len(segments)
+                    or source_index < previous_source_index
+                ):
+                    mapping_valid = False
+                    break
+                previous_source_index = source_index
+                source_units = units_by_segment.get(source_index) or []
+                characters = spoken_text_characters(source_text)
+                cursor = cursors.get(source_index, 0)
+                matched_start = None
+                if characters:
+                    for candidate in range(
+                        cursor,
+                        len(source_units) - len(characters) + 1,
+                    ):
+                        candidate_characters = [
+                            spoken_text_characters(str(unit.get("text") or ""))
+                            for unit in source_units[
+                                candidate : candidate + len(characters)
+                            ]
+                        ]
+                        if (
+                            all(len(item) == 1 for item in candidate_characters)
+                            and characters == [item[0] for item in candidate_characters]
+                        ):
+                            matched_start = candidate
+                            break
+                if matched_start is None:
+                    mapping_valid = False
+                    break
+                matched_end = matched_start + len(characters)
+                cursors[source_index] = matched_end
+                for unit in source_units[matched_start:matched_end]:
+                    candidate_ids[
+                        (
+                            source_index,
+                            int(unit["_segmentSpokenIndex"]),
+                        )
+                    ] = editable_id
+            if not mapping_valid:
+                break
 
         expected_units = {
             (
@@ -6870,8 +6859,14 @@ def build_cut_draft_retained_transcript(
 def align_transcript_text_to_segments(
     segments: list[dict[str, Any]],
     corrected_text: str,
+    *,
+    preserve_whitespace: bool = False,
 ) -> tuple[list[dict[str, Any]], int]:
-    compact_text = re.sub(r"\s+", "", corrected_text)
+    compact_text = (
+        corrected_text
+        if preserve_whitespace
+        else re.sub(r"\s+", "", corrected_text)
+    )
     if not compact_text:
         raise ValueError("识别全文不能为空。")
 
@@ -11502,8 +11497,10 @@ def build_editable_transcript_segments(
 
 def editable_segment_character_tokens(
     segment: dict[str, Any],
+    source_segments: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     source_words = segment.get("words") or []
+    has_timed_source_words = bool(source_words)
     if not source_words:
         source_words = [
             {
@@ -11513,29 +11510,115 @@ def editable_segment_character_tokens(
             }
         ]
 
+    fallback_source_index = editable_source_segment_index(
+        segment.get("sourceSegmentIndex")
+    )
     tokens: list[dict[str, Any]] = []
+    previous_source_index: int | None = None
     for word in source_words:
         characters = list(str(word.get("text") or ""))
         if not characters:
             continue
         start = float(word.get("start", 0) or 0)
         end = max(start, float(word.get("end", start) or start))
+        declared_source_index = editable_source_segment_index(
+            word.get("sourceSegmentIndex")
+        )
         duration = end - start
         for index, character in enumerate(characters):
-            tokens.append(
-                {
-                    "text": character,
-                    "start": round(start + duration * index / len(characters), 3),
-                    "end": round(
-                        start + duration * (index + 1) / len(characters),
-                        3,
-                    ),
-                }
-            )
+            token_start = start + duration * index / len(characters)
+            token_end = start + duration * (index + 1) / len(characters)
+            source_index = declared_source_index
+            if source_index is None and source_segments and has_timed_source_words:
+                midpoint = token_start + (token_end - token_start) / 2
+                fallback_contains_token = bool(
+                    fallback_source_index is not None
+                    and fallback_source_index < len(source_segments)
+                    and (
+                        previous_source_index is None
+                        or fallback_source_index >= previous_source_index
+                    )
+                    and float(
+                        source_segments[fallback_source_index].get("start", 0) or 0
+                    )
+                    - 0.001
+                    <= midpoint
+                    <= float(
+                        source_segments[fallback_source_index].get("end", 0) or 0
+                    )
+                    + 0.001
+                )
+                if fallback_contains_token:
+                    source_index = fallback_source_index
+                else:
+                    source_index = next(
+                        (
+                            candidate_index
+                            for candidate_index, source in enumerate(source_segments)
+                            if (
+                                previous_source_index is None
+                                or candidate_index >= previous_source_index
+                            )
+                            and float(source.get("start", 0) or 0) - 0.001
+                            <= midpoint
+                            <= float(source.get("end", 0) or 0) + 0.001
+                        ),
+                        None,
+                    )
+            if source_index is None:
+                source_index = fallback_source_index
+            token = {
+                "text": character,
+                "start": round(token_start, 3),
+                "end": round(token_end, 3),
+            }
+            if source_index is not None:
+                token["sourceSegmentIndex"] = source_index
+                previous_source_index = source_index
+            tokens.append(token)
 
     expected_text = str(segment.get("text") or "")
     if "".join(token["text"] for token in tokens) == expected_text:
         return tokens
+
+    if tokens:
+        try:
+            aligned_segments, _changed_count = align_transcript_text_to_segments(
+                [{"text": "".join(token["text"] for token in tokens), "words": tokens}],
+                expected_text,
+                preserve_whitespace=True,
+            )
+        except ValueError:
+            aligned_segments = []
+        if aligned_segments:
+            projected_tokens: list[dict[str, Any]] = []
+            for word in aligned_segments[0].get("words") or []:
+                characters = list(str(word.get("text") or ""))
+                if not characters:
+                    continue
+                start = float(word.get("start", 0) or 0)
+                end = max(start, float(word.get("end", start) or start))
+                duration = end - start
+                source_index = editable_source_segment_index(
+                    word.get("sourceSegmentIndex")
+                )
+                for index, character in enumerate(characters):
+                    projected_token = {
+                        "text": character,
+                        "start": round(
+                            start + duration * index / len(characters),
+                            3,
+                        ),
+                        "end": round(
+                            start + duration * (index + 1) / len(characters),
+                            3,
+                        ),
+                    }
+                    if source_index is not None:
+                        projected_token["sourceSegmentIndex"] = source_index
+                    projected_tokens.append(projected_token)
+            if "".join(token["text"] for token in projected_tokens) == expected_text:
+                return projected_tokens
 
     characters = list(expected_text)
     if not characters:
@@ -11543,27 +11626,191 @@ def editable_segment_character_tokens(
     start = float(segment.get("start", 0) or 0)
     end = max(start, float(segment.get("end", start) or start))
     duration = end - start
-    return [
+    fallback_tokens = [
         {
             "text": character,
             "start": round(start + duration * index / len(characters), 3),
             "end": round(start + duration * (index + 1) / len(characters), 3),
+            **(
+                {"sourceSegmentIndex": fallback_source_index}
+                if fallback_source_index is not None
+                else {}
+            ),
         }
         for index, character in enumerate(characters)
     ]
+    return fallback_tokens
+
+
+def editable_source_segment_index(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float) and (
+        not math.isfinite(value) or not value.is_integer()
+    ):
+        return None
+    try:
+        index = int(value)
+    except (TypeError, ValueError):
+        return None
+    return index if index >= 0 else None
+
+
+def editable_segment_source_indexes(
+    segment: dict[str, Any],
+    source_segments: list[dict[str, Any]] | None = None,
+) -> list[int]:
+    indexes: list[int] = []
+
+    def append_index(value: Any) -> None:
+        index = editable_source_segment_index(value)
+        if index is not None and index not in indexes:
+            indexes.append(index)
+
+    declared_indexes = segment.get("sourceSegmentIndexes")
+    if isinstance(declared_indexes, list):
+        for value in declared_indexes:
+            append_index(value)
+    for token in editable_segment_character_tokens(segment, source_segments):
+        append_index(token.get("sourceSegmentIndex"))
+    append_index(segment.get("sourceSegmentIndex"))
+    return sorted(indexes)
+
+
+def editable_segment_source_parts(
+    segment: dict[str, Any],
+    source_segments: list[dict[str, Any]] | None = None,
+) -> list[tuple[int, str]] | None:
+    tokens = editable_segment_character_tokens(segment, source_segments)
+    if "".join(str(token.get("text") or "") for token in tokens) != str(
+        segment.get("text") or ""
+    ):
+        return None
+    parts: list[tuple[int, str]] = []
+    for token in tokens:
+        source_index = editable_source_segment_index(
+            token.get("sourceSegmentIndex")
+        )
+        if source_index is None:
+            return None
+        if parts and source_index < parts[-1][0]:
+            return None
+        text = str(token.get("text") or "")
+        if parts and parts[-1][0] == source_index:
+            parts[-1] = (source_index, parts[-1][1] + text)
+        else:
+            parts.append((source_index, text))
+    return parts or None
+
+
+def retokenize_editable_segment_text(
+    segment: dict[str, Any],
+    new_text: str,
+    source_segments: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    old_tokens = editable_segment_character_tokens(segment, source_segments)
+    old_text = "".join(str(token.get("text") or "") for token in old_tokens)
+    old_owners = [
+        editable_source_segment_index(token.get("sourceSegmentIndex"))
+        for token in old_tokens
+    ]
+    fallback_owner = editable_source_segment_index(
+        segment.get("sourceSegmentIndex")
+    )
+    owners_are_monotonic = all(
+        previous is not None and current is not None and previous <= current
+        for previous, current in zip(old_owners, old_owners[1:])
+    )
+    if (
+        old_text != str(segment.get("text") or "")
+        or any(owner is None for owner in old_owners)
+        or not owners_are_monotonic
+    ):
+        start = float(segment.get("start") or 0)
+        end = max(start, float(segment.get("end") or start))
+        words = retokenize_words_preserving_text(
+            split_timed_text_units(new_text, start, end)
+        )
+        if fallback_owner is not None:
+            for word in words:
+                word["sourceSegmentIndex"] = fallback_owner
+        return words
+
+    aligned_segments, _changed_count = align_transcript_text_to_segments(
+        [{"text": old_text, "words": old_tokens}],
+        new_text,
+        preserve_whitespace=True,
+    )
+    aligned_tokens = aligned_segments[0]["words"]
+    words: list[dict[str, Any]] = []
+    run_start = 0
+    while run_start < len(aligned_tokens):
+        owner = editable_source_segment_index(
+            aligned_tokens[run_start].get("sourceSegmentIndex")
+        )
+        if owner is None:
+            raise RuntimeError("跨源文案字符归属投影失败。")
+        run_end = run_start + 1
+        while (
+            run_end < len(aligned_tokens)
+            and editable_source_segment_index(
+                aligned_tokens[run_end].get("sourceSegmentIndex")
+            )
+            == owner
+        ):
+            run_end += 1
+        run_tokens = aligned_tokens[run_start:run_end]
+        run_text = "".join(
+            str(token.get("text") or "") for token in run_tokens
+        )
+        run_units = split_timed_text_units(
+            run_text,
+            float(run_tokens[0].get("start") or 0),
+            float(run_tokens[-1].get("end") or 0),
+        )
+        run_words = retokenize_words_preserving_text(run_units)
+        for word in run_words:
+            word["sourceSegmentIndex"] = owner
+        words.extend(run_words)
+        run_start = run_end
+    if "".join(str(word.get("text") or "") for word in words) != new_text:
+        raise RuntimeError("跨源文案重新分词失败。")
+    return words
+
+
+def retokenize_words_preserving_text(
+    words: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    full_text = "".join(str(word.get("text") or "") for word in words)
+    retokenized = retokenize_words(words)
+    if "".join(str(word.get("text") or "") for word in retokenized) == full_text:
+        return retokenized
+    return words
 
 
 def build_editable_segment_from_tokens(
     tokens: list[dict[str, Any]],
     source_segment_index: int,
 ) -> dict[str, Any]:
+    copied_tokens = copy.deepcopy(tokens)
+    source_indexes: list[int] = []
+    for token in copied_tokens:
+        token_source_index = editable_source_segment_index(
+            token.get("sourceSegmentIndex")
+        )
+        if token_source_index is None:
+            token_source_index = source_segment_index
+            token["sourceSegmentIndex"] = token_source_index
+        if token_source_index not in source_indexes:
+            source_indexes.append(token_source_index)
     return {
         "id": 0,
-        "sourceSegmentIndex": source_segment_index,
+        "sourceSegmentIndex": source_indexes[0],
+        "sourceSegmentIndexes": source_indexes,
         "start": float(tokens[0]["start"]),
         "end": float(tokens[-1]["end"]),
         "text": "".join(str(token.get("text") or "") for token in tokens),
-        "words": copy.deepcopy(tokens),
+        "words": copied_tokens,
     }
 
 
@@ -11579,6 +11826,7 @@ def normalize_editable_segment_ids(
 def apply_transcript_segment_operation(
     editable_segments: list[dict[str, Any]],
     operation: TranscriptSegmentOperation,
+    source_segments: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     segments = normalize_editable_segment_ids(editable_segments)
     if operation.segmentIndex >= len(segments):
@@ -11592,12 +11840,17 @@ def apply_transcript_segment_operation(
         if len(content_characters(new_text)) > 300:
             raise ValueError("单段文字过长，请精简后再保存。")
         segment = segments[segment_index]
-        start = float(segment.get("start") or 0)
-        end = max(start, float(segment.get("end") or start))
-        segment["text"] = new_text
-        segment["words"] = retokenize_words(
-            split_timed_text_units(new_text, start, end)
+        source_indexes = editable_segment_source_indexes(segment, source_segments)
+        updated_words = retokenize_editable_segment_text(
+            segment,
+            new_text,
+            source_segments,
         )
+        segment["text"] = new_text
+        segment["words"] = updated_words
+        if source_indexes:
+            segment["sourceSegmentIndex"] = source_indexes[0]
+            segment["sourceSegmentIndexes"] = source_indexes
         return normalize_editable_segment_ids(segments)
     if operation.action == "merge_up":
         if segment_index == 0:
@@ -11611,7 +11864,7 @@ def apply_transcript_segment_operation(
         merge_parts = segments[segment_index : segment_index + 2]
     else:
         segment = segments[segment_index]
-        tokens = editable_segment_character_tokens(segment)
+        tokens = editable_segment_character_tokens(segment, source_segments)
         selection_start = operation.selectionStart
         selection_end = operation.selectionEnd
         if selection_start is None or selection_end is None:
@@ -11663,7 +11916,7 @@ def apply_transcript_segment_operation(
     merged_tokens = [
         token
         for part in merge_parts
-        for token in editable_segment_character_tokens(part)
+        for token in editable_segment_character_tokens(part, source_segments)
     ]
     source_segment_index = int(
         merge_parts[0].get("sourceSegmentIndex", 0) or 0
@@ -11739,30 +11992,41 @@ def enrich_editable_segment_boundaries(
     cursor_by_source: dict[int, int] = {}
     editable_unit_ranges: list[tuple[dict[str, Any], dict[str, Any]] | None] = []
     for segment in normalized:
-        source_index = int(segment.get("sourceSegmentIndex", -1))
-        source_units = units_by_segment.get(source_index) or []
-        characters = spoken_text_characters(str(segment.get("text") or ""))
-        cursor = cursor_by_source.get(source_index, 0)
-        matched_start = None
-        if characters:
-            for candidate in range(cursor, len(source_units) - len(characters) + 1):
-                candidate_characters = [
-                    spoken_text_characters(str(unit.get("text") or ""))
-                    for unit in source_units[candidate : candidate + len(characters)]
-                ]
-                if (
-                    all(len(item) == 1 for item in candidate_characters)
-                    and characters == [item[0] for item in candidate_characters]
-                ):
-                    matched_start = candidate
-                    break
-        if matched_start is None:
+        source_parts = editable_segment_source_parts(segment, source_segments)
+        matched_units: list[dict[str, Any]] = []
+        if not source_parts:
             editable_unit_ranges.append(None)
             continue
-        matched_end = matched_start + len(characters)
-        cursor_by_source[source_index] = matched_end
+        for source_index, source_text in source_parts:
+            source_units = units_by_segment.get(source_index) or []
+            characters = spoken_text_characters(source_text)
+            cursor = cursor_by_source.get(source_index, 0)
+            matched_start = None
+            if characters:
+                for candidate in range(
+                    cursor,
+                    len(source_units) - len(characters) + 1,
+                ):
+                    candidate_characters = [
+                        spoken_text_characters(str(unit.get("text") or ""))
+                        for unit in source_units[
+                            candidate : candidate + len(characters)
+                        ]
+                    ]
+                    if (
+                        all(len(item) == 1 for item in candidate_characters)
+                        and characters == [item[0] for item in candidate_characters]
+                    ):
+                        matched_start = candidate
+                        break
+            if matched_start is None:
+                matched_units = []
+                break
+            matched_end = matched_start + len(characters)
+            cursor_by_source[source_index] = matched_end
+            matched_units.extend(source_units[matched_start:matched_end])
         editable_unit_ranges.append(
-            (source_units[matched_start], source_units[matched_end - 1])
+            (matched_units[0], matched_units[-1]) if matched_units else None
         )
 
     existing_by_key = {
@@ -11852,26 +12116,52 @@ def sync_source_segments_from_editable(
 ) -> list[dict[str, Any]]:
     """Re-sync ASR segment text/words from the edited editable view."""
     synced = copy.deepcopy(source_segments)
+    represented_source_indexes: set[int] = set()
+    words_by_source: dict[int, list[dict[str, Any]]] = {}
+    for editable_segment in editable_segments:
+        if not isinstance(editable_segment, dict):
+            continue
+        represented_source_indexes.update(
+            index
+            for index in editable_segment_source_indexes(
+                editable_segment,
+                source_segments,
+            )
+            if index < len(synced)
+        )
+        for token in editable_segment_character_tokens(
+            editable_segment,
+            source_segments,
+        ):
+            source_index = editable_source_segment_index(
+                token.get("sourceSegmentIndex")
+            )
+            if source_index is None or source_index >= len(synced):
+                continue
+            words_by_source.setdefault(source_index, []).append(
+                copy.deepcopy(token)
+            )
+
     for source_index, source in enumerate(synced):
-        parts = [
-            item
-            for item in editable_segments
-            if int(item.get("sourceSegmentIndex", -1)) == source_index
-        ]
-        if not parts:
+        if source_index not in represented_source_indexes:
             continue
-        combined_text = "".join(str(item.get("text") or "") for item in parts)
-        if not content_characters(combined_text):
-            continue
-        combined_words: list[dict[str, Any]] = []
-        for part in parts:
-            combined_words.extend(copy.deepcopy(part.get("words") or []))
-        if not combined_words:
+        combined_tokens = words_by_source.get(source_index) or []
+        combined_text = "".join(
+            str(item.get("text") or "") for item in combined_tokens
+        )
+        combined_words = (
+            retokenize_words_preserving_text(combined_tokens)
+            if combined_tokens
+            else []
+        )
+        if combined_text and not combined_words:
             combined_words = split_timed_text_units(
                 combined_text,
                 float(source.get("start") or 0),
                 float(source.get("end") or 0),
             )
+        for word in combined_words:
+            word.pop("sourceSegmentIndex", None)
         # Capture the original source-anchor range before overwriting the words
         # so a re-segmented subtitle track keeps its cut-draft time mapping.
         # Without these anchors the retimed art-text cues drift forward.
@@ -11888,6 +12178,8 @@ def sync_source_segments_from_editable(
         ]
         source["text"] = combined_text
         source["words"] = combined_words
+        if not combined_words:
+            source["asrWords"] = []
         if anchor_starts and anchor_ends:
             segment_start = float(source.get("start") or 0)
             segment_end = max(
@@ -11985,8 +12277,6 @@ def update_transcript_track_text_for_segment(
     ]
     old_characters = list("".join(old_texts))
     new_characters = list(content_characters(new_text))
-    if not new_characters:
-        return
 
     semantic_boundaries = {0, len(new_characters)}
     word_characters = [
@@ -15281,6 +15571,7 @@ def update_editable_transcript_segments(
         updated_segments = apply_transcript_segment_operation(
             editable_segments,
             request,
+            source_segments,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -15329,10 +15620,12 @@ def update_editable_transcript_segments(
             edit = job.get("edit") or {}
             existing_art = job.get("art")
             edited_editable = updated_segments[request.segmentIndex]
-            source_index = int(
-                edited_editable.get("sourceSegmentIndex", 0) or 0
-            )
-            if existing_art is not None and 0 <= source_index < len(source_segments):
+            for source_index in editable_segment_source_indexes(
+                edited_editable,
+                source_segments,
+            ):
+                if existing_art is None or not 0 <= source_index < len(source_segments):
+                    continue
                 source_segment = source_segments[source_index]
                 update_transcript_track_text_for_segment(
                     existing_art,

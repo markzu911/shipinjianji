@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/index.md","reason":"后端质量检查入口"}
+{"file":".trellis/spec/backend/media-and-timeline.md","reason":"复核字符守恒、source anchor 和时间单调性"}
+{"file":".trellis/spec/backend/persistence-and-jobs.md","reason":"复核 editable 更新和持久化一致性"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"执行项目要求的完整验证"}
+{"file":".trellis/spec/testing/index.md","reason":"复核测试层级与回归选择"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"复核跨层权威状态与派生投影同步"}

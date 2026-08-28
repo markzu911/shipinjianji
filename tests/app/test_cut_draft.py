@@ -1763,6 +1763,273 @@ def test_editable_transcript_segments_can_split_and_merge_by_selected_text():
     assert merged_segments[0]["end"] == 1.4
 
 
+def test_cross_source_merge_and_text_edit_preserve_character_ownership() -> None:
+    source_segments = [
+        {
+            "id": 0,
+            "start": 0.0,
+            "end": 1.0,
+            "text": "甲乙",
+            "words": [{"text": "甲乙", "start": 0.0, "end": 1.0}],
+        },
+        {
+            "id": 1,
+            "start": 1.0,
+            "end": 2.0,
+            "text": "丙丁",
+            "words": [{"text": "丙丁", "start": 1.0, "end": 2.0}],
+        },
+    ]
+    editable_segments = app_module.build_editable_transcript_segments(
+        source_segments
+    )
+
+    merged = app_module.apply_transcript_segment_operation(
+        editable_segments,
+        app_module.TranscriptSegmentOperation(
+            segmentIndex=0,
+            action="merge_down",
+        ),
+        source_segments,
+    )
+    edited = app_module.apply_transcript_segment_operation(
+        merged,
+        app_module.TranscriptSegmentOperation(
+            segmentIndex=0,
+            action="text",
+            text="甲乙改丁",
+        ),
+        source_segments,
+    )
+    tokens = app_module.editable_segment_character_tokens(
+        edited[0],
+        source_segments,
+    )
+    synced = app_module.sync_source_segments_from_editable(
+        source_segments,
+        edited,
+    )
+
+    assert edited[0]["sourceSegmentIndexes"] == [0, 1]
+    assert "".join(token["text"] for token in tokens) == "甲乙改丁"
+    assert [token["sourceSegmentIndex"] for token in tokens] == [0, 0, 1, 1]
+    assert [segment["text"] for segment in synced] == ["甲乙", "改丁"]
+    assert "".join(segment["text"] for segment in synced) == edited[0]["text"]
+    previous_end = 0.0
+    for source_index, source_segment in enumerate(synced):
+        for word in source_segment["words"]:
+            assert math.isfinite(word["start"])
+            assert math.isfinite(word["end"])
+            assert source_segment["start"] <= word["start"] < word["end"]
+            assert word["end"] <= source_segment["end"]
+            assert word["start"] >= previous_end
+            previous_end = word["end"]
+        assert source_index == source_segment["id"]
+
+    legacy_merged = copy.deepcopy(merged)
+    legacy_merged[0].pop("sourceSegmentIndexes", None)
+    legacy_merged[0]["text"] = "甲 乙丙丁"
+    legacy_merged[0]["words"] = [
+        {"text": "甲乙丙丁", "start": 0.0, "end": 2.0}
+    ]
+    legacy_edited = app_module.apply_transcript_segment_operation(
+        legacy_merged,
+        app_module.TranscriptSegmentOperation(
+            segmentIndex=0,
+            action="text",
+            text="甲 乙改丁",
+        ),
+        source_segments,
+    )
+    assert app_module.editable_segment_source_parts(
+        legacy_edited[0], source_segments
+    ) == [(0, "甲 乙"), (1, "改丁")]
+    assert "".join(
+        segment["text"]
+        for segment in app_module.sync_source_segments_from_editable(
+            source_segments,
+            legacy_edited,
+        )
+    ) == legacy_edited[0]["text"]
+
+    split = app_module.apply_transcript_segment_operation(
+        edited,
+        app_module.TranscriptSegmentOperation(
+            segmentIndex=0,
+            action="split",
+            selectionStart=1,
+            selectionEnd=3,
+        ),
+        source_segments,
+    )
+    assert [segment["text"] for segment in split] == ["甲", "乙改", "丁"]
+    assert [
+        app_module.editable_segment_source_parts(segment, source_segments)
+        for segment in split
+    ] == [[(0, "甲")], [(0, "乙"), (1, "改")], [(1, "丁")]]
+    assert [
+        segment["text"]
+        for segment in app_module.sync_source_segments_from_editable(
+            source_segments,
+            split,
+        )
+    ] == ["甲乙", "改丁"]
+
+    spaced = app_module.apply_transcript_segment_operation(
+        merged,
+        app_module.TranscriptSegmentOperation(
+            segmentIndex=0,
+            action="text",
+            text="甲 乙改丁",
+        ),
+        source_segments,
+    )
+    assert spaced[0]["text"] == "甲 乙改丁"
+    assert "".join(word["text"] for word in spaced[0]["words"]) == "甲 乙改丁"
+    assert "".join(
+        segment["text"]
+        for segment in app_module.sync_source_segments_from_editable(
+            source_segments,
+            spaced,
+        )
+    ) == "甲 乙改丁"
+
+    shortened = app_module.apply_transcript_segment_operation(
+        merged,
+        app_module.TranscriptSegmentOperation(
+            segmentIndex=0,
+            action="text",
+            text="改",
+        ),
+        source_segments,
+    )
+    shortened_sources = app_module.sync_source_segments_from_editable(
+        source_segments,
+        shortened,
+    )
+    assert shortened[0]["sourceSegmentIndexes"] == [0, 1]
+    assert [segment["text"] for segment in shortened_sources] == ["改", ""]
+    assert "".join(segment["text"] for segment in shortened_sources) == "改"
+
+
+def test_cross_source_merge_then_text_edit_persists_without_duplication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = "47474747-4747-4474-8474-474747474747"
+    job_dir = app_module.jobs_directory() / job_id
+    job_dir.mkdir(parents=True)
+    source_path = job_dir / "source.mp4"
+    source_path.write_bytes(b"cross-source-edit-persistence")
+    monkeypatch.setattr(
+        app_module,
+        "enrich_editable_segment_boundaries",
+        lambda _media_path, _source_segments, editable_segments, **_kwargs: (
+            app_module.normalize_editable_segment_ids(editable_segments),
+            [],
+        ),
+    )
+    source_segments = [
+        {
+            "id": 0,
+            "start": 0.0,
+            "end": 1.0,
+            "text": "所有人。",
+            "words": [{"text": "所有人。", "start": 0.0, "end": 1.0}],
+        },
+        {
+            "id": 1,
+            "start": 1.0,
+            "end": 2.0,
+            "text": "一起出发。",
+            "words": [{"text": "一起出发。", "start": 1.0, "end": 2.0}],
+        },
+    ]
+    shared_overlay = {"trackType": "transcript", "trackId": "transcript-full"}
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "status": "completed",
+            "duration": 2.0,
+            "updatedAt": "2026-08-28T00:00:00+00:00",
+            "result": {
+                "text": "所有人。\n一起出发。",
+                "segments": source_segments,
+                "editableSegments": app_module.build_editable_transcript_segments(
+                    source_segments
+                ),
+            },
+            "edit": {
+                "status": "completed",
+                "ranges": [],
+                "transcriptRanges": [],
+                "outputDuration": 2.0,
+                "transcript": {"text": "旧文案", "segments": []},
+            },
+            "art": {
+                "status": "completed",
+                "overlays": [
+                    {
+                        **shared_overlay,
+                        "text": "所有人",
+                        "start": 0.0,
+                        "end": 1.0,
+                        "sourceStart": 0.0,
+                        "sourceEnd": 1.0,
+                    },
+                    {
+                        **shared_overlay,
+                        "text": "一起出发",
+                        "start": 1.0,
+                        "end": 2.0,
+                        "sourceStart": 1.0,
+                        "sourceEnd": 2.0,
+                    },
+                ],
+            },
+        }
+        app_module.JOB_FILES[job_id] = source_path
+
+    with TestClient(app_module.app) as client:
+        merge_response = client.put(
+            f"/api/transcriptions/{job_id}/editable-segments",
+            json={"segmentIndex": 0, "action": "merge_down"},
+        )
+        text_response = client.put(
+            f"/api/transcriptions/{job_id}/editable-segments",
+            json={
+                "segmentIndex": 0,
+                "action": "text",
+                "text": "所有人。",
+            },
+        )
+
+    assert merge_response.status_code == 200
+    assert text_response.status_code == 200
+    with app_module.JOBS_LOCK:
+        cleared_job = copy.deepcopy(app_module.JOBS[job_id])
+    cleared_persisted = app_module._project_repository().load(job_id)["job"]
+    for snapshot in (cleared_job, cleared_persisted):
+        segments = snapshot["result"]["segments"]
+        editable = snapshot["result"]["editableSegments"]
+        assert snapshot["result"]["editableSegmentBoundaries"] == []
+        assert [segment["text"] for segment in segments] == ["所有人。", ""]
+        assert editable[0]["text"] == "所有人。"
+        assert editable[0]["sourceSegmentIndexes"] == [0, 1]
+        assert [
+            segment["editableSegmentId"]
+            for segment in snapshot["edit"]["transcript"]["segments"]
+        ] == [0]
+        assert "".join(
+            item["text"] for item in snapshot["art"]["overlays"]
+        ) == app_module.content_characters("所有人。")
+        assert app_module.content_characters(
+            "".join(
+                item["text"]
+                for item in snapshot["art"].get("suppressedOverlays") or []
+            )
+        ) == app_module.content_characters("一起出发。")
+
+
 def test_editable_split_and_merge_refresh_completed_edit_projection() -> None:
     job_id = "46464646-4646-4464-8464-464646464646"
     source_segments = [
