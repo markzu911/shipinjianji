@@ -51,7 +51,7 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
 
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
-    assert "/app.js?v=20260827-01" in page_response.text
+    assert "/app.js?v=20260827-02" in page_response.text
     assert "/styles.css?v=20260825-11" in page_response.text
     assert "/transcript-follow-scroll.js?v=20260818-03" in page_response.text
     assert "/ui-feedback.js?v=20260807-03" in page_response.text
@@ -631,7 +631,9 @@ def test_cut_range_and_segment_frontend_contracts():
     keyboard_source = script_response.text[keyboard_start:keyboard_end]
     assert "const semanticRange = alignManualRangeToTranscript(range);" in keyboard_source
     assert "Object.assign(range, semanticRange);" in keyboard_source
-    assert "getEditableSegmentCoverageEnd" in script_response.text
+    assert "function applyCutTimelineTextLayoutRanges" in script_response.text
+    assert "item.dataset.layoutStart" in script_response.text
+    assert "item.dataset.layoutEnd" in script_response.text
     assert "adjacentSilenceBefore" in script_response.text
     manual_align_start = script_response.text.index(
         "function alignManualRangeToTranscript"
@@ -816,6 +818,70 @@ def test_cut_range_and_segment_frontend_contracts():
     assert "const deletedRanges = getCommittedTimelineSemanticDeleteRanges();" in (
         script_response.text[render_segments_start:render_segments_end]
     )
+
+
+def test_cut_timeline_text_layout_uses_edited_gaps_without_mutating_source_ranges():
+    root = Path(__file__).resolve().parents[2]
+    app_source = (root / "web" / "app.js").read_text(encoding="utf-8")
+    helper_start = app_source.index("function applyCutTimelineTextLayoutRanges(")
+    helper_end = app_source.index(
+        "function renderCutTimelineTextSegments()", helper_start
+    )
+    helper_source = app_source[helper_start:helper_end]
+    script = f"""
+const CUT_SPEECH_BOUNDARY_EPSILON = 0.002;
+const CUT_TIMELINE_TEXT_GAP_COVERAGE_MAX = 1.5;
+{helper_source}
+const parts = [
+  {{ sourceStart: 10, sourceEnd: 10.3, editedStart: 0.2, editedEnd: 0.5 }},
+  {{ sourceStart: 20, sourceEnd: 20.3, editedStart: 0.6, editedEnd: 0.9 }},
+  {{ sourceStart: 30, sourceEnd: 30.3, editedStart: 3.625, editedEnd: 3.9 }},
+];
+const before = JSON.stringify(parts);
+const layouts = applyCutTimelineTextLayoutRanges(parts);
+const exactThreshold = applyCutTimelineTextLayoutRanges([
+  {{ sourceStart: 100, sourceEnd: 100.1, editedStart: 1000, editedEnd: 1000.1 }},
+  {{ sourceStart: 110, sourceEnd: 110.1, editedStart: 1001.6, editedEnd: 1001.7 }},
+]);
+const overThreshold = applyCutTimelineTextLayoutRanges([
+  {{ sourceStart: 200, sourceEnd: 200.1, editedStart: 2000, editedEnd: 2000.1 }},
+  {{ sourceStart: 210, sourceEnd: 210.1, editedStart: 2001.601, editedEnd: 2001.7 }},
+]);
+const tinyPositiveGap = applyCutTimelineTextLayoutRanges([
+  {{ sourceStart: 300, sourceEnd: 300.1, editedStart: 3000, editedEnd: 3000.1 }},
+  {{ sourceStart: 310, sourceEnd: 310.1, editedStart: 3000.101, editedEnd: 3000.2 }},
+]);
+process.stdout.write(JSON.stringify({{
+  before,
+  after: JSON.stringify(parts),
+  layouts,
+  exactThreshold,
+  overThreshold,
+  tinyPositiveGap,
+}}));
+"""
+    result = subprocess.run(
+        ["node", "-e", script],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert payload["after"] == payload["before"]
+    assert [part["layoutStart"] for part in payload["layouts"]] == pytest.approx(
+        [0.2, 0.6, 3.625]
+    )
+    assert [part["layoutEnd"] for part in payload["layouts"]] == pytest.approx(
+        [0.6, 0.9, 3.9]
+    )
+    assert [
+        (part["sourceStart"], part["sourceEnd"]) for part in payload["layouts"]
+    ] == [(10, 10.3), (20, 20.3), (30, 30.3)]
+    assert payload["exactThreshold"][0]["layoutEnd"] == pytest.approx(1001.6)
+    assert payload["overThreshold"][0]["layoutEnd"] == pytest.approx(2000.1)
+    assert payload["tinyPositiveGap"][0]["layoutEnd"] == pytest.approx(3000.101)
 
 
 def test_top_level_art_and_pip_tools_are_the_only_editor_runtime():
@@ -2229,7 +2295,6 @@ const parts = functions.getRetainedSegmentParts(
     ],
   }},
   [{{ sourceStart: 0.5, sourceEnd: 0.6, editedStart: 0 }}],
-  0.6,
   [{{ start: 0.2, end: 0.4 }}],
 );
 console.log(JSON.stringify(parts));
@@ -2308,7 +2373,6 @@ const parts = functions.getRetainedSegmentParts(
     {{ sourceStart: 27.0, sourceEnd: 28.299, editedStart: 27.0 }},
     {{ sourceStart: 29.807, sourceEnd: 31.0, editedStart: 28.299 }},
   ],
-  31.0,
   [{{ start: 28.454, end: 29.171 }}],
 );
 console.log(JSON.stringify(parts));

@@ -903,6 +903,183 @@ def test_server_retained_projection_keeps_editable_timeline_paragraphs(
     assert timeline_items.all_text_contents() == ["保留", "内容"]
 
 
+def test_timeline_text_visual_ranges_fill_only_short_edited_gaps_and_stay_stable(
+    browser_session,
+    seeded_editor_job,
+):
+    segments = [
+        {"id": 0, "start": 0.05, "end": 0.3, "text": "第一段"},
+        {"id": 1, "start": 0.44, "end": 0.7, "text": "第二段"},
+        {"id": 2, "start": 2.405, "end": 2.7, "text": "第三段"},
+        {"id": 3, "start": 3.505, "end": 3.8, "text": "第四段"},
+        {"id": 4, "start": 6.525, "end": 6.9, "text": "第五段"},
+    ]
+    for segment in segments:
+        segment["words"] = [
+            {
+                "text": segment["text"],
+                "start": segment["start"],
+                "end": segment["end"],
+            }
+        ]
+    draft = {
+        "schemaVersion": 1,
+        "revision": 1,
+        "automaticNoSpeechInitialized": True,
+        "textRanges": [],
+        "noSpeechRanges": [],
+        "timelineRanges": [
+            {
+                "key": "collapse-source-silence",
+                "start": 0.7,
+                "end": 1.7,
+                "originalStart": 0.7,
+                "originalEnd": 1.7,
+                "boundaryMode": "speech_safe",
+            }
+        ],
+        "splitPoints": [],
+        "boundaryDiagnostics": [],
+        "acousticAlignment": {"status": "not_required"},
+        "updatedAt": "2026-08-27T00:00:00+00:00",
+    }
+    with app_module.JOBS_LOCK:
+        job = app_module.JOBS[seeded_editor_job.job_id]
+        job["duration"] = 7.0
+        result = job["result"]
+        result["duration"] = 7.0
+        result["mediaDuration"] = 7.0
+        result["text"] = "\n".join(segment["text"] for segment in segments)
+        result["segments"] = copy.deepcopy(segments)
+        result["editableSegments"] = copy.deepcopy(segments)
+        job["cutDraft"] = copy.deepcopy(draft)
+    app_module.save_cut_draft(seeded_editor_job.job_id, draft)
+
+    page = browser_session.page
+    page.add_init_script(
+        """(() => {
+          window.__firstVisibleTimelineTextGeometry = null;
+          document.addEventListener('DOMContentLoaded', () => {
+            const capture = () => {
+              const card = document.querySelector('#resultCard');
+              const track = document.querySelector('#cutFrameTimelineTrack');
+              const items = [...document.querySelectorAll(
+                '#cutFrameTimelineText .cut-timeline-text-segment'
+              )];
+              if (
+                card && !card.hidden && track && items.length === 5 &&
+                track.getBoundingClientRect().width > 0
+              ) {
+                window.__firstVisibleTimelineTextGeometry = {
+                  trackWidth: track.getBoundingClientRect().width,
+                  items: items.map(item => {
+                    const rect = item.getBoundingClientRect();
+                    return { left: rect.left, right: rect.right };
+                  }),
+                };
+                return;
+              }
+              requestAnimationFrame(capture);
+            };
+            requestAnimationFrame(capture);
+          }, { once: true });
+        })();"""
+    )
+
+    def read_stable_geometry():
+        page.locator("#resultCard").wait_for(state="visible")
+        timeline_items = page.locator(
+            "#cutFrameTimelineText .cut-timeline-text-segment"
+        )
+        page.wait_for_function(
+            """() => document.querySelectorAll(
+              '#cutFrameTimelineText .cut-timeline-text-segment'
+            ).length === 5 && window.__firstVisibleTimelineTextGeometry !== null"""
+        )
+        page.wait_for_function(
+            """() => {
+              const thumbs = [...document.querySelectorAll(
+                '#cutFrameTimelineThumbnails .frame-timeline-thumb'
+              )];
+              return thumbs.length > 0 &&
+                !thumbs.some(item => item.classList.contains('is-loading'));
+            }"""
+        )
+        stable = timeline_items.evaluate_all(
+            """items => ({
+              trackWidth: document.querySelector(
+                '#cutFrameTimelineTrack'
+              ).getBoundingClientRect().width,
+              items: items.map(item => {
+                const rect = item.getBoundingClientRect();
+                return {
+                  layoutStart: Number(item.dataset.layoutStart),
+                  layoutEnd: Number(item.dataset.layoutEnd),
+                  sourceStart: Number(item.dataset.sourceStart),
+                  sourceEnd: Number(item.dataset.sourceEnd),
+                  left: rect.left,
+                  right: rect.right,
+                };
+              }),
+            })"""
+        )
+        first_visible = page.evaluate(
+            "window.__firstVisibleTimelineTextGeometry"
+        )
+        return first_visible, stable
+
+    page.goto(f"{browser_session.base_url}/?job={seeded_editor_job.job_id}")
+    page.wait_for_load_state("networkidle")
+    first_visible, stable = read_stable_geometry()
+
+    source_ranges = [
+        (item["sourceStart"], item["sourceEnd"])
+        for item in stable["items"]
+    ]
+    for actual, segment in zip(source_ranges, segments, strict=True):
+        assert actual == pytest.approx((segment["start"], segment["end"]))
+    assert [item["layoutStart"] for item in stable["items"]] == pytest.approx(
+        [0.05, 0.44, 1.405, 2.505, 5.525]
+    )
+    assert [item["layoutEnd"] for item in stable["items"]] == pytest.approx(
+        [0.44, 1.405, 2.505, 2.8, 5.9]
+    )
+    playback_labels = page.evaluate(
+        """() => [0.2, 0.35, 0.5].map(sourceTime => {
+          updateCutTimelineTextStates(sourceTime);
+          return [...document.querySelectorAll(
+            '#cutFrameTimelineText .cut-timeline-text-segment.is-active '
+              + '.cut-timeline-text-segment-label'
+          )].map(item => item.textContent);
+        })"""
+    )
+    assert playback_labels == [["第一段"], [], ["第二段"]]
+    short_pixel_gaps = [
+        stable["items"][index + 1]["left"] - stable["items"][index]["right"]
+        for index in range(3)
+    ]
+    assert short_pixel_gaps == pytest.approx([0.0, 0.0, 0.0], abs=0.75)
+    assert stable["items"][4]["left"] - stable["items"][3]["right"] > 20
+    assert first_visible["trackWidth"] == pytest.approx(
+        stable["trackWidth"], abs=1.0
+    )
+    for first_item, stable_item in zip(
+        first_visible["items"], stable["items"], strict=True
+    ):
+        assert first_item["left"] == pytest.approx(stable_item["left"], abs=1.0)
+        assert first_item["right"] == pytest.approx(stable_item["right"], abs=1.0)
+
+    page.reload()
+    page.wait_for_load_state("networkidle")
+    refreshed_first, refreshed_stable = read_stable_geometry()
+    assert refreshed_first["trackWidth"] == pytest.approx(
+        refreshed_stable["trackWidth"], abs=1.0
+    )
+    assert [item["layoutEnd"] for item in refreshed_stable["items"]] == (
+        pytest.approx([0.44, 1.405, 2.505, 2.8, 5.9])
+    )
+
+
 def test_server_projection_keeps_disjoint_runs_for_one_editable_segment(
     browser_session,
     seeded_editor_job,
