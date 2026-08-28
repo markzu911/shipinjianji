@@ -750,3 +750,24 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 34: 优化文案跟随与时间轴预览缓存
+
+**Date**: 2026-08-28
+**Task**: 优化文案跟随与时间轴预览缓存
+**Branch**: `master`
+
+### Summary
+
+放大文案列表字体并下移播放跟随锚点；新增 IndexedDB JPEG Blob 时间轴预览帧缓存，覆盖刷新零抽帧复用、失败降级、LRU 清理和 Blob URL 生命周期；完整测试 486 passed。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `e7b5b5a` | (see git log) |
+
+### Status
+
+[OK] **Completed**

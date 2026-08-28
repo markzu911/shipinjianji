@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 33
+- **Total Sessions**: 34
 - **Last Active**: 2026-08-28
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~752 | Active |
+| `journal-1.md` | ~773 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 34 | 2026-08-28 | 优化文案跟随与时间轴预览缓存 | `e7b5b5a` | `master` |
 | 33 | 2026-08-28 | 修复时间轴文案空隙与刷新跳变 | `67742a0`, `b8a9545`, `950a0dc` | `master` |
 | 32 | 2026-08-27 | 修复艺术字语义词拆分 | `7328c92`, `dca50b4`, `bc4a38a` | `master` |
 | 31 | 2026-08-27 | 修复文案艺术字首字缺失 | `251d2ef`, `a0fa3f0`, `0af1d07` | `master` |
