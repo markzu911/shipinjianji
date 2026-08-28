@@ -53,8 +53,8 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
 
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
-    assert "/app.js?v=20260828-01" in page_response.text
-    assert "/styles.css?v=20260828-01" in page_response.text
+    assert "/app.js?v=20260828-02" in page_response.text
+    assert "/styles.css?v=20260828-02" in page_response.text
     assert "/transcript-follow-scroll.js?v=20260828-01" in page_response.text
     assert "/timeline-thumbnail-cache.js?v=20260828-01" in page_response.text
     assert "/ui-feedback.js?v=20260807-03" in page_response.text
@@ -691,6 +691,12 @@ def test_cut_range_and_segment_frontend_contracts():
     assert 'cancelPendingTimelineRange("已取消时间轴选区。")' in script_response.text
     assert ".cut-timeline-range-cancel {" in styles_response.text
     assert ".cut-timeline-range-cancel iconify-icon {" in styles_response.text
+    assert ".cut-timeline-delete-range.is-narrow {" in styles_response.text
+    assert (
+        ".cut-timeline-delete-range.is-narrow .cut-timeline-range-cancel {"
+        in styles_response.text
+    )
+    assert "--cut-timeline-range-cancel-left" in script_response.text
     assert 'rangeElement.dataset.cancelSide' not in script_response.text
     selection_start = script_response.text.index(
         "function beginCutTimelineSelection"
@@ -727,7 +733,25 @@ def test_cut_range_and_segment_frontend_contracts():
     assert "已取消时间轴选区。" in script_response.text
     assert "hasPendingRange || getMergedSelection().length === 0" in script_response.text
     assert "已调整待确认区间" in script_response.text
-    assert "CUT_TIMELINE_MIN_RANGE" in script_response.text
+    assert "const CUT_TIMELINE_MANUAL_MIN_RANGE = CUT_TIMELINE_STEP;" in (
+        script_response.text
+    )
+    assert "const CUT_TIMELINE_SPLIT_MIN_RANGE = 0.1;" in script_response.text
+    assert "CUT_TIMELINE_MIN_RANGE" not in script_response.text
+    split_validation = script_response.text[
+        script_response.text.index("function validateCutTimelineSplit"):
+        script_response.text.index("function getEditedAudioQuietRanges")
+    ]
+    split_normalization = script_response.text[
+        script_response.text.index("function normalizeCutSplitPoints"):
+        script_response.text.index("function cutSplitClipKey")
+    ]
+    assert "CUT_TIMELINE_SPLIT_MIN_RANGE" in split_validation
+    assert "CUT_TIMELINE_MANUAL_MIN_RANGE" not in split_validation
+    assert "CUT_TIMELINE_SPLIT_MIN_RANGE" in split_normalization
+    assert "CUT_TIMELINE_MANUAL_MIN_RANGE" not in split_normalization
+    assert "CUT_TIMELINE_MANUAL_MIN_RANGE" in selection_script
+    assert "CUT_TIMELINE_MANUAL_MIN_RANGE" in keyboard_source
     assert "activateTextEditorPanel" not in script_response.text
     assert "splitTextIntoCharacterTokens" in script_response.text
     assert "function getTranscriptCharacterUnits" in script_response.text
@@ -1198,7 +1222,7 @@ def test_art_template_library_frontend_contracts():
     art_tool_response = responses["/editor-art-tool.js"]
 
     assert template_page_response.status_code == 200
-    assert "/styles.css?v=20260828-01" in template_page_response.text
+    assert "/styles.css?v=20260828-02" in template_page_response.text
     assert "/art-template-library.js?v=20260819-01" in template_page_response.text
     assert "当前模板主色" in template_page_response.text
     assert 'id="templateCardGrid"' in template_page_response.text
@@ -1259,7 +1283,7 @@ def test_font_manager_frontend_contracts():
     font_script_response = responses["/font-manager.js"]
 
     assert font_page_response.status_code == 200
-    assert "/styles.css?v=20260828-01" in font_page_response.text
+    assert "/styles.css?v=20260828-02" in font_page_response.text
     assert "/font-manager.js?v=" in font_page_response.text
     assert 'id="fontUploadForm"' in font_page_response.text
     assert 'id="fontCardGrid"' in font_page_response.text
@@ -4008,7 +4032,7 @@ def test_compact_ui_density_preserves_preview_and_uses_shared_timeline_geometry(
         "font-library.html",
     ):
         page = (root / "web" / page_name).read_text(encoding="utf-8")
-        assert "/styles.css?v=20260828-01" in page
+        assert "/styles.css?v=20260828-02" in page
     index_page = (root / "web" / "index.html").read_text(encoding="utf-8")
     assert "/editor-timeline-controller.js?v=20260825-03" in index_page
 

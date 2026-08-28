@@ -157,9 +157,11 @@ if (textEditorOutputPanel) {
 }
 
 const CUT_TIMELINE_STEP = 1 / 30;
-const CUT_TIMELINE_MIN_RANGE = 0.1;
+const CUT_TIMELINE_MANUAL_MIN_RANGE = CUT_TIMELINE_STEP;
+const CUT_TIMELINE_SPLIT_MIN_RANGE = 0.1;
 const CUT_TIMELINE_SPLIT_EPSILON = 0.001;
 const CUT_TIMELINE_DRAG_THRESHOLD = 5;
+const CUT_TIMELINE_NARROW_HIT_WIDTH = 88;
 const CUT_SPEECH_BOUNDARY_EPSILON = 0.002;
 const CUT_SAFE_NO_SPEECH_MIN_DURATION = 0.45;
 const CUT_TIMELINE_TEXT_GAP_COVERAGE_MAX = 1.5;
@@ -2276,8 +2278,8 @@ function validateCutTimelineSplit(sourceTime) {
   const left = boundaries[rightIndex - 1];
   const right = boundaries[rightIndex];
   if (
-    point - left.sourceTime < CUT_TIMELINE_MIN_RANGE ||
-    right.sourceTime - point < CUT_TIMELINE_MIN_RANGE
+    point - left.sourceTime < CUT_TIMELINE_SPLIT_MIN_RANGE ||
+    right.sourceTime - point < CUT_TIMELINE_SPLIT_MIN_RANGE
   ) {
     return { valid: false, reason: "分割点距片段边界过近" };
   }
@@ -2783,10 +2785,11 @@ function normalizeCutSplitPoints(points) {
   for (const point of candidates) {
     if (
       seenKeys.has(point.key) ||
-      point.sourceTime < CUT_TIMELINE_MIN_RANGE ||
-      duration - point.sourceTime < CUT_TIMELINE_MIN_RANGE ||
+      point.sourceTime < CUT_TIMELINE_SPLIT_MIN_RANGE ||
+      duration - point.sourceTime < CUT_TIMELINE_SPLIT_MIN_RANGE ||
       (normalized.length > 0 &&
-        point.sourceTime - normalized.at(-1).sourceTime < CUT_TIMELINE_MIN_RANGE)
+        point.sourceTime - normalized.at(-1).sourceTime <
+          CUT_TIMELINE_SPLIT_MIN_RANGE)
     ) {
       continue;
     }
@@ -4392,7 +4395,7 @@ function syncCutTimelineModel() {
           name: "删除区间",
           start: range.start,
           end: range.end,
-          minDuration: CUT_TIMELINE_MIN_RANGE,
+          minDuration: CUT_TIMELINE_MANUAL_MIN_RANGE,
           editable: range.boundaryMode !== "split_exact",
           payload: {
             pending:
@@ -4659,6 +4662,7 @@ function renderCutTimelineRanges() {
   const spans = getEditedTimelineSpans();
   const total = editedCutTimelineDuration(spans);
   if (total <= 0) return;
+  const trackWidth = cutFrameTimelineTrack.getBoundingClientRect().width;
   if (
     selectedTimelineRangeId !== null &&
     !timelineDeleteRanges.some(({ id }) => id === selectedTimelineRangeId)
@@ -4684,7 +4688,29 @@ function renderCutTimelineRanges() {
     );
     rangeElement.dataset.rangeId = String(range.id);
     rangeElement.style.left = `${(editedStart / total) * 100}%`;
-    rangeElement.style.width = `${Math.max(0.25, ((editedEnd - editedStart) / total) * 100)}%`;
+    const rangeWidthPercent = Math.max(
+      0.25,
+      ((editedEnd - editedStart) / total) * 100,
+    );
+    const rangeLeftPixels = (editedStart / total) * trackWidth;
+    const rangeWidthPixels = Math.max(
+      4,
+      (rangeWidthPercent / 100) * trackWidth,
+    );
+    const isNarrowRange = rangeWidthPixels < CUT_TIMELINE_NARROW_HIT_WIDTH;
+    rangeElement.style.width = `${rangeWidthPercent}%`;
+    rangeElement.classList.toggle("is-narrow", isNarrowRange);
+    if (isNarrowRange) {
+      const cancelCenter = clamp(
+        rangeLeftPixels + rangeWidthPixels / 2,
+        22,
+        Math.max(22, trackWidth - 22),
+      );
+      rangeElement.style.setProperty(
+        "--cut-timeline-range-cancel-left",
+        `${cancelCenter - rangeLeftPixels}px`,
+      );
+    }
 
     const startHandle = document.createElement("button");
     startHandle.type = "button";
@@ -5395,7 +5421,7 @@ function beginCutTimelineSelection(event) {
     });
     if (
       !safeRange ||
-      safeRange.end - safeRange.start < CUT_TIMELINE_MIN_RANGE
+      safeRange.end - safeRange.start < CUT_TIMELINE_MANUAL_MIN_RANGE
     ) {
       timelineDeleteRanges = timelineDeleteRanges.filter(
         ({ id }) => id !== draftRange.id,
@@ -5440,7 +5466,18 @@ function beginTimelineRangeAdjustment(event) {
   event.stopPropagation();
   pauseCutPreview();
   selectedTimelineRangeId = rangeId;
-  const mode = control.dataset.dragMode;
+  let mode = control.dataset.dragMode;
+  if (mode !== "move" && rangeElement.classList.contains("is-narrow")) {
+    const rangeBounds = rangeElement.getBoundingClientRect();
+    if (event.clientY >= rangeBounds.top + rangeBounds.height / 2) {
+      mode = "move";
+    } else {
+      mode =
+        event.clientX <= rangeBounds.left + rangeBounds.width / 2
+          ? "start"
+          : "end";
+    }
+  }
   const startClientX = event.clientX;
   let hasDragged = false;
   const total = cutTimelineDuration();
@@ -5627,13 +5664,13 @@ function adjustTimelineRangeWithKeyboard(event) {
     range.start = clamp(
       range.start + delta,
       0,
-      range.end - CUT_TIMELINE_MIN_RANGE,
+      range.end - CUT_TIMELINE_MANUAL_MIN_RANGE,
     );
     seekCutPreview(range.start);
   } else if (mode === "end") {
     range.end = clamp(
       range.end + delta,
-      range.start + CUT_TIMELINE_MIN_RANGE,
+      range.start + CUT_TIMELINE_MANUAL_MIN_RANGE,
       total,
     );
     seekCutPreview(range.end);

@@ -1685,6 +1685,249 @@ def test_user_text_split_projects_directional_boundaries_without_media_reload(
     assert base_media_mutations(page) == {"srcWrites": 0, "loadCalls": 0}
 
 
+def test_short_timeline_range_delete_confirmation_history_and_mobile_hits(
+    browser_session,
+    seeded_editor_job,
+):
+    page = open_editor(browser_session, seeded_editor_job)
+    page.wait_for_function(
+        """() => {
+          const video = document.querySelector('#cutPreviewVideo');
+          return video?.readyState >= 1 && Number(video.duration) > 0;
+        }"""
+    )
+    page.locator("#cutPreviewVideo").evaluate(
+        """video => {
+          video.pause();
+          video.currentTime = 0.05;
+          video.dispatchEvent(new Event('seeking'));
+          video.dispatchEvent(new Event('timeupdate'));
+        }"""
+    )
+    page.wait_for_function(
+        """() => document.querySelector('#cutTimelineSplitButton')?.disabled"""
+    )
+
+    def drag_timeline_range(start: float, end: float) -> None:
+        page.evaluate(
+            """({ start, end }) => {
+              const track = document.querySelector('#cutFrameTimelineTrack');
+              const ruler = document.querySelector('#cutFrameTimelineRuler');
+              const seek = document.querySelector('#cutFrameTimelineSeek');
+              const bounds = track.getBoundingClientRect();
+              const duration = Number(seek.max);
+              const startX = bounds.left + bounds.width * (start / duration);
+              const endX = bounds.left + bounds.width * (end / duration);
+              ruler.dispatchEvent(new PointerEvent('pointerdown', {
+                bubbles: true, button: 0, buttons: 1, clientX: startX,
+              }));
+              window.dispatchEvent(new PointerEvent('pointermove', {
+                bubbles: true, button: 0, buttons: 1, clientX: endX,
+              }));
+              window.dispatchEvent(new PointerEvent('pointerup', {
+                bubbles: true, button: 0, clientX: endX,
+              }));
+            }""",
+            {"start": start, "end": end},
+        )
+
+    drag_timeline_range(0.70, 0.71)
+    page.wait_for_function(
+        """() => document.querySelectorAll(
+          '#cutFrameTimelineRanges .cut-timeline-delete-range'
+        ).length === 0"""
+    )
+    assert "区间过短" in page.locator("#cutFrameTimelineStatus").inner_text()
+
+    drag_timeline_range(0.60, 0.65)
+    pending = page.locator(
+        "#cutFrameTimelineRanges .cut-timeline-delete-range"
+    )
+    pending.wait_for()
+
+    def range_rect() -> dict[str, float]:
+        return page.evaluate(
+            """() => new Promise(resolve => requestAnimationFrame(
+              () => requestAnimationFrame(() => {
+              const range = document.querySelector(
+                '#cutFrameTimelineRanges .cut-timeline-delete-range'
+              );
+              const rect = range.getBoundingClientRect();
+              resolve({
+                left: rect.left,
+                right: rect.right,
+                top: rect.top,
+                width: rect.width,
+                height: rect.height,
+              });
+            })))"""
+        )
+
+    def drag_pending_at(x: float, y: float, delta_x: float) -> None:
+        page.evaluate(
+            """({ x, y, deltaX }) => {
+              const target = document.elementFromPoint(x, y);
+              target.dispatchEvent(new PointerEvent('pointerdown', {
+                bubbles: true, button: 0, buttons: 1, clientX: x, clientY: y,
+              }));
+              window.dispatchEvent(new PointerEvent('pointermove', {
+                bubbles: true, button: 0, buttons: 1,
+                clientX: x + deltaX, clientY: y,
+              }));
+              window.dispatchEvent(new PointerEvent('pointerup', {
+                bubbles: true, button: 0, clientX: x + deltaX, clientY: y,
+              }));
+            }""",
+            {"x": x, "y": y, "deltaX": delta_x},
+        )
+
+    before_move = range_rect()
+    drag_pending_at(
+        before_move["left"] + before_move["width"] / 2,
+        before_move["top"] + before_move["height"] * 0.75,
+        10,
+    )
+    page.wait_for_function(
+        """left => document.querySelector(
+          '#cutFrameTimelineRanges .cut-timeline-delete-range'
+        )?.getBoundingClientRect().left > left""",
+        arg=before_move["left"],
+    )
+    after_move = range_rect()
+    assert after_move["left"] > before_move["left"]
+    assert after_move["width"] == pytest.approx(before_move["width"], abs=1.0)
+
+    drag_pending_at(
+        after_move["left"] + after_move["width"] * 0.25,
+        after_move["top"] + after_move["height"] * 0.25,
+        -10,
+    )
+    page.wait_for_function(
+        """left => document.querySelector(
+          '#cutFrameTimelineRanges .cut-timeline-delete-range'
+        )?.getBoundingClientRect().left < left""",
+        arg=after_move["left"],
+    )
+    after_start_resize = range_rect()
+    assert after_start_resize["left"] < after_move["left"]
+    assert after_start_resize["right"] == pytest.approx(
+        after_move["right"], abs=1.0
+    )
+
+    drag_pending_at(
+        after_start_resize["left"] + after_start_resize["width"] * 0.75,
+        after_start_resize["top"] + after_start_resize["height"] * 0.25,
+        10,
+    )
+    page.wait_for_function(
+        """right => document.querySelector(
+          '#cutFrameTimelineRanges .cut-timeline-delete-range'
+        )?.getBoundingClientRect().right > right""",
+        arg=after_start_resize["right"],
+    )
+    after_end_resize = range_rect()
+    assert after_end_resize["left"] == pytest.approx(
+        after_start_resize["left"], abs=1.0
+    )
+    assert after_end_resize["right"] > after_start_resize["right"]
+
+    pending.locator('[data-drag-mode="start"]').press("ArrowRight")
+    page.evaluate(
+        """() => new Promise(resolve => requestAnimationFrame(
+          () => requestAnimationFrame(resolve)
+        ))"""
+    )
+    geometry = range_rect()
+    page.mouse.click(
+        geometry["left"] + geometry["width"] / 2,
+        geometry["top"] + geometry["height"] * 0.6,
+    )
+    confirm = page.locator("#appDialogConfirm").filter(has_text="确认删除")
+    confirm.wait_for(state="visible")
+    confirm.click()
+    page.wait_for_function(
+        """async () => {
+          const job = new URLSearchParams(location.search).get('job');
+          const payload = await (await fetch(
+            `/api/transcriptions/${job}/cut-draft`, { cache: 'no-store' }
+          )).json();
+          const range = payload.cutDraft?.timelineRanges?.[0];
+          return range && range.originalEnd - range.originalStart >= 1 / 30
+            && range.originalEnd - range.originalStart < 0.1;
+        }"""
+    )
+
+    page.keyboard.press("Control+z")
+    page.wait_for_function(
+        """async () => {
+          const job = new URLSearchParams(location.search).get('job');
+          const payload = await (await fetch(
+            `/api/transcriptions/${job}/cut-draft`, { cache: 'no-store' }
+          )).json();
+          return payload.cutDraft?.timelineRanges?.length === 0;
+        }"""
+    )
+    page.keyboard.press("Control+y")
+    page.wait_for_function(
+        """async () => {
+          const job = new URLSearchParams(location.search).get('job');
+          const payload = await (await fetch(
+            `/api/transcriptions/${job}/cut-draft`, { cache: 'no-store' }
+          )).json();
+          return payload.cutDraft?.timelineRanges?.length === 1;
+        }"""
+    )
+
+    page.set_viewport_size({"width": 375, "height": 812})
+    page.wait_for_timeout(100)
+    drag_timeline_range(0.20, 0.25)
+    mobile_pending = page.locator(
+        "#cutFrameTimelineRanges .cut-timeline-delete-range"
+    )
+    mobile_pending.wait_for()
+    mobile_geometry = mobile_pending.evaluate(
+        """range => {
+          const rect = range.getBoundingClientRect();
+          const cancelRect = range.querySelector(
+            '.cut-timeline-range-cancel'
+          ).getBoundingClientRect();
+          const handles = [...range.querySelectorAll(
+            '.cut-timeline-range-handle'
+          )].map(handle => handle.getBoundingClientRect().width);
+          return {
+            rangeBottom: rect.bottom,
+            cancelLeft: cancelRect.left,
+            cancelRight: cancelRect.right,
+            cancelTop: cancelRect.top,
+            handles,
+            narrow: range.classList.contains('is-narrow'),
+            viewportWidth: document.documentElement.clientWidth,
+            horizontalOverflow: document.documentElement.scrollWidth
+              > document.documentElement.clientWidth + 1,
+          };
+        }"""
+    )
+    assert mobile_geometry["narrow"] is True
+    assert mobile_geometry["cancelTop"] >= mobile_geometry["rangeBottom"] - 1.5
+    assert mobile_geometry["cancelLeft"] >= 0
+    assert mobile_geometry["cancelRight"] <= mobile_geometry["viewportWidth"]
+    assert mobile_geometry["handles"] == pytest.approx([44, 44], abs=0.75)
+    assert mobile_geometry["horizontalOverflow"] is False
+
+    mobile_body = mobile_pending.locator(".cut-timeline-range-body")
+    mobile_body.focus()
+    mobile_body.press("Enter")
+    page.locator("#appDialogCancel").wait_for(state="visible")
+    page.locator("#appDialogCancel").click()
+    assert mobile_pending.count() == 1
+    mobile_pending.locator(".cut-timeline-range-cancel").click()
+    page.wait_for_function(
+        """() => document.querySelectorAll(
+          '#cutFrameTimelineRanges .cut-timeline-delete-range'
+        ).length === 0"""
+    )
+
+
 def test_timeline_split_exact_clip_delete_restore_history_and_mobile_layout(
     browser_session,
     seeded_editor_job,

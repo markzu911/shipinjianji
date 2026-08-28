@@ -2148,6 +2148,10 @@ h1 {
     0 0 12px rgba(172, 43, 62, 0.2);
 }
 
+.cut-timeline-delete-range.is-narrow {
+  bottom: 44px;
+}
+
 .cut-timeline-range-body,
 .cut-timeline-range-handle,
 .cut-timeline-range-cancel {
@@ -2227,6 +2231,13 @@ h1 {
   background: transparent;
   border-radius: 3px;
   transition: color 140ms ease, background-color 140ms ease;
+}
+
+.cut-timeline-delete-range.is-narrow .cut-timeline-range-cancel {
+  top: calc(100% + 10px);
+  right: auto;
+  left: var(--cut-timeline-range-cancel-left, 50%);
+  transform: translateX(-50%);
 }
 
 .cut-timeline-range-cancel iconify-icon {
