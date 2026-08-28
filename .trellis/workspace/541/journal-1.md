@@ -771,3 +771,24 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 35: 修复极短时间轴选区删除
+
+**Date**: 2026-08-28
+**Task**: 修复极短时间轴选区删除
+**Branch**: `master`
+
+### Summary
+
+将手动时间轴删除下限降为一帧并与 0.1 秒分割保护解耦；修复极窄选区主体、左右手柄和取消按钮的命中冲突，补充桌面与 375px Chromium 回归。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `37a219c` | (see git log) |
+
+### Status
+
+[OK] **Completed**
