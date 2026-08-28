@@ -1,0 +1,4 @@
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"检查显示范围没有污染 source/edited 权威时间或后端数据。"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"检查时间轴渲染、播放索引和刷新生命周期仍满足既有架构契约。"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"检查短间隔覆盖、长静音保留和首帧几何稳定。"}
+{"file":".trellis/spec/testing/index.md","reason":"执行定向前端契约、浏览器回归与工作区质量检查。"}

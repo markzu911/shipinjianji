@@ -1,0 +1,6 @@
+{"file":".trellis/spec/guides/project-overview.md","reason":"确认本地单页编辑器技术栈与源时间/剪后时间必须分层的核心约束。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"约束语义时间与显示投影分离，避免显示修复反写权威 transcript 或媒体边界。"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"遵守公共时间轴状态所有权、播放帧热路径和 source/edited time 映射契约。"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"约束时间轴固定几何、刷新稳定性和真实浏览器验证。"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"确保时间轴显示变更不影响预览、compose payload 和媒体来源。"}
+{"file":".trellis/spec/testing/index.md","reason":"确定时间轴 Node 行为测试、真实浏览器刷新回归和 diff hygiene。"}
