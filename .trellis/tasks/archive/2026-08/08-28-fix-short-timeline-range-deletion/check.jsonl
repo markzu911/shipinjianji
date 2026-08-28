@@ -1,0 +1,4 @@
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"检查短选区主体、手柄、取消按钮、键盘和移动端命中区是否同时可用。"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"检查删除门槛拆分未影响分割规则、草稿、历史、语音安全边界和单一状态所有权。"}
+{"file":".trellis/spec/testing/index.md","reason":"核对前端静态、真实浏览器和剪辑回归测试覆盖及质量门禁。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"检查短选区真实交互、console/pageerror、桌面与 375px 回归。"}

@@ -1,0 +1,4 @@
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"实现一帧最小删除范围、极窄选区命中、拖动与键盘替代时遵守现有时间轴交互和可访问性契约。"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"保持 timeline range 的语义/物理边界、二次确认、历史和 Store 所有权不变。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"用真实 Chromium 覆盖短选区确认、保存、撤销/重做和桌面/375px 命中行为。"}
+{"file":".trellis/tasks/08-13-timeline-selection-second-confirm/prd.md","reason":"复用既有首次框选、微调、主体二次点击、取消保留和键盘确认产品决策。"}
