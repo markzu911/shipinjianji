@@ -792,3 +792,24 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 36: 修复跨源句合并后文字重复
+
+**Date**: 2026-08-28
+**Task**: 修复跨源句合并后文字重复
+**Branch**: `master`
+
+### Summary
+
+跨源 editable 合并改为保留逐 token 源句归属，修复后续文字编辑造成后一源句重复；同步 retained transcript、声学边界、艺术字与旧草稿兼容，并补充完整回归。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `bb14d75` | (see git log) |
+
+### Status
+
+[OK] **Completed**

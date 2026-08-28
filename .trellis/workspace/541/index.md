@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 35
+- **Total Sessions**: 36
 - **Last Active**: 2026-08-28
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~794 | Active |
+| `journal-1.md` | ~815 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 36 | 2026-08-28 | 修复跨源句合并后文字重复 | `bb14d75` | `master` |
 | 35 | 2026-08-28 | 修复极短时间轴选区删除 | `37a219c` | `master` |
 | 34 | 2026-08-28 | 优化文案跟随与时间轴预览缓存 | `e7b5b5a` | `master` |
 | 33 | 2026-08-28 | 修复时间轴文案空隙与刷新跳变 | `67742a0`, `b8a9545`, `950a0dc` | `master` |
