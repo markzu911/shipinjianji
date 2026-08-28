@@ -57,7 +57,13 @@
           toolbarBottom = Math.min(toolbarBottom, restingBottom);
         }
       }
-      const anchorTop = toolbarBottom + ANCHOR_GAP;
+      const baseAnchorTop = toolbarBottom + ANCHOR_GAP;
+      const desiredAnchorTop = baseAnchorTop + itemRect.height * 3;
+      const maximumAnchorTop = Math.max(
+        baseAnchorTop,
+        panelRect.bottom - itemRect.height,
+      );
+      const anchorTop = Math.min(desiredAnchorTop, maximumAnchorTop);
       const startScrollTop = finiteNumber(panel.scrollTop);
       const maxScrollTop = Math.max(
         0,

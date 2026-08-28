@@ -1,0 +1,4 @@
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"检查跟随 owner、DOM 唯一性、animation generation 和清理语义。"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"检查精确 20% 字号、三行锚点、尾部单调性和响应式无溢出。"}
+{"file":".trellis/spec/testing/index.md","reason":"执行 Node/Chromium 回归并禁止只用静态字符串断言。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"检查真实浏览器中布局、滚动、按钮唯一和 375px 行为。"}

@@ -426,6 +426,7 @@ async def disable_frontend_cache(request, call_next):
         "/index.html",
         "/app.js",
         "/transcript-follow-scroll.js",
+        "/timeline-thumbnail-cache.js",
         "/timeline-model.js",
         "/editor-pip-model.js",
         "/editor-project-store.js",

@@ -210,6 +210,10 @@ let nextTimelineRangeId = 1;
 let cutTimelineBuildId = 0;
 let cutTimelineThumbnailCache = null;
 let cutTimelineExtractorOwner = null;
+const cutTimelineThumbnailStore =
+  window.TimelineThumbnailCache?.createStore({
+    cacheVersion: CUT_TIMELINE_THUMB_CACHE_VERSION,
+  }) || null;
 let cutTimelineRulerSignature = "";
 let cutTimelineResizeTimer = null;
 let noSpeechPreviewEnd = null;
@@ -4877,7 +4881,7 @@ function renderCutTimelinePlaceholders(count, fallback = false) {
 }
 
 function desiredCutTimelineThumbnailCount() {
-  const total = cutTimelineDuration();
+  const total = Math.max(0, currentVideoDuration);
   const width = cutFrameTimelineScroll.clientWidth || 640;
   if (total <= 0) return CUT_TIMELINE_THUMB_MIN;
   const majorStep = cutTimelineMajorStep(total, width);
@@ -4977,17 +4981,70 @@ function seekCutTimelineExtractor(video, seconds, signal = null) {
   });
 }
 
+function cutTimelineCanvasToBlob(canvas, signal = null) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal?.removeEventListener("abort", handleAbort);
+    const handleAbort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(cutTimelineAbortError());
+    };
+    signal?.addEventListener("abort", handleAbort, { once: true });
+    if (signal?.aborted) {
+      handleAbort();
+      return;
+    }
+    canvas.toBlob(
+      (blob) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (blob) resolve(blob);
+        else reject(new Error("video frame encoding unavailable"));
+      },
+      "image/jpeg",
+      0.72,
+    );
+  });
+}
+
+function releaseCutTimelineThumbnailFrames(cache) {
+  for (const frame of cache?.frames || []) {
+    if (typeof frame?.url === "string" && frame.url.startsWith("blob:")) {
+      URL.revokeObjectURL(frame.url);
+    }
+  }
+}
+
+function replaceCutTimelineThumbnailCache(cache) {
+  if (cutTimelineThumbnailCache === cache) return;
+  cutFrameTimelineThumbnails.replaceChildren();
+  delete cutFrameTimelineThumbnails.dataset.cacheSignature;
+  releaseCutTimelineThumbnailFrames(cutTimelineThumbnailCache);
+  cutTimelineThumbnailCache = cache;
+}
+
+function currentCutTimelineThumbnailOwner(owner) {
+  return (
+    cutTimelineExtractorOwner === owner &&
+    cutTimelineBuildId === owner.buildId &&
+    !owner.controller.signal.aborted
+  );
+}
+
 function cancelCutTimelineExtractor({ clearCache = false } = {}) {
   const owner = cutTimelineExtractorOwner;
   cutTimelineExtractorOwner = null;
   if (owner) {
     owner.controller.abort();
-    owner.video.pause();
-    owner.video.removeAttribute("src");
-    owner.video.load();
+    owner.video?.pause();
+    owner.video?.removeAttribute("src");
+    owner.video?.load();
   }
   if (clearCache) {
-    cutTimelineThumbnailCache = null;
+    replaceCutTimelineThumbnailCache(null);
   }
 }
 
@@ -5096,21 +5153,68 @@ async function buildCutTimelineThumbnails(options = {}) {
     return;
   }
   cancelCutTimelineExtractor();
+  if (cutTimelineThumbnailCache?.signature !== signature) {
+    replaceCutTimelineThumbnailCache(null);
+  }
   const buildId = (cutTimelineBuildId += 1);
-  renderCutTimelinePlaceholders(count);
-  updateCutTimelineStatus("正在生成帧预览…", "neutral", "thumbnails");
-
-  const extractor = document.createElement("video");
   const controller = new AbortController();
-  const owner = { buildId, controller, signature, video: extractor };
+  const owner = { buildId, controller, signature, video: null };
   cutTimelineExtractorOwner = owner;
-  extractor.muted = true;
-  extractor.playsInline = true;
-  extractor.preload = "auto";
-  extractor.src = source;
+  let committedFrames = false;
+  let frames = [];
   try {
+    if (cutFrameTimelineStatus.dataset.source === "thumbnails") {
+      updateCutTimelineStatus("");
+    }
+    let persistentRecord = null;
+    try {
+      persistentRecord = await cutTimelineThumbnailStore?.load(signature);
+    } catch (_error) {
+      persistentRecord = null;
+    }
+    if (!currentCutTimelineThumbnailOwner(owner)) return;
+    if (
+      persistentRecord?.cacheVersion === CUT_TIMELINE_THUMB_CACHE_VERSION &&
+      persistentRecord.jobId === (currentJobId || "") &&
+      persistentRecord.count === count &&
+      Math.abs(persistentRecord.sourceDuration - sourceDuration) <= 0.001
+    ) {
+      try {
+        for (const frame of persistentRecord.frames) {
+          frames.push({
+            blob: frame.blob,
+            sourceTime: frame.sourceTime,
+            url: URL.createObjectURL(frame.blob),
+          });
+        }
+        if (!currentCutTimelineThumbnailOwner(owner)) return;
+        const cache = {
+          complete: true,
+          count,
+          frames,
+          signature,
+          sourceDuration,
+        };
+        replaceCutTimelineThumbnailCache(cache);
+        committedFrames = true;
+        renderCutTimelineThumbnailFrames(cache, editedCutTimelineDuration());
+        return;
+      } catch (_error) {
+        releaseCutTimelineThumbnailFrames({ frames });
+        frames = [];
+      }
+    }
+
+    renderCutTimelinePlaceholders(count);
+    updateCutTimelineStatus("正在生成帧预览…", "neutral", "thumbnails");
+    const extractor = document.createElement("video");
+    owner.video = extractor;
+    extractor.muted = true;
+    extractor.playsInline = true;
+    extractor.preload = "auto";
+    extractor.src = source;
     await waitForCutVideoMetadata(extractor, controller.signal);
-    if (buildId !== cutTimelineBuildId || controller.signal.aborted) return;
+    if (!currentCutTimelineThumbnailOwner(owner)) return;
     const ratio =
       extractor.videoWidth > 0 && extractor.videoHeight > 0
         ? extractor.videoWidth / extractor.videoHeight
@@ -5121,17 +5225,21 @@ async function buildCutTimelineThumbnails(options = {}) {
     const context = canvas.getContext("2d", { alpha: false });
     if (!context) throw new Error("frame canvas unavailable");
 
-    const frames = [];
     for (let index = 0; index < count; index += 1) {
       const seconds =
         count === 1
           ? 0
           : (sourceDuration * index) / Math.max(1, count - 1);
       await seekCutTimelineExtractor(extractor, seconds, controller.signal);
-      if (buildId !== cutTimelineBuildId || controller.signal.aborted) return;
+      if (!currentCutTimelineThumbnailOwner(owner)) return;
       context.drawImage(extractor, 0, 0, canvas.width, canvas.height);
-      const frameUrl = canvas.toDataURL("image/jpeg", 0.72);
-      frames.push({ sourceTime: seconds, url: frameUrl });
+      const blob = await cutTimelineCanvasToBlob(canvas, controller.signal);
+      if (!currentCutTimelineThumbnailOwner(owner)) return;
+      frames.push({
+        blob,
+        sourceTime: seconds,
+        url: URL.createObjectURL(blob),
+      });
     }
     const cache = {
       complete: true,
@@ -5140,14 +5248,38 @@ async function buildCutTimelineThumbnails(options = {}) {
       signature,
       sourceDuration,
     };
-    cutTimelineThumbnailCache = cache;
+    replaceCutTimelineThumbnailCache(cache);
+    committedFrames = true;
     renderCutTimelineThumbnailFrames(cache, editedCutTimelineDuration());
     if (cutFrameTimelineStatus.dataset.source === "thumbnails") {
       updateCutTimelineStatus("");
     }
+    const timestamp = Date.now();
+    const persistentFrames = frames.map((frame) => ({
+      blob: frame.blob,
+      sourceTime: frame.sourceTime,
+    }));
+    if (cutTimelineThumbnailStore) {
+      void cutTimelineThumbnailStore
+        .save({
+          byteSize: persistentFrames.reduce(
+            (totalBytes, frame) => totalBytes + frame.blob.size,
+            0,
+          ),
+          cacheVersion: CUT_TIMELINE_THUMB_CACHE_VERSION,
+          count,
+          createdAt: timestamp,
+          frames: persistentFrames,
+          jobId: currentJobId || "",
+          lastAccessedAt: timestamp,
+          signature,
+          sourceDuration,
+        })
+        .catch(() => {});
+    }
   } catch (error) {
     if (error?.name === "AbortError") return;
-    if (buildId === cutTimelineBuildId) {
+    if (currentCutTimelineThumbnailOwner(owner)) {
       renderCutTimelinePlaceholders(count, true);
       updateCutTimelineStatus(
         "帧预览生成失败，仍可拖动时间轴完成剪辑。",
@@ -5156,10 +5288,11 @@ async function buildCutTimelineThumbnails(options = {}) {
       );
     }
   } finally {
+    if (!committedFrames) releaseCutTimelineThumbnailFrames({ frames });
     if (cutTimelineExtractorOwner === owner) {
       cutTimelineExtractorOwner = null;
-      extractor.removeAttribute("src");
-      extractor.load();
+      owner.video?.removeAttribute("src");
+      owner.video?.load();
     }
   }
 }
@@ -7116,6 +7249,7 @@ window.addEventListener("beforeunload", () => {
   flushPageRecoveryState();
   resetCutCommitScheduler();
   cancelCutTimelineExtractor({ clearCache: true });
+  cutTimelineThumbnailStore?.close();
   cutPlaybackFrameClock?.destroy();
   transcriptFollowScrollController.destroy();
   if (selectedPreviewUrl) URL.revokeObjectURL(selectedPreviewUrl);

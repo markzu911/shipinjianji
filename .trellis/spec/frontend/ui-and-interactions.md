@@ -43,7 +43,7 @@
 }
 ```
 
-`.segment-item` 的紧凑行与 22px 控件几何是已确认的局部例外，但文字不能继续按 50% 缩小：正文不得低于 10px、时间 9px、播放状态 7px、删除/空白标题 9px、meta 8px，图标与勾选字形为 10–11px；短文案行保持约 32px，换行和空白说明行按内容自然增高且不得裁切。`.editor-pip-tool-panel { zoom: 0.6 }` 同样不得被新的 compact 规则二次缩放；面板固定使用适合小字号中文 UI 的 `Microsoft YaHei UI / PingFang SC / Noto Sans CJK SC / Source Han Sans SC / system-ui` 字体栈，正文与辅助文字使用 500，标题和 `strong` 使用真实 700，禁止依赖 650/750 合成字重。其缩放前字号下限为 small/time 15px、普通文字与控件 16px、主要选项 strong 17px，使视觉字号约为 9/9.6/10.2px。PiP 文案行的时间列固定为 64px，正文继续 `minmax(0, 1fr)` 和 ellipsis，两列逻辑 gap 为 12px（视觉约 7.2px），最长 `MM:SS.d` 不能与正文重叠。radio/checkbox 必须显式保持等宽等高，外层 label/card 承担命中区域。
+`.segment-item` 的紧凑行与 22px 控件几何是已确认的局部例外；文字层级固定为正文 12px、时间 10.8px、播放状态 8.4px、删除/空白标题 10.8px、meta 9.6px，图标与勾选字形继续保持 10–11px。短文案行保持约 32px，换行和空白说明行按内容自然增高且不得裁切；放大文字时不得同步放大播放按钮、删除圆圈或其他控件。`.editor-pip-tool-panel { zoom: 0.6 }` 同样不得被新的 compact 规则二次缩放；面板固定使用适合小字号中文 UI 的 `Microsoft YaHei UI / PingFang SC / Noto Sans CJK SC / Source Han Sans SC / system-ui` 字体栈，正文与辅助文字使用 500，标题和 `strong` 使用真实 700，禁止依赖 650/750 合成字重。其缩放前字号下限为 small/time 15px、普通文字与控件 16px、主要选项 strong 17px，使视觉字号约为 9/9.6/10.2px。PiP 文案行的时间列固定为 64px，正文继续 `minmax(0, 1fr)` 和 ellipsis，两列逻辑 gap 为 12px（视觉约 7.2px），最长 `MM:SS.d` 不能与正文重叠。radio/checkbox 必须显式保持等宽等高，外层 label/card 承担命中区域。
 
 以下公共预览矩形及其 contain/cover、pointer mapping 必须保持不变：`.text-editor-preview-pane`、`.cut-preview-panel`、`#cutPreviewPlayer`、`#cutVideoStage`、`#cutPreviewVideo`、`#editorSuitePreviewOverlay`、`.editor-suite-preview-canvas`。紧凑样式区块不得包含这些选择器，也不能通过改变桌面工作区列比例间接缩小预览。
 
@@ -178,10 +178,16 @@ if (document.activeElement !== positionXPercent) {
 
 已删除文字同样必须能试听。点击其播放按钮时，只在该展示行的源时间范围内临时绕过剪辑预览的“跳过已删除区间”逻辑；播放到展示行末时必须保存终点、暂停、清除临时范围，再把播放头校准到行末，避免校准产生的新 `timeupdate` 再次命中旧范围。用户执行其他 seek 时也立即清除临时范围，后续公共播放恢复正常跳过删除内容。当前行高亮优先命中该临时范围，因此已删除行试听时也显示 `aria-current` 和“播放中”。
 
-播放跟随滚动以文字面板为 scroll container，并读取 sticky `.cut-toolbar` 的实际位置和高度，把独立播放中展示层对齐到工具栏下方固定间距。工具栏尚未吸顶时，锚点要使用面板 scrollport、真实 padding、sticky inset 和工具栏实高计算其最终吸顶位置；工具栏吸顶后可直接使用 `toolbar.getBoundingClientRect().bottom + 8`。不能只用 `panelRect.top + toolbarHeight` 推算，因为面板 padding、边框或 sticky 偏移会让活动行被工具栏遮挡。首次跟随从活动行当前可见位置平滑进入锚点，不得在 reparent 时瞬移。控制器把真实活动行移入展示层，并在原位置保留无交互等高占位；不得复制行、按钮或时间 data，也不得 transform 仍位于列表中的真实行。目标 `scrollTop` 必须 clamp 到 `0..scrollHeight-clientHeight` 并一次写入，列表以 FLIP transform 平滑完成视觉滚动：中段展示层随列表阶段进入并停在锚点；接近尾部时面板停在最大滚动量，展示层等待列表完成后再从上一视觉位置直接向新的剩余距离单调下移，连续尾部换段不得先上弹到锚点。尾部阶段不能早于列表和入场动画完成。同一 `data-display-key` 只调度一次；切换行、重渲染或用户滚动意图会恢复真实行原顺序并清除占位、展示层状态和监听器，`prefers-reduced-motion: reduce` 保持同一唯一 DOM 结构但即时定位。
+播放跟随滚动以文字面板为 scroll container，并读取 sticky `.cut-toolbar` 的实际位置和高度。工具栏尚未吸顶时，基础锚点要使用面板 scrollport、真实 padding、sticky inset 和工具栏实高计算其最终吸顶位置；工具栏吸顶后基础锚点为 `toolbar.getBoundingClientRect().bottom + 8`。活动行的常规目标 top 在基础锚点上增加 `3 * itemRect.height`，必须使用当前真实行高而不是固定像素；接近面板底部时再 clamp 到 `panelRect.bottom - itemRect.height`，保证活动行完整可见。不能只用 `panelRect.top + toolbarHeight` 推算，因为面板 padding、边框或 sticky 偏移会让活动行被工具栏遮挡。首次跟随从活动行当前可见位置平滑进入锚点，不得在 reparent 时瞬移。控制器把真实活动行移入展示层，并在原位置保留无交互等高占位；不得复制行、按钮或时间 data，也不得 transform 仍位于列表中的真实行。目标 `scrollTop` 必须 clamp 到 `0..scrollHeight-clientHeight` 并一次写入，列表以 FLIP transform 平滑完成视觉滚动：中段展示层随列表阶段进入并停在锚点；接近尾部时面板停在最大滚动量，展示层等待列表完成后再从上一视觉位置直接向新的剩余距离单调下移，连续尾部换段不得先上弹到锚点。尾部阶段不能早于列表和入场动画完成。同一 `data-display-key` 只调度一次；切换行、重渲染或用户滚动意图会恢复真实行原顺序并清除占位、展示层状态和监听器，`prefers-reduced-motion: reduce` 保持同一唯一 DOM 结构但即时定位。
 
 ```javascript
-const anchorTop = Math.min(currentToolbarBottom, stickyRestingBottom) + 8;
+const baseAnchorTop = Math.min(currentToolbarBottom, stickyRestingBottom) + 8;
+const desiredAnchorTop = baseAnchorTop + itemRect.height * 3;
+const maximumAnchorTop = Math.max(
+  baseAnchorTop,
+  panelRect.bottom - itemRect.height,
+);
+const anchorTop = Math.min(desiredAnchorTop, maximumAnchorTop);
 const targetScrollTop = clamp(
   panel.scrollTop + itemRect.top - anchorTop,
   0,

@@ -21,6 +21,7 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
         "/styles.css",
         "/app.js",
         "/transcript-follow-scroll.js",
+        "/timeline-thumbnail-cache.js",
         "/ui-feedback.js",
         "/timeline-model.js",
         "/editor-pip-model.js",
@@ -37,6 +38,7 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     styles_response = responses["/styles.css"]
     script_response = responses["/app.js"]
     follow_scroll_response = responses["/transcript-follow-scroll.js"]
+    thumbnail_cache_response = responses["/timeline-thumbnail-cache.js"]
     feedback_script_response = responses["/ui-feedback.js"]
     timeline_script_response = responses["/timeline-model.js"]
     pip_model_response = responses["/editor-pip-model.js"]
@@ -51,9 +53,10 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
 
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
-    assert "/app.js?v=20260827-02" in page_response.text
-    assert "/styles.css?v=20260825-11" in page_response.text
-    assert "/transcript-follow-scroll.js?v=20260818-03" in page_response.text
+    assert "/app.js?v=20260828-01" in page_response.text
+    assert "/styles.css?v=20260828-01" in page_response.text
+    assert "/transcript-follow-scroll.js?v=20260828-01" in page_response.text
+    assert "/timeline-thumbnail-cache.js?v=20260828-01" in page_response.text
     assert "/ui-feedback.js?v=20260807-03" in page_response.text
     assert "/timeline-model.js?v=20260810-01" in page_response.text
     assert "/editor-pip-model.js?v=20260819-01" in page_response.text
@@ -131,6 +134,9 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
         "/editor-suite.js"
     )
     assert page_response.text.index("/transcript-follow-scroll.js") < (
+        page_response.text.index("/timeline-thumbnail-cache.js")
+    )
+    assert page_response.text.index("/timeline-thumbnail-cache.js") < (
         page_response.text.index("/app.js")
     )
 
@@ -141,6 +147,20 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     assert "function getTranscriptFollowScrollTarget" in follow_scroll_response.text
     assert "function createPlaceholder" in follow_scroll_response.text
     assert "tailRemainder" in follow_scroll_response.text
+
+    assert thumbnail_cache_response.status_code == 200
+    assert thumbnail_cache_response.headers["cache-control"] == "no-store, max-age=0"
+    assert "window.TimelineThumbnailCache = Object.freeze" in (
+        thumbnail_cache_response.text
+    )
+    assert "function createStore(options = {})" in thumbnail_cache_response.text
+    assert "function load(signature)" in thumbnail_cache_response.text
+    assert "function save(record)" in thumbnail_cache_response.text
+    assert "function prune({ preserveSignature" in thumbnail_cache_response.text
+    assert "blob instanceof BlobType" in thumbnail_cache_response.text
+    assert "DEFAULT_MAX_RECORDS = 24" in thumbnail_cache_response.text
+    assert "64 * 1024 * 1024" in thumbnail_cache_response.text
+    assert "30 * 24 * 60 * 60 * 1000" in thumbnail_cache_response.text
 
     assert feedback_script_response.status_code == 200
     assert 'className = "app-dialog-shell"' in feedback_script_response.text
@@ -475,6 +495,17 @@ def test_cut_timeline_and_draft_frontend_contracts():
     assert "cutTimelinePixelsPerSecond" in script_response.text
     assert "CUT_TIMELINE_TEXT_LINES" in script_response.text
     assert "Math.ceil(total / majorStep) + 1" in script_response.text
+    thumbnail_count_start = script_response.text.index(
+        "function desiredCutTimelineThumbnailCount"
+    )
+    thumbnail_count_end = script_response.text.index(
+        "function cutTimelineAbortError", thumbnail_count_start
+    )
+    thumbnail_count_source = script_response.text[
+        thumbnail_count_start:thumbnail_count_end
+    ]
+    assert "currentVideoDuration" in thumbnail_count_source
+    assert "editedCutTimelineDuration" not in thumbnail_count_source
     assert ".cut-timeline-text-segment {" in styles_response.text
     assert ".cut-frame-timeline .frame-timeline-thumb img {" in styles_response.text
     assert ".cut-frame-timeline-actions {" in styles_response.text
@@ -741,9 +772,9 @@ def test_cut_range_and_segment_frontend_contracts():
     )
     assert "min-height: 32px" in styles_response.text
     assert ".segment-time {" in styles_response.text
-    assert "font-size: 9px" in styles_response.text
+    assert "font-size: 10.8px" in styles_response.text
     assert ".segment-text {" in styles_response.text
-    assert "font-size: 10px" in styles_response.text
+    assert "font-size: 12px" in styles_response.text
     assert "width: 22px" in styles_response.text
     assert "height: 22px" in styles_response.text
     assert "text-shadow: 0 0 6px" in styles_response.text
@@ -780,7 +811,12 @@ def test_cut_range_and_segment_frontend_contracts():
     assert 'event.target.closest(".word-chip")' not in script_response.text
     assert "`${selectedSegmentCount} 段文字`" in script_response.text
     assert r"/\p{P}|\s/u" in script_response.text
-    assert 'toDataURL("image/jpeg"' in script_response.text
+    assert "canvas.toBlob(" in script_response.text
+    assert '"image/jpeg"' in script_response.text
+    assert "0.72" in script_response.text
+    assert "URL.createObjectURL(frame.blob)" in script_response.text
+    assert "URL.revokeObjectURL(frame.url)" in script_response.text
+    assert "cutTimelineThumbnailStore?.close()" in script_response.text
 
     assert "--editor-timeline-track-height: 112px" in styles_response.text
     assert "--editor-timeline-ruler-height: 28px" in styles_response.text
@@ -1162,7 +1198,7 @@ def test_art_template_library_frontend_contracts():
     art_tool_response = responses["/editor-art-tool.js"]
 
     assert template_page_response.status_code == 200
-    assert "/styles.css?v=20260825-11" in template_page_response.text
+    assert "/styles.css?v=20260828-01" in template_page_response.text
     assert "/art-template-library.js?v=20260819-01" in template_page_response.text
     assert "当前模板主色" in template_page_response.text
     assert 'id="templateCardGrid"' in template_page_response.text
@@ -1223,7 +1259,7 @@ def test_font_manager_frontend_contracts():
     font_script_response = responses["/font-manager.js"]
 
     assert font_page_response.status_code == 200
-    assert "/styles.css?v=20260825-11" in font_page_response.text
+    assert "/styles.css?v=20260828-01" in font_page_response.text
     assert "/font-manager.js?v=" in font_page_response.text
     assert 'id="fontUploadForm"' in font_page_response.text
     assert 'id="fontCardGrid"' in font_page_response.text
@@ -2787,7 +2823,7 @@ function createFixture() {
     const width = Number.parseFloat(layer.style.width || 0);
     return { bottom: top + height, height, left, right: left + width, top, width };
   };
-  function createItem(contentTop, height = 64) {
+  function createItem(contentTop, height = 32) {
     const item = createNode(['segment-item', 'is-playback-active']);
     item.buttonCount = 1;
     item.contentTop = contentTop;
@@ -2811,7 +2847,13 @@ function createFixture() {
     scrollWrites,
     setToolbarHeight: (height) => { toolbarHeight = height; },
     toolbar,
-    toolbarAnchor: () => 100 + toolbarOffset + toolbarHeight + 8,
+    toolbarAnchor: (height = 32) => {
+      const baseAnchorTop = 100 + toolbarOffset + toolbarHeight + 8;
+      return Math.min(
+        baseAnchorTop + height * 3,
+        Math.max(baseAnchorTop, 400 - height),
+      );
+    },
   };
 }
 
@@ -2836,6 +2878,18 @@ const tallToolbarTarget = followScroll.getTranscriptFollowScrollTarget(
 );
 fixture.setToolbarHeight(60);
 
+const dynamicAnchorFixture = createFixture();
+const standardRowMetrics = followScroll.getTranscriptFollowScrollMetrics(
+  dynamicAnchorFixture.panel,
+  dynamicAnchorFixture.createItem(300, 32),
+  dynamicAnchorFixture.toolbar,
+);
+const tallRowMetrics = followScroll.getTranscriptFollowScrollMetrics(
+  dynamicAnchorFixture.panel,
+  dynamicAnchorFixture.createItem(300, 80),
+  dynamicAnchorFixture.toolbar,
+);
+
 controller.follow(middleItem, 'row-a');
 const middlePlaceholder = fixture.list.children[0];
 const middlePinnedUnique =
@@ -2847,7 +2901,7 @@ const middlePinnedUnique =
   middlePlaceholder.attributes['aria-hidden'] === 'true' &&
   Object.hasOwn(middlePlaceholder.attributes, 'inert') &&
   middlePlaceholder.inert === true &&
-  middlePlaceholder.style.height === '64px' &&
+  middlePlaceholder.style.height === '32px' &&
   [...fixture.list.children, ...fixture.layer.children].reduce(
     (total, item) => total + Number(item.buttonCount || 0),
     0,
@@ -3093,7 +3147,7 @@ fallbackController.follow(fallbackItem, 'fallback-row');
 const unsupportedAnimationImmediate =
   fallbackFixture.animations.length === 0 &&
   fallbackFixture.scrollWrites.length === 1 &&
-  fallbackFixture.panel.scrollTop === 214 &&
+  fallbackFixture.panel.scrollTop === 118 &&
   fallbackFixture.layer.children[0] === fallbackItem &&
   fallbackFixture.layer.style.transform === '';
 fallbackItem.classList.remove('is-playback-active');
@@ -3105,7 +3159,7 @@ const unsupportedTailAnimationImmediate =
   fallbackFixture.panel.scrollTop === 700 &&
   fallbackFixture.layer.children[0] === fallbackTailItem &&
   fallbackTailItem.getBoundingClientRect().top === 400 &&
-  fallbackFixture.layer.style.transform === 'translate3d(0, 214px, 0)';
+  fallbackFixture.layer.style.transform === 'translate3d(0, 118px, 0)';
 fallbackController.destroy();
 
 const interruptionResults = ['wheel', 'touchstart', 'pointerdown', 'keydown'].map(
@@ -3137,6 +3191,10 @@ console.log(JSON.stringify({
   consecutiveTailMovesMonotonically,
   consecutiveTailVisualTops,
   destroyClean,
+  dynamicRowAnchors: {
+    standard: standardRowMetrics.anchorTop,
+    tall: tallRowMetrics.anchorTop,
+  },
   durationBounds: [
     followScroll.getMotionDuration(0),
     followScroll.getMotionDuration(114),
@@ -3196,17 +3254,21 @@ console.log(JSON.stringify({
     assert payload["queuedAfterDuplicate"] == 2
     assert payload["middlePinnedUnique"] is True
     assert payload["scrollHeightStable"] is True
-    assert payload["shortToolbarTarget"] == 214
-    assert payload["tallToolbarTarget"] == 182
+    assert payload["shortToolbarTarget"] == 118
+    assert payload["tallToolbarTarget"] == 86
+    assert payload["dynamicRowAnchors"] == {
+        "standard": 282,
+        "tall": 320,
+    }
     assert payload["middleScrollTops"] == sorted(payload["middleScrollTops"])
     assert len(payload["middleScrollTops"]) == 1
-    assert payload["middleScrollTops"][-1] == pytest.approx(214)
+    assert payload["middleScrollTops"][-1] == pytest.approx(118)
     assert payload["middleVisualTops"] == sorted(
         payload["middleVisualTops"], reverse=True
     )
     assert payload["middleVisualTops"][0] == pytest.approx(300)
     assert payload["middleVisualTops"][-1] == pytest.approx(payload["anchorTop"])
-    assert payload["stickyStartupTarget"] == pytest.approx(214)
+    assert payload["stickyStartupTarget"] == pytest.approx(118)
     assert payload["stickyStartupVisualTops"] == sorted(
         payload["stickyStartupVisualTops"], reverse=True
     )
@@ -3230,7 +3292,7 @@ console.log(JSON.stringify({
     assert payload["tailCreatedAfterList"] is True
     assert payload["durationBounds"] == [180, 231, 360]
     assert payload["flipKeyframes"] == [
-        {"transform": "translate3d(0, 114px, 0)"},
+        {"transform": "translate3d(0, 18px, 0)"},
         {"transform": "translate3d(0, 0px, 0)"},
     ]
     assert payload["transformParsing"] == [42, -19, 23]
@@ -3946,7 +4008,7 @@ def test_compact_ui_density_preserves_preview_and_uses_shared_timeline_geometry(
         "font-library.html",
     ):
         page = (root / "web" / page_name).read_text(encoding="utf-8")
-        assert "/styles.css?v=20260825-11" in page
+        assert "/styles.css?v=20260828-01" in page
     index_page = (root / "web" / "index.html").read_text(encoding="utf-8")
     assert "/editor-timeline-controller.js?v=20260825-03" in index_page
 
@@ -3981,14 +4043,14 @@ def test_compact_ui_density_preserves_preview_and_uses_shared_timeline_geometry(
     assert "/* Compact transcript controls keep half-scale geometry" in styles
     for transcript_type_contract in (
         ".segment-time {",
-        "font-size: 9px;",
+        "font-size: 10.8px;",
         ".segment-current-badge {",
-        "font-size: 7px;",
+        "font-size: 8.4px;",
         ".segment-text {",
-        "font-size: 10px;",
+        "font-size: 12px;",
         ".segment-no-speech-copy strong {",
         ".segment-no-speech-meta {",
-        "font-size: 8px;",
+        "font-size: 9.6px;",
     ):
         assert transcript_type_contract in styles
     assert ".editor-pip-tool-panel {\n  --pip-readable-small-font: 15px;" in styles

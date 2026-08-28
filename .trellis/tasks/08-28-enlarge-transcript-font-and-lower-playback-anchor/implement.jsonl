@@ -1,0 +1,5 @@
+{"file":".trellis/spec/guides/project-overview.md","reason":"确认原生前端技术栈、静态资源版本和单页编辑器约束。"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"遵守播放跟随控制器唯一所有权、真实行 reparent 和动画生命周期契约。"}
+{"file":".trellis/spec/frontend/ui-and-interactions.md","reason":"遵守紧凑文案行字号下限、动态行高、尾部动画、375px 与无溢出要求。"}
+{"file":".trellis/spec/testing/index.md","reason":"确定播放跟随 Node 行为与真实 Chromium 布局回归范围。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"遵守浏览器 fixture、网络隔离和中间帧几何断言规则。"}

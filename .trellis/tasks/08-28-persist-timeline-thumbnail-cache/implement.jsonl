@@ -1,0 +1,6 @@
+{"file":".trellis/spec/guides/project-overview.md","reason":"确认原生多页面前端、静态资源版本和本地应用约束。"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"保持时间轴缩略帧和媒体 source 映射的现有所有权，不建立第二个时间轴 owner。"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"遵守 thumbnail cache key、单 extractor owner、删除只重映射和异步竞态契约。"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"遵守 Object URL 创建、替换、重置和卸载释放规则。"}
+{"file":".trellis/spec/testing/index.md","reason":"选择前端静态契约和真实 Chromium 回归范围。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"使用同一 BrowserContext 验证 reload、IndexedDB、extractor 计数和时间轴连续覆盖。"}

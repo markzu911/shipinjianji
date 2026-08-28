@@ -58,7 +58,7 @@
 - 编辑器加载、保存、工具切换、公共预览或 compose 变更：运行 `\.venv\Scripts\python.exe -m pytest -q tests/app/browser`；首次运行先执行 `python -m playwright install chromium`。
 - 艺术字轨道分组或公共时间轴布局：同时运行 ArtModel、ProjectStore、TimelineController 和浏览器回归；断言手动 `art:manual` 与文案 `art:transcript:<trackId>` 分离且各固定一行、旧草稿重新派生、重叠手动项仍保留独立 ID/选择入口且 preview/compose 不漂移。片段点击还要覆盖横向滚动后的 track rect 换算、无效几何回退、拒绝选择不 seek、单次 seek、程序化起点 seek，以及浏览器中实际点击点与指示条中心对齐。
 
-播放跟随等涉及 reparent、占位和展示层的动效，不能只验证最终坐标或与实现同构的几何公式。Node 行为回归必须检查真实行/按钮唯一、占位无交互和 data、原索引恢复、重渲染前清理、同 key 中断、迟到动画完成、reduced-motion、单次目标 `scrollTop` 写入、列表 FLIP keyframe、尾部晚于列表阶段，以及工具栏尚未吸顶时首行从原位置连续进入最终 sticky 锚点。连续尾部行必须检查展示层从上一视觉位置到新余量单调下移，不能途经锚点；浏览器还要在中间帧检查按钮数量、列表 `scrollHeight`、锚点误差、尾部位移和横向溢出。
+播放跟随等涉及 reparent、占位和展示层的动效，不能只验证最终坐标或与实现同构的几何公式。Node 行为回归必须检查真实行/按钮唯一、占位无交互和 data、原索引恢复、重渲染前清理、同 key 中断、迟到动画完成、reduced-motion、单次目标 `scrollTop` 写入、列表 FLIP keyframe、尾部晚于列表阶段，以及工具栏尚未吸顶时首行从原位置连续进入最终 sticky 基础锚点。常规活动行 top 必须等于基础锚点加三个当前真实行高，长换行行要证明偏移随行高变化；底部场景要断言 clamp 后 top、活动行完整可见、真实按钮唯一和占位无交互。连续尾部行必须检查展示层从上一视觉位置到新余量单调下移，不能途经锚点；浏览器还要在中间帧检查按钮数量、列表 `scrollHeight`、锚点误差、尾部位移和横向溢出。真实浏览器几何测试不得复用应用当前正在播放的展示层；使用隔离 DOM/controller fixture，或先显式停止并恢复生产跟随状态，避免测试自身与异步播放 reparent 竞争。
 
 播放帧时钟行为测试必须覆盖 rVFC、RAF 和 `timeupdate` 三种模式，重复 `play` 只能保留一个 pending callback，`pause`/seek/结束/销毁都要取消并重置对应生命周期；测试必须保留一个取消前的回调并在新回调建立后手动触发，确认 generation guard 不发出旧时间、不清空新 callback id 且不产生第二条循环。帧热路径静态契约要禁止结构重建和全量 DOM 查询；重叠区间行为测试要分别断言 floor/active cursor，覆盖短项结束后恢复长项、重复向前帧和向后 seek 的二分重定位。
 

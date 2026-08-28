@@ -152,6 +152,98 @@ const signature = JSON.stringify({ ranges, revision, diagnostics });
 const signature = cutDraftSemanticSignature(buildPersistedCutDraftPayload());
 ```
 
+### 场景：时间轴预览帧持久缓存
+
+#### 1. Scope / Trigger
+
+修改 `timeline-thumbnail-cache.js`、`buildCutTimelineThumbnails()`、缩略帧采样密度、IndexedDB 存储、Blob URL 生命周期或相关静态资源加载顺序时，必须保持本场景。持久缓存只是刷新性能优化，不是项目、媒体或剪辑状态的权威来源。
+
+#### 2. Signatures
+
+```javascript
+TimelineThumbnailCache.createStore(options?) -> {
+  load(signature) -> Promise<record | null>,
+  save(record) -> Promise<void>,
+  prune({ preserveSignature? }?) -> Promise<number>,
+  close() -> void,
+}
+
+record = {
+  signature: string,
+  cacheVersion: number,
+  jobId: string,
+  sourceDuration: number,
+  count: number,
+  frames: Array<{ sourceTime: number, blob: Blob }>,
+  byteSize: number,
+  createdAt: number,
+  lastAccessedAt: number,
+}
+```
+
+缓存签名固定为 `cacheVersion | jobId | source URL | sourceDuration | count`。`count` 只依赖源视频时长和时间轴宽度；删除、恢复、文字拆分、split point、cut revision 和剪后时长不得进入签名或采样密度。
+
+#### 3. Contracts
+
+- `web/timeline-thumbnail-cache.js` 是 IndexedDB 的唯一访问边界，通过 `window.TimelineThumbnailCache` 暴露 API；`app.js` 继续唯一拥有 source-time 采样、extractor、Canvas、内存 cache 和剪后投影。
+- 构建顺序必须是 `memory -> IndexedDB -> extractor`。异步读取前先登记唯一 owner；每个 `await`、Blob URL 创建和 DOM 提交前都要校验 build id、AbortSignal 和 owner identity，迟到结果不得覆盖新 source。
+- IndexedDB 能力读取、同步/异步 `open()`、blocked、versionchange、transaction、记录 shape、Blob 和配额错误都必须静默降级。同步或瞬时 open 失败不得永久缓存 rejected Promise，后续 `load/save` 必须可以重试。
+- 持久层只保存 `image/jpeg` Blob 和 source time，不保存 Object URL。有效命中直接创建本 document 的 Blob URL 并渲染，隐藏 extractor 创建数和逐帧 seek 数都为 0，且不得短暂显示“正在生成帧预览”。
+- miss 时沿用隐藏 video 的 source-time seek；Canvas 使用异步 `toBlob("image/jpeg", 0.72)`。帧齐全后先安装内存 cache 并渲染，`save()` 和 30 天/24 条/64 MiB LRU 清理只能在后台执行，不能延迟可见结果。
+- 删除、恢复和用户点击文案拆分只使用既有 source-time frames 重新计算剪后 `left/width`；禁止因此重新 seek、编码、写持久缓存或改变基础 video source。
+- 替换缓存、清空任务、视频错误和页面销毁时，必须先移除 DOM 中对旧 Blob URL 的 `backgroundImage` 引用并清除 DOM cache signature，再调用 `URL.revokeObjectURL()`。先 revoke 会让 Chromium 报 `ERR_FILE_NOT_FOUND`，并可能让仍在绘制的帧变空。
+- 新脚本必须在 `app.js` 前以 `defer` 加载；脚本和消费者同步提升 `?v=`，并加入 `disable_frontend_cache` 与静态资源契约。该能力不得增加后端 API/schema 或持久化视频、文案、cut draft、艺术字和合成结果。
+
+#### 4. Validation & Error Matrix
+
+| 条件 | 结果 |
+| --- | --- |
+| 内存签名命中 | 直接重投影；0 IndexedDB、0 extractor、0 seek |
+| IndexedDB 有效命中 | Blob 转当前 document URL 后渲染；0 extractor、0 seek、无 loading 状态 |
+| `indexedDB` getter、open 或 transaction 失败 | 静默进入 extractor；编辑、播放和剪辑继续可用 |
+| 记录版本、数量、时长、Blob type/size 或 source time 非法 | 删除/忽略坏记录并重新抽帧，不产生 pageerror/unhandled rejection |
+| source/signature 在异步读取或编码期间变化 | abort 旧 owner；迟到结果只做自身 URL/video 清理，不写内存或 DOM |
+| 删除、恢复或文字拆分改变剪后时长 | cache signature 不变；只重投影，不创建 extractor |
+| 保存或 prune 失败 | 已显示帧保持；不显示产品错误 |
+| 缓存替换、任务重置或卸载 | 先解除 DOM Blob 引用，再 revoke；不得出现 `ERR_FILE_NOT_FOUND` |
+
+#### 5. Good / Base / Bad Cases
+
+- Good：首次打开先看到完整帧，再后台写入 Blob；同一 browser context 刷新后直接复用，extractor/seek 都为 0。
+- Base：浏览器禁用或回收 IndexedDB；页面仍按原流程抽帧，仅失去刷新加速。
+- Bad：把剪后时长或删除 revision 放进 key，缓存 rejected open Promise，或在 DOM 仍引用 Blob URL 时 revoke；这些分别造成每次编辑重抽帧、永久失去重试和刷新资源错误。
+
+#### 6. Tests Required
+
+- 静态契约：脚本加载顺序、资源版本、no-cache 路径、全局 API、JPEG Blob 校验、缓存上限和 source-duration 采样密度。
+- 真实 Chromium 首次生成：至少 8 张非 loading Blob 帧可见，持久记录 `byteSize` 等于帧 Blob 总和。
+- 同一 BrowserContext 刷新：DOM 签名不变，extractor 创建和 thumbnail seek 都为 0，状态栏无生成提示，console/pageerror 为空。
+- 失败矩阵：损坏 Blob、`indexedDB` getter 抛 `SecurityError`、同步瞬时 open 失败后重试成功，以及 age/count/bytes prune 保留当前 LRU 记录。
+- 编辑投影：删除、恢复、文字拆分和 375px 下不新增 extractor，可见帧高度正确并从 `0%` 到 `100%` 连续覆盖。
+- 在艺术字/画中画刷新和 context teardown 中保留 console 资源错误检查，防止 Blob URL 释放顺序回归。
+
+#### 7. Wrong vs Correct
+
+```javascript
+// Wrong: edited state changes the persistent key and every cut re-extracts.
+const signature = `${jobId}|${editedDuration}|${cutRevision}|${count}`;
+
+// Correct: persist immutable source samples and project them into edited time.
+const signature = `${cacheVersion}|${jobId}|${source}|${sourceDuration}|${count}`;
+renderCutTimelineThumbnailFrames(sourceFrames, editedDuration);
+```
+
+```javascript
+// Wrong: live CSS backgrounds still point at the revoked Blob URLs.
+releaseCutTimelineThumbnailFrames(cache);
+cutFrameTimelineThumbnails.replaceChildren();
+
+// Correct: remove document references before releasing their URLs.
+cutFrameTimelineThumbnails.replaceChildren();
+delete cutFrameTimelineThumbnails.dataset.cacheSignature;
+releaseCutTimelineThumbnailFrames(cache);
+```
+
 ### 场景：播放头分割与精确片段删除
 
 #### 1. Scope / Trigger

@@ -1,0 +1,4 @@
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"检查缓存 signature、单 owner、异步 guard、删除零重抽和失败降级。"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"检查 Blob/Object URL 生命周期和媒体源不被新缓存修改。"}
+{"file":".trellis/spec/testing/index.md","reason":"检查测试覆盖可观察行为而非仅静态字符串。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"检查真实刷新复用、零 extractor、损坏回退、清理上限和完整 browser suite。"}

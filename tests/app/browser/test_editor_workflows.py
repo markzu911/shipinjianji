@@ -87,8 +87,13 @@ def install_cut_performance_probe(page) -> None:
     page.add_init_script(
         """(() => {
           const originalCreateElement = Document.prototype.createElement;
+          const originalCurrentTime = Object.getOwnPropertyDescriptor(
+            HTMLMediaElement.prototype,
+            'currentTime',
+          );
           const originalSetItem = Storage.prototype.setItem;
           const originalFetch = window.fetch.bind(window);
+          const dynamicallyCreatedVideos = new WeakSet();
           window.__cutPerformanceProbe = {
             createdVideos: 0,
             historyWrites: 0,
@@ -97,6 +102,7 @@ def install_cut_performance_probe(page) -> None:
             putMaxInFlight: 0,
             storeActions: [],
             longTasks: [],
+            thumbnailSeekWrites: 0,
           };
           if (PerformanceObserver.supportedEntryTypes?.includes('longtask')) {
             new PerformanceObserver(list => {
@@ -112,9 +118,21 @@ def install_cut_performance_probe(page) -> None:
             const element = originalCreateElement.call(this, name, options);
             if (String(name).toLowerCase() === 'video') {
               window.__cutPerformanceProbe.createdVideos += 1;
+              dynamicallyCreatedVideos.add(element);
             }
             return element;
           };
+          Object.defineProperty(HTMLMediaElement.prototype, 'currentTime', {
+            configurable: originalCurrentTime.configurable,
+            enumerable: originalCurrentTime.enumerable,
+            get() { return originalCurrentTime.get.call(this); },
+            set(value) {
+              if (dynamicallyCreatedVideos.has(this)) {
+                window.__cutPerformanceProbe.thumbnailSeekWrites += 1;
+              }
+              originalCurrentTime.set.call(this, value);
+            },
+          });
           Storage.prototype.setItem = function setItemWithProbe(key, value) {
             if (String(key).startsWith('video-editor:cut-history:')) {
               window.__cutPerformanceProbe.historyWrites += 1;
@@ -156,6 +174,7 @@ def reset_cut_performance_probe(page) -> None:
           probe.putMaxInFlight = 0;
           probe.storeActions = [];
           probe.longTasks = [];
+          probe.thumbnailSeekWrites = 0;
           probe.commitCount = 0;
           probe.commitBreakdowns = [];
           probe.unsubscribe?.();
@@ -390,6 +409,316 @@ def test_cut_interaction_long_fixture_performance_and_work_counts(
     assert probe["historyWrites"] <= 1
     assert all(duration <= 200 for duration in probe["longTasks"])
     assert media_probe == {"srcWrites": 0, "loadCalls": 0}
+
+
+def test_timeline_thumbnail_cache_persists_reload_and_falls_back_safely(
+    browser_session,
+    seeded_editor_job,
+):
+    page = browser_session.page
+    install_cut_performance_probe(page)
+    route_cut_draft_echo(page, seeded_editor_job.job_id)
+    open_editor(browser_session, seeded_editor_job)
+    page.wait_for_function(
+        """() => {
+          const items = [...document.querySelectorAll(
+            '#cutFrameTimelineThumbnails .frame-timeline-thumb'
+          )];
+          return items.length >= 8
+            && items.every(item => !item.classList.contains('is-loading'))
+            && items.every(item => item.style.backgroundImage.includes('blob:'));
+        }"""
+    )
+    page.wait_for_function(
+        """async () => {
+          const signature = document.querySelector(
+            '#cutFrameTimelineThumbnails'
+          )?.dataset.cacheSignature;
+          if (!signature) return false;
+          const store = window.TimelineThumbnailCache.createStore();
+          try {
+            const record = await store.load(signature);
+            return record?.frames?.length >= 8
+              && record.frames.every(frame => frame.blob instanceof Blob)
+              && record.frames.every(frame => frame.blob.type === 'image/jpeg');
+          } finally {
+            store.close();
+          }
+        }"""
+    )
+    initial_cache = page.evaluate(
+        """async () => {
+          const signature = document.querySelector(
+            '#cutFrameTimelineThumbnails'
+          ).dataset.cacheSignature;
+          const store = window.TimelineThumbnailCache.createStore();
+          try {
+            const record = await store.load(signature);
+            return {
+              byteSize: record.byteSize,
+              count: record.count,
+              frameBytes: record.frames.reduce(
+                (total, frame) => total + frame.blob.size,
+                0
+              ),
+              signature,
+            };
+          } finally {
+            store.close();
+          }
+        }"""
+    )
+    assert initial_cache["count"] >= 8
+    assert initial_cache["byteSize"] > 0
+    assert initial_cache["byteSize"] == initial_cache["frameBytes"]
+    assert page.evaluate("window.__cutPerformanceProbe.createdVideos") >= 1
+
+    page.reload()
+    page.locator("#resultCard").wait_for(state="visible")
+    page.wait_for_function(
+        """expected => {
+          const layer = document.querySelector('#cutFrameTimelineThumbnails');
+          const items = [...layer.children];
+          return layer.dataset.cacheSignature === expected
+            && items.length > 0
+            && items.every(item => !item.classList.contains('is-loading'))
+            && items.every(item => item.style.backgroundImage.includes('blob:'));
+        }""",
+        arg=initial_cache["signature"],
+    )
+    reload_probe = page.evaluate("window.__cutPerformanceProbe")
+    assert reload_probe["createdVideos"] == 0
+    assert reload_probe["thumbnailSeekWrites"] == 0
+    assert "正在生成帧预览" not in page.locator(
+        "#cutFrameTimelineStatus"
+    ).inner_text()
+
+    page.evaluate(
+        """async signature => {
+          const database = await new Promise((resolve, reject) => {
+            const request = indexedDB.open('video-editor-timeline-thumbnails', 1);
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+          });
+          await new Promise((resolve, reject) => {
+            const transaction = database.transaction(
+              'timeline-thumbnails',
+              'readwrite'
+            );
+            const store = transaction.objectStore('timeline-thumbnails');
+            const request = store.get(signature);
+            request.onsuccess = () => {
+              const record = request.result;
+              record.frames[0] = {
+                sourceTime: record.frames[0].sourceTime,
+                blob: 'corrupted-frame',
+              };
+              store.put(record);
+            };
+            transaction.oncomplete = resolve;
+            transaction.onerror = () => reject(transaction.error);
+            transaction.onabort = () => reject(transaction.error);
+          });
+          database.close();
+        }""",
+        initial_cache["signature"],
+    )
+    page.reload()
+    page.locator("#resultCard").wait_for(state="visible")
+    page.wait_for_function(
+        """() => {
+          const items = [...document.querySelectorAll(
+            '#cutFrameTimelineThumbnails .frame-timeline-thumb'
+          )];
+          return items.length >= 8
+            && items.every(item => !item.classList.contains('is-loading'))
+            && items.every(item => item.style.backgroundImage.includes('blob:'));
+        }"""
+    )
+    corrupted_probe = page.evaluate("window.__cutPerformanceProbe")
+    assert corrupted_probe["createdVideos"] >= 1
+    assert corrupted_probe["thumbnailSeekWrites"] >= initial_cache["count"] - 1
+    page.wait_for_function(
+        """async signature => {
+          const store = window.TimelineThumbnailCache.createStore();
+          try {
+            const record = await store.load(signature);
+            return record?.frames?.length > 0
+              && record.frames.every(frame => frame.blob instanceof Blob);
+          } finally {
+            store.close();
+          }
+        }""",
+        arg=initial_cache["signature"],
+    )
+
+    page.add_init_script(
+        """Object.defineProperty(window, 'indexedDB', {
+          configurable: true,
+          get() { throw new DOMException('IndexedDB disabled for test', 'SecurityError'); },
+        });"""
+    )
+    page.reload()
+    page.locator("#resultCard").wait_for(state="visible")
+    page.wait_for_function(
+        """() => {
+          const items = [...document.querySelectorAll(
+            '#cutFrameTimelineThumbnails .frame-timeline-thumb'
+          )];
+          return items.length >= 8
+            && items.every(item => !item.classList.contains('is-loading'))
+            && items.every(item => item.style.backgroundImage.includes('blob:'));
+        }"""
+    )
+    unavailable_probe = page.evaluate("window.__cutPerformanceProbe")
+    assert unavailable_probe["createdVideos"] >= 1
+    assert unavailable_probe["thumbnailSeekWrites"] >= initial_cache["count"] - 1
+
+
+def test_timeline_thumbnail_cache_prunes_age_count_and_byte_limits(
+    browser_session,
+):
+    page = browser_session.page
+    page.goto(browser_session.base_url)
+    result = page.evaluate(
+        """async () => {
+          const databaseName = `thumbnail-prune-test-${crypto.randomUUID()}`;
+          window.__thumbnailCacheNow = 10_000;
+          const store = window.TimelineThumbnailCache.createStore({
+            databaseName,
+            maxAgeMs: 1_000,
+            maxBytes: 9,
+            maxRecords: 2,
+            now: () => window.__thumbnailCacheNow,
+          });
+          await store.load('__initialize__');
+          const database = await new Promise((resolve, reject) => {
+            const request = indexedDB.open(databaseName, 1);
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+          });
+          const makeRecord = (signature, lastAccessedAt, bytes) => ({
+            byteSize: bytes,
+            cacheVersion: 1,
+            count: 1,
+            createdAt: 100,
+            frames: [{
+              sourceTime: 0,
+              blob: new Blob([new Uint8Array(bytes)], { type: 'image/jpeg' }),
+            }],
+            jobId: 'prune-job',
+            lastAccessedAt,
+            signature,
+            sourceDuration: 1,
+          });
+          await new Promise((resolve, reject) => {
+            const transaction = database.transaction(
+              'timeline-thumbnails',
+              'readwrite'
+            );
+            const objectStore = transaction.objectStore('timeline-thumbnails');
+            objectStore.put(makeRecord('expired', 100, 4));
+            objectStore.put(makeRecord('preserve', 500, 4));
+            objectStore.put(makeRecord('too-large', 9_900, 8));
+            objectStore.put(makeRecord('recent', 9_800, 4));
+            objectStore.put(makeRecord('over-count', 9_700, 4));
+            transaction.oncomplete = resolve;
+            transaction.onerror = () => reject(transaction.error);
+            transaction.onabort = () => reject(transaction.error);
+          });
+          database.close();
+          const removed = await store.prune({ preserveSignature: 'preserve' });
+          const remainingDatabase = await new Promise((resolve, reject) => {
+            const request = indexedDB.open(databaseName, 1);
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+          });
+          const signatures = await new Promise((resolve, reject) => {
+            const transaction = remainingDatabase.transaction(
+              'timeline-thumbnails',
+              'readonly'
+            );
+            const request = transaction.objectStore(
+              'timeline-thumbnails'
+            ).getAllKeys();
+            request.onsuccess = () => resolve(request.result.sort());
+            request.onerror = () => reject(request.error);
+          });
+          remainingDatabase.close();
+          store.close();
+          await new Promise((resolve, reject) => {
+            const request = indexedDB.deleteDatabase(databaseName);
+            request.onsuccess = resolve;
+            request.onerror = () => reject(request.error);
+          });
+          return { removed, signatures };
+        }"""
+    )
+    assert result == {"removed": 3, "signatures": ["preserve", "recent"]}
+
+
+def test_timeline_thumbnail_cache_retries_after_transient_open_failure(
+    browser_session,
+):
+    page = browser_session.page
+    page.goto(browser_session.base_url)
+    result = page.evaluate(
+        """async () => {
+          const databaseName = `thumbnail-open-retry-${crypto.randomUUID()}`;
+          const nativeIndexedDb = window.indexedDB;
+          let openAttempts = 0;
+          const store = window.TimelineThumbnailCache.createStore({
+            databaseName,
+            indexedDB: {
+              open(...args) {
+                openAttempts += 1;
+                if (openAttempts === 1) throw new Error('transient open failure');
+                return nativeIndexedDb.open(...args);
+              },
+            },
+          });
+          let firstLoadRejected = false;
+          try {
+            await store.load('retry-record');
+          } catch (_error) {
+            firstLoadRejected = true;
+          }
+          const timestamp = Date.now();
+          const blob = new Blob(
+            [new Uint8Array([1, 2, 3])],
+            { type: 'image/jpeg' },
+          );
+          await store.save({
+            byteSize: blob.size,
+            cacheVersion: 1,
+            count: 1,
+            createdAt: timestamp,
+            frames: [{ blob, sourceTime: 0 }],
+            jobId: 'retry-job',
+            lastAccessedAt: timestamp,
+            signature: 'retry-record',
+            sourceDuration: 1,
+          });
+          const loaded = await store.load('retry-record');
+          store.close();
+          await new Promise((resolve, reject) => {
+            const request = nativeIndexedDb.deleteDatabase(databaseName);
+            request.onsuccess = resolve;
+            request.onerror = () => reject(request.error);
+          });
+          return {
+            firstLoadRejected,
+            loaded: loaded?.frames?.length === 1
+              && loaded.frames[0].blob instanceof Blob,
+            openAttempts,
+          };
+        }"""
+    )
+    assert result == {
+        "firstLoadRejected": True,
+        "loaded": True,
+        "openAttempts": 2,
+    }
 
 
 def test_cut_draft_burst_uses_one_trailing_save(
@@ -1809,7 +2138,7 @@ def test_timeline_split_exact_clip_delete_restore_history_and_mobile_layout(
     assert page.evaluate("window.__splitVideoCreations") == 0
 
 
-def test_transcript_rows_use_half_scale_geometry_without_horizontal_overflow(
+def test_transcript_rows_enlarge_type_without_horizontal_overflow(
     browser_session,
     seeded_editor_job,
 ):
@@ -1848,6 +2177,12 @@ def test_transcript_rows_use_half_scale_geometry_without_horizontal_overflow(
     page = browser_session.page
     page.set_viewport_size({"width": 1280, "height": 900})
     open_editor(browser_session, seeded_editor_job)
+    page.locator("#cutPreviewVideo").evaluate(
+        """video => {
+          video.pause();
+          video.dispatchEvent(new Event('pause'));
+        }"""
+    )
     page.locator(
         '.segment-item[data-segment-index="0"] .segment-toggle'
     ).click()
@@ -1961,18 +2296,18 @@ def test_transcript_rows_use_half_scale_geometry_without_horizontal_overflow(
     }
     assert desktop["play"] == [22, 22]
     assert desktop["playIcon"] == "11px"
-    assert desktop["timeFont"] == "9px"
-    assert desktop["textFont"] == "10px"
-    assert desktop["textLineHeight"] == "13.5px"
+    assert desktop["timeFont"] == "10.8px"
+    assert desktop["textFont"] == "12px"
+    assert desktop["textLineHeight"] == "16.2px"
     assert desktop["textMinHeight"] == "22px"
     assert desktop["textRunMinHeight"] == "22px"
     assert desktop["textRunPaddingTop"] == "2px"
     assert desktop["textRunGap"] == "2.5px"
-    assert desktop["badgeFont"] == "7px"
+    assert desktop["badgeFont"] == "8.4px"
     assert desktop["noSpeechMinHeight"] == "22px"
     assert desktop["noSpeechIcon"] == "10px"
-    assert desktop["noSpeechTitleFont"] == "9px"
-    assert desktop["noSpeechMetaFont"] == "8px"
+    assert desktop["noSpeechTitleFont"] == "10.8px"
+    assert desktop["noSpeechMetaFont"] == "9.6px"
     assert desktop["normalHeight"] > desktop["row"]
     assert desktop["noSpeechHeight"] >= desktop["row"]
     assert desktop["fullWidth"] is True
@@ -2035,12 +2370,169 @@ def test_transcript_rows_use_half_scale_geometry_without_horizontal_overflow(
     assert follow_geometry["placeholderButtons"] == 0
     assert follow_geometry["activeButtons"] > 0
 
+    anchor_geometry = page.evaluate(
+        """() => {
+          const templateItem = document.querySelector(
+            '.segment-item.is-delete-fragment[data-segment-index="0"]'
+          );
+          const toolbarHeight = document.querySelector(
+            '.text-editor-panel .cut-toolbar'
+          ).getBoundingClientRect().height;
+
+          function runFixture({ clampAtBottom, key }) {
+            const host = document.createElement('div');
+            Object.assign(host.style, {
+              height: '480px',
+              left: '-10000px',
+              position: 'fixed',
+              top: '0',
+              width: '320px',
+            });
+
+            const panel = document.createElement('section');
+            panel.className = 'text-editor-panel';
+            Object.assign(panel.style, {
+              border: '0',
+              boxSizing: 'border-box',
+              display: 'block',
+              height: '480px',
+              minHeight: '0',
+              overflow: 'auto',
+              padding: '0',
+              position: 'relative',
+              width: '300px',
+            });
+
+            const toolbar = document.createElement('div');
+            toolbar.className = 'cut-toolbar';
+            Object.assign(toolbar.style, {
+              border: '0',
+              boxSizing: 'border-box',
+              height: `${toolbarHeight}px`,
+              minHeight: `${toolbarHeight}px`,
+              padding: '0',
+              position: 'sticky',
+              top: '0',
+            });
+
+            const list = document.createElement('ol');
+            Object.assign(list.style, {
+              listStyle: 'none',
+              margin: '0',
+              padding: '0',
+            });
+            const spacerBefore = document.createElement('li');
+            spacerBefore.style.height = '300px';
+            const item = templateItem.cloneNode(true);
+            item.classList.add('is-playback-active');
+            const spacerAfter = document.createElement('li');
+            spacerAfter.style.height = '500px';
+            list.append(spacerBefore, item, spacerAfter);
+            panel.append(toolbar, list);
+
+            const layer = document.createElement('div');
+            Object.assign(layer.style, {
+              position: 'absolute',
+              zIndex: '1',
+            });
+            layer.hidden = true;
+            host.append(panel, layer);
+            document.body.append(host);
+
+            const itemHeight = item.getBoundingClientRect().height;
+            panel.style.height = clampAtBottom
+              ? `${toolbarHeight + 8 + itemHeight * 2}px`
+              : `${toolbarHeight + 8 + itemHeight * 5}px`;
+            const panelRect = panel.getBoundingClientRect();
+            const baseAnchorTop = toolbar.getBoundingClientRect().bottom + 8;
+            const desiredAnchorTop = baseAnchorTop + itemHeight * 3;
+            const maximumAnchorTop = Math.max(
+              baseAnchorTop,
+              panelRect.bottom - itemHeight
+            );
+            const expectedAnchorTop = Math.min(
+              desiredAnchorTop,
+              maximumAnchorTop
+            );
+            const playButtonCountBefore = host.querySelectorAll(
+              '.segment-play-button'
+            ).length;
+            const controller = window.TranscriptFollowScroll.createController({
+              layer,
+              matchMedia: () => ({ matches: true }),
+            });
+            const followed = controller.follow(item, key);
+            const active = layer.querySelector(
+              '.segment-item.is-playback-active'
+            );
+            const placeholder = list.querySelector(
+              '.segment-follow-placeholder'
+            );
+            const activeRect = active.getBoundingClientRect();
+            const result = {
+              activeBottom: activeRect.bottom,
+              activeTop: activeRect.top,
+              clamped: desiredAnchorTop > maximumAnchorTop + 0.5,
+              expectedAnchorTop,
+              followed,
+              itemHeight,
+              offsetFromBase: expectedAnchorTop - baseAnchorTop,
+              panelBottom: panelRect.bottom,
+              placeholderButtons: placeholder.querySelectorAll('button').length,
+              playButtonCountAfter: host.querySelectorAll(
+                '.segment-play-button'
+              ).length,
+              playButtonCountBefore,
+            };
+            controller.destroy();
+            host.remove();
+            return result;
+          }
+
+          return {
+            clamped: runFixture({
+              clampAtBottom: true,
+              key: 'bottom-clamp-review',
+            }),
+            regular: runFixture({
+              clampAtBottom: false,
+              key: 'three-row-anchor-review',
+            }),
+          };
+        }"""
+    )
+    regular_anchor = anchor_geometry["regular"]
+    assert regular_anchor["followed"] is True
+    assert regular_anchor["clamped"] is False
+    assert regular_anchor["activeTop"] == pytest.approx(
+        regular_anchor["expectedAnchorTop"], abs=1
+    )
+    assert regular_anchor["offsetFromBase"] == pytest.approx(
+        regular_anchor["itemHeight"] * 3, abs=1
+    )
+    assert regular_anchor["placeholderButtons"] == 0
+    assert regular_anchor["playButtonCountAfter"] == (
+        regular_anchor["playButtonCountBefore"]
+    )
+
+    clamped_anchor = anchor_geometry["clamped"]
+    assert clamped_anchor["followed"] is True
+    assert clamped_anchor["clamped"] is True
+    assert clamped_anchor["activeTop"] == pytest.approx(
+        clamped_anchor["expectedAnchorTop"], abs=1
+    )
+    assert clamped_anchor["activeBottom"] <= clamped_anchor["panelBottom"] + 1
+    assert clamped_anchor["placeholderButtons"] == 0
+    assert clamped_anchor["playButtonCountAfter"] == (
+        clamped_anchor["playButtonCountBefore"]
+    )
+
     page.set_viewport_size({"width": 375, "height": 812})
     mobile = transcript_geometry()
     assert mobile["toggle"] == [22, 22]
     assert mobile["play"] == [22, 22]
-    assert mobile["timeFont"] == "9px"
-    assert mobile["textFont"] == "10px"
+    assert mobile["timeFont"] == "10.8px"
+    assert mobile["textFont"] == "12px"
     assert mobile["columns"].startswith("22px ")
     assert mobile["columns"].endswith(" 22px")
     assert mobile["normalHeight"] >= desktop["normalHeight"]
@@ -2053,17 +2545,28 @@ def test_transcript_rows_use_half_scale_geometry_without_horizontal_overflow(
     assert mobile["timelineButton"][1] >= 44
     assert mobile["documentOverflow"] <= 1
 
+    page.locator("#cutPreviewVideo").evaluate(
+        """video => {
+          video.pause();
+          video.dispatchEvent(new Event('pause'));
+        }"""
+    )
+    transcript_roots = ":is(#segmentList, #transcriptNowPlayingLayer)"
     page.locator(
-        '#segmentList .segment-item.is-delete-fragment[data-segment-index="0"] '
+        '#segmentList .segment-item.is-delete-fragment'
+        '[data-segment-index="0"] '
         '.segment-restore-button'
     ).click()
-    restored_item = page.locator(
-        '#segmentList .segment-item[data-segment-index="0"]'
+    restored_selector = (
+        f'{transcript_roots} .segment-item[data-segment-index="0"]'
         ':not(.is-delete-fragment)'
     )
-    restored_item.wait_for(state="visible")
-    restored_geometry = restored_item.evaluate(
-        """item => {
+    restored_geometry = page.wait_for_function(
+        """selector => {
+          const item = [...document.querySelectorAll(selector)].find(
+            candidate => candidate.getBoundingClientRect().height >= 32
+          );
+          if (!item) return false;
           const bounds = item.getBoundingClientRect();
           const text = item.querySelector('.segment-text');
           return {
@@ -2072,23 +2575,35 @@ def test_transcript_rows_use_half_scale_geometry_without_horizontal_overflow(
             clipping: item.scrollHeight > item.clientHeight + 1,
             overflow: item.scrollWidth > item.clientWidth + 1,
           };
-        }"""
-    )
+        }""",
+        arg=restored_selector,
+    ).json_value()
     assert restored_geometry["height"] >= 32
-    assert restored_geometry["textFont"] == "10px"
+    assert restored_geometry["textFont"] == "12px"
     assert restored_geometry["clipping"] is False
     assert restored_geometry["overflow"] is False
 
+    page.locator("#cutPreviewVideo").evaluate(
+        """video => {
+          video.pause();
+          video.dispatchEvent(new Event('pause'));
+        }"""
+    )
     page.locator(
-        '#segmentList .segment-item.is-no-speech-fragment.is-delete-fragment '
+        '#segmentList .segment-item.is-no-speech-fragment'
+        '.is-delete-fragment '
         '.segment-toggle'
     ).click()
-    restored_no_speech = page.locator(
-        '#segmentList .segment-item.is-no-speech-fragment.is-restored-no-speech'
+    restored_no_speech_selector = (
+        f'{transcript_roots} .segment-item.is-no-speech-fragment'
+        '.is-restored-no-speech'
     )
-    restored_no_speech.wait_for(state="visible")
-    restored_no_speech_geometry = restored_no_speech.evaluate(
-        """item => {
+    restored_no_speech_geometry = page.wait_for_function(
+        """selector => {
+          const item = [...document.querySelectorAll(selector)].find(
+            candidate => candidate.getBoundingClientRect().height >= 32
+          );
+          if (!item) return false;
           const button = item.querySelector('.segment-no-speech-button');
           return {
             titleFont: getComputedStyle(button.querySelector('strong')).fontSize,
@@ -2101,11 +2616,12 @@ def test_transcript_rows_use_half_scale_geometry_without_horizontal_overflow(
             clipping: item.scrollHeight > item.clientHeight + 1,
             overflow: item.scrollWidth > item.clientWidth + 1,
           };
-        }"""
-    )
+        }""",
+        arg=restored_no_speech_selector,
+    ).json_value()
     assert restored_no_speech_geometry == {
-        "titleFont": "9px",
-        "metaFont": "8px",
+        "titleFont": "10.8px",
+        "metaFont": "9.6px",
         "iconFont": "10px",
         "clipping": False,
         "overflow": False,

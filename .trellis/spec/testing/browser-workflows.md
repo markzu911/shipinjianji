@@ -35,7 +35,7 @@ seeded_editor_job(sample_video) -> SeededEditorJob
 
 - 刷新恢复：执行可见删除操作，等待草稿保存，再核对 UI、cut draft JSON 和时间映射。
 - 时间轴分割：连续播放头分割后核对 source anchor、structure revision 与不变的 `timingRevision`；覆盖精确删除、全删后无 marker/占位/焦点目标、内部 Store 结构保留、撤销/重做、刷新、键盘焦点、Store `cut:split-structure` 轨道、普通拖选取消及 375px。纯分割期间基础 video `srcWrites/loadCalls` 和 extractor 创建数都必须为 0。
-- 时间轴缩略帧：除检查 data URL、绝对横向定位和剪后时间重映射外，还必须检查至少一个可见帧、每个可见帧的实际高度大于 0 并等于缩略图层高度，以及开头/交错删除后可见帧从 `0%` 到 `100%` 连续无缝覆盖；禁止只断言图片已生成或 `left/width` 已设置。删除或恢复后的纯投影更新不得新建 extractor。
+- 时间轴缩略帧：首次生成必须写入真实 IndexedDB JPEG Blob；同一 BrowserContext 刷新命中时 extractor 创建和逐帧 seek 都为 0，且不出现生成提示。损坏记录、`indexedDB` getter 抛 `SecurityError` 和瞬时 open 失败分别覆盖降级/重试；真实数据库覆盖 30 天、24 条、64 MiB LRU。布局还要检查至少一个可见帧、每个可见帧的实际高度大于 0 并等于缩略图层高度，以及开头/交错删除后从 `0%` 到 `100%` 连续无缝覆盖。删除、恢复和文字拆分后的纯投影不得新建 extractor；刷新、工具用例和 teardown 必须保持 console 无 Blob URL `ERR_FILE_NOT_FOUND`。
 - 工具切换：cut/art/pip 始终保持同一 document、基础 video、公共预览和公共时间线；隐藏 panel 必须 inert。
 - 文字保存：暂停/播放两种状态都保持 document/video/ArtTool/PipTool identity、src、currentTime、play state 和 art/pip 时间；新文案通过顶层 Store 进入艺术字与 compose。
 - 统一生成：用 `expect_response` 捕获真实 compose 响应，断言请求字段来自同一个 editor frame。
@@ -147,7 +147,7 @@ assert base_media_mutations(page) == {"srcWrites": 0, "loadCalls": 0}
 - create response 忽略 abort 并迟到返回，断言 no-op。
 - schema v1 art-only reload，pip 服务端 baseline 不变。
 - 历史 pip URL、桌面/375px、iframe 为 0、无横向溢出。
-- 文案列表正文 10px、时间 9px、播放状态 7px、删除/空白标题 9px、meta 8px、图标/勾选 10–11px；桌面和 375px 均断言短行约 32px、长文案自然增高、无横向溢出和纵向裁切。
+- 文案列表正文 12px、时间 10.8px、播放状态 8.4px、删除/空白标题 10.8px、meta 9.6px、图标/勾选 10–11px；桌面和 375px 均断言短行约 32px、长文案自然增高、无横向溢出和纵向裁切。播放跟随还要在真实 Chromium 中断言常规锚点下移三个当前行高、底部 clamp 后活动行完整可见、reduced-motion 终点一致、按钮唯一且占位无交互。
 - 画中画设置面板 60% computed geometry、中文 UI 字体与 500/700 权重、15/16/17px 字号下限、radio 等宽等高、生成素材卡无裁切，以及公共 preview/timeline 几何不变。
 
 ### 4. Wrong vs Correct

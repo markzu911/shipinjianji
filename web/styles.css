@@ -2489,7 +2489,7 @@ h1 {
 .segment-time {
   color: var(--text-muted);
   font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
-  font-size: 9px;
+  font-size: 10.8px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -2497,7 +2497,7 @@ h1 {
 .segment-current-badge {
   width: max-content;
   color: var(--primary);
-  font-size: 7px;
+  font-size: 8.4px;
   font-weight: 800;
   letter-spacing: 0.08em;
   line-height: 1.2;
@@ -2596,7 +2596,7 @@ h1 {
   flex-wrap: wrap;
   color: #c7d2db;
   background: transparent;
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.35;
   overflow-wrap: anywhere;
   white-space: normal;
@@ -2660,14 +2660,14 @@ h1 {
 
 .segment-no-speech-copy strong {
   color: inherit;
-  font-size: 9px;
+  font-size: 10.8px;
   font-weight: 700;
   line-height: 1.2;
 }
 
 .segment-no-speech-meta {
   color: var(--text-muted);
-  font-size: 8px;
+  font-size: 9.6px;
   line-height: 1.25;
 }
 
