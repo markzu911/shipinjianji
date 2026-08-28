@@ -727,3 +727,26 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 33: 修复时间轴文案空隙与刷新跳变
+
+**Date**: 2026-08-28
+**Task**: 修复时间轴文案空隙与刷新跳变
+**Branch**: `master`
+
+### Summary
+
+为时间轴文案增加独立 layout 范围，短间隔按剪后时间覆盖、长静音保留；阻止零宽度提前渲染并稳定刷新首帧，补齐阈值、删除折叠和浏览器刷新回归。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `67742a0` | (see git log) |
+| `b8a9545` | (see git log) |
+| `950a0dc` | (see git log) |
+
+### Status
+
+[OK] **Completed**
