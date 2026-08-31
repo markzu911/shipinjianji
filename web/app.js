@@ -2946,6 +2946,113 @@ function cutDraftSemanticSignature(payload) {
   return JSON.stringify(cutDraftSemanticSnapshot(payload));
 }
 
+function cutDraftKeyedItems(items) {
+  if (!Array.isArray(items)) return null;
+  const keyed = new Map();
+  for (const item of items) {
+    const key = String(item?.key || "");
+    if (!key || keyed.has(key)) return null;
+    keyed.set(key, item);
+  }
+  return keyed;
+}
+
+function cutDraftResponseStructureCompatible(requestPayload, responseDraft) {
+  if (
+    !requestPayload ||
+    !responseDraft ||
+    (requestPayload.automaticNoSpeechInitialized === true) !==
+      (responseDraft.automaticNoSpeechInitialized === true)
+  ) {
+    return false;
+  }
+
+  const collectionNames = [
+    "textRanges",
+    "noSpeechRanges",
+    "timelineRanges",
+    "splitPoints",
+  ];
+  const requestCollections = {};
+  const responseCollections = {};
+  for (const name of collectionNames) {
+    const requestItems = cutDraftKeyedItems(requestPayload[name]);
+    const responseItems = cutDraftKeyedItems(responseDraft[name]);
+    if (
+      !requestItems ||
+      !responseItems ||
+      requestItems.size !== responseItems.size ||
+      [...requestItems.keys()].some((key) => !responseItems.has(key))
+    ) {
+      return false;
+    }
+    requestCollections[name] = requestItems;
+    responseCollections[name] = responseItems;
+  }
+
+  for (const [key, requestRange] of requestCollections.textRanges) {
+    const responseRange = responseCollections.textRanges.get(key);
+    const semanticStart = Number(
+      responseRange?.originalStart ?? responseRange?.start,
+    );
+    const semanticEnd = Number(
+      responseRange?.originalEnd ?? responseRange?.end,
+    );
+    if (
+      String(requestRange?.text || "") !== String(responseRange?.text || "") ||
+      !serializableCutDraftRange(responseRange) ||
+      !Number.isFinite(semanticStart) ||
+      !Number.isFinite(semanticEnd) ||
+      semanticEnd <= semanticStart
+    ) {
+      return false;
+    }
+  }
+  if (
+    [...responseCollections.noSpeechRanges.values()].some(
+      (range) => !serializableCutDraftRange(range),
+    )
+  ) {
+    return false;
+  }
+  const normalizedBoundaryMode = (range) => {
+    const mode = range?.boundaryMode;
+    if (mode === undefined) return "speech_safe";
+    return mode === "speech_safe" || mode === "split_exact" ? mode : null;
+  };
+  for (const [key, requestRange] of requestCollections.timelineRanges) {
+    const responseRange = responseCollections.timelineRanges.get(key);
+    const requestMode = normalizedBoundaryMode(requestRange);
+    const responseMode = normalizedBoundaryMode(responseRange);
+    if (
+      !requestMode ||
+      !responseMode ||
+      requestMode !== responseMode ||
+      String(requestRange?.splitClipKey || "") !==
+        String(responseRange?.splitClipKey || "") ||
+      !serializableTimelineCutDraftRange(responseRange)
+    ) {
+      return false;
+    }
+  }
+  if (
+    [...responseCollections.splitPoints.values()].some(
+      (point) => !Number.isFinite(Number(point?.sourceTime)),
+    )
+  ) {
+    return false;
+  }
+  const normalizedSplitPoints = normalizeCutSplitPoints(
+    [...responseCollections.splitPoints.values()],
+  );
+  return (
+    normalizedSplitPoints.length === responseCollections.splitPoints.size &&
+    normalizedSplitPoints.every((point) =>
+      responseCollections.splitPoints.has(point.key),
+    )
+  );
+}
+
 function restorePersistedCutDraft(draft) {
   cutDraftRevision = Math.max(0, Number(draft?.revision) || 0);
   automaticNoSpeechInitialized =
@@ -3036,42 +3143,21 @@ function applyPersistedCutDraftAlignment(
     return false;
   }
 
-  const serverTextRanges = new Map(
-    (Array.isArray(draft.textRanges) ? draft.textRanges : []).flatMap((item) => {
-      const key = String(item?.key || "");
-      const normalized = serializableCutDraftRange(item);
-      return key && normalized ? [[key, { item, normalized }]] : [];
-    }),
-  );
-  if (
-    serverTextRanges.size !== selectedRanges.size ||
-    [...selectedRanges.keys()].some((key) => !serverTextRanges.has(key))
-  ) {
+  const currentPayload = buildPersistedCutDraftPayload();
+  if (!cutDraftResponseStructureCompatible(currentPayload, draft)) {
     return false;
   }
 
+  const serverTextRanges = cutDraftKeyedItems(draft.textRanges);
+  const serverNoSpeechRanges = cutDraftKeyedItems(draft.noSpeechRanges);
+  const serverTimelineRanges = cutDraftKeyedItems(draft.timelineRanges);
+
   const currentTimelineRanges = getCommittedTimelineDeleteRanges();
-  const serverTimelineRanges = new Map(
-    (Array.isArray(draft.timelineRanges) ? draft.timelineRanges : []).flatMap(
-      (item) => {
-        const key = String(item?.key || "");
-        const normalized = serializableTimelineCutDraftRange(item);
-        return key && normalized ? [[key, normalized]] : [];
-      },
-    ),
-  );
-  if (
-    serverTimelineRanges.size !== currentTimelineRanges.length ||
-    currentTimelineRanges.some(
-      (range) => !serverTimelineRanges.has(String(range.key || "")),
-    )
-  ) {
-    return false;
-  }
 
   const alignedTextRanges = new Map();
   for (const [key, currentRange] of selectedRanges.entries()) {
-    const { item, normalized } = serverTextRanges.get(key);
+    const item = serverTextRanges.get(key);
+    const normalized = serializableCutDraftRange(item);
     const aligned = {
       ...currentRange,
       ...normalized,
@@ -3094,10 +3180,25 @@ function applyPersistedCutDraftAlignment(
     alignedTextRanges.set(key, aligned);
   }
 
-  const alignedTimelineRanges = currentTimelineRanges.map((currentRange) => ({
-    ...currentRange,
-    ...serverTimelineRanges.get(String(currentRange.key)),
-  }));
+  const alignedNoSpeechRanges = new Map();
+  for (const [key, currentRange] of selectedNoSpeechRanges.entries()) {
+    const normalized = serializableCutDraftRange(
+      serverNoSpeechRanges.get(key),
+    );
+    alignedNoSpeechRanges.set(key, {
+      ...currentRange,
+      id: key,
+      ...normalized,
+    });
+  }
+
+  const alignedTimelineRanges = currentTimelineRanges.map((currentRange) => {
+    const normalized = serializableTimelineCutDraftRange(
+      serverTimelineRanges.get(String(currentRange.key)),
+    );
+    return { ...currentRange, ...normalized };
+  });
+  const alignedSplitPoints = normalizeCutSplitPoints(draft.splitPoints);
   const rangeChanged = (left, right, fields) =>
     fields.some((field) => left?.[field] !== right?.[field]);
   const changed =
@@ -3112,6 +3213,12 @@ function applyPersistedCutDraftAlignment(
         "text",
       ]),
     ) ||
+    [...selectedNoSpeechRanges.entries()].some(([key, currentRange]) =>
+      rangeChanged(currentRange, alignedNoSpeechRanges.get(key), [
+        "start",
+        "end",
+      ]),
+    ) ||
     currentTimelineRanges.some((currentRange, index) =>
       rangeChanged(currentRange, alignedTimelineRanges[index], [
         "start",
@@ -3121,13 +3228,30 @@ function applyPersistedCutDraftAlignment(
         "boundaryMode",
         "splitClipKey",
       ]),
+    ) ||
+    cutSplitPoints.length !== alignedSplitPoints.length ||
+    cutSplitPoints.some((point, index) =>
+      rangeChanged(point, alignedSplitPoints[index], ["key", "sourceTime"]),
     );
 
   selectedRanges.clear();
   for (const [key, range] of alignedTextRanges) {
     selectedRanges.set(key, range);
   }
-  timelineDeleteRanges = alignedTimelineRanges;
+  selectedNoSpeechRanges.clear();
+  for (const [key, range] of alignedNoSpeechRanges) {
+    selectedNoSpeechRanges.set(key, range);
+  }
+  const alignedTimelineRangesByKey = new Map(
+    alignedTimelineRanges.map((range) => [String(range.key || ""), range]),
+  );
+  timelineDeleteRanges = timelineDeleteRanges.map((range) =>
+    timelineRangeInProgress && range.id === selectedTimelineRangeId
+      ? range
+      : alignedTimelineRangesByKey.get(String(range.key || "")) || range,
+  );
+  cutSplitPoints = alignedSplitPoints;
+  cutSplitClipsCache = null;
 
   if (changed) {
     cutHistoryReplaying = true;
@@ -3139,9 +3263,9 @@ function applyPersistedCutDraftAlignment(
     reconcileCurrentCutHistorySnapshot();
   }
   if (retainedTranscript) {
-    return applyServerRetainedProjection(retainedTranscript, {
+    applyServerRetainedProjection(retainedTranscript, {
       jobId: expectedJobId,
-      signature: expectedSignature,
+      signature: cutDraftSemanticSignature(buildPersistedCutDraftPayload()),
       revision: draft.revision,
     });
   }
@@ -3254,15 +3378,18 @@ async function persistCutDraft() {
       if (!isCurrentRequest()) return;
 
       const serverDraft = result.cutDraft;
-      const responseSignature = cutDraftSemanticSignature(serverDraft || {});
-      if (responseSignature !== request.signature) {
-        throw new Error("服务器返回的剪辑草稿与当前请求不一致。");
-      }
-      const responseRevision = Number(serverDraft?.revision) || 0;
-      if (responseRevision <= request.requestRevision) {
+      const responseRevision = serverDraft?.revision;
+      if (
+        !Number.isSafeInteger(responseRevision) ||
+        responseRevision <= 0 ||
+        responseRevision <= request.requestRevision
+      ) {
         throw new Error("服务器未推进剪辑草稿版本。");
       }
       cutDraftRevision = Math.max(cutDraftRevision, responseRevision);
+      if (!cutDraftResponseStructureCompatible(request.payload, serverDraft)) {
+        throw new Error("服务器返回的剪辑草稿结构与当前请求不一致。");
+      }
 
       const stillDesired =
         cutDraftDesired?.jobId === request.jobId &&
@@ -3276,21 +3403,31 @@ async function persistCutDraft() {
         )) {
           throw new Error("服务器返回的剪辑范围无法安全应用。");
         }
+        const normalizedDesired = captureDesiredCutDraft();
         saveLocalCutDraft(serverDraft, request.jobId);
         syncEditorSuiteCutDraftState();
         renderCutTimelineTextSegments();
         cutCommitExternallySynced = true;
+        cutDraftLastSignature = normalizedDesired.signature;
+        cutDraftAcknowledged = {
+          jobId: request.jobId,
+          signature: normalizedDesired.signature,
+          normalizedSnapshot: serverDraft,
+          revision: responseRevision,
+        };
+        cutDraftNeedsServerSync = false;
         setCutDraftSaveStatus("剪辑草稿已保存", "success");
+      } else {
+        cutDraftLastSignature = request.signature;
+        cutDraftAcknowledged = {
+          jobId: request.jobId,
+          signature: request.signature,
+          normalizedSnapshot: serverDraft,
+          revision: responseRevision,
+        };
+        cutDraftNeedsServerSync = true;
       }
-      cutDraftLastSignature = request.signature;
-      cutDraftAcknowledged = {
-        jobId: request.jobId,
-        signature: request.signature,
-        normalizedSnapshot: serverDraft,
-        revision: responseRevision,
-      };
       cutDraftFailedSignature = "";
-      cutDraftNeedsServerSync = !stillDesired;
     } catch (error) {
       if (!isCurrentRequest() || error?.name === "AbortError") return;
       cutDraftFailedSignature = request.signature;

@@ -52,6 +52,7 @@
 - 工程快照、重启恢复、retry/attempt 或 retention 竞态：`test_project_repository.py`、`test_maintenance_history.py`、对应 API 测试和 browser restart/interrupted 用例，随后完整测试。
 - 转写或建议：`test_transcription_suggestions.py`。
 - 时间轴或剪辑：`test_acoustic_alignment.py`、`test_cut_draft.py`、`test_cut_acoustic_boundaries.py` 和 `test_cut_rendering.py`；同时覆盖 timeline 双范围、普通转场 `0.20s` 语义邻近门槛、可信 final 超距复用、重复转场的 structure/trust 分离与 PCM 佐证、完整 segment 的跨段 forced/PCM/无谷底/立即起音/delete-start 对称、合法大 coarse deviation、静音内精确范围、草稿 revision 生成门槛与生成阶段零次重对齐。重复和跨段边界测试必须同时断言被删语音消失和下一次保留表达未损伤，并覆盖走廊内部持续谷底、forced candidate 后独立 quiet gap、candidate/fallback 后 retained hard-limit 终端静音、gap 高能/缺少两侧语音/forced overlap、早期孤立爆音、单点尖谷、噪声轻微波动、单调斜坡、均匀低能和非削波增益；失败探测还要断言既有 hard limit 不会被 null 覆盖。“得/你”必须保留完整重复上下文，禁止只用两个相邻字的简化 fixture 掩盖重复分类。
+- cut-draft 保存状态机：服务端会规范化文字、静音、时间轴和 split 数值，前端测试不得只 echo 请求。至少覆盖 2xx 后先推进 revision、结构身份拒绝、完整 snapshot 原子安装、post-normalization ack/retained projection、旧响应 rebase、pending 选区保留，以及 `删除 -> undo -> refresh -> redo -> refresh`；每一步同时断言请求 revision、服务端草稿、localStorage/history 和顶层 Store，禁止只看“已保存”文案或 DOM。
 - overlay 或统一合成：art + pip + composition 对应模块，随后完整测试。
 - 打包/数据目录：`tests/test_build_mac_package.py`，确认不包含本机 jobs/history/秘密。
 - HTML/CSS/JS 行为变更：Python 静态契约测试之外，用浏览器验证桌面和 375px 窄屏的核心工作流。

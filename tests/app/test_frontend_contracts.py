@@ -53,7 +53,7 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
 
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
-    assert "/app.js?v=20260828-02" in page_response.text
+    assert "/app.js?v=20260831-01" in page_response.text
     assert "/styles.css?v=20260828-02" in page_response.text
     assert "/transcript-follow-scroll.js?v=20260828-01" in page_response.text
     assert "/timeline-thumbnail-cache.js?v=20260828-01" in page_response.text
@@ -2229,14 +2229,21 @@ const selectedRanges = new Map([["text-a", {{
   start: 0.0, end: 0.35, originalStart: 0.0, originalEnd: 0.35,
   text: "得", adjacentSilenceBefore: 0, adjacentSilenceAfter: 0,
 }}]]);
-const selectedNoSpeechRanges = new Map();
+const selectedNoSpeechRanges = new Map([["quiet-a", {{
+  id: "quiet-a", start: 0.6, end: 0.7,
+}}]]);
 let timelineDeleteRanges = [{{
   id: 1, key: "timeline-1", start: 0.35, end: 0.5,
   originalStart: 0.35, originalEnd: 0.42,
+  boundaryMode: "split_exact", splitClipKey: "split-clip:source-start:split-a",
+}}, {{
+  id: 2, key: "timeline-pending", start: 0.75, end: 0.79,
+  originalStart: 0.75, originalEnd: 0.79,
 }}];
-let cutSplitPoints = [];
-let timelineRangeInProgress = false;
-let selectedTimelineRangeId = null;
+let cutSplitPoints = [{{ key: "split-a", sourceTime: 0.8 }}];
+let cutSplitClipsCache = {{ stale: true }};
+let timelineRangeInProgress = true;
+let selectedTimelineRangeId = 2;
 let cutDraftRevision = 3;
 let automaticNoSpeechInitialized = true;
 let cutDraftLastSignature = "";
@@ -2245,6 +2252,10 @@ let selectionUpdates = 0;
 let historyReconciles = 0;
 const rangeKey = (start, end) =>
   Number(start).toFixed(3) + ":" + Number(end).toFixed(3);
+const CUT_TIMELINE_SPLIT_MIN_RANGE = 0.001;
+const cutTimelineDuration = () => 1;
+const clamp = (value, minimum, maximum) =>
+  Math.min(maximum, Math.max(minimum, value));
 const updateSelectionSummary = () => {{ selectionUpdates += 1; }};
 const reconcileCurrentCutHistorySnapshot = () => {{ historyReconciles += 1; }};
 ${{source}}
@@ -2253,7 +2264,10 @@ return {{
   applyPersistedCutDraftAlignment,
   snapshot: () => ({{
     text: [...selectedRanges.entries()],
+    noSpeech: [...selectedNoSpeechRanges.entries()],
     timeline: timelineDeleteRanges,
+    splitPoints: cutSplitPoints,
+    splitCache: cutSplitClipsCache,
     selectionUpdates,
     historyReconciles,
   }}),
@@ -2264,29 +2278,108 @@ const before = functions.snapshot();
 const rejected = functions.applyPersistedCutDraftAlignment({{
   textRanges: [{{
     key: "text-a", start: 0, end: 0.4,
-    originalStart: 0, originalEnd: 0.35, text: "得",
+    originalStart: 0, originalEnd: 0.36, text: "得",
+    adjacentSilenceBefore: 0, adjacentSilenceAfter: 0.04,
   }}],
+  noSpeechRanges: [{{ key: "quiet-a", start: 0.601, end: 0.699 }}],
   timelineRanges: [{{
     key: "wrong-key", start: 0.4, end: 0.5,
-    originalStart: 0.35, originalEnd: 0.42,
+    originalStart: 0.351, originalEnd: 0.421,
+    boundaryMode: "split_exact", splitClipKey: "split-clip:source-start:split-a",
   }}],
+  splitPoints: [{{ key: "split-a", sourceTime: 0.801 }}],
+  automaticNoSpeechInitialized: true,
 }}, expected);
 const afterRejected = functions.snapshot();
-const applied = functions.applyPersistedCutDraftAlignment({{
+const normalizedDraft = {{
   textRanges: [{{
     key: "text-a", start: 0, end: 0.4,
-    originalStart: 0, originalEnd: 0.35, text: "得",
+    originalStart: 0, originalEnd: 0.36, text: "得",
+    adjacentSilenceBefore: 0, adjacentSilenceAfter: 0.04,
   }}],
+  noSpeechRanges: [{{ key: "quiet-a", start: 0.601, end: 0.699 }}],
   timelineRanges: [{{
     key: "timeline-1", start: 0.4, end: 0.5,
-    originalStart: 0.35, originalEnd: 0.42,
+    originalStart: 0.351, originalEnd: 0.421,
+    boundaryMode: "split_exact", splitClipKey: "split-clip:source-start:split-a",
   }}],
-}}, expected);
+  splitPoints: [{{ key: "split-a", sourceTime: 0.801 }}],
+  automaticNoSpeechInitialized: true,
+}};
+const applied = functions.applyPersistedCutDraftAlignment(normalizedDraft, expected);
+const afterApplied = functions.snapshot();
+const rejectedChangedText = functions.applyPersistedCutDraftAlignment({{
+  textRanges: [{{
+    key: "text-a", start: 0, end: 0.4,
+    originalStart: 0, originalEnd: 0.36, text: "你",
+  }}],
+  noSpeechRanges: [{{ key: "quiet-a", start: 0.601, end: 0.699 }}],
+  timelineRanges: [{{
+    key: "timeline-1", start: 0.4, end: 0.5,
+    originalStart: 0.351, originalEnd: 0.421,
+    boundaryMode: "split_exact", splitClipKey: "split-clip:source-start:split-a",
+  }}],
+  splitPoints: [{{ key: "split-a", sourceTime: 0.801 }}],
+  automaticNoSpeechInitialized: true,
+}}, functions.expectedSignature());
+const rejectedUnknownBoundaryMode = functions.applyPersistedCutDraftAlignment({{
+  textRanges: [{{
+    key: "text-a", start: 0, end: 0.4,
+    originalStart: 0, originalEnd: 0.36, text: "得",
+    adjacentSilenceBefore: 0, adjacentSilenceAfter: 0.04,
+  }}],
+  noSpeechRanges: [{{ key: "quiet-a", start: 0.601, end: 0.699 }}],
+  timelineRanges: [{{
+    key: "timeline-1", start: 0.4, end: 0.5,
+    originalStart: 0.351, originalEnd: 0.421,
+    boundaryMode: "unknown",
+    splitClipKey: "split-clip:source-start:split-a",
+  }}],
+  splitPoints: [{{ key: "split-a", sourceTime: 0.801 }}],
+  automaticNoSpeechInitialized: true,
+}}, functions.expectedSignature());
+const rejectedDuplicateKey = functions.applyPersistedCutDraftAlignment({{
+  ...normalizedDraft,
+  textRanges: [
+    ...normalizedDraft.textRanges,
+    {{ ...normalizedDraft.textRanges[0] }},
+  ],
+}}, functions.expectedSignature());
+const rejectedExtraKey = functions.applyPersistedCutDraftAlignment({{
+  ...normalizedDraft,
+  noSpeechRanges: [
+    ...normalizedDraft.noSpeechRanges,
+    {{ key: "quiet-extra", start: 0.82, end: 0.84 }},
+  ],
+}}, functions.expectedSignature());
+const rejectedMissingKey = functions.applyPersistedCutDraftAlignment({{
+  ...normalizedDraft,
+  splitPoints: [],
+}}, functions.expectedSignature());
+const rejectedSplitOwnership = functions.applyPersistedCutDraftAlignment({{
+  ...normalizedDraft,
+  timelineRanges: [{{
+    ...normalizedDraft.timelineRanges[0],
+    splitClipKey: "split-clip:split-a:source-end",
+  }}],
+}}, functions.expectedSignature());
 console.log(JSON.stringify({{
   rejected,
   unchangedAfterRejected: JSON.stringify(before) === JSON.stringify(afterRejected),
   applied,
-  afterApplied: functions.snapshot(),
+  afterApplied,
+  rejectedChangedText,
+  unchangedAfterChangedText:
+    JSON.stringify(afterApplied) === JSON.stringify(functions.snapshot()),
+  rejectedUnknownBoundaryMode,
+  unchangedAfterUnknownBoundaryMode:
+    JSON.stringify(afterApplied) === JSON.stringify(functions.snapshot()),
+  rejectedDuplicateKey,
+  rejectedExtraKey,
+  rejectedMissingKey,
+  rejectedSplitOwnership,
+  unchangedAfterStructuralRejections:
+    JSON.stringify(afterApplied) === JSON.stringify(functions.snapshot()),
 }}));
 """
 
@@ -2309,16 +2402,357 @@ console.log(JSON.stringify({{
     assert payload["unchangedAfterRejected"] is True
     assert payload["applied"] is True
     assert payload["afterApplied"]["text"][0][1]["end"] == 0.4
+    assert payload["afterApplied"]["text"][0][1]["originalEnd"] == 0.36
+    assert payload["afterApplied"]["text"][0][1]["adjacentSilenceAfter"] == 0.04
+    assert payload["afterApplied"]["noSpeech"][0][1] == {
+        "id": "quiet-a",
+        "start": 0.601,
+        "end": 0.699,
+    }
     assert payload["afterApplied"]["timeline"][0] == {
         "id": 1,
         "key": "timeline-1",
         "start": 0.4,
         "end": 0.5,
-        "originalStart": 0.35,
-        "originalEnd": 0.42,
+        "originalStart": 0.351,
+        "originalEnd": 0.421,
+        "boundaryMode": "split_exact",
+        "splitClipKey": "split-clip:source-start:split-a",
     }
+    assert payload["afterApplied"]["timeline"][1] == {
+        "id": 2,
+        "key": "timeline-pending",
+        "start": 0.75,
+        "end": 0.79,
+        "originalStart": 0.75,
+        "originalEnd": 0.79,
+    }
+    assert payload["afterApplied"]["splitPoints"] == [
+        {"key": "split-a", "sourceTime": 0.801}
+    ]
+    assert payload["afterApplied"]["splitCache"] is None
     assert payload["afterApplied"]["selectionUpdates"] == 1
     assert payload["afterApplied"]["historyReconciles"] == 1
+    assert payload["rejectedChangedText"] is False
+    assert payload["unchangedAfterChangedText"] is True
+    assert payload["rejectedUnknownBoundaryMode"] is False
+    assert payload["unchangedAfterUnknownBoundaryMode"] is True
+    assert payload["rejectedDuplicateKey"] is False
+    assert payload["rejectedExtraKey"] is False
+    assert payload["rejectedMissingKey"] is False
+    assert payload["rejectedSplitOwnership"] is False
+    assert payload["unchangedAfterStructuralRejections"] is True
+
+
+def test_frontend_normalized_cut_draft_ack_undo_redo_and_invalid_rebase():
+    app_source = (Path(__file__).resolve().parents[2] / "web" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    timeline_start = app_source.index("function getCommittedTimelineDeleteRanges")
+    timeline_end = app_source.index(
+        "function protectRecognizedSpeechFromQuietRanges", timeline_start
+    )
+    serialization_start = app_source.index("function serializableCutDraftRange")
+    serialization_end = app_source.index(
+        "function normalizeRestoredTextDeleteRange", serialization_start
+    )
+    payload_start = app_source.index("function buildPersistedCutDraftPayload")
+    payload_end = app_source.index("function restorePersistedCutDraft", payload_start)
+    apply_start = app_source.index("function applyPersistedCutDraftAlignment")
+    apply_end = app_source.index("function scheduleCutDraftSave", apply_start)
+    source = "\n".join(
+        [
+            app_source[timeline_start:timeline_end],
+            app_source[serialization_start:serialization_end],
+            app_source[payload_start:payload_end],
+            app_source[apply_start:apply_end],
+        ]
+    )
+    script = f"""
+const source = {json.dumps(source)};
+const functions = new Function(`
+const selectedRanges = new Map();
+const selectedNoSpeechRanges = new Map();
+let timelineDeleteRanges = [{{
+  id: 1,
+  key: "timeline-1",
+  start: 0.3504,
+  end: 0.4204,
+  originalStart: 0.3504,
+  originalEnd: 0.4204,
+}}];
+let cutSplitPoints = [];
+let cutSplitClipsCache = null;
+let timelineRangeInProgress = false;
+let selectedTimelineRangeId = null;
+let currentJobId = "job-1";
+let cutDraftRevision = 1;
+let automaticNoSpeechInitialized = true;
+let cutDraftReady = true;
+let cutDraftSaveInFlight = null;
+let cutDraftDesired = null;
+let cutDraftAcknowledged = null;
+let cutDraftFailedSignature = "";
+let cutDraftLastSignature = "";
+let cutDraftNeedsServerSync = true;
+let cutDraftSaveGeneration = 1;
+let cutDraftSaveQueue = Promise.resolve();
+let cutDraftSaveTimer = null;
+let cutCommitExternallySynced = false;
+let cutHistoryReplaying = false;
+let serverRevision = 1;
+let responseRevisionOverride = null;
+let returnInvalidStructure = false;
+let historyReconciles = 0;
+const requests = [];
+const localRevisions = [];
+const statuses = [];
+const retainedProjectionChecks = [];
+const CUT_TIMELINE_SPLIT_MIN_RANGE = 0.001;
+const cutTimelineDuration = () => 1;
+const clamp = (value, minimum, maximum) =>
+  Math.min(maximum, Math.max(minimum, value));
+const rangeKey = (start, end) =>
+  Number(start).toFixed(3) + ":" + Number(end).toFixed(3);
+const window = {{
+  clearTimeout,
+  queueMicrotask,
+}};
+const updateSelectionSummary = () => undefined;
+const reconcileCurrentCutHistorySnapshot = () => {{ historyReconciles += 1; }};
+const applyServerRetainedProjection = (transcript, options) => {{
+  const currentSignature = cutDraftSemanticSignature(
+    buildPersistedCutDraftPayload(),
+  );
+  const accepted = options.jobId === currentJobId
+    && options.signature === currentSignature
+    && options.revision === cutDraftRevision;
+  retainedProjectionChecks.push({{
+    accepted,
+    text: transcript?.text || "",
+  }});
+  return accepted;
+}};
+const saveLocalCutDraft = draft => {{
+  localRevisions.push(Number(draft?.revision) || 0);
+}};
+const syncEditorSuiteCutDraftState = () => undefined;
+const renderCutTimelineTextSegments = () => undefined;
+const setCutDraftSaveStatus = (message, tone) => {{
+  statuses.push({{ message, tone }});
+}};
+const fetch = async (_url, options) => {{
+  const request = JSON.parse(options.body);
+  requests.push(request);
+  const responseRevision = responseRevisionOverride ?? serverRevision + 1;
+  responseRevisionOverride = null;
+  if (Number.isInteger(responseRevision) && responseRevision > serverRevision) {{
+    serverRevision = responseRevision;
+  }}
+  const timelineRanges = request.timelineRanges.map(range => ({{
+    ...range,
+    start: Number(Math.max(
+      0,
+      Math.round(range.originalStart * 1000) / 1000 - 0.03,
+    ).toFixed(3)),
+    end: Number(Math.min(
+      1,
+      Math.round(range.originalEnd * 1000) / 1000 + 0.03,
+    ).toFixed(3)),
+    originalStart: Math.round(range.originalStart * 1000) / 1000,
+    originalEnd: Math.round(range.originalEnd * 1000) / 1000,
+  }}));
+  const responseTimelineRanges = returnInvalidStructure ? [] : timelineRanges;
+  returnInvalidStructure = false;
+  return {{
+    ok: true,
+    status: 200,
+    json: async () => ({{
+      retainedTranscript: {{ text: "normalized", segments: [] }},
+      cutDraft: {{
+        schemaVersion: 1,
+        revision: responseRevision,
+        automaticNoSpeechInitialized:
+          request.automaticNoSpeechInitialized === true,
+        textRanges: request.textRanges,
+        noSpeechRanges: request.noSpeechRanges,
+        timelineRanges: responseTimelineRanges,
+        splitPoints: request.splitPoints,
+      }},
+    }}),
+  }};
+}};
+${{source}}
+return {{
+  async run() {{
+    const snapshots = [];
+    captureDesiredCutDraft();
+    responseRevisionOverride = 1.5;
+    await persistCutDraft();
+    snapshots.push({{
+      phase: "invalid-revision",
+      revision: cutDraftRevision,
+      acknowledged: isCutDraftAcknowledged(
+        cutDraftSemanticSignature(buildPersistedCutDraftPayload()),
+      ),
+    }});
+
+    cutDraftFailedSignature = "";
+    await persistCutDraft();
+    snapshots.push({{
+      phase: "normalized",
+      revision: cutDraftRevision,
+      range: {{ ...timelineDeleteRanges[0] }},
+      acknowledged: isCutDraftAcknowledged(
+        cutDraftSemanticSignature(buildPersistedCutDraftPayload()),
+      ),
+    }});
+
+    timelineDeleteRanges = [];
+    captureDesiredCutDraft();
+    await persistCutDraft();
+    snapshots.push({{
+      phase: "undo",
+      revision: cutDraftRevision,
+      count: timelineDeleteRanges.length,
+      acknowledged: isCutDraftAcknowledged(
+        cutDraftSemanticSignature(buildPersistedCutDraftPayload()),
+      ),
+    }});
+
+    timelineDeleteRanges = [{{
+      id: 2,
+      key: "timeline-1",
+      start: 0.32,
+      end: 0.45,
+      originalStart: 0.35,
+      originalEnd: 0.42,
+    }}];
+    captureDesiredCutDraft();
+    await persistCutDraft();
+    snapshots.push({{
+      phase: "redo",
+      revision: cutDraftRevision,
+      range: {{ ...timelineDeleteRanges[0] }},
+      acknowledged: isCutDraftAcknowledged(
+        cutDraftSemanticSignature(buildPersistedCutDraftPayload()),
+      ),
+    }});
+
+    timelineDeleteRanges[0].originalEnd = 0.4314;
+    captureDesiredCutDraft();
+    returnInvalidStructure = true;
+    await persistCutDraft();
+    snapshots.push({{
+      phase: "invalid",
+      revision: cutDraftRevision,
+      acknowledged: isCutDraftAcknowledged(
+        cutDraftSemanticSignature(buildPersistedCutDraftPayload()),
+      ),
+    }});
+
+    timelineDeleteRanges = [];
+    cutDraftFailedSignature = "";
+    captureDesiredCutDraft();
+    await persistCutDraft();
+    snapshots.push({{
+      phase: "recovered",
+      revision: cutDraftRevision,
+      count: timelineDeleteRanges.length,
+      acknowledged: isCutDraftAcknowledged(
+        cutDraftSemanticSignature(buildPersistedCutDraftPayload()),
+      ),
+    }});
+    return {{
+      historyReconciles,
+      localRevisions,
+      requestRevisions: requests.map(request => request.revision),
+      requestTimelineCounts: requests.map(
+        request => request.timelineRanges.length,
+      ),
+      snapshots,
+      statuses,
+      retainedProjectionChecks,
+    }};
+  }},
+}};
+`)();
+functions.run().then(
+  result => console.log(JSON.stringify(result)),
+  error => {{
+    console.error(error?.stack || error);
+    process.exitCode = 1;
+  }},
+);
+"""
+
+    try:
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[2],
+            check=True,
+            capture_output=True,
+            encoding="utf-8",
+            timeout=20,
+        )
+    except FileNotFoundError:
+        pytest.skip("Node.js is required for the frontend cut-draft unit test.")
+    except subprocess.CalledProcessError as exc:
+        pytest.fail(exc.stderr)
+
+    payload = json.loads(result.stdout)
+    assert payload["requestRevisions"] == [1, 1, 2, 3, 4, 5]
+    assert payload["requestTimelineCounts"] == [1, 1, 0, 1, 1, 0]
+    assert payload["localRevisions"] == [2, 3, 4, 6]
+    assert payload["historyReconciles"] == 1
+    assert payload["snapshots"] == [
+        {
+            "phase": "invalid-revision",
+            "revision": 1,
+            "acknowledged": False,
+        },
+        {
+            "phase": "normalized",
+            "revision": 2,
+            "range": {
+                "id": 1,
+                "key": "timeline-1",
+                "start": 0.32,
+                "end": 0.45,
+                "originalStart": 0.35,
+                "originalEnd": 0.42,
+            },
+            "acknowledged": True,
+        },
+        {"phase": "undo", "revision": 3, "count": 0, "acknowledged": True},
+        {
+            "phase": "redo",
+            "revision": 4,
+            "range": {
+                "id": 2,
+                "key": "timeline-1",
+                "start": 0.32,
+                "end": 0.45,
+                "originalStart": 0.35,
+                "originalEnd": 0.42,
+            },
+            "acknowledged": True,
+        },
+        {"phase": "invalid", "revision": 5, "acknowledged": False},
+        {"phase": "recovered", "revision": 6, "count": 0, "acknowledged": True},
+    ]
+    assert payload["statuses"][0]["tone"] == "error"
+    assert payload["statuses"][-2]["tone"] == "error"
+    assert payload["statuses"][-1] == {
+        "message": "剪辑草稿已保存",
+        "tone": "success",
+    }
+    assert payload["retainedProjectionChecks"] == [
+        {"accepted": True, "text": "normalized"},
+        {"accepted": True, "text": "normalized"},
+        {"accepted": True, "text": "normalized"},
+        {"accepted": True, "text": "normalized"},
+    ]
 
 
 def test_frontend_live_transcript_uses_semantic_range_and_physical_retiming():

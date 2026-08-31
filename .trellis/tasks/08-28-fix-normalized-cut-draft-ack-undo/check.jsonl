@@ -1,0 +1,6 @@
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"检查 revision、语义/物理边界、Store、API、持久化和刷新是否形成一致闭环。"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"检查 acknowledged、latest-state-wins、history reconcile 和保存提示是否仍由唯一 owner 管理。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"确认语义时间与物理音频切点仍分离，API schema 和服务端 VAD 行为未被意外改变。"}
+{"file":".trellis/spec/testing/index.md","reason":"执行前端、剪辑边界、浏览器与完整回归的项目质量门槛。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"检查真实浏览器证据、网络隔离、刷新恢复和 console 错误契约。"}
+{"file":".trellis/tasks/08-28-fix-normalized-cut-draft-ack-undo/research/normalized-response-state-machine.md","reason":"对照根因和所有边缘分支检查实现没有只修单个样片。"}

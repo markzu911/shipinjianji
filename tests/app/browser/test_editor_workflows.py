@@ -224,6 +224,7 @@ def route_cut_draft_recording(
     *,
     delay_first: float = 0.0,
     fail_first: bool = False,
+    normalize_first_semantics: bool = False,
 ) -> list[dict[str, object]]:
     revision = {"value": 1}
     requests: list[dict[str, object]] = []
@@ -251,6 +252,16 @@ def route_cut_draft_recording(
                     **item,
                     "start": max(0.0, float(item["start"]) - 0.02),
                     "end": float(item["end"]) + 0.02,
+                    **(
+                        {
+                            "originalEnd": round(
+                                float(item["originalEnd"]) + 0.001,
+                                3,
+                            )
+                        }
+                        if normalize_first_semantics
+                        else {}
+                    ),
                 }
                 for item in request["textRanges"]
             ]
@@ -776,6 +787,7 @@ def test_cut_draft_in_flight_edit_rebases_one_latest_request(
         page,
         seeded_performance_editor_job.job_id,
         delay_first=1.0,
+        normalize_first_semantics=True,
     )
     open_editor(browser_session, seeded_performance_editor_job)
     reset_cut_performance_probe(page)
@@ -814,6 +826,12 @@ def test_cut_draft_in_flight_edit_rebases_one_latest_request(
     )
     assert latest_first_range["start"] == pytest.approx(first_request_range["start"])
     assert latest_first_range["end"] == pytest.approx(first_request_range["end"])
+    assert latest_first_range["originalStart"] == pytest.approx(
+        first_request_range["originalStart"]
+    )
+    assert latest_first_range["originalEnd"] == pytest.approx(
+        first_request_range["originalEnd"]
+    )
 
 
 def test_cut_draft_failed_save_retries_on_next_edit(
@@ -1919,6 +1937,7 @@ def test_short_timeline_range_delete_confirmation_history_and_mobile_hits(
     mobile_body.press("Enter")
     page.locator("#appDialogCancel").wait_for(state="visible")
     page.locator("#appDialogCancel").click()
+    page.locator("dialog.app-dialog-shell").wait_for(state="hidden")
     assert mobile_pending.count() == 1
     mobile_pending.locator(".cut-timeline-range-cancel").click()
     page.wait_for_function(
@@ -1926,6 +1945,191 @@ def test_short_timeline_range_delete_confirmation_history_and_mobile_hits(
           '#cutFrameTimelineRanges .cut-timeline-delete-range'
         ).length === 0"""
     )
+
+
+def test_vad_normalized_timeline_range_undo_redo_survives_refresh(
+    browser_session,
+    seeded_editor_job,
+    monkeypatch,
+):
+    def normalize_draft_ranges(
+        _media_path,
+        text_ranges,
+        timeline_ranges,
+        _segments,
+        duration,
+        _existing_boundaries=None,
+    ):
+        normalized_timeline = []
+        for item in timeline_ranges:
+            original_start = float(item.get("originalStart", item["start"]))
+            original_end = float(item.get("originalEnd", item["end"]))
+            normalized_timeline.append(
+                {
+                    **copy.deepcopy(item),
+                    "start": round(max(0.0, original_start - 0.03), 3),
+                    "end": round(min(duration, original_end + 0.03), 3),
+                    "originalStart": round(original_start, 3),
+                    "originalEnd": round(original_end, 3),
+                }
+            )
+        return (
+            copy.deepcopy(text_ranges),
+            normalized_timeline,
+            [],
+            {"status": "unavailable"},
+        )
+
+    monkeypatch.setattr(
+        app_module,
+        "resolve_cut_draft_acoustic_boundaries",
+        normalize_draft_ranges,
+    )
+    page = open_editor(browser_session, seeded_editor_job)
+    page.wait_for_function(
+        """() => document.querySelector('#cutDraftSaveStatus')
+          ?.dataset.tone !== 'saving'"""
+    )
+    initial_draft = app_module.load_cut_draft(seeded_editor_job.job_id)
+    initial_revision = int((initial_draft or {}).get("revision") or 0)
+
+    page.evaluate(
+        """() => {
+          const track = document.querySelector('#cutFrameTimelineTrack');
+          const ruler = document.querySelector('#cutFrameTimelineRuler');
+          const seek = document.querySelector('#cutFrameTimelineSeek');
+          const bounds = track.getBoundingClientRect();
+          const duration = Number(seek.max);
+          const startX = bounds.left + bounds.width * (0.60251 / duration);
+          const endX = bounds.left + bounds.width * (0.65487 / duration);
+          ruler.dispatchEvent(new PointerEvent('pointerdown', {
+            bubbles: true, button: 0, buttons: 1, clientX: startX,
+          }));
+          window.dispatchEvent(new PointerEvent('pointermove', {
+            bubbles: true, button: 0, buttons: 1, clientX: endX,
+          }));
+          window.dispatchEvent(new PointerEvent('pointerup', {
+            bubbles: true, button: 0, clientX: endX,
+          }));
+        }"""
+    )
+    pending = page.locator(
+        "#cutFrameTimelineRanges .cut-timeline-delete-range"
+    )
+    pending.wait_for()
+    pending_body = pending.locator(".cut-timeline-range-body")
+    pending_body.focus()
+    pending_body.press("Enter")
+    confirm = page.locator("#appDialogConfirm").filter(has_text="确认删除")
+    confirm.wait_for()
+
+    with page.expect_response(
+        lambda response: response.request.method == "PUT"
+        and response.url.endswith("/cut-draft")
+        and len(response.request.post_data_json.get("timelineRanges", [])) == 1
+    ) as delete_response_info:
+        confirm.click()
+    delete_response = delete_response_info.value
+    assert delete_response.ok
+    delete_request = delete_response.request.post_data_json
+    delete_draft = delete_response.json()["cutDraft"]
+    delete_range = delete_draft["timelineRanges"][0]
+    assert delete_request["revision"] == initial_revision
+    assert delete_range["originalStart"] == pytest.approx(0.603)
+    assert delete_range["originalEnd"] == pytest.approx(0.655)
+    assert delete_range["start"] == pytest.approx(0.573)
+    assert delete_range["end"] == pytest.approx(0.685)
+    page.locator("#cutDraftSaveStatus").filter(
+        has_text="剪辑草稿已保存"
+    ).wait_for()
+
+    with page.expect_response(
+        lambda response: response.request.method == "PUT"
+        and response.url.endswith("/cut-draft")
+        and response.request.post_data_json.get("timelineRanges") == []
+    ) as undo_response_info:
+        page.keyboard.press("Control+z")
+    undo_response = undo_response_info.value
+    assert undo_response.ok
+    undo_request = undo_response.request.post_data_json
+    undo_draft = undo_response.json()["cutDraft"]
+    assert undo_request["revision"] == delete_draft["revision"]
+    assert undo_draft["timelineRanges"] == []
+    assert app_module.load_cut_draft(seeded_editor_job.job_id)[
+        "timelineRanges"
+    ] == []
+
+    page.reload()
+    page.locator("#resultCard").wait_for(state="visible")
+    page.wait_for_load_state("networkidle")
+    page.wait_for_function(
+        """() => document.querySelectorAll(
+          '#cutFrameTimelineRanges .cut-timeline-delete-range'
+        ).length === 0"""
+    )
+    before_redo_revision = app_module.load_cut_draft(
+        seeded_editor_job.job_id
+    )["revision"]
+
+    with page.expect_response(
+        lambda response: response.request.method == "PUT"
+        and response.url.endswith("/cut-draft")
+        and len(response.request.post_data_json.get("timelineRanges", [])) == 1
+    ) as redo_response_info:
+        page.keyboard.press("Control+y")
+    redo_response = redo_response_info.value
+    assert redo_response.ok
+    redo_request = redo_response.request.post_data_json
+    redo_draft = redo_response.json()["cutDraft"]
+    assert redo_request["revision"] == before_redo_revision
+    assert redo_request["revision"] >= undo_draft["revision"]
+    assert redo_request["timelineRanges"] == [delete_range]
+    assert redo_draft["timelineRanges"] == [delete_range]
+    page.wait_for_function(
+        """({ jobId, revision }) => {
+          const stored = JSON.parse(localStorage.getItem(
+            `video-editor:cut-draft:${jobId}`
+          ) || 'null');
+          return Number(stored?.revision) === revision
+            && stored?.timelineRanges?.length === 1;
+        }""",
+        arg={
+            "jobId": seeded_editor_job.job_id,
+            "revision": redo_draft["revision"],
+        },
+    )
+    assert app_module.load_cut_draft(seeded_editor_job.job_id)[
+        "timelineRanges"
+    ] == [delete_range]
+
+    page.reload()
+    page.locator("#resultCard").wait_for(state="visible")
+    page.wait_for_load_state("networkidle")
+    page.wait_for_timeout(1_000)
+    persisted = app_module.load_cut_draft(seeded_editor_job.job_id)
+    diagnostic = page.evaluate(
+        """jobId => ({
+          localDraft: JSON.parse(localStorage.getItem(
+            `video-editor:cut-draft:${jobId}`
+          ) || 'null'),
+          localHistory: JSON.parse(localStorage.getItem(
+            `video-editor:cut-history:${jobId}`
+          ) || 'null'),
+          storeRanges: window.EditorSuite.projectSnapshot()
+            .project.cut.ranges,
+        })""",
+        seeded_editor_job.job_id,
+    )
+    assert diagnostic["storeRanges"] == [
+        {"start": delete_range["start"], "end": delete_range["end"]}
+    ], json.dumps(
+        {"browser": diagnostic, "server": persisted}, ensure_ascii=False
+    )
+    assert diagnostic["localDraft"]["timelineRanges"] == [delete_range]
+    assert diagnostic["localDraft"]["revision"] == persisted["revision"]
+    assert diagnostic["localHistory"]["index"] == 1
+    assert persisted["revision"] >= redo_draft["revision"]
+    assert persisted["timelineRanges"] == [delete_range]
 
 
 def test_timeline_split_exact_clip_delete_restore_history_and_mobile_layout(

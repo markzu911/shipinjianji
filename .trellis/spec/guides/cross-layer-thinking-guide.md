@@ -32,6 +32,7 @@
 14. 语义身份是否被物理锚点误当成存在性过滤条件？字符、cue 或片段的身份必须来自当前语义权威；source/edited timing 只决定排序、合法分界候选的偏好和投影。跨多个 cue 重映射时要做全局单调分配和数量守恒，不能让每个旧区间或整轨旧 source 覆盖范围独立决定新对象是否存在；旧 `sourceEnd` 比当前末词早也不能裁掉末字。
 15. 一次权威响应是否只刷新了同一领域的部分内存副本？源 segments、editable segments、边界、字符 cache 和 Store projection 必须明确按同一 revision 原子更新；正常响应、stale effect 重读和错误恢复路径都要走同一同步入口。
 16. 派生媒体失效是否仍写成持久化 schema 接受的明确状态？没有 worker 的失效结果不能写 `queued`，非空子任务也不能写非法 `null` status；至少连续执行两次真实写操作并重新 load 快照，证明第一次写入没有毒化下一次覆盖。
+17. 写 API 是否会在返回前规范化并持久化客户端 payload？HTTP 2xx 表示 revision 已经成为服务端事实，客户端必须先接受单调 revision，再用 key/文字/mode/ownership 等结构身份验证响应；不能用 request/response 时间数值全等拒绝合法规范化。当前请求仍是 latest 时完整安装权威 snapshot 并重建 ack/history/projection，已经 stale 时只推进 revision 并用它重放最新 desired；测试必须跨 undo、redo、刷新同时核对 API、本地恢复副本和 Store。
 
 ## 浏览器边界
 

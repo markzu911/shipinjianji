@@ -1,0 +1,8 @@
+{"file":".trellis/spec/guides/project-overview.md","reason":"保持本地中文口播编辑器、原生前端、用户数据隔离和最小改动约束。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"核对语义范围、物理删音范围、API revision、Store、本地草稿和刷新恢复的权威关系。"}
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"遵守 cut-draft 保存队列、semantic signature、history 和 localStorage 不冒充服务端成功的契约。"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"遵守 fetch 迟到响应、错误提示、媒体时间语义和缓存版本规则。"}
+{"file":".trellis/spec/backend/persistence-and-jobs.md","reason":"理解 cut-draft.json 持久化、revision 和 job 快照的权威顺序，避免把 200 响应当作未提交。"}
+{"file":".trellis/spec/backend/media-and-timeline.md","reason":"遵守文字语义范围、服务端规范化物理边界和 retained projection 的分层契约。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"用隔离 Chromium 工作流验证保存、撤销、重做、刷新和服务端状态，不访问真实用户数据。"}
+{"file":".trellis/tasks/08-28-fix-normalized-cut-draft-ack-undo/research/normalized-response-state-machine.md","reason":"提供根因、最小修复形状、边缘分支和精确测试路径。"}

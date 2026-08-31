@@ -92,6 +92,13 @@ flushPendingCutCommitEffects() -> boolean
 scheduleCutDraftSave({ immediate?: boolean }) -> Promise<void>
 flushCutDraftSave() -> Promise<number>
 cutDraftSemanticSignature(payload) -> string
+cutDraftResponseStructureCompatible(requestPayload, responseDraft) -> boolean
+applyPersistedCutDraftAlignment(
+  draft,
+  expectedSignature,
+  retainedTranscript?,
+  expectedJobId?,
+) -> boolean
 buildCutTimelineThumbnails({ force?: boolean }) -> Promise<void>
 ```
 
@@ -101,9 +108,12 @@ buildCutTimelineThumbnails({ force?: boolean }) -> Promise<void>
 - 可见 commit 在下一帧更新删除/恢复状态和统计；EditorSuite、时间轴结构、缩略图映射、服务端保存和 history 序列化在其后执行。一次 cut commit 只允许一个 `CUT_TIMING_CHANGED`，`EditorSuite.setCutDraft()` 重绘必须使用 `hydrateProject: false`；Store 拒绝等价 action 时不得继续重绘 job 状态或覆盖其他操作刚写入的状态文案。
 - thumbnail cache key 只包含 job/source、源时长、采样数量和资源版本。删除范围只隐藏或重映射 source-time frame；同一时刻只有一个 extractor owner，source/key 切换、错误、重置和销毁都 abort 并释放旧 video source。
 - 缓存 frame 的布局必须用现有 source-to-edited spans 计算剪后 `left/width`，不能只隐藏删除区间后让 Grid 将剩余帧等宽重排；剪后时长变为零时也必须取消在途 extractor 并清空旧缩略图 DOM。
-- 本地 cut draft 在每次稳定编辑后立即写入恢复快照；服务端 PUT 使用约 `300ms` trailing debounce、单 in-flight 和 latest-state-wins。语义签名只包含 `automaticNoSpeechInitialized`、range key、文字及 `originalStart/originalEnd`，不得包含服务端派生的物理 `start/end`、revision、diagnostics 或时间戳。
+- 本地 cut draft 在每次稳定编辑后立即写入恢复快照；服务端 PUT 使用约 `300ms` trailing debounce、单 in-flight 和 latest-state-wins。语义签名描述浏览器当前完整语义状态，用于 desired/ack 去重；服务端可以合法规范化文字语义边界、静音范围、时间轴语义/物理边界和 split time，因此禁止用 request/response 时间数值全等判断响应是否合法。
 - in-flight identity 必须在调用 `fetch()` 前登记，保证同步抛错和异步拒绝都由同一 `finally` 释放队列；新命令取消旧 commit effect 时必须同时丢弃旧预览，服务端校准已直接同步 Store 时后续 effect 不得重复提交等价状态。
-- 旧响应可以推进 acknowledged revision；只有响应签名仍等于 desired signature 时才能把规范化物理范围应用到当前选择。后续请求必须在发送时使用最新 acknowledged revision 重建 envelope。
+- HTTP 2xx 表示服务端已经持久化草稿。响应 revision 必须是正安全整数且严格大于请求 revision；一旦通过此门槛，前端必须先单调推进 `cutDraftRevision`，后续结构/对齐错误不得让下一请求继续使用旧 revision。
+- 规范化响应使用结构命令身份校验：text/no-speech/timeline/split 各集合必须 key 非空且唯一、数量和 key 集合一致；文字、`automaticNoSpeechInitialized`、`boundaryMode` 和 `splitClipKey` 必须一致。所有合法时间数值以服务端响应为权威，未知 mode、缺失/重复/额外 key 或 split ownership 变化必须拒绝。
+- 只有请求仍等于当前 desired 时才能原子安装完整服务端 text/no-speech/timeline/split snapshot；先完成全部校验和构造，再一次性替换已提交状态，并保留用户尚未提交的时间轴 pending 选区。安装后必须重建 post-normalization payload/signature，用它更新 desired、ack、history endpoint、retained projection、本地草稿和 Store，最后才显示“已保存”。
+- 旧响应可以推进 acknowledged revision，但不得安装其规范化 snapshot 或覆盖较新的 desired/pending 状态；后续请求必须使用最新 revision 重放一次 latest-state PUT。
 - `flushCutDraftSave()` 必须先提交待处理 frame/effect、同步落盘 dirty history、取消 debounce、排空 in-flight，并且只在当前 job 的 desired signature 已由当前 revision 确认后返回。
 - history transaction 立即进入内存；localStorage 序列化通过 idle/短防抖合并，`pagehide`、document hidden 和显式 flush 必须同步写入 dirty 状态。localStorage 成功不等于服务端保存成功。
 
@@ -115,21 +125,26 @@ buildCutTimelineThumbnails({ force?: boolean }) -> Promise<void>
 | 同一 source 上改变删除范围 | extractor 创建数为 0；只重映射/隐藏已有 frame |
 | 新 source 或缩略图密度 | cancel 旧 owner，只允许新 generation 写缓存和 DOM |
 | 首个 PUT 在途时继续编辑 | 不并发发送；首个响应推进 revision，随后发送一个 latest-state PUT |
-| 旧响应签名不是当前 desired | 不覆盖当前物理范围，但保留其 acknowledged revision 供 rebase |
+| 合法规范化改变任意时间数值 | 完整安装服务端 snapshot，重建 post-normalization desired/ack/history/projection |
+| 旧响应不是当前 desired | 只推进 revision，不覆盖当前已提交或 pending 状态；用新 revision 重放 latest desired |
+| 2xx 响应结构缺失/重复/额外 key，或文字/mode/split ownership 变化 | 不安装、不显示成功；保留已提交 revision，使下一不同签名可补偿保存 |
+| revision 非正安全整数、未递增或缺失 | 拒绝响应，不推进本地 revision，不显示成功 |
 | PUT 失败 | 保留本地 dirty 状态并显示错误；下一次编辑可重试 |
 | 生成前仍有 timer/in-flight/frame | `flushCutDraftSave()` 继续排空，不使用旧 revision 生成 |
 
 #### 5. Good / Base / Bad Cases
 
-- Good：300ms 内连续 10 次删除只产生一次可见 action 序列和最多一次常规 PUT，基础 video 不 reload，history 最多序列化一次。
+- Good：300ms 内连续 10 次删除只产生一次可见 action 序列和最多一次常规 PUT；服务端规范化后完整安装四类集合、更新 revision/ack/history，基础 video 不 reload，history 最多序列化一次。
 - Base：单次删除在下一绘制机会可见，随后异步完成时间轴、缩略图映射和草稿保存。
-- Bad：把 cut revision 或删除范围放进 thumbnail key，或用包含物理 `start/end` 的签名判断 dirty；前者会逐次重新 seek/JPEG，后者会在服务端校准后循环 PUT。
+- Bad：把 cut revision 或删除范围放进 thumbnail key，或在接受 2xx revision 前比较 request/response 时间签名；前者会逐次重新 seek/JPEG，后者会把已持久化响应当失败，使 undo 使用旧 revision 并在刷新后恢复删除。
 
 #### 6. Tests Required
 
 - 真实浏览器使用至少 600 个可见字符和 30 个既有删除范围，连续 10 次操作测量 input 到 post-commit 第二个 rAF；P95 不高于 `100ms`，无新增 `>200ms` long task。
 - 计数断言 extractor、基础 video `src/load()`、Store action、history 写入、PUT 数与最大并发；网络变慢或失败不能阻止删除状态在下一帧可见。
-- 覆盖 burst、在途编辑、revision rebase、服务端物理范围变化、失败重试、生成前 flush、刷新恢复，以及同帧两命令两次撤销。
+- 覆盖 burst、在途编辑、revision rebase、服务端文字/静音/timeline/split 规范化、失败重试、生成前 flush、刷新恢复，以及同帧两命令两次撤销。
+- 结构校验必须覆盖缺失/重复/额外 key、文字变化、未知 `boundaryMode`、split ownership 变化和非法 revision；拒绝后下一不同签名必须使用已提交的新 revision 恢复同步。
+- 真实浏览器必须覆盖 `规范化删除 -> undo 服务端清空 -> refresh 保持空 -> redo 用最新 revision 恢复 -> refresh`，并同时断言 API、localStorage、history 和 Store；规范化旧响应还要证明不会覆盖在途新编辑或 pending 时间轴选区。
 - cut frame 前后保持 ArtTool tab、模板 listbox、selection、document/video/tool root identity。
 
 #### 7. Wrong vs Correct
@@ -150,6 +165,20 @@ const signature = JSON.stringify({ ranges, revision, diagnostics });
 
 // Correct: signature only describes stable user intent.
 const signature = cutDraftSemanticSignature(buildPersistedCutDraftPayload());
+```
+
+```javascript
+// Wrong: the server committed revision N+1, but numeric normalization is
+// treated as a failed write before the client accepts the revision.
+if (cutDraftSemanticSignature(serverDraft) !== request.signature) throw error;
+cutDraftRevision = serverDraft.revision;
+
+// Correct: accept the durable revision first, validate command identity,
+// install the complete authoritative snapshot, then acknowledge its new signature.
+acceptAdvancedRevision(serverDraft.revision);
+assertStructureCompatible(request.payload, serverDraft);
+installNormalizedSnapshot(serverDraft);
+acknowledge(cutDraftSemanticSignature(buildPersistedCutDraftPayload()));
 ```
 
 ### 场景：时间轴预览帧持久缓存
