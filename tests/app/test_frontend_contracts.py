@@ -53,7 +53,7 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
 
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
-    assert "/app.js?v=20260831-01" in page_response.text
+    assert "/app.js?v=20260831-02" in page_response.text
     assert "/styles.css?v=20260828-02" in page_response.text
     assert "/transcript-follow-scroll.js?v=20260828-01" in page_response.text
     assert "/timeline-thumbnail-cache.js?v=20260828-01" in page_response.text
@@ -3084,6 +3084,109 @@ functions.flushCutDraftSave().then(
         "resolved": False,
         "message": "剪辑草稿尚未同步到服务器。请稍后重试。",
         "scheduleCount": 1,
+    }
+
+
+def test_frontend_restart_abandons_in_flight_cut_draft_without_waiting():
+    app_source = (Path(__file__).resolve().parents[2] / "web" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    reset_start = app_source.index("async function confirmAndResetProject")
+    reset_end = app_source.index("function setProgress", reset_start)
+    source = app_source[reset_start:reset_end]
+    script = f"""
+const source = {json.dumps(source)};
+const functions = new Function(`
+let currentJobId = "job-1";
+let cutDraftReady = true;
+const calls = [];
+const never = new Promise(() => {{}});
+let cutDraftSaveInFlight = {{ promise: never }};
+let cutDraftSaveQueue = never;
+let shouldFailClear = false;
+const window = {{
+  appConfirm: async () => true,
+  appAlert: async () => calls.push("alert"),
+}};
+const resetCutDraftSaveRuntime = () => calls.push("reset-runtime");
+const cancelCutDraftSaveTimer = () => calls.push("cancel-timer");
+const clearPersistedCutDraft = async (jobId) => {{
+  calls.push("clear:" + jobId);
+  if (shouldFailClear) throw new Error("clear failed");
+}};
+const removeLocalCutDraft = (jobId) => calls.push("remove-draft:" + jobId);
+const removeLocalCutHistory = (jobId) => calls.push("remove-history:" + jobId);
+const resetToUpload = () => calls.push("reset-upload");
+const setCutDraftSaveStatus = () => calls.push("status-error");
+${{source}}
+return {{
+  confirmAndResetProject,
+  calls: () => calls,
+  ready: () => cutDraftReady,
+  prepareFailure: () => {{
+    calls.length = 0;
+    shouldFailClear = true;
+    cutDraftReady = true;
+  }},
+}};
+`)();
+(async () => {{
+  const outcome = await Promise.race([
+    functions.confirmAndResetProject().then(() => "completed"),
+    new Promise(resolve => setTimeout(() => resolve("timed-out"), 50)),
+  ]);
+  const success = {{
+    outcome,
+    calls: [...functions.calls()],
+    ready: functions.ready(),
+  }};
+  functions.prepareFailure();
+  await functions.confirmAndResetProject();
+  console.log(JSON.stringify({{
+    success,
+    failure: {{
+      calls: functions.calls(),
+      ready: functions.ready(),
+    }},
+  }}));
+}})();
+"""
+
+    try:
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=Path(__file__).resolve().parents[2],
+            check=True,
+            capture_output=True,
+            encoding="utf-8",
+            timeout=20,
+        )
+    except FileNotFoundError:
+        pytest.skip("Node.js is required for the frontend restart unit test.")
+    except subprocess.CalledProcessError as exc:
+        pytest.fail(exc.stderr)
+
+    assert json.loads(result.stdout) == {
+        "success": {
+            "outcome": "completed",
+            "calls": [
+                "reset-runtime",
+                "clear:job-1",
+                "remove-draft:job-1",
+                "remove-history:job-1",
+                "reset-upload",
+            ],
+            "ready": False,
+        },
+        "failure": {
+            "calls": [
+                "reset-runtime",
+                "clear:job-1",
+                "status-error",
+                "alert",
+            ],
+            "ready": True,
+        },
     }
 
 

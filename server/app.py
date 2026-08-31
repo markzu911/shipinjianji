@@ -363,6 +363,7 @@ CUT_DRAFT_PCM_CACHE = FingerprintPcmCache()
 
 JOBS: dict[str, dict[str, Any]] = {}
 JOB_FILES: dict[str, Path] = {}
+CUT_DRAFT_WRITE_GENERATIONS: dict[str, int] = {}
 JOBS_LOCK = threading.Lock()
 PROJECT_RECOVERY_FAILURES: list[dict[str, str]] = []
 PROJECT_SNAPSHOT_FAILURES: list[dict[str, str]] = []
@@ -1147,6 +1148,7 @@ def cleanup_job_directories(
         if not dry_run:
             removed_job: dict[str, Any] | None = None
             removed_source: Path | None = None
+            removed_cut_draft_generation: int | None = None
             skipped = False
             try:
                 with job_attempt_lock(str(item["id"])):
@@ -1176,6 +1178,12 @@ def cleanup_job_directories(
                                     str(item["id"]),
                                     None,
                                 )
+                                removed_cut_draft_generation = (
+                                    CUT_DRAFT_WRITE_GENERATIONS.pop(
+                                        str(item["id"]),
+                                        None,
+                                    )
+                                )
                         if not skipped:
                             shutil.rmtree(path)
             except OSError as exc:
@@ -1186,6 +1194,11 @@ def cleanup_job_directories(
                             JOB_FILES.setdefault(
                                 str(item["id"]),
                                 removed_source,
+                            )
+                        if removed_cut_draft_generation is not None:
+                            CUT_DRAFT_WRITE_GENERATIONS.setdefault(
+                                str(item["id"]),
+                                removed_cut_draft_generation,
                             )
                 failures.append({"id": item["id"], "error": str(exc)})
                 continue
@@ -15131,6 +15144,7 @@ def update_cut_draft(
             raise HTTPException(status_code=409, detail="视频时长无效，无法保存剪辑草稿。")
 
         current_draft = copy.deepcopy(job.get("cutDraft"))
+        write_generation = CUT_DRAFT_WRITE_GENERATIONS.get(job_id, 0)
 
         video_path = JOB_FILES.get(job_id)
         source_segments = copy.deepcopy(
@@ -15258,6 +15272,11 @@ def update_cut_draft(
                 )
             if job.get("cutDraft") is not None:
                 current_draft = job["cutDraft"]
+            if CUT_DRAFT_WRITE_GENERATIONS.get(job_id, 0) != write_generation:
+                raise HTTPException(
+                    status_code=409,
+                    detail="剪辑草稿已被放弃，请重新操作。",
+                )
             current_revision = int((current_draft or {}).get("revision") or 0)
             if request.revision != current_revision:
                 raise HTTPException(
@@ -15326,6 +15345,9 @@ def delete_cut_draft(
             job = JOBS.get(job_id)
             if job is None:
                 raise HTTPException(status_code=404, detail="转写任务不存在或服务已重启。")
+            CUT_DRAFT_WRITE_GENERATIONS[job_id] = (
+                CUT_DRAFT_WRITE_GENERATIONS.get(job_id, 0) + 1
+            )
             job["cutDraft"] = None
             job["updatedAt"] = utc_now()
     background_tasks.add_task(persist_job_snapshot_best_effort, job_id)

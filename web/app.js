@@ -6543,9 +6543,8 @@ async function confirmAndResetProject() {
   if (!confirmed) return;
   const jobId = currentJobId;
   cutDraftReady = false;
+  resetCutDraftSaveRuntime();
   try {
-    cancelCutDraftSaveTimer();
-    await (cutDraftSaveInFlight?.promise || cutDraftSaveQueue);
     await clearPersistedCutDraft(jobId);
     removeLocalCutDraft(jobId);
     removeLocalCutHistory(jobId);

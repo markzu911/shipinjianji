@@ -425,6 +425,72 @@ def test_cut_draft_is_persisted_versioned_restored_and_cleared(
     assert snapshot_calls == [job_id, job_id]
 
 
+def test_delete_cut_draft_rejects_an_older_write_that_finishes_late(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    job_id = "34343434-3434-4434-8434-343434343434"
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "status": "completed",
+            "duration": 10.0,
+            "result": {"segments": []},
+            "cutDraft": None,
+        }
+
+    entered_alignment = threading.Event()
+    release_alignment = threading.Event()
+    outcome: list[tuple[int, str] | str] = []
+
+    def blocked_alignment(
+        _video_path,
+        text_ranges,
+        timeline_ranges,
+        _source_segments,
+        _duration,
+        _source_boundaries,
+    ):
+        entered_alignment.set()
+        assert release_alignment.wait(timeout=2)
+        return text_ranges, timeline_ranges, [], {"status": "unavailable"}
+
+    monkeypatch.setattr(
+        app_module,
+        "resolve_cut_draft_acoustic_boundaries",
+        blocked_alignment,
+    )
+
+    def save_draft() -> None:
+        try:
+            app_module.update_cut_draft(
+                job_id,
+                app_module.CutDraftRequest(),
+                app_module.BackgroundTasks(),
+            )
+            outcome.append("saved")
+        except app_module.HTTPException as exc:
+            outcome.append((exc.status_code, str(exc.detail)))
+
+    writer = threading.Thread(target=save_draft)
+    writer.start()
+    assert entered_alignment.wait(timeout=2)
+    try:
+        cleared = app_module.delete_cut_draft(
+            job_id,
+            app_module.BackgroundTasks(),
+        )
+    finally:
+        release_alignment.set()
+        writer.join(timeout=2)
+
+    assert not writer.is_alive()
+    assert cleared == {"status": "cleared"}
+    assert outcome == [(409, "剪辑草稿已被放弃，请重新操作。")]
+    with app_module.JOBS_LOCK:
+        assert app_module.JOBS[job_id]["cutDraft"] is None
+    assert not app_module.cut_draft_path(job_id).exists()
+
+
 def test_cut_draft_commit_survives_async_snapshot_metadata_failure(
     monkeypatch: pytest.MonkeyPatch,
 ):

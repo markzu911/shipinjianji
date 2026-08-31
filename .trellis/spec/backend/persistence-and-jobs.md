@@ -164,6 +164,79 @@ if (
 - `splitPoints` 与 exact identity 是用户语义，服务端响应往返时必须保留；boundary diagnostics 和 acoustic cache 仍是派生数据，不能用来推断或重建分割结构。
 - API 回归必须覆盖旧草稿读取、新字段往返、revision conflict 不覆盖结构、非法 exact 请求不写部分草稿，以及删除草稿时一并清除结构字段。
 
+## 场景：重新开始放弃草稿与迟到写入隔离
+
+### 1. Scope / Trigger
+
+修改“重新开始”、cut-draft PUT/DELETE、VAD/声学校准等待或草稿保存取消逻辑时适用。用户尚未生成视频时确认“重新开始”代表放弃当前草稿，不是生成前的权威保存动作。
+
+### 2. Signatures
+
+```javascript
+resetCutDraftSaveRuntime({ abort?: boolean }) -> void
+confirmAndResetProject() -> Promise<void>
+```
+
+```text
+PUT /api/transcriptions/{job_id}/cut-draft
+DELETE /api/transcriptions/{job_id}/cut-draft -> { status: "cleared" }
+CUT_DRAFT_WRITE_GENERATIONS[job_id] -> integer
+```
+
+### 3. Contracts
+
+- 用户确认后先把 `cutDraftReady` 设为 `false`，再调用 `resetCutDraftSaveRuntime()`；不得等待 `cutDraftSaveInFlight.promise` 或 `cutDraftSaveQueue`，也不得为即将放弃的状态发起新 PUT。
+- 浏览器取消 fetch 只负责释放客户端运行时。服务端 PUT 在进入耗时 VAD/声学校准前捕获当前 write generation，并在持久化前、per-job lock 内再次比较。
+- DELETE 在成功移除 `cut-draft.json` 后、释放 per-job lock 前推进 write generation 并把内存 `job.cutDraft` 设为 `None`。较旧 generation 的 PUT 返回 `409`，不得重新创建文件或内存草稿。
+- DELETE 成功后前端清除本地草稿和剪辑历史并进入上传页；DELETE 失败时保留当前工程、恢复 `cutDraftReady` 并显示既有错误弹窗。
+- 该放弃流程不删除原视频、已生成文件或 history；生成动作仍必须使用 `flushCutDraftSave()` 等待最新权威 revision。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 结果 |
+| --- | --- |
+| debounce timer 尚未触发 | 取消 timer，不发送 PUT；DELETE 后进入上传页 |
+| PUT/fetch 仍在等待 | 中止并失效客户端 request identity；不等待 Promise |
+| 旧 PUT 在 DELETE 后结束 VAD | generation 不匹配，返回 `409`，草稿保持为空 |
+| DELETE 文件失败 | `500`；当前工程保留并显示错误，可再次操作 |
+| DELETE 时任务已不存在 | 既有 `404` 兼容按前端清理规则处理，不复活旧草稿 |
+| 用户点击生成 | 不走放弃路径；继续等待稳定草稿 revision |
+
+### 5. Good / Base / Bad Cases
+
+- Good：VAD 首次加载中的 PUT 被“重新开始”打断；DELETE 立即完成，旧 PUT 稍后被 generation guard 拒绝，刷新也没有草稿。
+- Base：没有 timer 或 in-flight 保存；确认后发送一次 DELETE 并回到上传页。
+- Bad：先 `await cutDraftSaveInFlight.promise` 再 DELETE，会让 VAD/网络耗时表现为按钮无响应；只 abort fetch 后 DELETE，则服务端旧 PUT 仍可能在 DELETE 后落盘。
+
+### 6. Tests Required
+
+- Node 行为回归注入永不 resolve 的 in-flight Promise，断言 `confirmAndResetProject()` 仍完成，调用顺序为 reset runtime、DELETE、本地清理、页面重置。
+- 后端并发回归用 event 阻塞 PUT 的声学校准，先执行 DELETE 再释放 PUT；断言 PUT `409`、内存草稿为 `None` 且文件不存在。
+- 真实浏览器执行“载入工程 -> 重新开始 -> 确认”，断言回到上传页、无 pageerror，并保留 history 数量。
+
+### 7. Wrong vs Correct
+
+```javascript
+// Wrong: 放弃操作仍等待耗时保存。
+await (cutDraftSaveInFlight?.promise || cutDraftSaveQueue);
+await clearPersistedCutDraft(jobId);
+
+// Correct: 先失效客户端保存，再清除服务端权威草稿。
+cutDraftReady = false;
+resetCutDraftSaveRuntime();
+await clearPersistedCutDraft(jobId);
+```
+
+```python
+# Wrong: DELETE 清空后，旧 PUT 只比较 revision=0，仍可重新写入。
+if request.revision == current_revision:
+    save_cut_draft(job_id, draft)
+
+# Correct: 持久化前同时验证请求捕获的写入代次。
+if CUT_DRAFT_WRITE_GENERATIONS.get(job_id, 0) != write_generation:
+    raise HTTPException(status_code=409, detail="剪辑草稿已被放弃，请重新操作。")
+```
+
 ## 任务状态更新
 
 - 通过 `update_job` 或对应的 `update_edit_job`、`update_art_job`、`update_picture_in_picture_job` 更新，不直接在无锁区域修改嵌套字典。

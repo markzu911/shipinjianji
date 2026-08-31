@@ -33,6 +33,7 @@
 15. 一次权威响应是否只刷新了同一领域的部分内存副本？源 segments、editable segments、边界、字符 cache 和 Store projection 必须明确按同一 revision 原子更新；正常响应、stale effect 重读和错误恢复路径都要走同一同步入口。
 16. 派生媒体失效是否仍写成持久化 schema 接受的明确状态？没有 worker 的失效结果不能写 `queued`，非空子任务也不能写非法 `null` status；至少连续执行两次真实写操作并重新 load 快照，证明第一次写入没有毒化下一次覆盖。
 17. 写 API 是否会在返回前规范化并持久化客户端 payload？HTTP 2xx 表示 revision 已经成为服务端事实，客户端必须先接受单调 revision，再用 key/文字/mode/ownership 等结构身份验证响应；不能用 request/response 时间数值全等拒绝合法规范化。当前请求仍是 latest 时完整安装权威 snapshot 并重建 ack/history/projection，已经 stale 时只推进 revision 并用它重放最新 desired；测试必须跨 undo、redo、刷新同时核对 API、本地恢复副本和 Store。
+18. “放弃/重新开始”是否与仍在运行的写请求并发？客户端 `AbortController` 只停止浏览器等待，不能证明服务端处理已经取消；删除权威草稿时必须同时推进服务端写入代次，并在旧请求最终持久化前再次校验，防止 DELETE 后迟到 PUT 复活已放弃状态。
 
 ## 浏览器边界
 

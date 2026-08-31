@@ -79,6 +79,7 @@ def isolated_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     with app_module.JOBS_LOCK:
         app_module.JOBS.clear()
         app_module.JOB_FILES.clear()
+        app_module.CUT_DRAFT_WRITE_GENERATIONS.clear()
     with app_module.PROJECT_FAILURES_LOCK:
         app_module.PROJECT_RECOVERY_FAILURES.clear()
         app_module.PROJECT_SNAPSHOT_FAILURES.clear()
@@ -92,6 +93,8 @@ def isolated_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     app_module.dashscope.base_http_api_url = dashscope_http_url
     app_module.dashscope.base_websocket_api_url = dashscope_websocket_url
     app_module.CUT_DRAFT_PCM_CACHE.clear()
+    with app_module.JOBS_LOCK:
+        app_module.CUT_DRAFT_WRITE_GENERATIONS.clear()
     with app_module.PROJECT_FAILURES_LOCK:
         app_module.PROJECT_RECOVERY_FAILURES.clear()
         app_module.PROJECT_SNAPSHOT_FAILURES.clear()
