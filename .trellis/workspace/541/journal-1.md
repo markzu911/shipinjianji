@@ -813,3 +813,24 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 37: 修复规范化剪辑草稿撤销状态分叉
+
+**Date**: 2026-08-31
+**Task**: 修复规范化剪辑草稿撤销状态分叉
+**Branch**: `master`
+
+### Summary
+
+修复服务端规范化 cut-draft 后前端 revision/ack 未推进导致的撤销、重做和刷新分叉；完整安装规范化 text/noSpeech/timeline/split 状态，补充结构校验、在途 rebase、浏览器刷新链路测试和项目规范。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `a4b435f` | (see git log) |
+
+### Status
+
+[OK] **Completed**

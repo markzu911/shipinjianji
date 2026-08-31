@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 36
-- **Last Active**: 2026-08-28
+- **Total Sessions**: 37
+- **Last Active**: 2026-08-31
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~815 | Active |
+| `journal-1.md` | ~836 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 37 | 2026-08-31 | 修复规范化剪辑草稿撤销状态分叉 | `a4b435f` | `master` |
 | 36 | 2026-08-28 | 修复跨源句合并后文字重复 | `bb14d75` | `master` |
 | 35 | 2026-08-28 | 修复极短时间轴选区删除 | `37a219c` | `master` |
 | 34 | 2026-08-28 | 优化文案跟随与时间轴预览缓存 | `e7b5b5a` | `master` |
