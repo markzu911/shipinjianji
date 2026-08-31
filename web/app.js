@@ -211,6 +211,7 @@ let timelineRangeConfirmationOpen = false;
 let nextTimelineRangeId = 1;
 let cutTimelineBuildId = 0;
 let cutTimelineThumbnailCache = null;
+let cutTimelineThumbnailProjectionSignature = "";
 let cutTimelineExtractorOwner = null;
 const cutTimelineThumbnailStore =
   window.TimelineThumbnailCache?.createStore({
@@ -238,6 +239,7 @@ let cutSplitClipsCache = null;
 let cutTimelinePixelsPerSecondCache = null;
 let cutTimelineScaleSignature = "";
 let cutTimelineTrackWidthCache = 0;
+let cutTimelineViewportWidthCache = 0;
 let cutTimelineTextPlaybackEntries = [];
 let cutTimelineTextPlaybackFloorCursor = -1;
 let cutTimelineTextPlaybackCursor = -1;
@@ -279,9 +281,41 @@ let cutHistoryPersistJobId = null;
 let cutCommitFrameId = null;
 let cutCommitEffectsFrameId = null;
 let cutCommitEffectsTimer = null;
+let cutCommitActiveEffects = null;
 let cutCommitNeedsEditorSuiteSync = false;
+let cutCommitNeedsSummaryRefresh = false;
 let cutCommitExternallySynced = false;
 let cutCommitPreviewEffect = null;
+let cutCommitRenderPlan = createCutCommitRenderPlan();
+
+function createCutCommitRenderPlan() {
+  return {
+    transcript: "skip",
+    timelineText: "skip",
+  };
+}
+
+function mergeCutRenderMode(current, requested) {
+  const priorities = { skip: 0, reconcile: 1, replace: 2 };
+  return priorities[requested] > priorities[current] ? requested : current;
+}
+
+function requestCutCommitRender(options = {}) {
+  cutCommitRenderPlan.transcript = mergeCutRenderMode(
+    cutCommitRenderPlan.transcript,
+    options.transcript || "reconcile",
+  );
+  cutCommitRenderPlan.timelineText = mergeCutRenderMode(
+    cutCommitRenderPlan.timelineText,
+    options.timelineText || "reconcile",
+  );
+}
+
+function consumeCutCommitRenderPlan() {
+  const plan = cutCommitRenderPlan;
+  cutCommitRenderPlan = createCutCommitRenderPlan();
+  return plan;
+}
 
 function updateOriginalSourceActionsVisibility() {
   const visible = originalSourceActionsAllowed && !hasCutSelection();
@@ -1002,11 +1036,7 @@ function renderNoSpeechSegmentItem(suggestion, displayIndex) {
   return item;
 }
 
-function renderCutSegments() {
-  transcriptFollowScrollController.reset();
-  activeTranscriptSegmentIndex = -1;
-  activeTranscriptSegmentKey = "";
-  activeTranscriptItem = null;
+function buildCutSegmentDisplayItems() {
   const deletedRanges = getCommittedTimelineSemanticDeleteRanges();
   const displayItems = [];
   currentEditableSegments.forEach((segment, segmentIndex) => {
@@ -1035,23 +1065,172 @@ function renderCutSegments() {
     left.end - right.end ||
     left.type.localeCompare(right.type),
   );
+  return displayItems;
+}
+
+function cutSegmentDisplayKey(displayItem) {
+  if (displayItem.type === "no-speech") {
+    const range = getNoSpeechRange(displayItem.suggestion);
+    return range
+      ? `no-speech:${range.id}:${rangeKey(range.start, range.end)}`
+      : "";
+  }
+  const { run, segmentIndex } = displayItem;
+  return `${segmentIndex}:${run.presentationKey}:${rangeKey(run.start, run.end)}`;
+}
+
+function cutSegmentReconcileSignature(displayItem) {
+  const key = cutSegmentDisplayKey(displayItem);
+  if (displayItem.type === "no-speech") {
+    const suggestion = displayItem.suggestion;
+    const range = getNoSpeechRange(suggestion);
+    return JSON.stringify([
+      key,
+      range ? selectedNoSpeechRanges.has(range.id) : false,
+      suggestion.deletable !== false,
+      noSpeechKindLabel(suggestion),
+      noSpeechAudioLabel(suggestion),
+      cutControlsLocked,
+    ]);
+  }
+  const { run } = displayItem;
+  return JSON.stringify([
+    key,
+    run.kind,
+    run.text,
+    run.semanticStart,
+    run.semanticEnd,
+    run.rangeKeys,
+    run.suggestionRangeKeys,
+    cutControlsLocked,
+  ]);
+}
+
+function createCutSegmentItem(displayItem, displayIndex) {
+  const item = displayItem.type === "no-speech"
+    ? renderNoSpeechSegmentItem(displayItem.suggestion, displayIndex)
+    : renderTextSegmentItem(
+        displayItem.run,
+        displayItem.segmentIndex,
+        displayIndex,
+      );
+  if (!item) return null;
+  item.dataset.displayKey = cutSegmentDisplayKey(displayItem);
+  item.dataset.reconcileSignature = cutSegmentReconcileSignature(displayItem);
+  return item;
+}
+
+function resetCutTranscriptRenderState() {
+  transcriptFollowScrollController.reset();
+  if (activeTranscriptItem) {
+    activeTranscriptItem.classList.remove("is-playback-active");
+    activeTranscriptItem.removeAttribute("aria-current");
+    const badge = activeTranscriptItem.querySelector(".segment-current-badge");
+    if (badge) badge.hidden = true;
+  }
+  activeTranscriptSegmentIndex = -1;
+  activeTranscriptSegmentKey = "";
+  activeTranscriptItem = null;
+}
+
+function recordCutRenderResult(surface, mode, details = {}) {
+  const probe = window.__cutPerformanceProbe;
+  if (!probe) return;
+  const countKey = `${surface}${mode[0].toUpperCase()}${mode.slice(1)}Count`;
+  probe[countKey] = (Number(probe[countKey]) || 0) + 1;
+  probe.renderResults = [
+    ...(Array.isArray(probe.renderResults) ? probe.renderResults : []),
+    { surface, mode, ...details },
+  ];
+}
+
+function renderCutSegments(
+  displayItems = buildCutSegmentDisplayItems(),
+) {
+  resetCutTranscriptRenderState();
 
   const fragment = document.createDocumentFragment();
   displayItems.forEach((displayItem, displayIndex) => {
-    const item = displayItem.type === "no-speech"
-      ? renderNoSpeechSegmentItem(displayItem.suggestion, displayIndex)
-      : renderTextSegmentItem(
-          displayItem.run,
-          displayItem.segmentIndex,
-          displayIndex,
-        );
+    const item = createCutSegmentItem(displayItem, displayIndex);
     if (item) fragment.append(item);
   });
   segmentList.replaceChildren(fragment);
   updateCutSegmentTimestamps();
+  recordCutRenderResult("transcript", "replace", {
+    created: displayItems.length,
+  });
 }
 
-function updateCutSegmentText() {
+function reconcileCutSegments() {
+  resetCutTranscriptRenderState();
+  const displayItems = buildCutSegmentDisplayItems();
+  const descriptors = displayItems.map((displayItem) => ({
+    displayItem,
+    key: cutSegmentDisplayKey(displayItem),
+    signature: cutSegmentReconcileSignature(displayItem),
+  }));
+  const targetKeys = descriptors.map(({ key }) => key);
+  const existingItems = [...segmentList.children];
+  const existingKeys = existingItems.map((item) =>
+    String(item.dataset?.displayKey || ""),
+  );
+  const validKeys =
+    targetKeys.every(Boolean) &&
+    new Set(targetKeys).size === targetKeys.length &&
+    existingKeys.every(Boolean) &&
+    new Set(existingKeys).size === existingKeys.length;
+  if (!validKeys) {
+    recordCutRenderResult("transcript", "fallback", {
+      existing: existingItems.length,
+      target: descriptors.length,
+    });
+    renderCutSegments(displayItems);
+    return false;
+  }
+
+  const existingByKey = new Map(
+    existingItems.map((item) => [String(item.dataset.displayKey), item]),
+  );
+  const desiredNodes = new Set();
+  let reference = segmentList.firstElementChild;
+  let created = 0;
+  let reused = 0;
+  descriptors.forEach(({ displayItem, key, signature }, displayIndex) => {
+    const existing = existingByKey.get(key);
+    const item = existing?.dataset.reconcileSignature === signature
+      ? existing
+      : createCutSegmentItem(displayItem, displayIndex);
+    if (!item) return;
+    if (item === existing) {
+      item.dataset.displayIndex = String(displayIndex);
+      reused += 1;
+    } else {
+      created += 1;
+    }
+    desiredNodes.add(item);
+    if (item === reference) {
+      reference = reference.nextElementSibling;
+    } else {
+      segmentList.insertBefore(item, reference);
+    }
+  });
+  for (const item of [...segmentList.children]) {
+    if (!desiredNodes.has(item)) item.remove();
+  }
+  updateCutSegmentTimestamps();
+  recordCutRenderResult("transcript", "reconcile", {
+    created,
+    removed: existingItems.length + created - desiredNodes.size,
+    reused,
+  });
+  return true;
+}
+
+function updateCutSegmentText(mode = "replace") {
+  if (mode === "reconcile") {
+    reconcileCutSegments();
+    return;
+  }
   renderCutSegments();
 }
 
@@ -1066,6 +1245,7 @@ function updateImmediateCutSelectionFeedback() {
     let selected = false;
     if (item.dataset.noSpeechId) {
       selected = selectedNoSpeechRanges.has(item.dataset.noSpeechId);
+      if (toggle.getAttribute("aria-pressed") === String(selected)) continue;
       item.classList.toggle("has-selection", selected);
       item.classList.toggle("is-delete-fragment", selected);
       item.classList.toggle("is-restored-no-speech", !selected);
@@ -1088,6 +1268,7 @@ function updateImmediateCutSelectionFeedback() {
           range.start <= start + CUT_SPEECH_BOUNDARY_EPSILON &&
           range.end >= end - CUT_SPEECH_BOUNDARY_EPSILON,
       );
+    if (toggle.getAttribute("aria-pressed") === String(selected)) continue;
     item.classList.toggle("has-selection", selected);
     item.classList.toggle("is-delete-fragment", selected);
     item.classList.toggle(
@@ -1426,9 +1607,10 @@ async function applyEditableSegmentOperation(action) {
     serverRetainedProjection = null;
     transcriptCharacterUnitsCache = null;
     syncCorrectedWords();
-    renderCutSegments();
-    renderCutTimelineTextSegments();
-    updateSelectionSummary();
+    updateSelectionSummary({
+      transcript: "replace",
+      timelineText: "replace",
+    });
     setSegmentOperationBusy(false);
     closeSegmentEditDialog();
     setSegmentStructureStatus(
@@ -2095,10 +2277,11 @@ function getMergedSelection() {
   return mergedCutSelectionCache;
 }
 
-function invalidateCutTimelineScale() {
+function invalidateCutTimelineScale({ geometry = false } = {}) {
   cutTimelinePixelsPerSecondCache = null;
   cutTimelineScaleSignature = "";
   cutTimelineTrackWidthCache = 0;
+  if (geometry) cutTimelineViewportWidthCache = 0;
 }
 
 function invalidateCutPlaybackStructure() {
@@ -2613,15 +2796,31 @@ function applyServerRetainedProjection(
 }
 
 function syncEditorSuiteCutDraftState(
-  state = buildLiveCutDraftState(),
+  state = null,
   { structureOnly = false } = {},
 ) {
   if (suppressEditorSuiteCutSync) return;
+  const breakdown = {};
+  let stepStarted = performance.now();
+  const resolvedState = state || buildLiveCutDraftState();
+  stepStarted = recordCutPerformanceStep(breakdown, "buildState", stepStarted);
+  const timeline = syncCutTimelineModel();
+  stepStarted = recordCutPerformanceStep(breakdown, "timeline", stepStarted);
   window.EditorSuite?.setCutDraft({
-    ...state,
+    ...resolvedState,
     structureOnly,
-    timeline: syncCutTimelineModel(),
+    timeline,
   });
+  recordCutPerformanceStep(breakdown, "dispatch", stepStarted);
+  const probe = window.__cutPerformanceProbe;
+  if (probe) {
+    probe.storeSyncBreakdowns = [
+      ...(Array.isArray(probe.storeSyncBreakdowns)
+        ? probe.storeSyncBreakdowns
+        : []),
+      breakdown,
+    ];
+  }
 }
 
 function acceptEditorSuiteJobState(event) {
@@ -2650,14 +2849,17 @@ function acceptEditorSuiteJobState(event) {
   });
 }
 
-function updateTimelineRangeConfirmation() {
+function updateTimelineRangeConfirmation(options = {}) {
   const hasPendingRange = Boolean(
     timelineRangeInProgress &&
     selectedTimelineRangeId !== null &&
     timelineDeleteRanges.some(({ id }) => id === selectedTimelineRangeId),
   );
+  const hasMergedSelection = typeof options.hasMergedSelection === "boolean"
+    ? options.hasMergedSelection
+    : getMergedSelection().length > 0;
   generateCutButton.disabled =
-    cutControlsLocked || hasPendingRange || getMergedSelection().length === 0;
+    cutControlsLocked || hasPendingRange || !hasMergedSelection;
 }
 
 function setCutControlsDisabled(disabled) {
@@ -3256,7 +3458,10 @@ function applyPersistedCutDraftAlignment(
   if (changed) {
     cutHistoryReplaying = true;
     try {
-      updateSelectionSummary();
+      updateSelectionSummary({
+        transcript: "replace",
+        timelineText: "replace",
+      });
     } finally {
       cutHistoryReplaying = false;
     }
@@ -3406,7 +3611,7 @@ async function persistCutDraft() {
         const normalizedDesired = captureDesiredCutDraft();
         saveLocalCutDraft(serverDraft, request.jobId);
         syncEditorSuiteCutDraftState();
-        renderCutTimelineTextSegments();
+        renderCutTimelineTextSegments("reconcile");
         cutCommitExternallySynced = true;
         cutDraftLastSignature = normalizedDesired.signature;
         cutDraftAcknowledged = {
@@ -3923,33 +4128,158 @@ function recordCutPerformanceStep(breakdown, name, started) {
   return ended;
 }
 
-function runCutCommitEffects({ preview = true } = {}) {
-  cutCommitEffectsFrameId = null;
-  cutCommitEffectsTimer = null;
-  updateCutSegmentText();
+function finishCutCommitEffects(state) {
+  const previewEffect = cutCommitPreviewEffect;
+  cutCommitPreviewEffect = null;
+  const previewStarted = performance.now();
+  if (state.preview) previewEffect?.();
+  recordCutPerformanceStep(state.breakdown, "preview", previewStarted);
+  state.breakdown.total = Object.values(state.breakdown).reduce(
+    (total, duration) => total + duration,
+    0,
+  );
+  if (cutCommitActiveEffects === state) cutCommitActiveEffects = null;
+  const probe = window.__cutPerformanceProbe;
+  if (probe) {
+    probe.effectBreakdowns = [
+      ...(Array.isArray(probe.effectBreakdowns) ? probe.effectBreakdowns : []),
+      state.breakdown,
+    ];
+  }
+}
+
+function runCutCommitTimelineAuxEffects(state) {
+  if (cutCommitActiveEffects !== state) return;
+  state.phase = "timelineAux";
+  let stepStarted = performance.now();
+  renderCutSplitClips();
+  renderCutTimelineRanges();
+  updateCutTimelinePlayhead();
+  stepStarted = recordCutPerformanceStep(
+    state.breakdown,
+    "splitRanges",
+    stepStarted,
+  );
+  buildCutTimelineThumbnails();
+  stepStarted = recordCutPerformanceStep(
+    state.breakdown,
+    "thumbnails",
+    stepStarted,
+  );
+  scheduleCutDraftSave();
+  recordCutPerformanceStep(state.breakdown, "draftSave", stepStarted);
+  finishCutCommitEffects(state);
+}
+
+function runCutCommitTimelineEffects(state, deferred = false) {
+  if (cutCommitActiveEffects !== state) return;
+  state.phase = "timeline";
+  let stepStarted = performance.now();
+  updateCutTimelineScale();
+  stepStarted = recordCutPerformanceStep(
+    state.breakdown,
+    "timelineScale",
+    stepStarted,
+  );
+  renderCutTimelineRuler();
+  stepStarted = recordCutPerformanceStep(
+    state.breakdown,
+    "timelineRuler",
+    stepStarted,
+  );
+  if (state.renderPlan.timelineText !== "skip") {
+    renderCutTimelineTextSegments(state.renderPlan.timelineText);
+  }
+  stepStarted = recordCutPerformanceStep(
+    state.breakdown,
+    "timelineText",
+    stepStarted,
+  );
+  if (deferred) {
+    scheduleCutCommitEffectPhase(state, runCutCommitTimelineAuxEffects);
+    return;
+  }
+  runCutCommitTimelineAuxEffects(state);
+}
+
+function scheduleCutCommitEffectPhase(state, effect) {
+  state.phase = effect === runCutCommitStoreEffects
+    ? "store"
+    : effect === runCutCommitTimelineEffects
+      ? "timeline"
+      : "timelineAux";
+  cutCommitEffectsTimer = window.setTimeout(() => {
+    cutCommitEffectsTimer = null;
+    if (cutCommitActiveEffects === state) effect(state, true);
+  }, 0);
+}
+
+function runCutCommitStoreEffects(state, deferred = false) {
+  if (cutCommitActiveEffects !== state) return;
+  state.phase = "store";
+  const stepStarted = performance.now();
   if (cutCommitNeedsEditorSuiteSync && !cutCommitExternallySynced) {
     syncEditorSuiteCutDraftState();
   }
   cutCommitNeedsEditorSuiteSync = false;
   cutCommitExternallySynced = false;
-  updateCutTimelineScale();
-  renderCutTimelineRuler();
-  renderCutTimelineTextSegments();
-  renderCutSplitClips();
-  renderCutTimelineRanges();
-  updateCutTimelinePlayhead();
-  buildCutTimelineThumbnails();
-  scheduleCutDraftSave();
-  const previewEffect = cutCommitPreviewEffect;
-  cutCommitPreviewEffect = null;
-  if (preview) previewEffect?.();
+  recordCutPerformanceStep(state.breakdown, "store", stepStarted);
+  if (deferred) {
+    scheduleCutCommitEffectPhase(state, runCutCommitTimelineEffects);
+    return;
+  }
+  runCutCommitTimelineEffects(state);
+}
+
+function runCutCommitEffects({ preview = true } = {}) {
+  cutCommitEffectsFrameId = null;
+  cutCommitEffectsTimer = null;
+  const state = {
+    breakdown: {},
+    phase: "transcript",
+    preview,
+    renderPlan: consumeCutCommitRenderPlan(),
+  };
+  cutCommitActiveEffects = state;
+  let stepStarted = performance.now();
+  if (cutCommitNeedsSummaryRefresh) {
+    updateDeferredCutSelectionSummary();
+    cutCommitNeedsSummaryRefresh = false;
+  }
+  stepStarted = recordCutPerformanceStep(
+    state.breakdown,
+    "summary",
+    stepStarted,
+  );
+  if (state.renderPlan.transcript !== "skip") {
+    updateCutSegmentText(state.renderPlan.transcript);
+  }
+  recordCutPerformanceStep(state.breakdown, "transcript", stepStarted);
+  if (preview) {
+    scheduleCutCommitEffectPhase(state, runCutCommitStoreEffects);
+    return;
+  }
+  runCutCommitStoreEffects(state);
 }
 
 function scheduleCutPreviewEffect(effect) {
   cutCommitPreviewEffect = typeof effect === "function" ? effect : null;
 }
 
+function requeueUnfinishedCutCommitRender(state) {
+  if (!state) return;
+  requestCutCommitRender({
+    transcript: state.phase === "transcript"
+      ? state.renderPlan.transcript
+      : "skip",
+    timelineText: state.phase === "timelineAux"
+      ? "skip"
+      : state.renderPlan.timelineText,
+  });
+}
+
 function cancelPendingCutCommitEffects() {
+  requeueUnfinishedCutCommitRender(cutCommitActiveEffects);
   if (cutCommitEffectsFrameId !== null) {
     window.cancelAnimationFrame(cutCommitEffectsFrameId);
     cutCommitEffectsFrameId = null;
@@ -3958,14 +4288,23 @@ function cancelPendingCutCommitEffects() {
     window.clearTimeout(cutCommitEffectsTimer);
     cutCommitEffectsTimer = null;
   }
+  cutCommitActiveEffects = null;
   cutCommitPreviewEffect = null;
 }
 
 function scheduleCutCommitEffects() {
-  if (cutCommitEffectsFrameId !== null || cutCommitEffectsTimer !== null) return;
+  if (
+    cutCommitEffectsFrameId !== null ||
+    cutCommitEffectsTimer !== null ||
+    cutCommitActiveEffects !== null
+  ) {
+    return;
+  }
   cutCommitEffectsFrameId = window.requestAnimationFrame(() => {
-    cutCommitEffectsFrameId = null;
-    cutCommitEffectsTimer = window.setTimeout(runCutCommitEffects, 0);
+    cutCommitEffectsFrameId = window.requestAnimationFrame(() => {
+      cutCommitEffectsFrameId = null;
+      cutCommitEffectsTimer = window.setTimeout(runCutCommitEffects, 0);
+    });
   });
 }
 
@@ -3977,21 +4316,16 @@ function resetCutCommitScheduler() {
   cutCommitFrameId = null;
   cutCommitEffectsFrameId = null;
   cutCommitEffectsTimer = null;
+  cutCommitActiveEffects = null;
   cutCommitNeedsEditorSuiteSync = false;
+  cutCommitNeedsSummaryRefresh = false;
   cutCommitExternallySynced = false;
   cutCommitPreviewEffect = null;
+  cutCommitRenderPlan = createCutCommitRenderPlan();
 }
 
-function commitSelectionSummary() {
-  cutCommitFrameId = null;
-  const breakdown = {};
-  let stepStarted = performance.now();
+function updateDeferredCutSelectionSummary() {
   const merged = getMergedSelection();
-  stepStarted = recordCutPerformanceStep(
-    breakdown,
-    "deriveSelection",
-    stepStarted,
-  );
   const deletedDuration = merged.reduce(
     (total, range) => total + range.end - range.start,
     0,
@@ -4035,13 +4369,20 @@ function commitSelectionSummary() {
       `共删除 ${formatDuration(deletedDuration)} · 剪辑后约 ${formatDuration(editedDuration)} · 原视频保留`;
   }
 
-  clearSelectionButton.disabled =
-    cutControlsLocked || !hasCutSelection();
-  generateCutButton.disabled =
-    cutControlsLocked || merged.length === 0;
-  updateTimelineRangeConfirmation();
+  updateTimelineRangeConfirmation({
+    hasMergedSelection: merged.length > 0,
+  });
+}
+
+function commitSelectionSummary() {
+  cutCommitFrameId = null;
+  const breakdown = {};
+  let stepStarted = performance.now();
+  const hasSelection = hasCutSelection();
+  clearSelectionButton.disabled = cutControlsLocked || !hasSelection;
+  updateTimelineRangeConfirmation({ hasMergedSelection: hasSelection });
   updateOriginalSourceActionsVisibility();
-  cutToolbar.classList.toggle("has-cut-selection", hasCutSelection());
+  cutToolbar.classList.toggle("has-cut-selection", hasSelection);
   stepStarted = recordCutPerformanceStep(breakdown, "summaryDom", stepStarted);
   updateImmediateCutSelectionFeedback();
   stepStarted = recordCutPerformanceStep(
@@ -4058,6 +4399,7 @@ function commitSelectionSummary() {
       breakdown,
     ];
   }
+  cutCommitNeedsSummaryRefresh = true;
   scheduleCutCommitEffects();
 }
 
@@ -4072,16 +4414,38 @@ function flushPendingCutSelectionCommit() {
 function flushPendingCutCommitEffects() {
   if (
     cutCommitEffectsFrameId === null &&
-    cutCommitEffectsTimer === null
+    cutCommitEffectsTimer === null &&
+    cutCommitActiveEffects === null
   ) {
     return false;
+  }
+  if (cutCommitActiveEffects) {
+    if (cutCommitEffectsFrameId !== null) {
+      window.cancelAnimationFrame(cutCommitEffectsFrameId);
+      cutCommitEffectsFrameId = null;
+    }
+    if (cutCommitEffectsTimer !== null) {
+      window.clearTimeout(cutCommitEffectsTimer);
+      cutCommitEffectsTimer = null;
+    }
+    const state = cutCommitActiveEffects;
+    state.preview = false;
+    if (state.phase === "store") {
+      runCutCommitStoreEffects(state);
+    } else if (state.phase === "timelineAux") {
+      runCutCommitTimelineAuxEffects(state);
+    } else {
+      runCutCommitTimelineEffects(state);
+    }
+    return true;
   }
   cancelPendingCutCommitEffects();
   runCutCommitEffects({ preview: false });
   return true;
 }
 
-function updateSelectionSummary() {
+function updateSelectionSummary(renderOptions = {}) {
+  requestCutCommitRender(renderOptions);
   cancelPendingCutCommitEffects();
   invalidateCutPlaybackStructure();
   recordCutHistoryIfChanged();
@@ -4172,7 +4536,9 @@ function cutTimelinePixelsPerSecond() {
 
 function updateCutTimelineScale() {
   const total = editedCutTimelineDuration();
-  const viewportWidth = cutFrameTimelineScroll.clientWidth;
+  const viewportWidth = cutTimelineViewportWidthCache ||
+    cutFrameTimelineScroll.clientWidth;
+  cutTimelineViewportWidthCache = viewportWidth;
   const pixelsPerSecond = cutTimelinePixelsPerSecond();
   const signature = `${total.toFixed(3)}|${viewportWidth}|${pixelsPerSecond}`;
   if (signature === cutTimelineScaleSignature) return;
@@ -4423,38 +4789,93 @@ function cutTimelineMajorStep(total, width) {
   return steps.find((step) => step >= targetStep) || steps.at(-1);
 }
 
+function createCutTimelineRulerTick(
+  index,
+  minorStep,
+  pixelsPerSecond,
+  total,
+) {
+  const seconds = index * minorStep;
+  const isMajor = index % 5 === 0;
+  const tick = document.createElement("span");
+  tick.className = "frame-timeline-tick";
+  tick.dataset.rulerIndex = String(index);
+  tick.classList.toggle("is-major", isMajor);
+  tick.style.left = `${seconds * pixelsPerSecond}px`;
+  if (isMajor) {
+    const label = document.createElement("span");
+    label.className = "frame-timeline-tick-label";
+    label.textContent = formatTime(seconds);
+    if (index === 0) label.classList.add("is-start");
+    if (Math.abs(total - seconds) < 0.001) label.classList.add("is-end");
+    tick.append(label);
+  }
+  return tick;
+}
+
 function renderCutTimelineRuler() {
   const total = editedCutTimelineDuration();
-  const width = cutFrameTimelineTrack.clientWidth;
+  const width = cutTimelineTrackWidthCache || cutFrameTimelineTrack.clientWidth;
   if (total <= 0 || width <= 0) {
+    cutTimelineRulerSignature = "";
     cutFrameTimelineRuler.replaceChildren();
+    delete cutFrameTimelineRuler.dataset.layoutSignature;
     return;
   }
   const majorStep = cutTimelineMajorStep(total, width);
   const minorStep = majorStep / 5;
   const signature = `${total.toFixed(3)}|${Math.round(width)}|${majorStep}`;
   if (signature === cutTimelineRulerSignature) return;
-  cutTimelineRulerSignature = signature;
-  cutFrameTimelineRuler.replaceChildren();
-
+  const logicalPixelsPerSecond = cutTimelinePixelsPerSecond();
+  const pixelsPerSecond = width > total * logicalPixelsPerSecond + 0.5
+    ? width / total
+    : logicalPixelsPerSecond;
+  const layoutSignature = `${majorStep}|${pixelsPerSecond.toFixed(6)}`;
   const tickCount = Math.floor(total / minorStep + 0.000001);
-  for (let index = 0; index <= tickCount; index += 1) {
-    const seconds = index * minorStep;
-    const isMajor = index % 5 === 0;
-    const tick = document.createElement("span");
-    tick.className = "frame-timeline-tick";
-    tick.classList.toggle("is-major", isMajor);
-    tick.style.left = `${(seconds / total) * 100}%`;
-    if (isMajor) {
-      const label = document.createElement("span");
-      label.className = "frame-timeline-tick-label";
-      label.textContent = formatTime(seconds);
-      if (index === 0) label.classList.add("is-start");
-      if (Math.abs(total - seconds) < 0.001) label.classList.add("is-end");
-      tick.append(label);
+  const existingTicks = [...cutFrameTimelineRuler.children];
+  const canReuse = Boolean(cutTimelineRulerSignature) &&
+    cutFrameTimelineRuler.dataset.layoutSignature === layoutSignature &&
+    existingTicks.every(
+      (tick, index) => tick.dataset.rulerIndex === String(index),
+    );
+  cutTimelineRulerSignature = signature;
+  if (canReuse) {
+    while (cutFrameTimelineRuler.children.length > tickCount + 1) {
+      cutFrameTimelineRuler.lastElementChild?.remove();
     }
-    cutFrameTimelineRuler.append(tick);
+    for (
+      let index = cutFrameTimelineRuler.children.length;
+      index <= tickCount;
+      index += 1
+    ) {
+      cutFrameTimelineRuler.append(
+        createCutTimelineRulerTick(
+          index,
+          minorStep,
+          pixelsPerSecond,
+          total,
+        ),
+      );
+    }
+    cutFrameTimelineRuler
+      .querySelector(".frame-timeline-tick-label.is-end")
+      ?.classList.remove("is-end");
+    const finalSeconds = tickCount * minorStep;
+    if (Math.abs(total - finalSeconds) < 0.001) {
+      cutFrameTimelineRuler.lastElementChild
+        ?.querySelector(".frame-timeline-tick-label")
+        ?.classList.add("is-end");
+    }
+    return;
   }
+  const fragment = document.createDocumentFragment();
+  for (let index = 0; index <= tickCount; index += 1) {
+    fragment.append(
+      createCutTimelineRulerTick(index, minorStep, pixelsPerSecond, total),
+    );
+  }
+  cutFrameTimelineRuler.replaceChildren(fragment);
+  cutFrameTimelineRuler.dataset.layoutSignature = layoutSignature;
 }
 
 function cutTimelineClipId(rangeId) {
@@ -4630,18 +5051,8 @@ function updateCutSplitControls(frame = getCutPlaybackFrameState()) {
   cutTimelineRestoreClipButton.disabled = cutControlsLocked || !isDeleted;
 }
 
-function renderCutSplitClips() {
-  const focusedSplitKey = String(
-    document.activeElement?.closest?.("[data-split-clip-key]")?.dataset
-      ?.splitClipKey || "",
-  );
-  cutFrameTimelineClips.replaceChildren();
-  const total = editedCutTimelineDuration();
-  if (cutSplitPoints.length === 0) {
-    selectedSplitClipKey = "";
-    updateCutSplitControls();
-    return;
-  }
+function buildCutSplitClipDescriptors() {
+  if (cutSplitPoints.length === 0) return [];
   const { clips, markers } = deriveCutSplitClips();
   if (
     selectedSplitClipKey &&
@@ -4650,47 +5061,116 @@ function renderCutSplitClips() {
   ) {
     selectedSplitClipKey = "";
   }
-  const fragment = document.createDocumentFragment();
-  for (const clip of clips) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "cut-timeline-split-clip";
-    button.dataset.splitClipKey = clip.key;
-    button.style.left = `${(clip.editedStart / total) * 100}%`;
-    button.style.width = `${Math.max(
+  const total = editedCutTimelineDuration();
+  if (total <= 0) return [];
+  return clips.map((clip) => ({
+    ariaLabel:
+      `视频片段 ${formatCutRange(clip.sourceStart, clip.sourceEnd)}，点击选中`,
+    hiddenLeftBoundary: clip.hiddenLeftBoundary,
+    hiddenRightBoundary: clip.hiddenRightBoundary,
+    key: clip.key,
+    label: formatCutRange(clip.sourceStart, clip.sourceEnd),
+    left: `${(clip.editedStart / total) * 100}%`,
+    selected: clip.key === selectedSplitClipKey,
+    width: `${Math.max(
       0.25,
       ((clip.editedEnd - clip.editedStart) / total) * 100,
-    )}%`;
-    button.classList.toggle("is-selected", clip.key === selectedSplitClipKey);
-    button.classList.toggle(
-      "has-hidden-left-boundary",
-      clip.hiddenLeftBoundary,
-    );
-    button.classList.toggle(
-      "has-hidden-right-boundary",
-      clip.hiddenRightBoundary,
-    );
-    button.setAttribute(
-      "aria-label",
-      `视频片段 ${formatCutRange(clip.sourceStart, clip.sourceEnd)}，点击选中`,
-    );
-    button.setAttribute(
-      "aria-pressed",
-      clip.key === selectedSplitClipKey ? "true" : "false",
-    );
-    button.title = "选中视频片段后可删除";
-    const label = document.createElement("span");
-    label.textContent = formatCutRange(clip.sourceStart, clip.sourceEnd);
-    button.append(label);
-    fragment.append(button);
+    )}%`,
+  }));
+}
+
+function updateCutSplitClipElement(button, descriptor) {
+  button.dataset.splitClipKey = descriptor.key;
+  button.style.left = descriptor.left;
+  button.style.width = descriptor.width;
+  button.classList.toggle("is-selected", descriptor.selected);
+  button.classList.toggle(
+    "has-hidden-left-boundary",
+    descriptor.hiddenLeftBoundary,
+  );
+  button.classList.toggle(
+    "has-hidden-right-boundary",
+    descriptor.hiddenRightBoundary,
+  );
+  button.setAttribute("aria-label", descriptor.ariaLabel);
+  button.setAttribute("aria-pressed", String(descriptor.selected));
+  const label = button.querySelector("span");
+  if (label) label.textContent = descriptor.label;
+}
+
+function createCutSplitClipElement(descriptor) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "cut-timeline-split-clip";
+  button.title = "选中视频片段后可删除";
+  const label = document.createElement("span");
+  button.append(label);
+  updateCutSplitClipElement(button, descriptor);
+  return button;
+}
+
+function replaceCutSplitClips(descriptors) {
+  const fragment = document.createDocumentFragment();
+  for (const descriptor of descriptors) {
+    fragment.append(createCutSplitClipElement(descriptor));
   }
-  cutFrameTimelineClips.append(fragment);
-  if (focusedSplitKey) {
-    const focusTarget = [...cutFrameTimelineClips.children].find(
-      (element) => element.dataset?.splitClipKey === focusedSplitKey,
-    );
-    focusTarget?.focus({ preventScroll: true });
+  cutFrameTimelineClips.replaceChildren(fragment);
+  recordCutRenderResult("splitClips", "replace", {
+    created: descriptors.length,
+  });
+}
+
+function reconcileCutSplitClips(descriptors) {
+  const existingItems = [...cutFrameTimelineClips.children];
+  const targetKeys = descriptors.map(({ key }) => key);
+  const existingKeys = existingItems.map((item) =>
+    String(item.dataset?.splitClipKey || ""),
+  );
+  const validKeys =
+    targetKeys.every(Boolean) &&
+    new Set(targetKeys).size === targetKeys.length &&
+    existingKeys.every(Boolean) &&
+    new Set(existingKeys).size === existingKeys.length;
+  if (!validKeys) {
+    replaceCutSplitClips(descriptors);
+    return;
   }
+  const existingByKey = new Map(
+    existingItems.map((item) => [String(item.dataset.splitClipKey), item]),
+  );
+  const desiredNodes = new Set();
+  let reference = cutFrameTimelineClips.firstElementChild;
+  let created = 0;
+  let reused = 0;
+  for (const descriptor of descriptors) {
+    const item = existingByKey.get(descriptor.key) ||
+      createCutSplitClipElement(descriptor);
+    if (existingByKey.has(descriptor.key)) {
+      updateCutSplitClipElement(item, descriptor);
+      reused += 1;
+    } else {
+      created += 1;
+    }
+    desiredNodes.add(item);
+    if (item === reference) {
+      reference = reference.nextElementSibling;
+    } else {
+      cutFrameTimelineClips.insertBefore(item, reference);
+    }
+  }
+  for (const item of [...cutFrameTimelineClips.children]) {
+    if (!desiredNodes.has(item)) item.remove();
+  }
+  recordCutRenderResult("splitClips", "reconcile", {
+    created,
+    removed: existingItems.length + created - desiredNodes.size,
+    reused,
+  });
+}
+
+function renderCutSplitClips() {
+  if (cutSplitPoints.length === 0) selectedSplitClipKey = "";
+  reconcileCutSplitClips(buildCutSplitClipDescriptors());
   updateCutSplitControls();
 }
 
@@ -4794,11 +5274,10 @@ function restoreSelectedCutSplitClip() {
   return true;
 }
 
-function renderCutTimelineRanges() {
-  cutFrameTimelineRanges.replaceChildren();
+function buildCutTimelineRangeDescriptors() {
   const spans = getEditedTimelineSpans();
   const total = editedCutTimelineDuration(spans);
-  if (total <= 0) return;
+  if (total <= 0) return [];
   const trackWidth = cutFrameTimelineTrack.getBoundingClientRect().width;
   if (
     selectedTimelineRangeId !== null &&
@@ -4807,24 +5286,11 @@ function renderCutTimelineRanges() {
     selectedTimelineRangeId = null;
   }
   syncCutTimelineModel();
-
-  for (const range of timelineDeleteRanges.filter(
+  return timelineDeleteRanges.filter(
     ({ id }) => id === selectedTimelineRangeId,
-  )) {
+  ).map((range) => {
     const editedStart = sourceTimeToEditedTime(range.start, spans);
     const editedEnd = sourceTimeToEditedTime(range.end, spans);
-    const rangeElement = document.createElement("div");
-    rangeElement.className = "cut-timeline-delete-range";
-    rangeElement.classList.toggle(
-      "is-selected",
-      range.id === selectedTimelineRangeId,
-    );
-    rangeElement.classList.toggle(
-      "is-pending",
-      timelineRangeInProgress && range.id === selectedTimelineRangeId,
-    );
-    rangeElement.dataset.rangeId = String(range.id);
-    rangeElement.style.left = `${(editedStart / total) * 100}%`;
     const rangeWidthPercent = Math.max(
       0.25,
       ((editedEnd - editedStart) / total) * 100,
@@ -4835,60 +5301,61 @@ function renderCutTimelineRanges() {
       (rangeWidthPercent / 100) * trackWidth,
     );
     const isNarrowRange = rangeWidthPixels < CUT_TIMELINE_NARROW_HIT_WIDTH;
-    rangeElement.style.width = `${rangeWidthPercent}%`;
-    rangeElement.classList.toggle("is-narrow", isNarrowRange);
+    let cancelLeft = "";
     if (isNarrowRange) {
       const cancelCenter = clamp(
         rangeLeftPixels + rangeWidthPixels / 2,
         22,
         Math.max(22, trackWidth - 22),
       );
-      rangeElement.style.setProperty(
-        "--cut-timeline-range-cancel-left",
-        `${cancelCenter - rangeLeftPixels}px`,
-      );
+      cancelLeft = `${cancelCenter - rangeLeftPixels}px`;
     }
+    const formattedRange = formatCutRange(range.start, range.end);
+    return {
+      bodyAriaLabel:
+        `待确认删除区间 ${formattedRange}，可拖动调整，再次点击或按 Enter 确认删除`,
+      bodyText: formattedRange,
+      cancelAriaLabel: `取消待确认删除区间 ${formattedRange}`,
+      cancelLeft,
+      endAriaLabel: `调整删除区间结束时间，当前 ${formatTime(range.end)}`,
+      id: String(range.id),
+      isNarrowRange,
+      left: `${(editedStart / total) * 100}%`,
+      pending: timelineRangeInProgress && range.id === selectedTimelineRangeId,
+      selected: range.id === selectedTimelineRangeId,
+      startAriaLabel: `调整删除区间开始时间，当前 ${formatTime(range.start)}`,
+      width: `${rangeWidthPercent}%`,
+    };
+  });
+}
+
+function createCutTimelineRangeElement() {
+  const rangeElement = document.createElement("div");
+  rangeElement.className = "cut-timeline-delete-range";
 
     const startHandle = document.createElement("button");
     startHandle.type = "button";
     startHandle.className = "cut-timeline-range-handle";
     startHandle.dataset.dragMode = "start";
     startHandle.dataset.edge = "start";
-    startHandle.setAttribute(
-      "aria-label",
-      `调整删除区间开始时间，当前 ${formatTime(range.start)}`,
-    );
 
     const body = document.createElement("button");
     body.type = "button";
     body.className = "cut-timeline-range-body";
     body.dataset.dragMode = "move";
-    body.textContent = formatCutRange(range.start, range.end);
     body.title = "拖动调整区间，再次点击确认删除";
-    body.setAttribute(
-      "aria-label",
-      `待确认删除区间 ${formatCutRange(range.start, range.end)}，可拖动调整，再次点击或按 Enter 确认删除`,
-    );
 
     const endHandle = document.createElement("button");
     endHandle.type = "button";
     endHandle.className = "cut-timeline-range-handle";
     endHandle.dataset.dragMode = "end";
     endHandle.dataset.edge = "end";
-    endHandle.setAttribute(
-      "aria-label",
-      `调整删除区间结束时间，当前 ${formatTime(range.end)}`,
-    );
 
     const cancelButton = document.createElement("button");
     cancelButton.type = "button";
     cancelButton.className = "cut-timeline-range-cancel";
     cancelButton.dataset.timelineRangeAction = "cancel";
     cancelButton.title = "取消选区";
-    cancelButton.setAttribute(
-      "aria-label",
-      `取消待确认删除区间 ${formatCutRange(range.start, range.end)}`,
-    );
 
     const cancelIcon = document.createElement("iconify-icon");
     cancelIcon.setAttribute("icon", "ph:x-bold");
@@ -4896,8 +5363,94 @@ function renderCutTimelineRanges() {
     cancelButton.append(cancelIcon);
 
     rangeElement.append(startHandle, body, endHandle, cancelButton);
-    cutFrameTimelineRanges.append(rangeElement);
+    return rangeElement;
+}
+
+function updateCutTimelineRangeElement(rangeElement, descriptor) {
+  rangeElement.classList.toggle("is-selected", descriptor.selected);
+  rangeElement.classList.toggle("is-pending", descriptor.pending);
+  rangeElement.classList.toggle("is-narrow", descriptor.isNarrowRange);
+  rangeElement.dataset.rangeId = descriptor.id;
+  rangeElement.style.left = descriptor.left;
+  rangeElement.style.width = descriptor.width;
+  if (descriptor.cancelLeft) {
+    rangeElement.style.setProperty(
+      "--cut-timeline-range-cancel-left",
+      descriptor.cancelLeft,
+    );
+  } else {
+    rangeElement.style.removeProperty("--cut-timeline-range-cancel-left");
   }
+  const [startHandle, body, endHandle, cancelButton] = rangeElement.children;
+  startHandle?.setAttribute("aria-label", descriptor.startAriaLabel);
+  if (body) {
+    body.textContent = descriptor.bodyText;
+    body.setAttribute("aria-label", descriptor.bodyAriaLabel);
+  }
+  endHandle?.setAttribute("aria-label", descriptor.endAriaLabel);
+  cancelButton?.setAttribute("aria-label", descriptor.cancelAriaLabel);
+}
+
+function replaceCutTimelineRanges(descriptors) {
+  const fragment = document.createDocumentFragment();
+  for (const descriptor of descriptors) {
+    const item = createCutTimelineRangeElement();
+    updateCutTimelineRangeElement(item, descriptor);
+    fragment.append(item);
+  }
+  cutFrameTimelineRanges.replaceChildren(fragment);
+  recordCutRenderResult("timelineRanges", "replace", {
+    created: descriptors.length,
+  });
+}
+
+function reconcileCutTimelineRanges(descriptors) {
+  const existingItems = [...cutFrameTimelineRanges.children];
+  const targetKeys = descriptors.map(({ id }) => id);
+  const existingKeys = existingItems.map((item) =>
+    String(item.dataset?.rangeId || ""),
+  );
+  const validKeys =
+    targetKeys.every(Boolean) &&
+    new Set(targetKeys).size === targetKeys.length &&
+    existingKeys.every(Boolean) &&
+    new Set(existingKeys).size === existingKeys.length;
+  if (!validKeys) {
+    replaceCutTimelineRanges(descriptors);
+    return;
+  }
+  const existingByKey = new Map(
+    existingItems.map((item) => [String(item.dataset.rangeId), item]),
+  );
+  const desiredNodes = new Set();
+  let reference = cutFrameTimelineRanges.firstElementChild;
+  let created = 0;
+  let reused = 0;
+  for (const descriptor of descriptors) {
+    const existing = existingByKey.get(descriptor.id);
+    const item = existing || createCutTimelineRangeElement();
+    updateCutTimelineRangeElement(item, descriptor);
+    if (existing) reused += 1;
+    else created += 1;
+    desiredNodes.add(item);
+    if (item === reference) {
+      reference = reference.nextElementSibling;
+    } else {
+      cutFrameTimelineRanges.insertBefore(item, reference);
+    }
+  }
+  for (const item of [...cutFrameTimelineRanges.children]) {
+    if (!desiredNodes.has(item)) item.remove();
+  }
+  recordCutRenderResult("timelineRanges", "reconcile", {
+    created,
+    removed: existingItems.length + created - desiredNodes.size,
+    reused,
+  });
+}
+
+function renderCutTimelineRanges() {
+  reconcileCutTimelineRanges(buildCutTimelineRangeDescriptors());
   updateTimelineRangeConfirmation();
   updateCutTimelineTextStates();
 }
@@ -4933,17 +5486,12 @@ function applyCutTimelineTextLayoutRanges(parts) {
   });
 }
 
-function renderCutTimelineTextSegments() {
+function buildCutTimelineTextDescriptors() {
   updateCutTimelineScale();
-  cutFrameTimelineText.replaceChildren();
-  cutTimelineTextPlaybackEntries = [];
-  cutTimelineTextPlaybackFloorCursor = -1;
-  cutTimelineTextPlaybackCursor = -1;
-  cutTimelineTextPlaybackLastTime = Number.NEGATIVE_INFINITY;
-  if (cutTimelineTrackWidthCache <= 0) return;
+  if (cutTimelineTrackWidthCache <= 0) return [];
   const spans = getEditedTimelineSpans();
   const total = editedCutTimelineDuration(spans);
-  if (total <= 0) return;
+  if (total <= 0) return [];
   const projection = getCurrentRetainedProjection();
   const usesServerProjection = projection === serverRetainedProjection?.transcript;
   const layoutParts = [];
@@ -4986,7 +5534,7 @@ function renderCutTimelineTextSegments() {
       sourceStart,
     });
   }
-  for (const layoutPart of applyCutTimelineTextLayoutRanges(layoutParts)) {
+  return applyCutTimelineTextLayoutRanges(layoutParts).map((layoutPart) => {
     const {
       editedEnd,
       editedStart,
@@ -4997,32 +5545,86 @@ function renderCutTimelineTextSegments() {
       sourceEnd,
       sourceStart,
     } = layoutPart;
+    const explicitId = String(part.id || "").trim();
+    const editableSegmentId = Number(part.editableSegmentId);
+    const ownerKey = Number.isInteger(editableSegmentId)
+      ? `editable:${editableSegmentId}`
+      : `source:${segmentIndex}`;
+    const key = [
+      ownerKey,
+      explicitId ? `id:${explicitId}` : "",
+      rangeKey(sourceStart, sourceEnd),
+    ].filter(Boolean).join(":");
+    const text = String(part.text || "暂无文字").replace(/\s+/g, " ");
+    const editedRange = formatCutRange(editedStart, editedEnd);
+    const descriptor = {
+      ariaLabel: `剪辑后 ${editedRange} ${text}`,
+      key,
+      label: text,
+      layoutEnd,
+      layoutStart,
+      left: `${(layoutStart / total) * 100}%`,
+      segmentIndex,
+      sourceEnd,
+      sourceStart,
+      title: `${editedRange} ${text}`,
+      width: `${Math.max(0.2, ((layoutEnd - layoutStart) / total) * 100)}%`,
+    };
+    descriptor.signature = JSON.stringify([
+      descriptor.key,
+      descriptor.label,
+      descriptor.segmentIndex,
+      descriptor.sourceStart,
+      descriptor.sourceEnd,
+      descriptor.layoutStart,
+      descriptor.layoutEnd,
+      descriptor.left,
+      descriptor.width,
+      descriptor.title,
+    ]);
+    return descriptor;
+  });
+}
+
+function createCutTimelineTextSegment(descriptor) {
     const item = document.createElement("span");
     item.className = "cut-timeline-text-segment";
-    item.dataset.segmentIndex = String(segmentIndex);
-    item.dataset.sourceStart = String(sourceStart);
-    item.dataset.sourceEnd = String(sourceEnd);
-    item.dataset.layoutStart = String(layoutStart);
-    item.dataset.layoutEnd = String(layoutEnd);
-    item.style.left = `${(layoutStart / total) * 100}%`;
-    item.style.width = `${Math.max(0.2, ((layoutEnd - layoutStart) / total) * 100)}%`;
     const label = document.createElement("span");
     label.className = "cut-timeline-text-segment-label";
-    label.textContent = String(part.text || "暂无文字").replace(/\s+/g, " ");
-    const editedRange = formatCutRange(editedStart, editedEnd);
-    item.title = `${editedRange} ${label.textContent}`;
-    item.setAttribute(
-      "aria-label",
-      `剪辑后 ${editedRange} ${label.textContent}`,
-    );
     item.append(label);
-    cutFrameTimelineText.append(item);
-    cutTimelineTextPlaybackEntries.push({
-      element: item,
-      end: sourceEnd,
-      start: sourceStart,
+    updateCutTimelineTextSegment(item, descriptor);
+    return item;
+}
+
+function updateCutTimelineTextSegment(item, descriptor) {
+  item.dataset.renderKey = descriptor.key;
+  item.dataset.reconcileSignature = descriptor.signature;
+  item.dataset.segmentIndex = String(descriptor.segmentIndex);
+  item.dataset.sourceStart = String(descriptor.sourceStart);
+  item.dataset.sourceEnd = String(descriptor.sourceEnd);
+  item.dataset.layoutStart = String(descriptor.layoutStart);
+  item.dataset.layoutEnd = String(descriptor.layoutEnd);
+  item.style.left = descriptor.left;
+  item.style.width = descriptor.width;
+  const label = item.querySelector(".cut-timeline-text-segment-label");
+  if (label) label.textContent = descriptor.label;
+  item.title = descriptor.title;
+  item.setAttribute("aria-label", descriptor.ariaLabel);
+}
+
+function rebuildCutTimelineTextPlaybackEntries() {
+  cutTimelineTextPlaybackEntries = [...cutFrameTimelineText.children]
+    .flatMap((item) => {
+      item.classList.remove("is-active");
+      const start = Number(item.dataset.sourceStart);
+      const end = Number(item.dataset.sourceEnd);
+      return Number.isFinite(start) && Number.isFinite(end) && end > start
+        ? [{ element: item, end, start }]
+        : [];
     });
-  }
+  cutTimelineTextPlaybackFloorCursor = -1;
+  cutTimelineTextPlaybackCursor = -1;
+  cutTimelineTextPlaybackLastTime = Number.NEGATIVE_INFINITY;
   cutTimelineTextPlaybackEntries.sort((left, right) =>
     left.start - right.start || left.end - right.end,
   );
@@ -5034,7 +5636,88 @@ function renderCutTimelineTextSegments() {
   updateCutTimelineTextStates();
 }
 
+function replaceCutTimelineTextSegments(descriptors) {
+  const fragment = document.createDocumentFragment();
+  for (const descriptor of descriptors) {
+    fragment.append(createCutTimelineTextSegment(descriptor));
+  }
+  cutFrameTimelineText.replaceChildren(fragment);
+  rebuildCutTimelineTextPlaybackEntries();
+  recordCutRenderResult("timelineText", "replace", {
+    created: descriptors.length,
+  });
+}
+
+function reconcileCutTimelineTextSegments(descriptors) {
+  const targetKeys = descriptors.map(({ key }) => key);
+  const existingItems = [...cutFrameTimelineText.children];
+  const existingKeys = existingItems.map((item) =>
+    String(item.dataset?.renderKey || ""),
+  );
+  const validKeys =
+    targetKeys.every(Boolean) &&
+    new Set(targetKeys).size === targetKeys.length &&
+    existingKeys.every(Boolean) &&
+    new Set(existingKeys).size === existingKeys.length;
+  if (!validKeys) {
+    recordCutRenderResult("timelineText", "fallback", {
+      existing: existingItems.length,
+      target: descriptors.length,
+    });
+    replaceCutTimelineTextSegments(descriptors);
+    return false;
+  }
+
+  const existingByKey = new Map(
+    existingItems.map((item) => [String(item.dataset.renderKey), item]),
+  );
+  const desiredNodes = new Set();
+  let reference = cutFrameTimelineText.firstElementChild;
+  let created = 0;
+  let reused = 0;
+  let updated = 0;
+  for (const descriptor of descriptors) {
+    let item = existingByKey.get(descriptor.key);
+    if (!item) {
+      item = createCutTimelineTextSegment(descriptor);
+      created += 1;
+    } else if (item.dataset.reconcileSignature !== descriptor.signature) {
+      updateCutTimelineTextSegment(item, descriptor);
+      updated += 1;
+    } else {
+      reused += 1;
+    }
+    desiredNodes.add(item);
+    if (item === reference) {
+      reference = reference.nextElementSibling;
+    } else {
+      cutFrameTimelineText.insertBefore(item, reference);
+    }
+  }
+  for (const item of [...cutFrameTimelineText.children]) {
+    if (!desiredNodes.has(item)) item.remove();
+  }
+  rebuildCutTimelineTextPlaybackEntries();
+  recordCutRenderResult("timelineText", "reconcile", {
+    created,
+    removed: existingItems.length + created - desiredNodes.size,
+    reused,
+    updated,
+  });
+  return true;
+}
+
+function renderCutTimelineTextSegments(mode = "replace") {
+  const descriptors = buildCutTimelineTextDescriptors();
+  if (mode === "reconcile") {
+    reconcileCutTimelineTextSegments(descriptors);
+    return;
+  }
+  replaceCutTimelineTextSegments(descriptors);
+}
+
 function renderCutTimelinePlaceholders(count, fallback = false) {
+  cutTimelineThumbnailProjectionSignature = "";
   cutFrameTimelineThumbnails.replaceChildren();
   for (let index = 0; index < count; index += 1) {
     const item = document.createElement("span");
@@ -5183,6 +5866,7 @@ function releaseCutTimelineThumbnailFrames(cache) {
 
 function replaceCutTimelineThumbnailCache(cache) {
   if (cutTimelineThumbnailCache === cache) return;
+  cutTimelineThumbnailProjectionSignature = "";
   cutFrameTimelineThumbnails.replaceChildren();
   delete cutFrameTimelineThumbnails.dataset.cacheSignature;
   releaseCutTimelineThumbnailFrames(cutTimelineThumbnailCache);
@@ -5213,6 +5897,7 @@ function cancelCutTimelineExtractor({ clearCache = false } = {}) {
 
 function renderCutTimelineThumbnailFrames(cache, total) {
   if (!cache?.frames?.length || total <= 0) return false;
+  let frameNodesRebuilt = false;
   if (
     cutFrameTimelineThumbnails.children.length !== cache.frames.length ||
     cutFrameTimelineThumbnails.dataset.cacheSignature !== cache.signature
@@ -5227,8 +5912,35 @@ function renderCutTimelineThumbnailFrames(cache, total) {
     });
     cutFrameTimelineThumbnails.replaceChildren(fragment);
     cutFrameTimelineThumbnails.dataset.cacheSignature = cache.signature;
+    frameNodesRebuilt = true;
   }
   const spans = getEditedTimelineSpans();
+  const projectionSignature = [
+    cache.signature,
+    total.toFixed(3),
+    ...spans.map((span) => [
+      span.sourceStart,
+      span.sourceEnd,
+      span.editedStart,
+      span.editedEnd,
+    ].map((value) => Number(value).toFixed(3)).join(":")),
+  ].join("|");
+  const probe = window.__cutPerformanceProbe;
+  if (
+    !frameNodesRebuilt &&
+    projectionSignature === cutTimelineThumbnailProjectionSignature
+  ) {
+    if (probe) {
+      probe.thumbnailProjectionSkipCount =
+        (Number(probe.thumbnailProjectionSkipCount) || 0) + 1;
+    }
+    return true;
+  }
+  cutTimelineThumbnailProjectionSignature = projectionSignature;
+  if (probe) {
+    probe.thumbnailProjectionCount =
+      (Number(probe.thumbnailProjectionCount) || 0) + 1;
+  }
   const projectedFrames = cache.frames
     .map((frame, index) => ({
       frame,
@@ -5289,6 +6001,7 @@ async function buildCutTimelineThumbnails(options = {}) {
   const source = cutPreviewVideo.currentSrc || cutPreviewVideo.src;
   if (!source || total <= 0) {
     cancelCutTimelineExtractor({ clearCache: !source });
+    cutTimelineThumbnailProjectionSignature = "";
     cutFrameTimelineThumbnails.replaceChildren();
     delete cutFrameTimelineThumbnails.dataset.cacheSignature;
     return;
@@ -6086,7 +6799,7 @@ function scheduleCutTimelineResize() {
   window.clearTimeout(cutTimelineResizeTimer);
   cutTimelineResizeTimer = window.setTimeout(() => {
     syncCutVideoStageLayout();
-    invalidateCutTimelineScale();
+    invalidateCutTimelineScale({ geometry: true });
     updateCutTimelineScale();
     cutTimelineRulerSignature = "";
     renderCutTimelineRuler();
@@ -6723,11 +7436,9 @@ function renderResult(job) {
   progressCard.hidden = true;
   resultCard.hidden = false;
   renderCutSegments();
-  updateSelectionSummary();
-  const initialTimelineJobId = currentJobId;
-  window.requestAnimationFrame(() => {
-    if (currentJobId !== initialTimelineJobId || resultCard.hidden) return;
-    renderCutTimelineTextSegments();
+  updateSelectionSummary({
+    transcript: "skip",
+    timelineText: "replace",
   });
   cutDraftReady = true;
   if (shouldPersistAutomaticDefaults || cutDraftNeedsServerSync) {

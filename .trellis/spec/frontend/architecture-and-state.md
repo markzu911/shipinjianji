@@ -7,7 +7,7 @@
 - `web/editor-art-tool.js`：只挂载到 `#editorArtPanelRoot` 的艺术字 inspector，不拥有页面、视频或时间线。
 - `web/editor-pip-tool.js`：只挂载到 `#editorPipPanelRoot` 的画中画 inspector，不拥有页面、视频或时间线。
 - `web/timeline-model.js`：版本化轨道文档、clip 归一化、选择、拖动/缩放和 localStorage 草稿。
-- `web/transcript-follow-scroll.js`：文字播放跟随滚动的目标计算、真实行 reparent、列表 FLIP/WAAPI 动画、去重、中断和临时样式清理。
+- `web/transcript-follow-scroll.js`：文字播放跟随滚动的目标计算、真实行 reparent、最终位置提交、去重、中断和临时样式清理。
 - `web/ui-feedback.js`：对话框、生成进度和通用播放器反馈。
 
 ## 加载方式
@@ -22,11 +22,11 @@
 
 ### 文案跟随滚动模块契约
 
-`web/transcript-follow-scroll.js` 是播放中活动文案跟随滚动的唯一实现边界，并通过 `window.TranscriptFollowScroll` 暴露 `createController()`。控制器唯一拥有真实活动行的 reparent、等高占位、单行展示层定位、一次性目标 `scrollTop` 提交、列表 FLIP/WAAPI、跟随 key、用户中断和恢复顺序；不得再对仍位于 `segmentList` 的真实行执行跟随 transform，也不得由 `app.js` 建立逐帧滚动控制器。
+`web/transcript-follow-scroll.js` 是播放中活动文案跟随滚动的唯一实现边界，并通过 `window.TranscriptFollowScroll` 暴露 `createController()`。控制器唯一拥有真实活动行的 reparent、等高占位、单行展示层最终定位、一次性目标 `scrollTop` 提交、跟随 key、用户中断和恢复顺序；不得对整个列表建立 FLIP/WAAPI 运动带，不得对仍位于 `segmentList` 的真实行执行跟随 transform，也不得由 `app.js` 建立逐帧滚动控制器。
 
 `app.js` 只负责确定活动行、更新 `aria-current`/播放 badge，并调用控制器的 `follow()`、`reset()` 和 `destroy()`。列表与展示层中的真实行必须经统一查询 helper 读取，所有行交互复用同一个命名事件处理器；`renderCutSegments()` 必须在替换列表内容前调用 `reset()`，先把展示层中的真实行恢复到占位位置。
 
-控制器移动真实行前要插入不含按钮、时间 data 或可聚焦后代的等高占位，使展示行和播放按钮始终只有一份。每次换段只提交一次目标 `scrollTop`，列表通过从 `scrollDelta` 到 `0` 的 FLIP transform 表达滚动过程；中段展示层同时进入工具栏锚点。滚动目标被最大值截断时，列表阶段必须保持展示层的上一视觉位置，列表动画完成后再从该位置直接、单调地移动到新的尾部余量，不得先返回锚点再折返。换段、重渲染、关闭跟随、目标失效或收到 `wheel`、`touchstart`、`pointerdown`、滚动键意图时，必须取消旧动画、恢复原顺序并清除占位、展示层尺寸/transform、动画 class 和监听器；迟到旧动画完成回调不得写入新 DOM。`prefers-reduced-motion: reduce` 使用相同的唯一 DOM/占位结构，但即时定位且不建立运动带。
+控制器必须先集中读取 item、panel、toolbar 和定位 context 的几何，再插入不含按钮、时间 data 或可聚焦后代的等高占位并移动真实行，最后一次写入目标 `scrollTop`、展示层尺寸/位置和底部余量。中段直接进入“三个当前行高”锚点；接近尾部时直接进入 clamp 后的完整可见位置。不得读取上一视觉位置、不得写列表 `transform/will-change`、不得创建 list/tail 动画阶段。换段、重渲染、关闭跟随、目标失效或收到 `wheel`、`touchstart`、`pointerdown`、滚动键意图时，必须恢复原顺序并清除占位、展示层尺寸/transform 和监听器。`prefers-reduced-motion: reduce` 与普通模式使用相同的唯一 DOM 结构和最终位置，不建立另一条实现路径。
 
 跟随 key 只能在目标行和滚动面板通过有效性校验后记录；首次调用遇到隐藏/脱离 DOM 的目标不得消耗 key，运行中的目标失效也要释放 key，使面板恢复后同一行可以重试。用户主动滚动中断则保留已跟随 key，避免后续 `timeupdate` 立即抢回滚动控制权。
 
@@ -86,7 +86,10 @@ if (shouldPersistAutomaticDefaults) scheduleCutDraftSave();
 #### 2. Signatures
 
 ```javascript
-updateSelectionSummary() -> schedule one visible commit
+updateSelectionSummary({
+  transcript?: "skip" | "reconcile" | "replace",
+  timelineText?: "skip" | "reconcile" | "replace",
+}) -> schedule one visible commit
 flushPendingCutSelectionCommit() -> boolean
 flushPendingCutCommitEffects() -> boolean
 scheduleCutDraftSave({ immediate?: boolean }) -> Promise<void>
@@ -105,7 +108,11 @@ buildCutTimelineThumbnails({ force?: boolean }) -> Promise<void>
 #### 3. Contracts
 
 - 每个用户命令在 handler 内同步更新选择并记录自己的 before/after history transaction；同一 rAF 只能合并可见 commit 和后置 effect，不能合并两个命令的撤销边界。
-- 可见 commit 在下一帧更新删除/恢复状态和统计；EditorSuite、时间轴结构、缩略图映射、服务端保存和 history 序列化在其后执行。一次 cut commit 只允许一个 `CUT_TIMING_CHANGED`，`EditorSuite.setCutDraft()` 重绘必须使用 `hydrateProject: false`；Store 拒绝等价 action 时不得继续重绘 job 状态或覆盖其他操作刚写入的状态文案。
+- 可见 commit 在下一帧只更新删除/恢复状态、选区控件和保守的生成禁用态；精确合并范围、删除时长和统计文案进入 transcript 后置阶段。后置阶段必须用精确 merged 结果再次校正生成禁用态，显式 flush 也必须包含该统计更新。EditorSuite、时间轴结构、缩略图映射、服务端保存和 history 序列化继续在其后执行。一次 cut commit 只允许一个 `CUT_TIMING_CHANGED`，`EditorSuite.setCutDraft()` 重绘必须使用 `hydrateProject: false`；Store 拒绝等价 action 时不得继续重绘 job 状态或覆盖其他操作刚写入的状态文案。
+- 文案和时间轴文字使用显式 `skip/reconcile/replace` render intent；同一帧合并时 `replace` 具有最高优先级，后来的普通选择不得把结构失效降级。取消尚未完成的 effect 时只把未执行阶段的 intent 放回队列；结构替换入口必须实际调用完整 render，不能只处理 `reconcile` 后静默跳过 `replace`。
+- 普通删除/恢复按稳定 key 对账文案、时间轴文字、split clip 和待确认范围；相同 key 只更新变化属性，未受影响节点保持 identity。重复/空 key 或现有 DOM identity 不可信时允许单次完整 fallback；fallback 不能成为普通点击常态。ruler 只在时长、宽度或主刻度 signature 变化时重建，缩略图 projection signature 命中时直接跳过。
+- 后置 effect 按 transcript -> Store -> timeline text/ruler -> split/range/thumbnail/draft 四阶段分散到独立任务。`flushPendingCutCommitEffects()` 必须识别当前阶段并同步排空余下阶段，生成、pagehide 和显式 flush 不能读到半提交状态。
+- cut 工具激活时，公共 preview 继续消费最新 frame，但隐藏的公共效果时间轴、ArtTool 和 PipTool 不做同步重绘；切换到 art/pip 时必须从最新 Store frame 一次补齐，不能显示旧 timing revision。
 - thumbnail cache key 只包含 job/source、源时长、采样数量和资源版本。删除范围只隐藏或重映射 source-time frame；同一时刻只有一个 extractor owner，source/key 切换、错误、重置和销毁都 abort 并释放旧 video source。
 - 缓存 frame 的布局必须用现有 source-to-edited spans 计算剪后 `left/width`，不能只隐藏删除区间后让 Grid 将剩余帧等宽重排；剪后时长变为零时也必须取消在途 extractor 并清空旧缩略图 DOM。
 - 本地 cut draft 在每次稳定编辑后立即写入恢复快照；服务端 PUT 使用约 `300ms` trailing debounce、单 in-flight 和 latest-state-wins。语义签名描述浏览器当前完整语义状态，用于 desired/ack 去重；服务端可以合法规范化文字语义边界、静音范围、时间轴语义/物理边界和 split time，因此禁止用 request/response 时间数值全等判断响应是否合法。
@@ -140,8 +147,10 @@ buildCutTimelineThumbnails({ force?: boolean }) -> Promise<void>
 
 #### 6. Tests Required
 
-- 真实浏览器使用至少 600 个可见字符和 30 个既有删除范围，连续 10 次操作测量 input 到 post-commit 第二个 rAF；P95 不高于 `100ms`，无新增 `>200ms` long task。
+- 真实浏览器使用至少 600 个可见字符和 30 个既有删除范围，连续 10 次操作测量 input 到 post-commit 第二个 rAF；P95 不高于 `80ms`、最大不高于 `120ms`、同步点击 P95 不高于 `10ms`，且无新增 `>100ms` long task。
 - 计数断言 extractor、基础 video `src/load()`、Store action、history 写入、PUT 数与最大并发；网络变慢或失败不能阻止删除状态在下一帧可见。
+- 增量用例必须保存未受影响的文案、时间轴文字和 ruler 节点引用，操作后断言 identity 仍相同，并断言普通选择没有 transcript/timeline full replace 或 fallback。结构修改、服务端权威替换和 identity 破坏另行断言 `replace`/fallback 可恢复完整 DOM。
+- 真实本地媒体连续播放至少 15 秒并跨越至少 8 个文字/空白边界；切段 rAF 超出 60Hz 基线的 P95 不高于 `16ms`、最大不高于 `32ms`，无 `>50ms` long task，且活动真实行和播放按钮始终唯一。
 - 覆盖 burst、在途编辑、revision rebase、服务端文字/静音/timeline/split 规范化、失败重试、生成前 flush、刷新恢复，以及同帧两命令两次撤销。
 - 结构校验必须覆盖缺失/重复/额外 key、文字变化、未知 `boundaryMode`、split ownership 变化和非法 revision；拒绝后下一不同签名必须使用已提交的新 revision 恢复同步。
 - 真实浏览器必须覆盖 `规范化删除 -> undo 服务端清空 -> refresh 保持空 -> redo 用最新 revision 恢复 -> refresh`，并同时断言 API、localStorage、history 和 Store；规范化旧响应还要证明不会覆盖在途新编辑或 pending 时间轴选区。

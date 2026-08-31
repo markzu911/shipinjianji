@@ -367,8 +367,20 @@
       }
 
       function setCutRanges(ranges, settings = {}) {
+        const performanceProbe = root.__cutPerformanceProbe;
+        const breakdown = performanceProbe ? {} : null;
+        const rangeStarted = performanceProbe ? performance.now() : 0;
+        let stepStarted = rangeStarted;
         const nextRanges = normalizeRanges(ranges);
+        if (breakdown) {
+          breakdown.normalize = performance.now() - stepStarted;
+          stepStarted = performance.now();
+        }
         const nextSignature = JSON.stringify(nextRanges);
+        if (breakdown) {
+          breakdown.signature = performance.now() - stepStarted;
+          stepStarted = performance.now();
+        }
         const previousDuration = configuredSourceDuration;
         if (Number.isFinite(Number(settings.sourceDuration))) {
           configuredSourceDuration = Math.max(0, Number(settings.sourceDuration));
@@ -381,8 +393,25 @@
         }
         cutRanges = nextRanges;
         cutRangeSignature = nextSignature;
-        emitState(settings.reason || "cut-ranges");
-        return cutRanges.map((range) => ({ ...range }));
+        if (settings.emitState !== false) {
+          emitState(settings.reason || "cut-ranges");
+        }
+        if (breakdown) {
+          breakdown.emit = performance.now() - stepStarted;
+          stepStarted = performance.now();
+        }
+        const result = cutRanges.map((range) => ({ ...range }));
+        if (breakdown) {
+          breakdown.clone = performance.now() - stepStarted;
+          breakdown.total = performance.now() - rangeStarted;
+          performanceProbe.mediaCutRangeBreakdowns = [
+            ...(Array.isArray(performanceProbe.mediaCutRangeBreakdowns)
+              ? performanceProbe.mediaCutRangeBreakdowns
+              : []),
+            breakdown,
+          ];
+        }
+        return result;
       }
 
       function seekSource(seconds, settings = {}) {
@@ -438,22 +467,46 @@
         return () => stateListeners.delete(listener);
       }
 
-      function applyFrame(frame) {
+      function applyFrame(frame, settings = {}) {
         if (!frame?.media) return false;
+        const performanceProbe = root.__cutPerformanceProbe;
+        const breakdown = performanceProbe ? {} : null;
+        const frameStarted = performanceProbe ? performance.now() : 0;
+        let stepStarted = frameStarted;
         video.dataset.projectRevision = String(frame.revision ?? "");
         video.dataset.timingRevision = String(frame.timingRevision ?? "");
+        if (breakdown) {
+          breakdown.dataset = performance.now() - stepStarted;
+          stepStarted = performance.now();
+        }
         setCutRanges(frame.media.cutRanges, {
           sourceDuration: frame.media.sourceDuration,
           reason: "project-frame",
+          emitState: settings.emitCutRangeState !== false,
         });
+        if (breakdown) {
+          breakdown.cutRanges = performance.now() - stepStarted;
+          stepStarted = performance.now();
+        }
+        let sourceChanged = false;
         if (frame.media.sourceUrl) {
-          return setSource(frame.media.sourceUrl, {
+          sourceChanged = setSource(frame.media.sourceUrl, {
             key: `${frame.media.jobId || ""}:${frame.media.sourceUrl}`,
             sourceDuration: frame.media.sourceDuration,
             reason: "project-frame",
           });
         }
-        return false;
+        if (breakdown) {
+          breakdown.source = performance.now() - stepStarted;
+          breakdown.total = performance.now() - frameStarted;
+          performanceProbe.mediaFrameBreakdowns = [
+            ...(Array.isArray(performanceProbe.mediaFrameBreakdowns)
+              ? performanceProbe.mediaFrameBreakdowns
+              : []),
+            breakdown,
+          ];
+        }
+        return sourceChanged;
       }
 
       function destroy() {

@@ -1195,11 +1195,34 @@
 
       function dispatch(action) {
         if (destroyed) return result(false);
+        const performanceProbe = root.__cutPerformanceProbe;
+        const dispatchStarted = performanceProbe ? performance.now() : 0;
         const previous = state;
         const next = reduceState(previous, action, timelineApi);
         if (!next) return result(false);
+        const reducedAt = performanceProbe ? performance.now() : 0;
         state = next;
-        for (const listener of listeners) listener(state, previous, action);
+        const listenerDurations = [];
+        for (const listener of listeners) {
+          const listenerStarted = performanceProbe ? performance.now() : 0;
+          listener(state, previous, action);
+          if (performanceProbe) {
+            listenerDurations.push(performance.now() - listenerStarted);
+          }
+        }
+        if (performanceProbe) {
+          performanceProbe.storeDispatchBreakdowns = [
+            ...(Array.isArray(performanceProbe.storeDispatchBreakdowns)
+              ? performanceProbe.storeDispatchBreakdowns
+              : []),
+            {
+              action: String(action?.type || ""),
+              reduce: reducedAt - dispatchStarted,
+              listeners: listenerDurations,
+              total: performance.now() - dispatchStarted,
+            },
+          ];
+        }
         return result(true);
       }
 

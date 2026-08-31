@@ -8,8 +8,6 @@
     "use strict";
 
     const ANCHOR_GAP = 8;
-    const MIN_DURATION = 180;
-    const MAX_DURATION = 360;
     const SCROLL_KEYS = new Set([
       "ArrowDown",
       "ArrowUp",
@@ -28,14 +26,6 @@
     function finiteNumber(value, fallback = 0) {
       const number = Number(value);
       return Number.isFinite(number) ? number : fallback;
-    }
-
-    function getMotionDuration(distance) {
-      return Math.round(clamp(
-        MIN_DURATION + Math.abs(finiteNumber(distance)) * 0.45,
-        MIN_DURATION,
-        MAX_DURATION,
-      ));
     }
 
     function getTranscriptFollowScrollMetrics(panel, item, toolbar) {
@@ -91,36 +81,13 @@
       return getTranscriptFollowScrollMetrics(panel, item, toolbar).targetScrollTop;
     }
 
-    function parseTransformY(transform) {
-      const value = String(transform || "").trim();
-      if (!value || value === "none") return 0;
-      const matrix3d = value.match(/^matrix3d\(([^)]+)\)$/);
-      if (matrix3d) return finiteNumber(matrix3d[1].split(",")[13]);
-      const matrix = value.match(/^matrix\(([^)]+)\)$/);
-      if (matrix) return finiteNumber(matrix[1].split(",")[5]);
-      const translateY = value.match(/^translateY\((-?[\d.]+)px\)$/);
-      if (translateY) return finiteNumber(translateY[1]);
-      const translate3d = value.match(
-        /^translate3d\([^,]+,\s*(-?[\d.]+)px,\s*[^)]+\)$/,
-      );
-      if (translate3d) return finiteNumber(translate3d[1]);
-      const translate = value.match(
-        /^translate\([^,]+,\s*(-?[\d.]+)px\)$/,
-      );
-      return translate ? finiteNumber(translate[1]) : 0;
-    }
-
     function createController(options = {}) {
       const layer = options.layer || root.document?.querySelector?.(
         "#transcriptNowPlayingLayer",
       );
-      const matchMedia = options.matchMedia || root.matchMedia?.bind(root);
       const createElement =
         options.createElement || root.document?.createElement?.bind(root.document);
-      const readComputedStyle =
-        options.getComputedStyle || root.getComputedStyle?.bind(root);
       const passiveListenerOptions = { passive: true };
-      let activeMotion = null;
       let pinnedItem = null;
       let followedDisplayKey = "";
       let listenerTargets = [];
@@ -134,12 +101,6 @@
         element.style.transform = normalizedOffset
           ? `translate3d(0, ${normalizedOffset}px, 0)`
           : "";
-      }
-
-      function readTransformY(element) {
-        if (!element) return 0;
-        const computed = readComputedStyle?.(element)?.transform;
-        return parseTransformY(computed || element.style?.transform);
       }
 
       function clearLayerStyles() {
@@ -197,7 +158,7 @@
           return;
         }
 
-        const { item, list, originalNextSibling, originalParent, placeholder } = pinned;
+        const { item, originalNextSibling, originalParent, placeholder } = pinned;
         if (placeholder?.parentNode?.insertBefore) {
           placeholder.parentNode.insertBefore(item, placeholder);
         } else if (originalParent?.insertBefore) {
@@ -209,58 +170,17 @@
           originalParent.appendChild(item);
         }
         removePlaceholder(placeholder);
-        if (list?.style) {
-          list.style.transform = "";
-          list.style.willChange = "";
-        }
         clearLayerStyles();
       }
 
-      function commitCurrentListPosition(motion) {
-        if (!motion || motion.phase !== "list" || !motion.pinned?.panel) return;
-        const visualOffset = readTransformY(motion.pinned.list);
-        if (Math.abs(visualOffset) < 0.01) return;
-        const { maxScrollTop } = motion.metrics;
-        const committedScrollTop = clamp(
-          finiteNumber(motion.pinned.panel.scrollTop) - visualOffset,
-          0,
-          maxScrollTop,
-        );
-        if (
-          Math.abs(committedScrollTop - finiteNumber(motion.pinned.panel.scrollTop)) >=
-          0.01
-        ) {
-          motion.pinned.panel.scrollTop = committedScrollTop;
-        }
-      }
-
-      function cancelMotion({ commitVisual = false } = {}) {
-        const motion = activeMotion;
-        if (!motion) return;
-        if (commitVisual) commitCurrentListPosition(motion);
-        activeMotion = null;
-        for (const animation of motion.animations) {
-          animation.onfinish = null;
-          animation.cancel?.();
-        }
-        motion.animations.clear();
-        if (motion.pinned?.list?.style) {
-          motion.pinned.list.style.transform = "";
-          motion.pinned.list.style.willChange = "";
-        }
-        layer?.classList?.remove("is-follow-animating");
-        if (layer?.style) layer.style.willChange = "";
-      }
-
-      function stopAndRestore({ clearKey = false, commitVisual = false } = {}) {
-        cancelMotion({ commitVisual });
+      function stopAndRestore({ clearKey = false } = {}) {
         restorePinnedItem();
         if (clearKey) followedDisplayKey = "";
       }
 
       function handleUserScrollIntent(event) {
         if (event.type === "keydown" && !SCROLL_KEYS.has(event.key)) return;
-        stopAndRestore({ commitVisual: true });
+        stopAndRestore();
       }
 
       function addIntentListeners(panel) {
@@ -317,7 +237,7 @@
         return placeholder;
       }
 
-      function placeLayer(itemRect, anchorTop) {
+      function getLayerPlacement(itemRect, anchorTop) {
         const positioningContext = layer.offsetParent || layer.parentElement;
         const contextRect = positioningContext?.getBoundingClientRect?.() || {
           left: 0,
@@ -327,153 +247,20 @@
           finiteNumber(positioningContext?.clientLeft);
         const contextTop = finiteNumber(contextRect.top) +
           finiteNumber(positioningContext?.clientTop);
-        layer.hidden = false;
-        layer.style.height = `${itemRect.height}px`;
-        layer.style.left = `${itemRect.left - contextLeft}px`;
-        layer.style.top = `${anchorTop - contextTop}px`;
-        layer.style.width = `${itemRect.width}px`;
-      }
-
-      function finishTransformAnimation(
-        motion,
-        animation,
-        element,
-        targetOffset,
-        onFinish,
-      ) {
-        if (activeMotion !== motion) return;
-        motion.animations.delete(animation);
-        animation.onfinish = null;
-        setTransformY(element, targetOffset);
-        animation.cancel?.();
-        onFinish();
-      }
-
-      function animateTransform(
-        motion,
-        element,
-        startOffset,
-        targetOffset,
-        duration,
-        onFinish,
-      ) {
-        setTransformY(element, startOffset);
-        if (
-          Math.abs(targetOffset - startOffset) < 0.5 ||
-          typeof element?.animate !== "function"
-        ) {
-          setTransformY(element, targetOffset);
-          onFinish();
-          return;
-        }
-        const animation = element.animate(
-          [
-            { transform: `translate3d(0, ${startOffset}px, 0)` },
-            { transform: `translate3d(0, ${targetOffset}px, 0)` },
-          ],
-          {
-            duration,
-            easing: "cubic-bezier(0.22, 1, 0.36, 1)",
-            fill: "both",
-          },
-        );
-        if (!animation) {
-          setTransformY(element, targetOffset);
-          onFinish();
-          return;
-        }
-        motion.animations.add(animation);
-        animation.onfinish = () => {
-          finishTransformAnimation(
-            motion,
-            animation,
-            element,
-            targetOffset,
-            onFinish,
-          );
+        return {
+          height: `${itemRect.height}px`,
+          left: `${itemRect.left - contextLeft}px`,
+          top: `${anchorTop - contextTop}px`,
+          width: `${itemRect.width}px`,
         };
       }
 
-      function finishMotion(motion) {
-        if (activeMotion !== motion) return;
-        activeMotion = null;
-        motion.pinned.list.style.transform = "";
-        motion.pinned.list.style.willChange = "";
-        layer.classList?.remove("is-follow-animating");
-        layer.style.willChange = "";
-      }
-
-      function startTailPhase(motion) {
-        if (activeMotion !== motion) return;
-        if (!isPinnedTargetValid(motion.pinned)) {
-          stopAndRestore({ clearKey: true, commitVisual: true });
-          return;
-        }
-        motion.phase = "tail";
-        const tailRemainder = motion.metrics.tailRemainder;
-        if (Math.abs(tailRemainder) < 0.5) {
-          setTransformY(layer, 0);
-          finishMotion(motion);
-          return;
-        }
-        layer.style.willChange = "transform";
-        animateTransform(
-          motion,
-          layer,
-          motion.tailStartOffset,
-          tailRemainder,
-          getMotionDuration(tailRemainder - motion.tailStartOffset),
-          () => finishMotion(motion),
-        );
-      }
-
-      function completeListPhasePart(motion) {
-        if (activeMotion !== motion) return;
-        motion.pendingListAnimations -= 1;
-        if (motion.pendingListAnimations <= 0) startTailPhase(motion);
-      }
-
-      function startListPhase(motion) {
-        const { list } = motion.pinned;
-        const { scrollDelta, tailRemainder } = motion.metrics;
-        const entryDistance = motion.startLayerOffset;
-        const hasListMotion = Math.abs(scrollDelta) >= 0.5;
-        const hasTailMotion = Math.abs(tailRemainder) >= 0.5;
-        const hasEntryMotion = !hasTailMotion && Math.abs(entryDistance) >= 0.5;
-        motion.tailStartOffset = hasTailMotion ? entryDistance : 0;
-        motion.phase = "list";
-        motion.pendingListAnimations = Number(hasListMotion) + Number(hasEntryMotion);
-
-        motion.pinned.panel.scrollTop = motion.metrics.targetScrollTop;
-        if (!hasListMotion && !hasEntryMotion) {
-          startTailPhase(motion);
-          return;
-        }
-        if (!hasEntryMotion) setTransformY(layer, motion.tailStartOffset);
-        if (hasListMotion) {
-          list.style.willChange = "transform";
-          animateTransform(
-            motion,
-            list,
-            scrollDelta,
-            0,
-            getMotionDuration(scrollDelta),
-            () => completeListPhasePart(motion),
-          );
-        } else {
-          setTransformY(list, 0);
-        }
-        if (hasEntryMotion) {
-          layer.style.willChange = "transform";
-          animateTransform(
-            motion,
-            layer,
-            entryDistance,
-            0,
-            getMotionDuration(entryDistance),
-            () => completeListPhasePart(motion),
-          );
-        }
+      function placeLayer(placement) {
+        layer.hidden = false;
+        layer.style.height = placement.height;
+        layer.style.left = placement.left;
+        layer.style.top = placement.top;
+        layer.style.width = placement.width;
       }
 
       function follow(item, displayKey) {
@@ -481,15 +268,12 @@
         if (destroyed || !normalizedKey || !layer) return false;
         if (normalizedKey === followedDisplayKey) {
           if (pinnedItem && !isPinnedTargetValid()) {
-            stopAndRestore({ clearKey: true, commitVisual: true });
+            stopAndRestore({ clearKey: true });
           }
           return false;
         }
 
-        const previousVisualTop = pinnedItem && !layer.hidden
-          ? layer.getBoundingClientRect?.().top
-          : null;
-        stopAndRestore({ commitVisual: true });
+        stopAndRestore();
         const panel = item?.closest?.(".text-editor-panel");
         if (
           !panel ||
@@ -506,16 +290,16 @@
         const toolbar = panel.querySelector?.(".cut-toolbar") || null;
         const itemRect = item.getBoundingClientRect();
         const metrics = getTranscriptFollowScrollMetrics(panel, item, toolbar);
+        const layerPlacement = getLayerPlacement(itemRect, metrics.anchorTop);
         const originalParent = item.parentNode;
         const originalNextSibling = item.nextSibling;
         const placeholder = createPlaceholder(item, itemRect);
         if (!placeholder) return false;
 
-        placeLayer(itemRect, metrics.anchorTop);
+        placeLayer(layerPlacement);
         layer.appendChild(item);
         pinnedItem = {
           item,
-          list: originalParent,
           originalNextSibling,
           originalParent,
           panel,
@@ -523,41 +307,17 @@
         };
         followedDisplayKey = normalizedKey;
         addIntentListeners(panel);
-
-        const startLayerOffset = Number.isFinite(previousVisualTop)
-          ? previousVisualTop - metrics.anchorTop
-          : metrics.itemOffset;
-        setTransformY(layer, startLayerOffset);
-        const reduceMotion = Boolean(
-          matchMedia?.("(prefers-reduced-motion: reduce)")?.matches,
-        );
-        if (reduceMotion) {
-          panel.scrollTop = metrics.targetScrollTop;
-          setTransformY(originalParent, 0);
-          setTransformY(layer, metrics.tailRemainder);
-          return true;
-        }
-
-        layer.classList?.add("is-follow-animating");
-        const motion = {
-          animations: new Set(),
-          metrics,
-          pendingListAnimations: 0,
-          phase: "list",
-          pinned: pinnedItem,
-          startLayerOffset,
-          tailStartOffset: 0,
-        };
-        activeMotion = motion;
-        startListPhase(motion);
+        panel.scrollTop = metrics.targetScrollTop;
+        setTransformY(layer, metrics.tailRemainder);
         return true;
       }
 
       function reset() {
-        stopAndRestore({ clearKey: true, commitVisual: true });
+        stopAndRestore({ clearKey: true });
       }
 
       function destroy() {
+        if (destroyed) return;
         reset();
         destroyed = true;
       }
@@ -567,10 +327,8 @@
 
     return {
       createController,
-      getMotionDuration,
       getTranscriptFollowScrollMetrics,
       getTranscriptFollowScrollTarget,
-      parseTransformY,
     };
   },
 );

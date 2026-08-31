@@ -53,22 +53,22 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
 
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
-    assert "/app.js?v=20260831-02" in page_response.text
+    assert "/app.js?v=20260831-06" in page_response.text
     assert "/styles.css?v=20260828-02" in page_response.text
-    assert "/transcript-follow-scroll.js?v=20260828-01" in page_response.text
+    assert "/transcript-follow-scroll.js?v=20260831-01" in page_response.text
     assert "/timeline-thumbnail-cache.js?v=20260828-01" in page_response.text
     assert "/ui-feedback.js?v=20260807-03" in page_response.text
     assert "/timeline-model.js?v=20260810-01" in page_response.text
     assert "/editor-pip-model.js?v=20260819-01" in page_response.text
-    assert "/editor-project-store.js?v=20260827-01" in page_response.text
-    assert "/editor-media-controller.js?v=20260819-01" in page_response.text
+    assert "/editor-project-store.js?v=20260831-01" in page_response.text
+    assert "/editor-media-controller.js?v=20260831-01" in page_response.text
     assert "/editor-art-model.js?v=20260827-01" in page_response.text
     assert "/editor-art-renderer.js?v=20260819-01" in page_response.text
     assert "/editor-preview-compositor.js?v=20260820-01" in page_response.text
     assert "/editor-timeline-controller.js?v=20260825-03" in page_response.text
     assert "/editor-art-tool.js?v=20260821-02" in page_response.text
     assert "/editor-pip-tool.js?v=20260825-01" in page_response.text
-    assert "/editor-suite.js?v=20260823-01" in page_response.text
+    assert "/editor-suite.js?v=20260831-01" in page_response.text
     assert timeline_script_response.status_code == 200
     assert timeline_script_response.headers["cache-control"] == "no-store, max-age=0"
     assert "function createStore" in timeline_script_response.text
@@ -731,7 +731,8 @@ def test_cut_range_and_segment_frontend_contracts():
     assert 'title: "删除这个时间轴区间？"' in script_response.text
     assert 'confirmText: "确认删除"' in script_response.text
     assert "已取消时间轴选区。" in script_response.text
-    assert "hasPendingRange || getMergedSelection().length === 0" in script_response.text
+    assert "hasPendingRange || !hasMergedSelection" in script_response.text
+    assert 'typeof options.hasMergedSelection === "boolean"' in script_response.text
     assert "已调整待确认区间" in script_response.text
     assert "const CUT_TIMELINE_MANUAL_MIN_RANGE = CUT_TIMELINE_STEP;" in (
         script_response.text
@@ -871,7 +872,9 @@ def test_cut_range_and_segment_frontend_contracts():
     assert "protectRecognizedSpeechFromQuietRanges" in script_response.text
     assert "getRetainedTranscriptRanges" in script_response.text
     assert "subtractProtectedRanges" in script_response.text
-    render_segments_start = script_response.text.index("function renderCutSegments()")
+    render_segments_start = script_response.text.index(
+        "function buildCutSegmentDisplayItems()"
+    )
     render_segments_end = script_response.text.index(
         "function noSpeechKindLabel", render_segments_start
     )
@@ -885,7 +888,7 @@ def test_cut_timeline_text_layout_uses_edited_gaps_without_mutating_source_range
     app_source = (root / "web" / "app.js").read_text(encoding="utf-8")
     helper_start = app_source.index("function applyCutTimelineTextLayoutRanges(")
     helper_end = app_source.index(
-        "function renderCutTimelineTextSegments()", helper_start
+        "function renderCutTimelineTextSegments(", helper_start
     )
     helper_source = app_source[helper_start:helper_end]
     script = f"""
@@ -942,6 +945,202 @@ process.stdout.write(JSON.stringify({{
     assert payload["exactThreshold"][0]["layoutEnd"] == pytest.approx(1001.6)
     assert payload["overThreshold"][0]["layoutEnd"] == pytest.approx(2000.1)
     assert payload["tinyPositiveGap"][0]["layoutEnd"] == pytest.approx(3000.101)
+
+
+def test_cut_commit_render_plan_preserves_replace_across_mid_phase_cancel():
+    root = Path(__file__).resolve().parents[2]
+    app_source = (root / "web" / "app.js").read_text(encoding="utf-8")
+    plan_start = app_source.index("function createCutCommitRenderPlan()")
+    plan_end = app_source.index(
+        "function updateOriginalSourceActionsVisibility", plan_start
+    )
+    requeue_start = app_source.index("function requeueUnfinishedCutCommitRender")
+    requeue_end = app_source.index(
+        "function cancelPendingCutCommitEffects", requeue_start
+    )
+    helpers = app_source[plan_start:plan_end] + app_source[
+        requeue_start:requeue_end
+    ]
+    script = f"""
+{helpers}
+let cutCommitRenderPlan = createCutCommitRenderPlan();
+requestCutCommitRender({{ transcript: "replace", timelineText: "replace" }});
+const active = {{
+  phase: "store",
+  renderPlan: consumeCutCommitRenderPlan(),
+}};
+requestCutCommitRender({{ transcript: "reconcile", timelineText: "reconcile" }});
+requeueUnfinishedCutCommitRender(active);
+const afterCancel = consumeCutCommitRenderPlan();
+requestCutCommitRender({{ transcript: "reconcile", timelineText: "reconcile" }});
+requestCutCommitRender({{ transcript: "replace", timelineText: "replace" }});
+requestCutCommitRender({{ transcript: "reconcile", timelineText: "reconcile" }});
+const sameFrame = consumeCutCommitRenderPlan();
+requeueUnfinishedCutCommitRender({{
+  phase: "timelineAux",
+  renderPlan: {{ transcript: "replace", timelineText: "replace" }},
+}});
+const afterTimeline = consumeCutCommitRenderPlan();
+process.stdout.write(JSON.stringify({{ afterCancel, afterTimeline, sameFrame }}));
+"""
+    result = subprocess.run(
+        ["node", "-e", script],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(result.stdout) == {
+        "afterCancel": {
+            "transcript": "reconcile",
+            "timelineText": "replace",
+        },
+        "afterTimeline": {
+            "transcript": "skip",
+            "timelineText": "skip",
+        },
+        "sameFrame": {
+            "transcript": "replace",
+            "timelineText": "replace",
+        },
+    }
+
+
+def test_cut_segment_update_dispatches_reconcile_and_replace_modes():
+    root = Path(__file__).resolve().parents[2]
+    app_source = (root / "web" / "app.js").read_text(encoding="utf-8")
+    update_start = app_source.index("function updateCutSegmentText(")
+    update_end = app_source.index(
+        "function updateImmediateCutSelectionFeedback", update_start
+    )
+    update_source = app_source[update_start:update_end]
+    script = f"""
+const calls = [];
+const reconcileCutSegments = () => calls.push("reconcile");
+const renderCutSegments = () => calls.push("replace");
+{update_source}
+updateCutSegmentText("reconcile");
+updateCutSegmentText("replace");
+updateCutSegmentText();
+process.stdout.write(JSON.stringify(calls));
+"""
+    result = subprocess.run(
+        ["node", "-e", script],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(result.stdout) == ["reconcile", "replace", "replace"]
+
+
+def test_cut_commit_effect_second_frame_is_cancellable_and_flushes_synchronously():
+    root = Path(__file__).resolve().parents[2]
+    app_source = (root / "web" / "app.js").read_text(encoding="utf-8")
+    cancel_start = app_source.index("function cancelPendingCutCommitEffects()")
+    schedule_start = app_source.index("function scheduleCutCommitEffects()")
+    schedule_end = app_source.index("function resetCutCommitScheduler", schedule_start)
+    flush_start = app_source.index("function flushPendingCutCommitEffects()")
+    flush_end = app_source.index("function updateSelectionSummary", flush_start)
+    source = (
+        app_source[cancel_start:schedule_start]
+        + app_source[schedule_start:schedule_end]
+        + app_source[flush_start:flush_end]
+    )
+    script = f"""
+const source = {json.dumps(source)};
+const functions = new Function(`
+let cutCommitEffectsFrameId = null;
+let cutCommitEffectsTimer = null;
+let cutCommitActiveEffects = null;
+let cutCommitPreviewEffect = null;
+let runCount = 0;
+let nextFrameId = 1;
+const frames = new Map();
+const timers = new Map();
+const cancelledFrames = [];
+const window = {{
+  requestAnimationFrame(callback) {{
+    const id = nextFrameId++;
+    frames.set(id, callback);
+    return id;
+  }},
+  cancelAnimationFrame(id) {{
+    cancelledFrames.push(id);
+    frames.delete(id);
+  }},
+  setTimeout(callback) {{ timers.set(1, callback); return 1; }},
+  clearTimeout(id) {{ timers.delete(id); }},
+}};
+const requeueUnfinishedCutCommitRender = () => undefined;
+const runCutCommitEffects = () => {{ runCount += 1; }};
+const runCutCommitStoreEffects = () => {{ runCount += 10; }};
+const runCutCommitTimelineEffects = () => {{ runCount += 100; }};
+const runCutCommitTimelineAuxEffects = () => {{ runCount += 1000; }};
+${{source}}
+return {{
+  scheduleCutCommitEffects,
+  cancelPendingCutCommitEffects,
+  flushPendingCutCommitEffects,
+  runFirstFrame() {{
+    const [id, callback] = frames.entries().next().value;
+    frames.delete(id);
+    callback();
+  }},
+  state() {{
+    return {{
+      cancelledFrames: [...cancelledFrames],
+      frameCount: frames.size,
+      frameId: cutCommitEffectsFrameId,
+      runCount,
+      timerCount: timers.size,
+    }};
+  }},
+}};
+`)();
+functions.scheduleCutCommitEffects();
+functions.runFirstFrame();
+const afterFirstFrame = functions.state();
+functions.cancelPendingCutCommitEffects();
+const afterCancel = functions.state();
+functions.scheduleCutCommitEffects();
+const flushed = functions.flushPendingCutCommitEffects();
+const afterFlush = functions.state();
+process.stdout.write(JSON.stringify({{ afterFirstFrame, afterCancel, flushed, afterFlush }}));
+"""
+    result = subprocess.run(
+        ["node", "-e", script],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["afterFirstFrame"] == {
+        "cancelledFrames": [],
+        "frameCount": 1,
+        "frameId": 2,
+        "runCount": 0,
+        "timerCount": 0,
+    }
+    assert payload["afterCancel"] == {
+        "cancelledFrames": [2],
+        "frameCount": 0,
+        "frameId": None,
+        "runCount": 0,
+        "timerCount": 0,
+    }
+    assert payload["flushed"] is True
+    assert payload["afterFlush"] == {
+        "cancelledFrames": [2, 3],
+        "frameCount": 0,
+        "frameId": None,
+        "runCount": 1,
+        "timerCount": 0,
+    }
 
 
 def test_top_level_art_and_pip_tools_are_the_only_editor_runtime():
@@ -1530,7 +1729,7 @@ def test_frontend_merges_adjacent_deleted_text_across_range_keys():
     token_end = app_source.index("const EDITABLE_CLAUSE_ENDINGS", token_start)
     run_start = app_source.index("function selectedTextRangeKeysAtTime")
     run_end = app_source.index("function renderSegmentTextRun", run_start)
-    render_start = app_source.index("function renderCutSegments")
+    render_start = app_source.index("function buildCutSegmentDisplayItems")
     render_end = app_source.index("function updateCutSegmentText", render_start)
     click_start = app_source.index("function handleTranscriptDisplayClick")
     click_end = app_source.index("\n}\n\nfor (const eventName", click_start) + 2
@@ -1546,29 +1745,39 @@ def test_frontend_merges_adjacent_deleted_text_across_range_keys():
 const source = {json.dumps(source)};
 const functions = new Function(`
 const selectedRanges = new Map();
+const selectedNoSpeechRanges = new Map();
 const currentSuggestions = [];
 const currentEditableSegments = [];
 const currentNoSpeechSuggestions = [];
 let activeTranscriptSegmentIndex = -1;
 let activeTranscriptSegmentKey = "";
+let activeTranscriptItem = null;
 const transcriptFollowScrollController = {{ reset() {{}} }};
 const renderedItems = [];
 const historyActions = [];
 const seekTimes = [];
 let selectionUpdateCount = 0;
 let cutControlsLocked = false;
+const window = {{}};
 const rangeKey = (start, end) =>
   Number(start).toFixed(3) + "-" + Number(end).toFixed(3);
 const getSuggestionRanges = (suggestion) => suggestion.ranges || [];
 const getCommittedTimelineDeleteRanges = () => [];
 const getCommittedTimelineSemanticDeleteRanges = () => [];
 const getNoSpeechRange = (suggestion) => suggestion;
+const noSpeechKindLabel = () => "quiet";
+const noSpeechAudioLabel = () => "silent";
 const stageCutHistoryOperation = (label) => historyActions.push(label);
 const updateSelectionSummary = () => {{ selectionUpdateCount += 1; }};
 const seekCutPreview = (time) => seekTimes.push(time);
 const scheduleCutPreviewEffect = (effect) => effect?.();
-const renderTextSegmentItem = (run) => ({{ type: "text", text: run.text }});
+const renderTextSegmentItem = (run) => ({{
+  dataset: {{}},
+  type: "text",
+  text: run.text,
+}});
 const renderNoSpeechSegmentItem = (suggestion) => ({{
+  dataset: {{}},
   type: "no-speech",
   id: suggestion.id,
 }});
@@ -1734,7 +1943,11 @@ console.log(JSON.stringify({{
     assert payload["historyActions"] == ["恢复已删除文字"]
     assert payload["seekTimes"] == [0]
     assert payload["selectionUpdateCount"] == 1
-    assert payload["renderedItems"] == [
+    rendered_items = [
+        {key: value for key, value in item.items() if key != "dataset"}
+        for item in payload["renderedItems"]
+    ]
+    assert rendered_items == [
         {"type": "text", "text": "文案"},
         {"type": "no-speech", "id": "quiet"},
     ]
@@ -3201,7 +3414,10 @@ def test_frontend_transcript_now_playing_layer_has_one_real_row_owner():
     placeholder_start = follow_source.index("function createPlaceholder")
     placeholder_end = follow_source.index("function placeLayer", placeholder_start)
     placeholder_source = follow_source[placeholder_start:placeholder_end]
-    render_start = app_source.index("function renderCutSegments()")
+    reset_start = app_source.index("function resetCutTranscriptRenderState()")
+    reset_end = app_source.index("function recordCutRenderResult", reset_start)
+    reset_source = app_source[reset_start:reset_end]
+    render_start = app_source.index("function renderCutSegments(")
     render_end = app_source.index("function updateCutSegmentText", render_start)
     render_source = app_source[render_start:render_end]
 
@@ -3214,7 +3430,8 @@ def test_frontend_transcript_now_playing_layer_has_one_real_row_owner():
     assert "segment-play-button" not in placeholder_source
     assert ".tabIndex" not in placeholder_source
     assert "item.style.transform =" not in follow_source
-    assert render_source.index("transcriptFollowScrollController.reset()") < (
+    assert "transcriptFollowScrollController.reset()" in reset_source
+    assert render_source.index("resetCutTranscriptRenderState()") < (
         render_source.index("segmentList.replaceChildren(fragment)")
     )
     assert app_source.count(
@@ -3224,7 +3441,27 @@ def test_frontend_transcript_now_playing_layer_has_one_real_row_owner():
 
 
 def test_frontend_transcript_follow_scroll_anchors_clamps_and_deduplicates():
+    root = Path(__file__).resolve().parents[2]
+    follow_source = (root / "web" / "transcript-follow-scroll.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert ".animate(" not in follow_source
+    assert "previousVisualTop" not in follow_source
+    assert "activeMotion" not in follow_source
+    assert "startListPhase" not in follow_source
+    assert "startTailPhase" not in follow_source
+    assert "list.style.transform" not in follow_source
+    assert follow_source.count("panel.scrollTop = metrics.targetScrollTop;") == 1
+    assert follow_source.index("const metrics = getTranscriptFollowScrollMetrics") < (
+        follow_source.index("const placeholder = createPlaceholder")
+    )
+    assert follow_source.index("const layerPlacement = getLayerPlacement") < (
+        follow_source.index("const placeholder = createPlaceholder")
+    )
+
     script = r"""
+const assert = require('node:assert/strict');
 global.getComputedStyle = (node) => node.computedStyle || ({
   paddingTop: '0px',
   position: 'static',
@@ -3241,13 +3478,11 @@ function createClassList(initial = []) {
   };
 }
 
-function createFixture() {
-  const animations = [];
-  const listenerMap = new Map();
+function createFixture({ reducedMotion = false } = {}) {
   const scrollWrites = [];
+  let animationCalls = 0;
   let scrollTop = 100;
-  let toolbarHeight = 60;
-  const toolbarOffset = 18;
+
   function createNode(classNames = []) {
     const node = {
       attributes: {},
@@ -3285,20 +3520,8 @@ function createFixture() {
       setAttribute(name, value) {
         this.attributes[name] = String(value);
       },
-      animate(keyframes, options) {
-        const animation = {
-          cancelled: false,
-          finished: false,
-          onfinish: null,
-          cancel() { this.cancelled = true; },
-          finish() {
-            if (this.cancelled || this.finished) return;
-            this.finished = true;
-            this.onfinish?.();
-          },
-        };
-        animations.push({ animation, element: this, keyframes, options });
-        return animation;
+      animate() {
+        animationCalls += 1;
       },
     };
     Object.defineProperty(node, 'nextSibling', {
@@ -3310,6 +3533,7 @@ function createFixture() {
     });
     return node;
   }
+
   function addEventTarget(node) {
     const listeners = new Map();
     node.addEventListener = (type, callback) => {
@@ -3328,41 +3552,34 @@ function createFixture() {
     };
     return node;
   }
+
   const toolbar = {
+    computedStyle: { position: 'static', top: 'auto' },
     getBoundingClientRect: () => ({
-      bottom: 100 + toolbarOffset + toolbarHeight,
-      height: toolbarHeight,
-      top: 100 + toolbarOffset,
+      bottom: 178,
+      height: 60,
+      top: 118,
     }),
   };
-  const panel = {
+  const panel = addEventTarget({
     clientHeight: 300,
+    clientTop: 0,
     hidden: false,
     scrollHeight: 1000,
-    get scrollTop() { return scrollTop; },
+    get scrollTop() {
+      return scrollTop;
+    },
     set scrollTop(value) {
       scrollTop = Number(value);
       scrollWrites.push(scrollTop);
     },
-    addEventListener(type, callback) {
-      if (!listenerMap.has(type)) listenerMap.set(type, new Set());
-      listenerMap.get(type).add(callback);
-    },
-    dispatch(type, key = '') {
-      for (const callback of listenerMap.get(type) || []) {
-        callback({ key, type });
-      }
-    },
-    getBoundingClientRect: () => ({ bottom: 400, height: 300, top: 100 }),
-    listenerCount: () => [...listenerMap.values()].reduce(
-      (total, callbacks) => total + callbacks.size,
-      0,
-    ),
+    getBoundingClientRect: () => ({
+      bottom: 400,
+      height: 300,
+      top: 100,
+    }),
     querySelector: (selector) => selector === '.cut-toolbar' ? toolbar : null,
-    removeEventListener(type, callback) {
-      listenerMap.get(type)?.delete(callback);
-    },
-  };
+  });
   const positioningContext = {
     clientLeft: 0,
     clientTop: 0,
@@ -3382,494 +3599,156 @@ function createFixture() {
     const left = 20 + Number.parseFloat(layer.style.left || 0);
     const height = Number.parseFloat(layer.style.height || 0);
     const width = Number.parseFloat(layer.style.width || 0);
-    return { bottom: top + height, height, left, right: left + width, top, width };
+    return { bottom: top + height, height, left, top, width };
   };
+
   function createItem(contentTop, height = 32) {
     const item = createNode(['segment-item', 'is-playback-active']);
     item.buttonCount = 1;
-    item.contentTop = contentTop;
-    item.style = { transform: '', willChange: '' };
     item.closest = (selector) => selector === '.text-editor-panel' ? panel : null;
     item.getBoundingClientRect = () => {
       if (item.parentNode === layer) return layer.getBoundingClientRect();
       const top = 100 + contentTop - panel.scrollTop;
-      return { bottom: top + height, height, left: 40, right: 280, top, width: 240 };
+      return {
+        bottom: top + height,
+        height,
+        left: 40,
+        right: 280,
+        top,
+        width: 240,
+      };
     };
     list.appendChild(item);
     return item;
   }
-  return {
-    animations,
+
+  const controller = followScroll.createController({
     createElement: () => createNode(),
+    layer,
+    matchMedia: () => ({ matches: reducedMotion }),
+  });
+  return {
+    animationCalls: () => animationCalls,
+    controller,
     createItem,
     layer,
     list,
     panel,
     scrollWrites,
-    setToolbarHeight: (height) => { toolbarHeight = height; },
     toolbar,
-    toolbarAnchor: (height = 32) => {
-      const baseAnchorTop = 100 + toolbarOffset + toolbarHeight + 8;
-      return Math.min(
-        baseAnchorTop + height * 3,
-        Math.max(baseAnchorTop, 400 - height),
-      );
-    },
   };
 }
 
-let reduceMotion = false;
 const fixture = createFixture();
-const controller = followScroll.createController({
-  createElement: fixture.createElement,
-  layer: fixture.layer,
-  matchMedia: () => ({ matches: reduceMotion }),
-});
-const middleItem = fixture.createItem(300);
-const shortToolbarTarget = followScroll.getTranscriptFollowScrollTarget(
+const first = fixture.createItem(420);
+const second = fixture.createItem(620);
+const firstMetrics = followScroll.getTranscriptFollowScrollMetrics(
   fixture.panel,
-  middleItem,
+  first,
   fixture.toolbar,
 );
-fixture.setToolbarHeight(92);
-const tallToolbarTarget = followScroll.getTranscriptFollowScrollTarget(
-  fixture.panel,
-  middleItem,
-  fixture.toolbar,
+assert.equal(firstMetrics.anchorTop, 282);
+assert.equal(firstMetrics.tailRemainder, 0);
+
+assert.equal(fixture.controller.follow(first, 'row-first'), true);
+assert.deepEqual(fixture.scrollWrites, [firstMetrics.targetScrollTop]);
+assert.equal(fixture.layer.children.length, 1);
+assert.equal(fixture.layer.children[0], first);
+assert.equal(fixture.layer.getBoundingClientRect().top, firstMetrics.anchorTop);
+assert.equal(fixture.list.children.length, 2);
+const firstPlaceholder = fixture.list.children[0];
+assert.equal(firstPlaceholder.className, 'segment-follow-placeholder');
+assert.equal(firstPlaceholder.attributes['aria-hidden'], 'true');
+assert.equal(Object.hasOwn(firstPlaceholder.attributes, 'inert'), true);
+assert.equal(firstPlaceholder.inert, true);
+assert.equal(firstPlaceholder.children.length, 0);
+assert.equal(first.buttonCount, 1);
+
+assert.equal(fixture.controller.follow(first, 'row-first'), false);
+assert.deepEqual(fixture.scrollWrites, [firstMetrics.targetScrollTop]);
+assert.equal(fixture.layer.children[0], first);
+
+assert.equal(fixture.controller.follow(second, 'row-second'), true);
+assert.deepEqual(fixture.list.children, [first, fixture.list.children[1]]);
+assert.equal(fixture.list.children[1].className, 'segment-follow-placeholder');
+assert.equal(fixture.layer.children[0], second);
+assert.equal(fixture.animationCalls(), 0);
+
+fixture.panel.dispatch('keydown', 'Enter');
+assert.equal(fixture.layer.children[0], second);
+fixture.panel.dispatch('wheel');
+assert.deepEqual(fixture.list.children, [first, second]);
+assert.equal(fixture.layer.hidden, true);
+assert.equal(fixture.layer.children.length, 0);
+assert.equal(fixture.panel.listenerCount(), 0);
+assert.equal(fixture.controller.follow(second, 'row-second'), false);
+assert.equal(fixture.layer.children.length, 0);
+
+fixture.controller.reset();
+assert.equal(fixture.controller.follow(second, 'row-second'), true);
+second.classList.remove('is-playback-active');
+assert.equal(fixture.controller.follow(second, 'row-second'), false);
+assert.deepEqual(fixture.list.children, [first, second]);
+second.classList.add('is-playback-active');
+assert.equal(fixture.controller.follow(second, 'row-second'), true);
+fixture.controller.reset();
+
+const hiddenFixture = createFixture({ reducedMotion: true });
+const hiddenItem = hiddenFixture.createItem(420);
+hiddenFixture.panel.hidden = true;
+assert.equal(hiddenFixture.controller.follow(hiddenItem, 'retry-key'), false);
+assert.equal(hiddenFixture.scrollWrites.length, 0);
+hiddenFixture.panel.hidden = false;
+assert.equal(hiddenFixture.controller.follow(hiddenItem, 'retry-key'), true);
+assert.equal(hiddenFixture.scrollWrites.length, 1);
+assert.equal(hiddenFixture.animationCalls(), 0);
+hiddenFixture.controller.destroy();
+hiddenFixture.controller.destroy();
+assert.equal(hiddenFixture.controller.follow(hiddenItem, 'after-destroy'), false);
+assert.deepEqual(hiddenFixture.list.children, [hiddenItem]);
+
+const tailFixture = createFixture();
+const tailItem = tailFixture.createItem(900);
+const tailMetrics = followScroll.getTranscriptFollowScrollMetrics(
+  tailFixture.panel,
+  tailItem,
+  tailFixture.toolbar,
 );
-fixture.setToolbarHeight(60);
-
-const dynamicAnchorFixture = createFixture();
-const standardRowMetrics = followScroll.getTranscriptFollowScrollMetrics(
-  dynamicAnchorFixture.panel,
-  dynamicAnchorFixture.createItem(300, 32),
-  dynamicAnchorFixture.toolbar,
+assert.ok(tailMetrics.tailRemainder > 0);
+assert.equal(tailFixture.controller.follow(tailItem, 'tail-row'), true);
+assert.equal(
+  tailFixture.layer.getBoundingClientRect().top,
+  tailMetrics.anchorTop + tailMetrics.tailRemainder,
 );
-const tallRowMetrics = followScroll.getTranscriptFollowScrollMetrics(
-  dynamicAnchorFixture.panel,
-  dynamicAnchorFixture.createItem(300, 80),
-  dynamicAnchorFixture.toolbar,
+assert.ok(
+  tailFixture.layer.getBoundingClientRect().bottom <=
+    tailFixture.panel.getBoundingClientRect().bottom,
 );
+assert.equal(tailFixture.animationCalls(), 0);
+tailFixture.panel.dispatch('touchstart');
+assert.deepEqual(tailFixture.list.children, [tailItem]);
+assert.equal(tailFixture.layer.hidden, true);
 
-controller.follow(middleItem, 'row-a');
-const middlePlaceholder = fixture.list.children[0];
-const middlePinnedUnique =
-  fixture.layer.children.length === 1 &&
-  fixture.layer.children[0] === middleItem &&
-  !fixture.list.children.includes(middleItem) &&
-  middlePlaceholder.className === 'segment-follow-placeholder' &&
-  middlePlaceholder.children.length === 0 &&
-  middlePlaceholder.attributes['aria-hidden'] === 'true' &&
-  Object.hasOwn(middlePlaceholder.attributes, 'inert') &&
-  middlePlaceholder.inert === true &&
-  middlePlaceholder.style.height === '32px' &&
-  [...fixture.list.children, ...fixture.layer.children].reduce(
-    (total, item) => total + Number(item.buttonCount || 0),
-    0,
-  ) === 1;
-const scrollHeightStable = fixture.panel.scrollHeight === 1000;
-const scheduledBeforeDuplicate = fixture.animations.length;
-controller.follow(middleItem, 'row-a');
-const queuedAfterDuplicate = fixture.animations.length;
-const middleVisualTops = [middleItem.getBoundingClientRect().top];
-const middleScrollTops = [...fixture.scrollWrites];
-for (const record of fixture.animations.slice(0, 2)) {
-  record.animation.finish();
-  middleVisualTops.push(middleItem.getBoundingClientRect().top);
-}
-
-middleItem.classList.remove('is-playback-active');
-const tailItem = fixture.createItem(1000);
-controller.follow(tailItem, 'row-tail');
-const tailAnimationCountBeforeList = fixture.animations.length;
-const retargetOrderPreserved =
-  fixture.list.children[0] === middleItem &&
-  fixture.list.children[1].className === 'segment-follow-placeholder' &&
-  fixture.layer.children.length === 1 &&
-  fixture.layer.children[0] === tailItem;
-const tailVisualTops = [tailItem.getBoundingClientRect().top];
-const tailScrollTops = fixture.scrollWrites.slice(-1);
-fixture.animations[2].animation.finish();
-const tailCreatedAfterList = fixture.animations.length === 4;
-for (const record of fixture.animations.slice(3)) {
-  record.animation.finish();
-  tailVisualTops.push(tailItem.getBoundingClientRect().top);
-}
-const tailStylesCleared =
-  tailItem.style.transform === '' &&
-  tailItem.style.willChange === '' &&
-  !tailItem.classList.contains('is-follow-animating') &&
-  fixture.layer.style.willChange === '';
-const tailRemainsPinnedAfterFinish =
-  fixture.layer.children[0] === tailItem && !fixture.layer.hidden;
-
-const consecutiveTailVisualTops = [tailItem.getBoundingClientRect().top];
-const consecutiveTailKeyframes = [];
-let previousTailItem = tailItem;
-for (const [index, contentTop] of [1064, 1128, 1192].entries()) {
-  previousTailItem.classList.remove('is-playback-active');
-  const nextTailItem = fixture.createItem(contentTop);
-  const animationStart = fixture.animations.length;
-  controller.follow(nextTailItem, `row-tail-${index + 2}`);
-  const animations = fixture.animations.slice(animationStart);
-  consecutiveTailVisualTops.push(nextTailItem.getBoundingClientRect().top);
-  consecutiveTailKeyframes.push(...animations.map(({ keyframes }) => keyframes));
-  animations.forEach(({ animation }) => animation.finish());
-  consecutiveTailVisualTops.push(nextTailItem.getBoundingClientRect().top);
-  previousTailItem = nextTailItem;
-}
-const consecutiveTailMovesMonotonically =
-  consecutiveTailVisualTops.every(
-    (top, index, values) => index === 0 || top >= values[index - 1],
-  ) &&
-  consecutiveTailKeyframes.every(([start, end]) => {
-    const parseY = ({ transform }) => Number(
-      transform.match(/translate3d\(0, (-?[\d.]+)px, 0\)/)?.[1],
-    );
-    return parseY(end) >= parseY(start) && parseY(start) > 0;
-  });
-controller.reset();
-const mainResetRestoresOrder =
-  fixture.list.children[0] === middleItem &&
-  fixture.list.children[1] === tailItem &&
-  fixture.list.children.every(
-    (item) => item.className !== 'segment-follow-placeholder',
-  ) &&
-  fixture.layer.children.length === 0 &&
-  fixture.layer.hidden &&
-  fixture.layer.style.transform === '' &&
-  fixture.panel.listenerCount() === 0 &&
-  fixture.layer.listenerCount() === 0;
-
-const stickyStartupFixture = createFixture();
-stickyStartupFixture.panel.computedStyle = { paddingTop: '18px' };
-stickyStartupFixture.toolbar.computedStyle = {
-  position: 'sticky',
-  top: '0px',
-};
-stickyStartupFixture.toolbar.getBoundingClientRect = () => ({
-  bottom: 300,
-  height: 60,
-  top: 240,
-});
-const stickyStartupController = followScroll.createController({
-  createElement: stickyStartupFixture.createElement,
-  layer: stickyStartupFixture.layer,
-  matchMedia: () => ({ matches: false }),
-});
-const stickyStartupItem = stickyStartupFixture.createItem(300);
-const stickyStartupTarget = followScroll.getTranscriptFollowScrollTarget(
-  stickyStartupFixture.panel,
-  stickyStartupItem,
-  stickyStartupFixture.toolbar,
-);
-stickyStartupController.follow(stickyStartupItem, 'sticky-startup-row');
-const stickyStartupVisualTops = [stickyStartupItem.getBoundingClientRect().top];
-for (const record of stickyStartupFixture.animations) {
-  record.animation.finish();
-  stickyStartupVisualTops.push(stickyStartupItem.getBoundingClientRect().top);
-}
-stickyStartupController.reset();
-
-const retargetFixture = createFixture();
-const retargetController = followScroll.createController({
-  createElement: retargetFixture.createElement,
-  layer: retargetFixture.layer,
-  matchMedia: () => ({ matches: false }),
-});
-const staleItem = retargetFixture.createItem(300);
-const newItem = retargetFixture.createItem(520);
-retargetController.follow(staleItem, 'stale-row');
-const staleCompletions = retargetFixture.animations.map(
-  ({ animation }) => animation.onfinish,
-);
-retargetFixture.list.computedStyle = {
-  transform: 'matrix(1, 0, 0, 1, 0, 57)',
-};
-retargetFixture.layer.style.transform = 'translate3d(0, 57px, 0)';
-staleItem.classList.remove('is-playback-active');
-retargetController.follow(newItem, 'new-row');
-const scrollBeforeStaleFrame = retargetFixture.panel.scrollTop;
-const layerBeforeStaleFrame = retargetFixture.layer.style.transform;
-staleCompletions.forEach((complete) => complete());
-const staleFrameIgnored =
-  retargetFixture.panel.scrollTop === scrollBeforeStaleFrame &&
-  retargetFixture.layer.style.transform === layerBeforeStaleFrame &&
-  retargetFixture.layer.children[0] === newItem &&
-  retargetFixture.list.children[0] === staleItem &&
-  staleItem.style.transform === '' &&
-    !staleItem.classList.contains('is-follow-animating');
-const currentCompletions = retargetFixture.animations.slice(2).map(
-  ({ animation }) => animation.onfinish,
-);
-retargetFixture.list.computedStyle = {
-  transform: 'matrix(1, 0, 0, 1, 0, 100)',
-};
-const scrollBeforeManualCancel = retargetFixture.panel.scrollTop;
-retargetFixture.panel.dispatch('wheel');
-const scrollAfterManualCancel = retargetFixture.panel.scrollTop;
-currentCompletions.forEach((complete) => complete());
-const scheduledBeforeSameKey = retargetFixture.animations.length;
-retargetController.follow(newItem, 'new-row');
-const manualCancelClean =
-  scrollAfterManualCancel === scrollBeforeManualCancel - 100 &&
-  retargetFixture.panel.scrollTop === scrollAfterManualCancel &&
-  newItem.style.transform === '' &&
-  newItem.style.willChange === '' &&
-  !newItem.classList.contains('is-follow-animating') &&
-  retargetFixture.panel.listenerCount() === 0 &&
-  retargetFixture.layer.listenerCount() === 0 &&
-  retargetFixture.layer.hidden &&
-  retargetFixture.list.children[1] === newItem &&
-  retargetFixture.animations.length === scheduledBeforeSameKey;
-
-const resetItem = retargetFixture.createItem(760);
-retargetFixture.list.computedStyle = { transform: 'none' };
-newItem.classList.remove('is-playback-active');
-const resetAnimationStart = retargetFixture.animations.length;
-retargetController.follow(resetItem, 'reset-row');
-const resetCompletions = retargetFixture.animations
-  .slice(resetAnimationStart)
-  .map(({ animation }) => animation.onfinish);
-retargetController.reset();
-const scrollBeforeResetFrame = retargetFixture.panel.scrollTop;
-resetCompletions.forEach((complete) => complete());
-const resetClean =
-  retargetFixture.panel.scrollTop === scrollBeforeResetFrame &&
-  resetItem.style.transform === '' &&
-  !resetItem.classList.contains('is-follow-animating') &&
-  retargetFixture.panel.listenerCount() === 0 &&
-  retargetFixture.layer.listenerCount() === 0 &&
-  retargetFixture.list.children.at(-1) === resetItem &&
-  retargetFixture.layer.hidden;
-
-const delayedFixture = createFixture();
-const delayedController = followScroll.createController({
-  createElement: delayedFixture.createElement,
-  layer: delayedFixture.layer,
-  matchMedia: () => ({ matches: false }),
-});
-const delayedItem = delayedFixture.createItem(300);
-delayedFixture.panel.hidden = true;
-const hiddenFollowRejected =
-  delayedController.follow(delayedItem, 'delayed-row') === false &&
-  delayedFixture.animations.length === 0;
-delayedFixture.panel.hidden = false;
-const visibleFollowRetried =
-  delayedController.follow(delayedItem, 'delayed-row') === true &&
-  delayedFixture.animations.length === 2;
-const delayedCompletions = delayedFixture.animations.map(
-  ({ animation }) => animation.onfinish,
-);
-delayedFixture.panel.hidden = true;
-delayedCompletions.forEach((complete) => complete());
-delayedFixture.panel.hidden = false;
-const visibleFollowRetriedAfterInvalidation =
-  delayedController.follow(delayedItem, 'delayed-row') === true &&
-  delayedFixture.animations.length === 2 &&
-  delayedFixture.layer.children[0] === delayedItem;
-delayedController.reset();
-
-const reducedFixture = createFixture();
-reduceMotion = true;
-const reducedController = followScroll.createController({
-  createElement: reducedFixture.createElement,
-  layer: reducedFixture.layer,
-  matchMedia: () => ({ matches: reduceMotion }),
-});
-const reducedItem = reducedFixture.createItem(1000);
-reducedController.follow(reducedItem, 'reduced-row');
-const reducedMotionImmediate =
-  reducedFixture.panel.scrollTop === 700 &&
-  reducedFixture.animations.length === 0 &&
-  reducedFixture.layer.children[0] === reducedItem &&
-  reducedItem.getBoundingClientRect().top === 400 &&
-  reducedItem.style.transform === '' &&
-  !reducedItem.classList.contains('is-follow-animating');
-reducedController.destroy();
-reducedController.destroy();
-const destroyClean =
-  reducedFixture.list.children[0] === reducedItem &&
-  reducedFixture.layer.children.length === 0 &&
-  reducedFixture.layer.hidden &&
-  reducedFixture.panel.listenerCount() === 0 &&
-  reducedFixture.layer.listenerCount() === 0;
-
-const fallbackFixture = createFixture();
-fallbackFixture.list.animate = undefined;
-fallbackFixture.layer.animate = undefined;
-const fallbackController = followScroll.createController({
-  createElement: fallbackFixture.createElement,
-  layer: fallbackFixture.layer,
-  matchMedia: () => ({ matches: false }),
-});
-const fallbackItem = fallbackFixture.createItem(300);
-fallbackController.follow(fallbackItem, 'fallback-row');
-const unsupportedAnimationImmediate =
-  fallbackFixture.animations.length === 0 &&
-  fallbackFixture.scrollWrites.length === 1 &&
-  fallbackFixture.panel.scrollTop === 118 &&
-  fallbackFixture.layer.children[0] === fallbackItem &&
-  fallbackFixture.layer.style.transform === '';
-fallbackItem.classList.remove('is-playback-active');
-const fallbackTailItem = fallbackFixture.createItem(1000);
-fallbackController.follow(fallbackTailItem, 'fallback-tail-row');
-const unsupportedTailAnimationImmediate =
-  fallbackFixture.animations.length === 0 &&
-  fallbackFixture.scrollWrites.length === 2 &&
-  fallbackFixture.panel.scrollTop === 700 &&
-  fallbackFixture.layer.children[0] === fallbackTailItem &&
-  fallbackTailItem.getBoundingClientRect().top === 400 &&
-  fallbackFixture.layer.style.transform === 'translate3d(0, 118px, 0)';
-fallbackController.destroy();
-
-const interruptionResults = ['wheel', 'touchstart', 'pointerdown', 'keydown'].map(
-  (type) => {
-    const interruptionFixture = createFixture();
-    const interruptionController = followScroll.createController({
-      createElement: interruptionFixture.createElement,
-      layer: interruptionFixture.layer,
-      matchMedia: () => ({ matches: false }),
-    });
-    const interruptionItem = interruptionFixture.createItem(300);
-    interruptionController.follow(interruptionItem, `interrupt-${type}`);
-    interruptionFixture.panel.dispatch(
-      type,
-      type === 'keydown' ? 'ArrowDown' : '',
-    );
-    return (
-      interruptionFixture.list.children[0] === interruptionItem &&
-      interruptionFixture.layer.children.length === 0 &&
-      interruptionFixture.layer.hidden &&
-      interruptionFixture.panel.listenerCount() === 0 &&
-      interruptionFixture.layer.listenerCount() === 0
-    );
-  },
-);
-
-console.log(JSON.stringify({
-  anchorTop: fixture.toolbarAnchor(),
-  consecutiveTailMovesMonotonically,
-  consecutiveTailVisualTops,
-  destroyClean,
-  dynamicRowAnchors: {
-    standard: standardRowMetrics.anchorTop,
-    tall: tallRowMetrics.anchorTop,
-  },
-  durationBounds: [
-    followScroll.getMotionDuration(0),
-    followScroll.getMotionDuration(114),
-    followScroll.getMotionDuration(1000),
-  ],
-  flipKeyframes: fixture.animations[0].keyframes,
-  hiddenFollowRejected,
-  interruptionResults,
-  mainResetRestoresOrder,
-  manualCancelClean,
-  middlePinnedUnique,
-  middleScrollTops,
-  middleVisualTops,
-  queuedAfterDuplicate,
-  reducedMotionImmediate,
-  resetClean,
-  retargetOrderPreserved,
-  scheduledBeforeDuplicate,
-  scrollHeightStable,
-  shortToolbarTarget,
-  stickyStartupTarget,
-  stickyStartupVisualTops,
-  staleFrameIgnored,
-  tailAnimationCountBeforeList,
-  tailCreatedAfterList,
-  tailScrollTops,
-  tailStylesCleared,
-  tailRemainsPinnedAfterFinish,
-  tailVisualTops,
-  tallToolbarTarget,
-  transformParsing: [
-    followScroll.parseTransformY('matrix(1, 0, 0, 1, 0, 42)'),
-    followScroll.parseTransformY('matrix3d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, -19, 0, 1)'),
-    followScroll.parseTransformY('translateY(23px)'),
-  ],
-  unsupportedAnimationImmediate,
-  unsupportedTailAnimationImmediate,
-  visibleFollowRetried,
-  visibleFollowRetriedAfterInvalidation,
-}));
+console.log('ok');
 """
-
     try:
         result = subprocess.run(
             ["node", "-e", script],
-            cwd=Path(__file__).resolve().parents[2],
+            cwd=root,
             check=True,
             capture_output=True,
+            text=True,
             encoding="utf-8",
             timeout=20,
         )
     except FileNotFoundError:
-        pytest.skip("Node.js is required for the transcript follow-scroll test.")
+        pytest.skip("Node.js is required for the transcript follow-scroll unit test.")
+    except subprocess.CalledProcessError as exc:
+        pytest.fail(exc.stderr)
 
-    payload = json.loads(result.stdout)
-    assert payload["scheduledBeforeDuplicate"] == 2
-    assert payload["queuedAfterDuplicate"] == 2
-    assert payload["middlePinnedUnique"] is True
-    assert payload["scrollHeightStable"] is True
-    assert payload["shortToolbarTarget"] == 118
-    assert payload["tallToolbarTarget"] == 86
-    assert payload["dynamicRowAnchors"] == {
-        "standard": 282,
-        "tall": 320,
-    }
-    assert payload["middleScrollTops"] == sorted(payload["middleScrollTops"])
-    assert len(payload["middleScrollTops"]) == 1
-    assert payload["middleScrollTops"][-1] == pytest.approx(118)
-    assert payload["middleVisualTops"] == sorted(
-        payload["middleVisualTops"], reverse=True
-    )
-    assert payload["middleVisualTops"][0] == pytest.approx(300)
-    assert payload["middleVisualTops"][-1] == pytest.approx(payload["anchorTop"])
-    assert payload["stickyStartupTarget"] == pytest.approx(118)
-    assert payload["stickyStartupVisualTops"] == sorted(
-        payload["stickyStartupVisualTops"], reverse=True
-    )
-    assert payload["stickyStartupVisualTops"][0] == pytest.approx(300)
-    assert payload["stickyStartupVisualTops"][-1] == pytest.approx(
-        payload["anchorTop"]
-    )
-    assert payload["tailScrollTops"] == sorted(payload["tailScrollTops"])
-    assert len(payload["tailScrollTops"]) == 1
-    assert max(payload["tailScrollTops"]) == pytest.approx(700)
-    assert payload["tailVisualTops"] == sorted(payload["tailVisualTops"])
-    assert payload["tailVisualTops"][0] == pytest.approx(payload["anchorTop"])
-    assert payload["tailVisualTops"][-1] == pytest.approx(400)
-    assert payload["tailStylesCleared"] is True
-    assert payload["tailRemainsPinnedAfterFinish"] is True
-    assert payload["consecutiveTailMovesMonotonically"] is True
-    assert payload["consecutiveTailVisualTops"] == sorted(
-        payload["consecutiveTailVisualTops"]
-    )
-    assert payload["tailAnimationCountBeforeList"] == 3
-    assert payload["tailCreatedAfterList"] is True
-    assert payload["durationBounds"] == [180, 231, 360]
-    assert payload["flipKeyframes"] == [
-        {"transform": "translate3d(0, 18px, 0)"},
-        {"transform": "translate3d(0, 0px, 0)"},
-    ]
-    assert payload["transformParsing"] == [42, -19, 23]
-    assert payload["unsupportedAnimationImmediate"] is True
-    assert payload["unsupportedTailAnimationImmediate"] is True
-    assert payload["retargetOrderPreserved"] is True
-    assert payload["mainResetRestoresOrder"] is True
-    assert payload["staleFrameIgnored"] is True
-    assert payload["manualCancelClean"] is True
-    assert payload["resetClean"] is True
-    assert payload["hiddenFollowRejected"] is True
-    assert payload["visibleFollowRetried"] is True
-    assert payload["visibleFollowRetriedAfterInvalidation"] is True
-    assert payload["reducedMotionImmediate"] is True
-    assert payload["destroyClean"] is True
-    assert payload["interruptionResults"] == [True, True, True, True]
+    assert result.stdout.strip() == "ok"
+
+
 
 
 def test_frontend_playback_frame_clock_uses_one_cancellable_callback():

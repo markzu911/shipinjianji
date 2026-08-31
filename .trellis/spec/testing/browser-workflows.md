@@ -36,6 +36,7 @@ seeded_editor_job(sample_video) -> SeededEditorJob
 - 刷新恢复：执行可见删除操作，等待草稿保存，再核对 UI、cut draft JSON 和时间映射。
 - 时间轴分割：连续播放头分割后核对 source anchor、structure revision 与不变的 `timingRevision`；覆盖精确删除、全删后无 marker/占位/焦点目标、内部 Store 结构保留、撤销/重做、刷新、键盘焦点、Store `cut:split-structure` 轨道、普通拖选取消及 375px。纯分割期间基础 video `srcWrites/loadCalls` 和 extractor 创建数都必须为 0。
 - 时间轴缩略帧：首次生成必须写入真实 IndexedDB JPEG Blob；同一 BrowserContext 刷新命中时 extractor 创建和逐帧 seek 都为 0，且不出现生成提示。损坏记录、`indexedDB` getter 抛 `SecurityError` 和瞬时 open 失败分别覆盖降级/重试；真实数据库覆盖 30 天、24 条、64 MiB LRU。布局还要检查至少一个可见帧、每个可见帧的实际高度大于 0 并等于缩略图层高度，以及开头/交错删除后从 `0%` 到 `100%` 连续无缝覆盖。删除、恢复和文字拆分后的纯投影不得新建 extractor；刷新、工具用例和 teardown 必须保持 console 无 Blob URL `ERR_FILE_NOT_FOUND`。
+- 剪辑性能：长 fixture 连续 10 次删除/恢复达到 P95 `<=80ms`、最大 `<=120ms`、同步 P95 `<=10ms`，无 `>100ms` long task；普通选择保留未受影响的文案、时间轴文字和 ruler 节点 identity，且不触发 full replace/fallback、extractor、seek 或基础媒体重载。播放 fixture 使用本地真实 16 秒媒体，正常倍速播放至少 15 秒并跨越至少 8 个文字/空白边界；切段 rAF 延迟 P95 `<=16ms`、最大 `<=32ms`，无 `>50ms` long task，活动真实行与播放按钮始终唯一。
 - 工具切换：cut/art/pip 始终保持同一 document、基础 video、公共预览和公共时间线；隐藏 panel 必须 inert。
 - 文字保存：暂停/播放两种状态都保持 document/video/ArtTool/PipTool identity、src、currentTime、play state 和 art/pip 时间；新文案通过顶层 Store 进入艺术字与 compose。
 - 统一生成：用 `expect_response` 捕获真实 compose 响应，断言请求字段来自同一个 editor frame。

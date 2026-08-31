@@ -534,6 +534,114 @@ def seeded_performance_editor_job(
 
 
 @pytest.fixture
+def seeded_playback_performance_editor_job(
+    seeded_editor_job: SeededEditorJob,
+) -> SeededEditorJob:
+    media_duration = 16.0
+    playback_path = seeded_editor_job.video_path.with_name(
+        "browser-playback-performance.mp4"
+    )
+    subprocess.run(
+        [
+            app_module.get_ffmpeg_binary("ffmpeg"),
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=#152433:s=640x360:r=30:d={media_duration}",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=440:sample_rate=48000:duration={media_duration}",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-movflags",
+            "+faststart",
+            "-shortest",
+            str(playback_path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    segments: list[dict[str, object]] = []
+    no_speech_suggestions: list[dict[str, object]] = []
+    for index in range(16):
+        start = float(index)
+        end = round(start + 0.72, 3)
+        text = f"播放性能{index:02d}段"
+        segments.append(
+            {
+                "id": index,
+                "start": start,
+                "end": end,
+                "text": text,
+                "words": [{"text": text, "start": start, "end": end}],
+            }
+        )
+        if index < 15:
+            no_speech_suggestions.append(
+                {
+                    "id": f"playback-gap-{index:02d}",
+                    "start": end,
+                    "end": float(index + 1),
+                    "duration": round(float(index + 1) - end, 3),
+                    "originalGapDuration": round(float(index + 1) - end, 3),
+                    "kind": "middle",
+                    "protected": False,
+                    "deletable": True,
+                    "audioState": "quiet",
+                    "quietRatio": 1.0,
+                    "confidence": 0.99,
+                    "reason": "播放性能回归空白。",
+                }
+            )
+
+    with app_module.JOBS_LOCK:
+        job = app_module.JOBS[seeded_editor_job.job_id]
+        job["filename"] = playback_path.name
+        job["duration"] = media_duration
+        job["result"].update(
+            {
+                "text": "\n".join(str(item["text"]) for item in segments),
+                "duration": media_duration,
+                "mediaDuration": media_duration,
+                "segments": segments,
+                "editableSegments": copy.deepcopy(segments),
+                "suggestions": [],
+                "noSpeechSuggestions": no_speech_suggestions,
+                "audioQuietRanges": [],
+            }
+        )
+        job["cutDraft"] = {
+            "schemaVersion": 1,
+            "revision": 1,
+            "automaticNoSpeechInitialized": True,
+            "textRanges": [],
+            "noSpeechRanges": [],
+            "timelineRanges": [],
+            "boundaryDiagnostics": [],
+            "acousticAlignment": {"status": "unavailable"},
+            "updatedAt": "2026-08-31T00:00:00+00:00",
+        }
+        app_module.JOB_FILES[seeded_editor_job.job_id] = playback_path
+    app_module.persist_job_snapshot(
+        seeded_editor_job.job_id,
+        raise_on_error=True,
+    )
+    return seeded_editor_job
+
+
+@pytest.fixture
 def seeded_portrait_editor_job(
     seeded_editor_job: SeededEditorJob,
 ) -> SeededEditorJob:

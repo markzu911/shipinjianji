@@ -700,11 +700,35 @@
   }
 
   const unsubscribeProjectStore = projectStore.subscribe((next, previous, action) => {
-    renderEditorFrame(next);
+    const performanceProbe = window.__cutPerformanceProbe;
+    const breakdown = performanceProbe ? {} : null;
+    let stepStarted = performanceProbe ? performance.now() : 0;
+    renderEditorFrame(next, action);
+    if (breakdown) {
+      breakdown.renderFrame = performance.now() - stepStarted;
+      stepStarted = performance.now();
+    }
     if (next.ui.activeTool !== previous.ui.activeTool) {
       activeTool = next.ui.activeTool;
     }
+    if (breakdown) {
+      breakdown.activeTool = performance.now() - stepStarted;
+      stepStarted = performance.now();
+    }
     persistEditorDraft(next, action);
+    if (breakdown) {
+      breakdown.persistDraft = performance.now() - stepStarted;
+      breakdown.total = Object.values(breakdown).reduce(
+        (total, duration) => total + duration,
+        0,
+      );
+      performanceProbe.editorSuiteSubscriberBreakdowns = [
+        ...(Array.isArray(performanceProbe.editorSuiteSubscriberBreakdowns)
+          ? performanceProbe.editorSuiteSubscriberBreakdowns
+          : []),
+        { action: String(action?.type || ""), ...breakdown },
+      ];
+    }
   });
 
   function supportsInlineWorkspace() {
@@ -1220,23 +1244,67 @@
     window.history[method]({ ...(window.history.state || {}), editorTool: name }, "", url);
   }
 
-  function renderEditorFrame(state = projectSnapshot()) {
+  function renderEditorFrame(state = projectSnapshot(), action = null) {
     if (!mediaController) return null;
+    const performanceProbe = window.__cutPerformanceProbe;
+    const breakdown = performanceProbe ? {} : null;
+    const frameStarted = performanceProbe ? performance.now() : 0;
+    let stepStarted = frameStarted;
     const nextFrame = selectCurrentProjectFrame(state);
     if (!nextFrame) return null;
+    if (breakdown) {
+      breakdown.select = performance.now() - stepStarted;
+      stepStarted = performance.now();
+    }
     currentEditorFrame = nextFrame;
-    mediaController.applyFrame(nextFrame);
+    mediaController.applyFrame(nextFrame, { emitCutRangeState: false });
+    if (breakdown) {
+      breakdown.media = performance.now() - stepStarted;
+      stepStarted = performance.now();
+    }
     previewCompositor?.render(nextFrame);
-    timelineController?.render(nextFrame);
-    artTool?.render(nextFrame);
-    pipTool?.render(nextFrame);
+    if (breakdown) {
+      breakdown.preview = performance.now() - stepStarted;
+      stepStarted = performance.now();
+    }
+    const renderToolSurfaces = state?.ui?.activeTool !== "cut";
+    if (renderToolSurfaces) timelineController?.render(nextFrame);
+    if (breakdown) {
+      breakdown.timeline = performance.now() - stepStarted;
+      stepStarted = performance.now();
+    }
+    if (renderToolSurfaces) artTool?.render(nextFrame);
+    if (breakdown) {
+      breakdown.art = performance.now() - stepStarted;
+      stepStarted = performance.now();
+    }
+    if (renderToolSurfaces) pipTool?.render(nextFrame);
+    if (breakdown) {
+      breakdown.pip = performance.now() - stepStarted;
+      breakdown.toolSurfacesDeferred = renderToolSurfaces ? 0 : 1;
+      stepStarted = performance.now();
+    }
     if (previewOverlay) {
       previewOverlay.hidden = !(
         nextFrame.preview.art.overlays.length ||
         nextFrame.preview.pip.overlays.length
       );
     }
+    if (breakdown) {
+      breakdown.overlay = performance.now() - stepStarted;
+      stepStarted = performance.now();
+    }
     syncDouyinBasePlayback();
+    if (breakdown) {
+      breakdown.douyin = performance.now() - stepStarted;
+      breakdown.total = performance.now() - frameStarted;
+      performanceProbe.editorFrameBreakdowns = [
+        ...(Array.isArray(performanceProbe.editorFrameBreakdowns)
+          ? performanceProbe.editorFrameBreakdowns
+          : []),
+        { action: String(action?.type || ""), ...breakdown },
+      ];
+    }
     return nextFrame;
   }
 
@@ -1601,6 +1669,9 @@
   }
 
   function setCutDraft(value) {
+    const performanceProbe = window.__cutPerformanceProbe;
+    const breakdown = performanceProbe ? {} : null;
+    let stepStarted = performanceProbe ? performance.now() : 0;
     const payload = value && typeof value === "object"
       ? value
       : { active: Boolean(value) };
@@ -1632,6 +1703,10 @@
       duration: Math.max(0, Number(payload.duration) || 0),
       transcript: payload.transcript || null,
     };
+    if (breakdown) {
+      breakdown.normalize = performance.now() - stepStarted;
+      stepStarted = performance.now();
+    }
     const commit = projectStore.dispatch({
       type: payload.structureOnly
         ? window.EditorProjectStore.ACTIONS.CUT_STRUCTURE_CHANGED
@@ -1641,12 +1716,37 @@
         timeline: payload.timeline || null,
       },
     });
+    if (breakdown) {
+      breakdown.dispatch = performance.now() - stepStarted;
+      stepStarted = performance.now();
+    }
     cutDraftState = projectSnapshot().project.cut;
     cutDraftActive = cutDraftState.active;
+    if (breakdown) {
+      breakdown.snapshot = performance.now() - stepStarted;
+      stepStarted = performance.now();
+    }
     updateDouyinBaseVideo();
+    if (breakdown) {
+      breakdown.douyin = performance.now() - stepStarted;
+      stepStarted = performance.now();
+    }
     if (currentJob && commit.accepted) {
       renderJobState(currentJob, { hydrateProject: false });
     } else syncGenerationButton();
+    if (breakdown) {
+      breakdown.chrome = performance.now() - stepStarted;
+      breakdown.total = Object.values(breakdown).reduce(
+        (total, duration) => total + duration,
+        0,
+      );
+      performanceProbe.editorSuiteCutDraftBreakdowns = [
+        ...(Array.isArray(performanceProbe.editorSuiteCutDraftBreakdowns)
+          ? performanceProbe.editorSuiteCutDraftBreakdowns
+          : []),
+        breakdown,
+      ];
+    }
     return commit;
   }
 

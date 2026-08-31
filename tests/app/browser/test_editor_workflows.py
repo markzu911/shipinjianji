@@ -105,11 +105,16 @@ def install_cut_performance_probe(page) -> None:
             thumbnailSeekWrites: 0,
           };
           if (PerformanceObserver.supportedEntryTypes?.includes('longtask')) {
-            new PerformanceObserver(list => {
+            window.__cutPerformanceProbe.longTaskObserver =
+              new PerformanceObserver(list => {
               window.__cutPerformanceProbe.longTasks.push(
                 ...list.getEntries().map(entry => entry.duration),
               );
-            }).observe({ type: 'longtask', buffered: true });
+              });
+            window.__cutPerformanceProbe.longTaskObserver.observe({
+              type: 'longtask',
+              buffered: true,
+            });
           }
           Document.prototype.createElement = function createElementWithProbe(
             name,
@@ -173,10 +178,28 @@ def reset_cut_performance_probe(page) -> None:
           probe.putInFlight = 0;
           probe.putMaxInFlight = 0;
           probe.storeActions = [];
+          probe.longTaskObserver?.takeRecords();
           probe.longTasks = [];
           probe.thumbnailSeekWrites = 0;
+          probe.thumbnailProjectionCount = 0;
+          probe.thumbnailProjectionSkipCount = 0;
           probe.commitCount = 0;
           probe.commitBreakdowns = [];
+          probe.effectBreakdowns = [];
+          probe.storeSyncBreakdowns = [];
+          probe.storeDispatchBreakdowns = [];
+          probe.editorSuiteSubscriberBreakdowns = [];
+          probe.editorSuiteCutDraftBreakdowns = [];
+          probe.editorFrameBreakdowns = [];
+          probe.mediaFrameBreakdowns = [];
+          probe.mediaCutRangeBreakdowns = [];
+          probe.renderResults = [];
+          probe.transcriptFallbackCount = 0;
+          probe.transcriptReconcileCount = 0;
+          probe.transcriptReplaceCount = 0;
+          probe.timelineTextFallbackCount = 0;
+          probe.timelineTextReconcileCount = 0;
+          probe.timelineTextReplaceCount = 0;
           probe.unsubscribe?.();
           probe.unsubscribe = window.EditorSuite.subscribeProject(
             (_next, _previous, action) => probe.storeActions.push(action.type),
@@ -351,12 +374,35 @@ def test_cut_interaction_long_fixture_performance_and_work_counts(
     assert page.locator("#segmentList .segment-item").count() >= 60
     assert len(page.locator("#segmentList").inner_text().replace("\n", "")) >= 600
     install_base_media_mutation_probe(page)
+    page.wait_for_timeout(50)
     reset_cut_performance_probe(page)
 
     durations = page.evaluate(
         """async () => {
           const values = [];
           const states = [];
+          const transcriptNodes = [...document.querySelectorAll(
+            '#segmentList .segment-item[data-display-key]'
+          )];
+          const targetNode = transcriptNodes.find(candidate =>
+            candidate.dataset.displayText.includes('性能回归00测试文本')
+          );
+          const unaffectedTranscriptNode = transcriptNodes.findLast(
+            candidate => candidate !== targetNode && candidate.dataset.segmentIndex
+          );
+          const timelineNodes = [...document.querySelectorAll(
+            '#cutFrameTimelineText .cut-timeline-text-segment[data-render-key]'
+          )];
+          const unaffectedTimelineNode = timelineNodes.at(-1);
+          window.__cutNodeIdentityProbe = {
+            transcriptKey: unaffectedTranscriptNode?.dataset.displayKey || '',
+            transcriptNode: unaffectedTranscriptNode || null,
+            timelineKey: unaffectedTimelineNode?.dataset.renderKey || '',
+            timelineNode: unaffectedTimelineNode || null,
+            rulerNode: document.querySelector(
+              '#cutFrameTimelineRuler .frame-timeline-tick'
+            ),
+          };
           for (let index = 0; index < 10; index += 1) {
             const item = [...document.querySelectorAll(
               '.segment-item[data-segment-index]'
@@ -390,14 +436,50 @@ def test_cut_interaction_long_fixture_performance_and_work_counts(
     )
     page.wait_for_timeout(900)
     probe = page.evaluate("window.__cutPerformanceProbe")
+    identity = page.evaluate(
+        """() => {
+          const identityProbe = window.__cutNodeIdentityProbe;
+          const transcriptNode = [...document.querySelectorAll(
+            '#segmentList .segment-item[data-display-key]'
+          )].find(item =>
+            item.dataset.displayKey === identityProbe.transcriptKey
+          );
+          const timelineNode = [...document.querySelectorAll(
+            '#cutFrameTimelineText .cut-timeline-text-segment[data-render-key]'
+          )].find(item =>
+            item.dataset.renderKey === identityProbe.timelineKey
+          );
+          return {
+            timeline: Boolean(
+              identityProbe.timelineKey
+                && identityProbe.timelineNode === timelineNode
+                && timelineNode?.isConnected
+            ),
+            transcript: Boolean(
+              identityProbe.transcriptKey
+                && identityProbe.transcriptNode === transcriptNode
+                && transcriptNode?.isConnected
+            ),
+            ruler: Boolean(
+              identityProbe.rulerNode
+                && identityProbe.rulerNode === document.querySelector(
+                  '#cutFrameTimelineRuler .frame-timeline-tick'
+                )
+                && identityProbe.rulerNode.isConnected
+            ),
+          };
+        }"""
+    )
     media_probe = base_media_mutations(page)
     assert all(
         state["before"] and state["after"] and state["before"] != state["after"]
         for state in durations["states"]
     ), durations["states"]
     ordered = sorted(value["total"] for value in durations["values"])
+    ordered_sync = sorted(value["sync"] for value in durations["values"])
     p50 = statistics.median(ordered)
     p95 = ordered[max(0, int(len(ordered) * 0.95) - 1)]
+    sync_p95 = ordered_sync[max(0, int(len(ordered_sync) * 0.95) - 1)]
     print(
         "cut-performance-baseline",
         {
@@ -407,19 +489,207 @@ def test_cut_interaction_long_fixture_performance_and_work_counts(
             ],
             "p50Ms": round(p50, 3),
             "p95Ms": round(p95, 3),
+            "syncP95Ms": round(sync_p95, 3),
             "maxMs": round(max(ordered), 3),
             "probe": probe,
+            "identity": identity,
             "media": media_probe,
         },
     )
 
-    assert p95 <= 100
+    assert p95 <= 80
+    assert max(ordered) <= 120
+    assert sync_p95 <= 10
+    assert identity == {"ruler": True, "timeline": True, "transcript": True}
     assert probe["createdVideos"] == 0
+    assert probe["thumbnailSeekWrites"] == 0
     assert probe["putCalls"] <= 1
     assert probe["putMaxInFlight"] <= 1
     assert probe["historyWrites"] <= 1
-    assert all(duration <= 200 for duration in probe["longTasks"])
+    assert probe["storeActions"].count("cutTimingChanged") == 1
+    cut_frame_breakdowns = [
+        breakdown
+        for breakdown in probe["editorFrameBreakdowns"]
+        if breakdown["action"] == "cutTimingChanged"
+    ]
+    assert len(cut_frame_breakdowns) == 1
+    assert all(
+        breakdown["toolSurfacesDeferred"] == 1
+        and breakdown["timeline"] <= 1
+        and breakdown["art"] <= 1
+        and breakdown["pip"] <= 1
+        for breakdown in cut_frame_breakdowns
+    )
+    assert probe["transcriptFallbackCount"] == 0
+    assert probe["transcriptReplaceCount"] == 0
+    assert probe["transcriptReconcileCount"] >= 1
+    assert probe["timelineTextFallbackCount"] == 0
+    assert probe["timelineTextReplaceCount"] == 0
+    assert probe["timelineTextReconcileCount"] >= 1
+    assert probe["mediaFrameBreakdowns"]
+    assert all(
+        {"dataset", "cutRanges", "source", "total"} <= breakdown.keys()
+        for breakdown in probe["mediaFrameBreakdowns"]
+    )
+    assert probe["thumbnailProjectionCount"] <= probe["transcriptReconcileCount"]
+    assert all(duration <= 100 for duration in probe["longTasks"])
+    required_effect_stages = {
+        "summary",
+        "transcript",
+        "store",
+        "timelineScale",
+        "timelineRuler",
+        "timelineText",
+        "splitRanges",
+        "thumbnails",
+        "draftSave",
+        "preview",
+        "total",
+    }
+    assert probe["effectBreakdowns"]
+    assert all(
+        required_effect_stages <= breakdown.keys()
+        for breakdown in probe["effectBreakdowns"]
+    )
     assert media_probe == {"srcWrites": 0, "loadCalls": 0}
+
+
+def test_transcript_playback_crosses_boundaries_within_frame_budget(
+    browser_session,
+    seeded_playback_performance_editor_job,
+):
+    page = browser_session.page
+    install_cut_performance_probe(page)
+    open_editor(browser_session, seeded_playback_performance_editor_job)
+    page.wait_for_function(
+        """() => {
+          const video = document.querySelector('#cutPreviewVideo');
+          return video?.readyState >= 2 && video.duration >= 15.5;
+        }"""
+    )
+    page.wait_for_function(
+        """() => {
+          const items = [...document.querySelectorAll(
+            '#cutFrameTimelineThumbnails .frame-timeline-thumb'
+          )];
+          return items.length >= 8
+            && items.every(item => !item.classList.contains('is-loading'));
+        }"""
+    )
+    reset_cut_performance_probe(page)
+
+    result = page.evaluate(
+        """async () => {
+          const video = document.querySelector('#cutPreviewVideo');
+          video.pause();
+          video.muted = true;
+          video.currentTime = 0;
+          video.playbackRate = 1;
+          const idealFrameDuration = 1000 / 60;
+          const transitions = [];
+          let lastFrameAt = performance.now();
+          let previousKey = '__initial__';
+          let maximumActiveRows = 0;
+          let maximumActiveButtons = 0;
+          let frameId = 0;
+
+          const sampleFrame = now => {
+            const interval = now - lastFrameAt;
+            lastFrameAt = now;
+            const activeRows = [...document.querySelectorAll(
+              '.segment-item.is-playback-active'
+            )];
+            maximumActiveRows = Math.max(maximumActiveRows, activeRows.length);
+            maximumActiveButtons = Math.max(
+              maximumActiveButtons,
+              activeRows.reduce(
+                (total, row) => total + row.querySelectorAll(
+                  '.segment-play-button'
+                ).length,
+                0,
+              ),
+            );
+            const active = activeRows[0] || null;
+            const key = active
+              ? active.dataset.noSpeechId
+                ? `gap:${active.dataset.noSpeechId}`
+                : `text:${active.dataset.displayKey}`
+              : '';
+            if (key !== previousKey) {
+              if (previousKey !== '__initial__') {
+                transitions.push({
+                  delay: Math.max(0, interval - idealFrameDuration),
+                  interval,
+                  key,
+                  sourceTime: video.currentTime,
+                });
+              }
+              previousKey = key;
+            }
+            frameId = requestAnimationFrame(sampleFrame);
+          };
+          frameId = requestAnimationFrame(sampleFrame);
+          await video.play();
+          await new Promise((resolve, reject) => {
+            const startedAt = performance.now();
+            const check = () => {
+              if (video.currentTime >= 15) {
+                resolve();
+                return;
+              }
+              if (performance.now() - startedAt > 20000) {
+                reject(new Error('playback performance fixture timed out'));
+                return;
+              }
+              window.setTimeout(check, 25);
+            };
+            check();
+          });
+          video.pause();
+          cancelAnimationFrame(frameId);
+          return {
+            maximumActiveButtons,
+            maximumActiveRows,
+            playedUntil: video.currentTime,
+            transitions,
+          };
+        }"""
+    )
+    page.wait_for_timeout(100)
+    probe = page.evaluate("window.__cutPerformanceProbe")
+    transition_delays = sorted(
+        transition["delay"] for transition in result["transitions"]
+    )
+    p95 = transition_delays[
+        max(0, int(len(transition_delays) * 0.95) - 1)
+    ]
+    print(
+        "transcript-playback-performance",
+        {
+            "transitionCount": len(result["transitions"]),
+            "delaysMs": [round(value, 3) for value in transition_delays],
+            "p95Ms": round(p95, 3),
+            "maxMs": round(max(transition_delays), 3),
+            "longTasksMs": probe["longTasks"],
+            "transitions": result["transitions"],
+        },
+    )
+
+    assert result["playedUntil"] >= 15
+    assert len(result["transitions"]) >= 16
+    assert any(
+        str(transition["key"]).startswith("gap:")
+        for transition in result["transitions"]
+    )
+    assert any(
+        str(transition["key"]).startswith("text:")
+        for transition in result["transitions"]
+    )
+    assert result["maximumActiveRows"] <= 1
+    assert result["maximumActiveButtons"] <= 1
+    assert p95 <= 16
+    assert max(transition_delays) <= 32
+    assert all(duration <= 50 for duration in probe["longTasks"])
 
 
 def test_timeline_thumbnail_cache_persists_reload_and_falls_back_safely(
@@ -765,10 +1035,13 @@ def test_cut_draft_burst_uses_one_trailing_save(
           }
         }"""
     )
+    page.wait_for_function(
+        """() => window.__cutPerformanceProbe.putCalls === 1
+          && window.__cutPerformanceProbe.putInFlight === 0"""
+    )
     page.locator("#cutDraftSaveStatus").filter(
         has_text="剪辑草稿已保存"
     ).wait_for()
-    page.wait_for_timeout(450)
 
     probe = page.evaluate("window.__cutPerformanceProbe")
     assert len(requests) == 1
@@ -3201,12 +3474,38 @@ def test_tool_switch_keeps_selection_preview_and_playback_position(
     page.locator('[data-editor-tool="cut"]').click()
     assert page.locator(".text-editor-panel-stack").is_visible()
     wait_for_preview_time(page, selected_time)
+    hidden_timeline_revision = page.locator(
+        "#editorSuiteTimelineLayer"
+    ).get_attribute("data-timing-revision")
+    latest_timing_revision = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          const cut = snapshot.project.cut;
+          window.EditorSuite.setCutDraft({
+            ...cut,
+            active: true,
+            ranges: [...cut.ranges, { start: 0.01, end: 0.02 }],
+            duration: Math.max(0, Number(cut.duration || 0) - 0.01),
+          });
+          return String(window.EditorSuite.projectSnapshot().timingRevision);
+        }"""
+    )
+    assert latest_timing_revision != hidden_timeline_revision
+    assert page.locator("#editorSuiteTimelineLayer").get_attribute(
+        "data-timing-revision"
+    ) == hidden_timeline_revision
     page.locator('[data-editor-tool="art"]').click()
     wait_for_preview_time(page, selected_time)
+    assert page.locator("#editorSuiteTimelineLayer").get_attribute(
+        "data-timing-revision"
+    ) == latest_timing_revision
     assert art_panel.evaluate("panel => panel.inert") is False
     assert pip_panel.evaluate("panel => panel.inert") is True
     page.locator('[data-editor-tool="pip"]').click()
     wait_for_preview_time(page, selected_time)
+    assert page.locator("#editorSuiteTimelineLayer").get_attribute(
+        "data-timing-revision"
+    ) == latest_timing_revision
 
     assert page.title() == original_title
     assert selected_art.count() == 0
