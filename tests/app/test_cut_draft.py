@@ -1829,6 +1829,255 @@ def test_editable_transcript_segments_can_split_and_merge_by_selected_text():
     assert merged_segments[0]["end"] == 1.4
 
 
+def test_scoped_text_edit_replaces_duplicate_slice_and_preserves_source_owners() -> None:
+    source_segments = [
+        {
+            "id": 0,
+            "start": 0.0,
+            "end": 1.0,
+            "text": "😀重复前",
+            "words": [{"text": "😀重复前", "start": 0.0, "end": 1.0}],
+        },
+        {
+            "id": 1,
+            "start": 1.0,
+            "end": 2.0,
+            "text": "😀重复后",
+            "words": [{"text": "😀重复后", "start": 1.0, "end": 2.0}],
+        },
+    ]
+    editable_segments = app_module.build_editable_transcript_segments(
+        source_segments
+    )
+    merged = app_module.apply_transcript_segment_operation(
+        editable_segments,
+        app_module.TranscriptSegmentOperation(
+            segmentIndex=0,
+            action="merge_down",
+        ),
+        source_segments,
+    )
+    original_tokens = app_module.editable_segment_character_tokens(
+        merged[0],
+        source_segments,
+    )
+
+    edited = app_module.apply_transcript_segment_operation(
+        merged,
+        app_module.TranscriptSegmentOperation(
+            segmentIndex=0,
+            action="text",
+            selectionStart=4,
+            selectionEnd=7,
+            text="第二处",
+        ),
+        source_segments,
+    )
+    edited_tokens = app_module.editable_segment_character_tokens(
+        edited[0],
+        source_segments,
+    )
+    synced = app_module.sync_source_segments_from_editable(
+        source_segments,
+        edited,
+    )
+
+    assert edited[0]["text"] == "😀重复前第二处后"
+    assert edited[0]["sourceSegmentIndexes"] == [0, 1]
+    assert edited_tokens[:4] == original_tokens[:4]
+    assert edited_tokens[-1] == original_tokens[-1]
+    assert [token["sourceSegmentIndex"] for token in edited_tokens] == [
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        1,
+    ]
+    assert [segment["text"] for segment in synced] == ["😀重复前", "第二处后"]
+
+
+def test_scoped_merge_isolates_unselected_prefix_or_suffix_atomically() -> None:
+    source_segments = [
+        {
+            "id": 0,
+            "start": 0.0,
+            "end": 1.0,
+            "text": "上段",
+            "words": [{"text": "上段", "start": 0.0, "end": 1.0}],
+        },
+        {
+            "id": 1,
+            "start": 1.0,
+            "end": 2.0,
+            "text": "目标后缀",
+            "words": [{"text": "目标后缀", "start": 1.0, "end": 2.0}],
+        },
+        {
+            "id": 2,
+            "start": 2.0,
+            "end": 3.0,
+            "text": "下段",
+            "words": [{"text": "下段", "start": 2.0, "end": 3.0}],
+        },
+    ]
+    editable_segments = app_module.build_editable_transcript_segments(
+        source_segments
+    )
+
+    merged_up = app_module.apply_transcript_segment_operation(
+        editable_segments,
+        app_module.TranscriptSegmentOperation(
+            segmentIndex=1,
+            action="merge_up",
+            selectionStart=0,
+            selectionEnd=2,
+        ),
+        source_segments,
+    )
+    merged_down = app_module.apply_transcript_segment_operation(
+        editable_segments,
+        app_module.TranscriptSegmentOperation(
+            segmentIndex=1,
+            action="merge_down",
+            selectionStart=2,
+            selectionEnd=4,
+        ),
+        source_segments,
+    )
+
+    assert [segment["text"] for segment in merged_up] == [
+        "上段目标",
+        "后缀",
+        "下段",
+    ]
+    assert [
+        app_module.editable_segment_source_parts(segment, source_segments)
+        for segment in merged_up
+    ] == [[(0, "上段"), (1, "目标")], [(1, "后缀")], [(2, "下段")]]
+    assert [segment["text"] for segment in merged_down] == [
+        "上段",
+        "目标",
+        "后缀下段",
+    ]
+    assert [
+        app_module.editable_segment_source_parts(segment, source_segments)
+        for segment in merged_down
+    ] == [[(0, "上段")], [(1, "目标")], [(1, "后缀"), (2, "下段")]]
+
+
+def test_editable_segment_api_scoped_text_and_range_validation() -> None:
+    job_id = "43434343-4343-4434-8434-434343434343"
+    source_segments = [
+        {
+            "id": 0,
+            "start": 0.0,
+            "end": 1.0,
+            "text": "你身边你身边都觉得",
+            "words": [
+                {"text": "你身边你身边都觉得", "start": 0.0, "end": 1.0}
+            ],
+        },
+        {
+            "id": 1,
+            "start": 1.0,
+            "end": 2.0,
+            "text": "下一段",
+            "words": [{"text": "下一段", "start": 1.0, "end": 2.0}],
+        },
+    ]
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "status": "completed",
+            "duration": 2.0,
+            "result": {
+                "text": "你身边你身边都觉得\n下一段",
+                "segments": source_segments,
+                "editableSegments": app_module.build_editable_transcript_segments(
+                    source_segments
+                ),
+            },
+            "edit": None,
+            "art": None,
+        }
+
+    with TestClient(app_module.app) as client:
+        incomplete = client.put(
+            f"/api/transcriptions/{job_id}/editable-segments",
+            json={
+                "segmentIndex": 0,
+                "action": "text",
+                "selectionStart": 3,
+                "text": "大家",
+            },
+        )
+        invalid = client.put(
+            f"/api/transcriptions/{job_id}/editable-segments",
+            json={
+                "segmentIndex": 0,
+                "action": "text",
+                "selectionStart": 3,
+                "selectionEnd": 99,
+                "text": "大家",
+            },
+        )
+        invalid_merge_up = client.put(
+            f"/api/transcriptions/{job_id}/editable-segments",
+            json={
+                "segmentIndex": 1,
+                "action": "merge_up",
+                "selectionStart": 1,
+                "selectionEnd": 2,
+            },
+        )
+        invalid_merge_down = client.put(
+            f"/api/transcriptions/{job_id}/editable-segments",
+            json={
+                "segmentIndex": 0,
+                "action": "merge_down",
+                "selectionStart": 3,
+                "selectionEnd": 6,
+            },
+        )
+        edited = client.put(
+            f"/api/transcriptions/{job_id}/editable-segments",
+            json={
+                "segmentIndex": 0,
+                "action": "text",
+                "selectionStart": 3,
+                "selectionEnd": 6,
+                "text": "大家",
+            },
+        )
+
+    assert incomplete.status_code == 400
+    assert incomplete.json()["detail"] == "文字片段范围必须同时包含开始和结束位置。"
+    assert invalid.status_code == 400
+    assert invalid.json()["detail"] == "文字片段范围无效，请刷新后重试。"
+    assert invalid_merge_up.status_code == 400
+    assert (
+        invalid_merge_up.json()["detail"]
+        == "向上合并的文字片段必须从当前段开头开始。"
+    )
+    assert invalid_merge_down.status_code == 400
+    assert (
+        invalid_merge_down.json()["detail"]
+        == "向下合并的文字片段必须延伸到当前段结尾。"
+    )
+    assert edited.status_code == 200
+    assert edited.json()["editableSegments"][0]["text"] == "你身边大家都觉得"
+    with app_module.JOBS_LOCK:
+        result = copy.deepcopy(app_module.JOBS[job_id]["result"])
+    assert result["text"] == "你身边大家都觉得\n下一段"
+    assert [segment["text"] for segment in result["segments"]] == [
+        "你身边大家都觉得",
+        "下一段",
+    ]
+
+
 def test_cross_source_merge_and_text_edit_preserve_character_ownership() -> None:
     source_segments = [
         {

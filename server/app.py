@@ -11836,6 +11836,21 @@ def normalize_editable_segment_ids(
     return normalized
 
 
+def optional_transcript_operation_range(
+    operation: TranscriptSegmentOperation,
+    token_count: int,
+) -> tuple[int, int] | None:
+    selection_start = operation.selectionStart
+    selection_end = operation.selectionEnd
+    if selection_start is None and selection_end is None:
+        return None
+    if selection_start is None or selection_end is None:
+        raise ValueError("文字片段范围必须同时包含开始和结束位置。")
+    if not (0 <= selection_start < selection_end <= token_count):
+        raise ValueError("文字片段范围无效，请刷新后重试。")
+    return selection_start, selection_end
+
+
 def apply_transcript_segment_operation(
     editable_segments: list[dict[str, Any]],
     operation: TranscriptSegmentOperation,
@@ -11847,17 +11862,55 @@ def apply_transcript_segment_operation(
 
     segment_index = operation.segmentIndex
     if operation.action == "text":
-        new_text = str(operation.text or "").strip()
-        if not content_characters(new_text):
+        replacement_text = str(operation.text or "").strip()
+        if not content_characters(replacement_text):
             raise ValueError("修改后的文字不能为空。")
+        segment = segments[segment_index]
+        tokens = editable_segment_character_tokens(segment, source_segments)
+        selection_range = optional_transcript_operation_range(
+            operation,
+            len(tokens),
+        )
+        new_text = replacement_text
+        if selection_range is not None:
+            selection_start, selection_end = selection_range
+            selected_tokens = tokens[selection_start:selection_end]
+            source_segment_index = int(
+                segment.get("sourceSegmentIndex", 0) or 0
+            )
+            selected_segment = build_editable_segment_from_tokens(
+                selected_tokens,
+                source_segment_index,
+            )
+            selected_segment["text"] = replacement_text
+            selected_segment["words"] = retokenize_editable_segment_text(
+                selected_segment,
+                replacement_text,
+                source_segments,
+            )
+            replacement_tokens = editable_segment_character_tokens(
+                selected_segment,
+                source_segments,
+            )
+            updated_tokens = [
+                *tokens[:selection_start],
+                *replacement_tokens,
+                *tokens[selection_end:],
+            ]
+            new_text = "".join(
+                str(token.get("text") or "") for token in updated_tokens
+            )
         if len(content_characters(new_text)) > 300:
             raise ValueError("单段文字过长，请精简后再保存。")
-        segment = segments[segment_index]
         source_indexes = editable_segment_source_indexes(segment, source_segments)
-        updated_words = retokenize_editable_segment_text(
-            segment,
-            new_text,
-            source_segments,
+        updated_words = (
+            updated_tokens
+            if selection_range is not None
+            else retokenize_editable_segment_text(
+                segment,
+                new_text,
+                source_segments,
+            )
         )
         segment["text"] = new_text
         segment["words"] = updated_words
@@ -11866,13 +11919,83 @@ def apply_transcript_segment_operation(
             segment["sourceSegmentIndexes"] = source_indexes
         return normalize_editable_segment_ids(segments)
     if operation.action == "merge_up":
+        segment = segments[segment_index]
+        tokens = editable_segment_character_tokens(segment, source_segments)
+        selection_range = optional_transcript_operation_range(
+            operation,
+            len(tokens),
+        )
+        if selection_range is not None and selection_range[0] != 0:
+            raise ValueError("向上合并的文字片段必须从当前段开头开始。")
         if segment_index == 0:
             raise ValueError("第一段没有可向上合并的段落。")
+        if selection_range is not None:
+            _selection_start, selection_end = selection_range
+            previous_segment = segments[segment_index - 1]
+            previous_tokens = editable_segment_character_tokens(
+                previous_segment,
+                source_segments,
+            )
+            previous_source_index = int(
+                previous_segment.get("sourceSegmentIndex", 0) or 0
+            )
+            replacement_segments = [
+                build_editable_segment_from_tokens(
+                    [*previous_tokens, *tokens[:selection_end]],
+                    previous_source_index,
+                )
+            ]
+            if selection_end < len(tokens):
+                source_segment_index = int(
+                    segment.get("sourceSegmentIndex", 0) or 0
+                )
+                replacement_segments.append(
+                    build_editable_segment_from_tokens(
+                        tokens[selection_end:],
+                        source_segment_index,
+                    )
+                )
+            segments[segment_index - 1 : segment_index + 1] = replacement_segments
+            return normalize_editable_segment_ids(segments)
         merge_start = segment_index - 1
         merge_parts = segments[merge_start : segment_index + 1]
     elif operation.action == "merge_down":
+        segment = segments[segment_index]
+        tokens = editable_segment_character_tokens(segment, source_segments)
+        selection_range = optional_transcript_operation_range(
+            operation,
+            len(tokens),
+        )
+        if selection_range is not None and selection_range[1] != len(tokens):
+            raise ValueError("向下合并的文字片段必须延伸到当前段结尾。")
         if segment_index + 1 >= len(segments):
             raise ValueError("最后一段没有可向下合并的段落。")
+        if selection_range is not None:
+            selection_start, _selection_end = selection_range
+            next_segment = segments[segment_index + 1]
+            next_tokens = editable_segment_character_tokens(
+                next_segment,
+                source_segments,
+            )
+            source_segment_index = int(
+                segment.get("sourceSegmentIndex", 0) or 0
+            )
+            replacement_segments: list[dict[str, Any]] = []
+            if selection_start > 0:
+                replacement_segments.append(
+                    build_editable_segment_from_tokens(
+                        tokens[:selection_start],
+                        source_segment_index,
+                    )
+                )
+            replacement_segments.append(
+                build_editable_segment_from_tokens(
+                    [*tokens[selection_start:], *next_tokens],
+                    source_segment_index,
+                )
+            )
+            segments[segment_index : segment_index + 2] = replacement_segments
+            return normalize_editable_segment_ids(segments)
         merge_start = segment_index
         merge_parts = segments[segment_index : segment_index + 2]
     else:

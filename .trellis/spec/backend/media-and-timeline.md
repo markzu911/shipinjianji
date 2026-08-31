@@ -135,13 +135,14 @@ const cutTranscript = getCurrentRetainedProjection();
 ### 1. Scope / Trigger
 
 - 用户把属于不同 ASR `sourceSegmentIndex` 的相邻 editable 段合并，随后执行文字修改、再次拆分、删除或刷新恢复时适用。
+- 一个 editable 父段被删除状态拆成多个可见 run，浏览器只修改或合并其中一个连续字符片段时同样适用。
 - editable 段是展示和操作单元，不再隐含“只属于一个源句”；源句仍是 retained transcript、声学映射和艺术字 source anchor 的稳定存储单元。
 
 ### 2. Signatures
 
 - `apply_transcript_segment_operation(editable_segments, operation, source_segments=None) -> editable_segments`。
 - `sync_source_segments_from_editable(source_segments, editable_segments) -> source_segments`。
-- `PUT /api/transcriptions/{job_id}/editable-segments` 的请求 action 保持 `merge_up|merge_down|split|text`；响应中的 mixed-source editable 段携带主归属 `sourceSegmentIndex`、有序完整归属 `sourceSegmentIndexes[]`，其 `words[]` 携带逐 token `sourceSegmentIndex`。
+- `PUT /api/transcriptions/{job_id}/editable-segments` 的请求 action 保持 `merge_up|merge_down|split|text`；`selectionStart/selectionEnd` 是可选的父段 Unicode code point 半开范围。响应中的 mixed-source editable 段携带主归属 `sourceSegmentIndex`、有序完整归属 `sourceSegmentIndexes[]`，其 `words[]` 携带逐 token `sourceSegmentIndex`。
 
 ### 3. Contracts
 
@@ -152,6 +153,8 @@ const cutTranscript = getCurrentRetainedProjection();
 - retained transcript、editable acoustic boundary、已有 edit projection 和 transcript art cue 均消费同一 token owner；一个 mixed-source editable id 可映射多个 source segment。源句清空时对应艺术字 cue 进入既有 suppressed 流程。
 - 旧草稿没有 token owner 时，只能按每个字符的时间中点和已声明源句包络单调恢复；一个旧自然词跨源时不得用整词中点统一归属。无法形成完整单调分区时使用既有安全回退，不得部分安装映射。
 - 以上只改变语义归属；不得修改 VAD/forced alignment 候选、物理删除范围或声学吸附算法。
+- `text` 带 selection 时只重分词并替换目标 token slice，前后 token 的文字、时间和 owner 不变；无 selection 时保持旧整段替换。
+- 局部 `merge_up` 要求 selection start 为 `0`，先把未选 suffix 隔离，再合并上一段与目标 prefix；局部 `merge_down` 要求 selection end 等于父段 token 数，先隔离未选 prefix，再合并目标 suffix 与下一段。隔离和合并只安装一次最终列表，不持久化中间结构。
 
 ### 4. Validation & Error Matrix
 
@@ -163,12 +166,16 @@ const cutTranscript = getCurrentRetainedProjection();
 | 旧 merged words 的单个词跨两个 source 包络 | 按逐字符时间中点恢复两个 owner，字符数量守恒 |
 | source words/anchors 合法 | 回写后的 word 时间有限、单调、位于各自 source 包络内 |
 | action 后工程快照写入失败 | 路由保持既有 `500 分段状态保存失败`，不得报告伪成功 |
+| selection 只提供一个端点、为空或越界 | 返回稳定 400，不执行局部写入 |
+| 局部 merge 范围未贴对应父段边界 | 返回方向明确的稳定 400，不跨越未选/删除文字 |
 
 ### 5. Good / Base / Bad Cases
 
 - Good：源句“所有人。”和“一起出发。”合并后改成“所有人。共同出发。”，回写仍是两个源句且拼接恰好等于新文案；同一 editable id 可投影到两个 retained segment。
 - Base：同一源句内 split/merge/text 仍只有一个 owner，既有 API 和时间行为不变。
 - Bad：合并段只继承首句 owner，再把全文写回首句；后一源句会保留旧文案并产生重复。按字符数量比例硬切也会把用户修改错分到另一源句。
+- Good：父段含两处相同短语时，用明确 `selectionStart/selectionEnd` 修改第二处；第一处和被删除前缀逐字符不变。
+- Bad：服务端用 replacement 文字搜索父段，或局部 merge 先持久化 split 再发第二次 merge；前者命中错误实例，后者暴露半完成 revision。
 
 ### 6. Tests Required
 
@@ -176,6 +183,7 @@ const cutTranscript = getCurrentRetainedProjection();
 - legacy：删除 `sourceSegmentIndexes` 和 token owner 后恢复；覆盖一个自然词跨 source 边界，断言逐字符归属而非整词中点归属。
 - API/持久化：真实连续 merge/text PUT 后，同时检查内存 job 与 `project-state.json` 中的 source segments、editable segments、retained transcript 和艺术字 cue 无重复且拼接一致。
 - 回归：完整 `test_cut_draft.py`、声学边界和艺术字 API/track 测试；物理删除边界结果不得变化。
+- scoped operation：覆盖第二处重复短语、emoji、prefix/suffix token 快照、局部双向 merge、非法范围 400，以及无 selection 的旧整段请求。
 
 ### 7. Wrong vs Correct
 
@@ -187,6 +195,25 @@ source["text"] = "".join(item["text"] for item in parts)
 # Correct: 兼容主归属只用于旧消费者，真实回写按逐 token owner 聚合。
 for token in editable_segment_character_tokens(editable, source_segments):
     words_by_source[token["sourceSegmentIndex"]].append(token)
+```
+
+```python
+# Wrong: 先模糊搜索文字，或用两个请求拆分再合并。
+start = segment["text"].index(request.text)
+
+# Correct: 验证父段 code point 范围，在同一个内存结果中组装最终 replacement。
+selection_start, _selection_end = optional_transcript_operation_range(
+    operation,
+    len(tokens),
+)
+replacement_segments = [
+    build_editable_segment_from_tokens(tokens[:selection_start], owner),
+    build_editable_segment_from_tokens(
+        [*tokens[selection_start:], *next_tokens],
+        owner,
+    ),
+]
+segments[index:index + 2] = replacement_segments
 ```
 
 ## 场景：实时艺术字草稿使用双时间坐标

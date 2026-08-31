@@ -1777,6 +1777,240 @@ def test_server_projection_keeps_disjoint_runs_for_one_editable_segment(
     ).all_text_contents() == ["删除片段", "保", "内容"]
 
 
+def test_visible_text_fragment_dialog_save_and_merge_preserve_deleted_prefix(
+    browser_session,
+    seeded_two_cue_transcript_track_editor_job,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    source_segments = [
+        {
+            "id": 0,
+            "start": 0.05,
+            "end": 0.65,
+            "text": "重复删除重复保留",
+            "words": [
+                {"text": "重复删除", "start": 0.05, "end": 0.35},
+                {"text": "重复保留", "start": 0.35, "end": 0.65},
+            ],
+        },
+        {
+            "id": 1,
+            "start": 0.70,
+            "end": 0.95,
+            "text": "下段内容",
+            "words": [{"text": "下段内容", "start": 0.70, "end": 0.95}],
+        },
+    ]
+
+    def deterministic_boundaries(
+        _media_path,
+        _source_segments,
+        editable_segments,
+        **_kwargs,
+    ):
+        segments = app_module.normalize_editable_segment_ids(editable_segments)
+        for segment in segments:
+            segment["mediaStart"] = float(segment["start"])
+            segment["mediaEnd"] = float(segment["end"])
+        return segments, []
+
+    monkeypatch.setattr(
+        app_module,
+        "enrich_editable_segment_boundaries",
+        deterministic_boundaries,
+    )
+    job_id = seeded_two_cue_transcript_track_editor_job.job_id
+    with app_module.JOBS_LOCK:
+        job = app_module.JOBS[job_id]
+        job["result"].update(
+            {
+                "text": "重复删除重复保留\n下段内容",
+                "segments": copy.deepcopy(source_segments),
+                "editableSegments": copy.deepcopy(source_segments),
+                "editableSegmentBoundaries": [],
+            }
+        )
+        for overlay in job["art"]["overlays"]:
+            if overlay.get("sourceSegmentIndex") == 0:
+                overlay.update(
+                    {
+                        "text": "重复删除重复保留",
+                        "start": 0.05,
+                        "end": 0.65,
+                        "sourceStart": 0.05,
+                        "sourceEnd": 0.65,
+                    }
+                )
+            else:
+                overlay.update(
+                    {
+                        "text": "下段内容",
+                        "start": 0.70,
+                        "end": 0.95,
+                        "sourceStart": 0.70,
+                        "sourceEnd": 0.95,
+                    }
+                )
+            overlay.pop("characterTimings", None)
+        job["cutDraft"] = {
+            "schemaVersion": 1,
+            "revision": 1,
+            "automaticNoSpeechInitialized": True,
+            "textRanges": [
+                {
+                    "key": "0.050-0.350",
+                    "start": 0.05,
+                    "end": 0.35,
+                    "originalStart": 0.05,
+                    "originalEnd": 0.35,
+                    "text": "重复删除",
+                    "adjacentSilenceBefore": 0.0,
+                    "adjacentSilenceAfter": 0.0,
+                }
+            ],
+            "noSpeechRanges": [],
+            "timelineRanges": [],
+            "boundaryDiagnostics": [],
+            "acousticAlignment": {"status": "unavailable"},
+            "updatedAt": "2026-08-31T00:00:00+00:00",
+        }
+    app_module.persist_job_snapshot(job_id, raise_on_error=True)
+
+    page = browser_session.page
+    route_cut_draft_echo(page, job_id)
+    install_cut_performance_probe(page)
+    page = open_editor(browser_session, seeded_two_cue_transcript_track_editor_job)
+    install_base_media_mutation_probe(page)
+    created_videos_before = page.evaluate(
+        "window.__cutPerformanceProbe.createdVideos"
+    )
+
+    retained_button = page.get_by_role(
+        "button",
+        name="编辑文字段：重复保留",
+        exact=True,
+    )
+    retained_item = retained_button.locator("xpath=ancestor::li[1]")
+    assert retained_item.get_attribute("data-segment-character-start") == "4"
+    assert retained_item.get_attribute("data-segment-character-end") == "8"
+    retained_button.click()
+    assert page.locator("#segmentEditText").input_value() == "重复保留"
+    assert page.locator("#segmentEditTime").text_content() == (
+        "00:00.050 — 00:00.350"
+    )
+    assert page.locator("#mergeSegmentUpButton").is_disabled()
+    assert page.locator("#mergeSegmentDownButton").is_enabled()
+
+    page.locator("#segmentEditText").fill("重复已留")
+    with page.expect_response(
+        lambda response: response.request.method == "PUT"
+        and response.url.endswith("/editable-segments")
+    ) as save_response_info:
+        page.locator("#saveSegmentTextButton").click()
+    save_response = save_response_info.value
+    assert save_response.ok, save_response.text()
+    assert save_response.request.post_data_json == {
+        "segmentIndex": 0,
+        "action": "text",
+        "text": "重复已留",
+        "selectionStart": 4,
+        "selectionEnd": 8,
+    }
+    page.locator("#segmentStructureStatus").filter(
+        has_text="项目预览已同步"
+    ).wait_for()
+    with app_module.JOBS_LOCK:
+        saved_segments = copy.deepcopy(
+            app_module.JOBS[job_id]["result"]["editableSegments"]
+        )
+    assert [segment["text"] for segment in saved_segments] == [
+        "重复删除重复已留",
+        "下段内容",
+    ]
+
+    page.get_by_role(
+        "button",
+        name="编辑文字段：重复已留",
+        exact=True,
+    ).click()
+    assert page.locator("#mergeSegmentUpButton").is_disabled()
+    assert page.locator("#mergeSegmentDownButton").is_enabled()
+    with page.expect_response(
+        lambda response: response.request.method == "PUT"
+        and response.url.endswith("/editable-segments")
+    ) as merge_response_info:
+        page.locator("#mergeSegmentDownButton").click()
+    merge_response = merge_response_info.value
+    assert merge_response.ok, merge_response.text()
+    assert merge_response.request.post_data_json == {
+        "segmentIndex": 0,
+        "action": "merge_down",
+        "selectionStart": 4,
+        "selectionEnd": 8,
+    }
+    page.locator("#segmentEditDialog").wait_for(state="hidden")
+    page.get_by_role(
+        "button",
+        name="恢复已删除文字：重复删除",
+        exact=True,
+    ).wait_for(state="visible")
+    with app_module.JOBS_LOCK:
+        merged_segments = copy.deepcopy(
+            app_module.JOBS[job_id]["result"]["editableSegments"]
+        )
+    assert [segment["text"] for segment in merged_segments] == [
+        "重复删除",
+        "重复已留下段内容",
+    ]
+
+    page.wait_for_function(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          return (snapshot.project.cut.transcript?.segments || [])
+            .map(item => item.text).join('') === '重复已留下段内容';
+        }"""
+    )
+    projection = page.evaluate(
+        """() => {
+          const snapshot = window.EditorSuite.projectSnapshot();
+          const frame = window.EditorProjectStore.selectEditorFrame(snapshot);
+          const orderedText = items => [...items]
+            .sort((left, right) => left.start - right.start || left.end - right.end)
+            .map(item => item.text || item.payload?.text || '')
+            .join('');
+          const artClips = frame.timeline.tracks
+            .filter(track => track.id === 'art:transcript:browser-transcript-track')
+            .flatMap(track => track.clips);
+          return {
+            cut: orderedText(snapshot.project.cut.transcript?.segments || []),
+            art: orderedText(snapshot.project.art.overlays.filter(
+              item => item.trackType === 'transcript'
+            )),
+            timeline: orderedText(artClips),
+            preview: orderedText(frame.preview.art.overlays.filter(
+              item => item.trackType === 'transcript'
+            )),
+            compose: orderedText(frame.composition.artOverlays.filter(
+              item => item.trackId === 'browser-transcript-track'
+            )),
+            cutTimeline: [...document.querySelectorAll(
+              '#cutFrameTimelineText .cut-timeline-text-segment-label'
+            )].map(item => item.textContent).join(''),
+            createdVideos: window.__cutPerformanceProbe.createdVideos,
+          };
+        }"""
+    )
+    expected_text = "重复已留下段内容"
+    assert projection["cut"] == expected_text
+    assert projection["art"] == expected_text
+    assert projection["timeline"] == expected_text
+    assert projection["preview"] == expected_text
+    assert projection["compose"] == expected_text
+    assert projection["cutTimeline"] == expected_text
+    assert projection["createdVideos"] == created_videos_before
+    assert base_media_mutations(page) == {"srcWrites": 0, "loadCalls": 0}
+
+
 def test_user_text_split_projects_directional_boundaries_without_media_reload(
     browser_session,
     seeded_two_cue_transcript_track_editor_job,

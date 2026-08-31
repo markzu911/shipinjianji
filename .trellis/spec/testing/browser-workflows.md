@@ -39,6 +39,7 @@ seeded_editor_job(sample_video) -> SeededEditorJob
 - 剪辑性能：长 fixture 连续 10 次删除/恢复达到 P95 `<=80ms`、最大 `<=120ms`、同步 P95 `<=10ms`，无 `>100ms` long task；普通选择保留未受影响的文案、时间轴文字和 ruler 节点 identity，且不触发 full replace/fallback、extractor、seek 或基础媒体重载。播放 fixture 使用本地真实 16 秒媒体，正常倍速播放至少 15 秒并跨越至少 8 个文字/空白边界；切段 rAF 延迟 P95 `<=16ms`、最大 `<=32ms`，无 `>50ms` long task，活动真实行与播放按钮始终唯一。
 - 工具切换：cut/art/pip 始终保持同一 document、基础 video、公共预览和公共时间线；隐藏 panel 必须 inert。
 - 文字保存：暂停/播放两种状态都保持 document/video/ArtTool/PipTool identity、src、currentTime、play state 和 art/pip 时间；新文案通过顶层 Store 进入艺术字与 compose。
+- 展示片段编辑：父 editable 段含已删除前缀/后缀和重复短语时，点击保留行只打开该 run；保存、局部拆分和允许方向的原子合并只影响目标 code point 范围，被隔离删除文字仍有恢复入口。操作后同时核对 Store、艺术字、公共时间轴、preview、compose、媒体 mutation 和 extractor 计数。
 - 统一生成：用 `expect_response` 捕获真实 compose 响应，断言请求字段来自同一个 editor frame。
 - 重启恢复：completed 工程清空进程内状态后仍从同一 URL 恢复文案/草稿/工具；running 工程变为 `interrupted`、停止轮询并提供同 job 重试。重试响应迟到时，已点击“重新选择视频”的页面不得被旧 job 重新渲染。
 - 清理：context、Uvicorn 线程、socket 和临时媒体全部释放；连续运行结果一致。

@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "后端实现与 API 兼容质量门禁"}
+{"file": ".trellis/spec/frontend/architecture-and-state.md", "reason": "复核片段 identity、Store 和草稿一致性"}
+{"file": ".trellis/spec/frontend/ui-and-interactions.md", "reason": "复核弹窗与按钮可观察行为"}
+{"file": ".trellis/spec/testing/index.md", "reason": "完整测试与回归选择"}
+{"file": ".trellis/spec/testing/browser-workflows.md", "reason": "真实浏览器错误、媒体 identity 和状态一致性门禁"}

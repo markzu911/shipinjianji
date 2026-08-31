@@ -191,7 +191,7 @@ let currentJobId = null;
 let currentSegments = [];
 let currentEditableSegments = [];
 let currentEditableSegmentBoundaries = [];
-let activeSegmentEditIndex = null;
+let activeSegmentEditTarget = null;
 let segmentOperationInFlight = false;
 let currentSuggestions = [];
 let currentNoSpeechSuggestions = [];
@@ -756,7 +756,12 @@ function buildSegmentTextRuns(segment, deletedRanges, segmentIndex) {
         },
       ];
   const runs = [];
+  let characterCursor = 0;
   for (const [wordIndex, word] of words.entries()) {
+    const wordText = String(word.text || "");
+    const characterStart = characterCursor;
+    characterCursor += Array.from(wordText).length;
+    const characterEnd = characterCursor;
     const semanticStart = Number(word.start);
     const semanticEnd = Number(word.end);
     const start = wordIndex === 0 ? displayBounds.start : semanticStart;
@@ -793,7 +798,8 @@ function buildSegmentTextRuns(segment, deletedRanges, segmentIndex) {
         (kind === "restore" || previous.presentationKey === presentationKey),
     );
     if (canMerge) {
-      previous.text += String(word.text || "");
+      previous.text += wordText;
+      previous.characterEnd = characterEnd;
       previous.end = Number.isFinite(end) ? end : previous.end;
       previous.semanticEnd = Number.isFinite(semanticEnd)
         ? semanticEnd
@@ -808,7 +814,9 @@ function buildSegmentTextRuns(segment, deletedRanges, segmentIndex) {
     } else {
       runs.push({
         kind,
-        text: String(word.text || ""),
+        text: wordText,
+        characterStart,
+        characterEnd,
         start,
         end,
         semanticStart,
@@ -885,10 +893,13 @@ function renderTextSegmentItem(run, segmentIndex, displayIndex) {
   item.dataset.displayEnd = String(segmentEnd);
   item.dataset.semanticStart = String(run.semanticStart);
   item.dataset.semanticEnd = String(run.semanticEnd);
+  item.dataset.segmentCharacterStart = String(run.characterStart);
+  item.dataset.segmentCharacterEnd = String(run.characterEnd);
   item.dataset.displayText = run.text;
   item.dataset.rangeKeys = JSON.stringify(run.rangeKeys);
   item.dataset.displayKey =
-    `${segmentIndex}:${run.presentationKey}:${rangeKey(segmentStart, segmentEnd)}`;
+    `${segmentIndex}:${run.characterStart}-${run.characterEnd}:` +
+    `${run.presentationKey}:${rangeKey(segmentStart, segmentEnd)}`;
 
   const selectSegmentButton = document.createElement("button");
   selectSegmentButton.type = "button";
@@ -1076,7 +1087,8 @@ function cutSegmentDisplayKey(displayItem) {
       : "";
   }
   const { run, segmentIndex } = displayItem;
-  return `${segmentIndex}:${run.presentationKey}:${rangeKey(run.start, run.end)}`;
+  return `${segmentIndex}:${run.characterStart}-${run.characterEnd}:` +
+    `${run.presentationKey}:${rangeKey(run.start, run.end)}`;
 }
 
 function cutSegmentReconcileSignature(displayItem) {
@@ -1098,6 +1110,8 @@ function cutSegmentReconcileSignature(displayItem) {
     key,
     run.kind,
     run.text,
+    run.characterStart,
+    run.characterEnd,
     run.semanticStart,
     run.semanticEnd,
     run.rangeKeys,
@@ -1502,50 +1516,171 @@ function getSegmentSelectionOffsets() {
 function updateSegmentEditSelection() {
   const selection = getSegmentSelectionOffsets();
   const selectedCharacters = Array.from(selection.text.trim()).length;
+  const textMatchesTarget = activeSegmentEditTarget !== null &&
+    segmentEditText.value === activeSegmentEditTarget.displayText;
   const hasPartialSelection =
+    textMatchesTarget &&
     selectedCharacters > 0 &&
     (selection.start > 0 || selection.end < Array.from(segmentEditText.value).length);
   splitSegmentButton.disabled = segmentOperationInFlight || !hasPartialSelection;
-  segmentEditSelectionStatus.textContent = hasPartialSelection
-    ? `已选择 ${selectedCharacters} 个字，将拆分为单独一行`
-    : "尚未选择部分文字";
+  segmentEditSelectionStatus.textContent = !textMatchesTarget
+    ? "文字已修改，请先保存后再拆分。"
+    : hasPartialSelection
+      ? `已选择 ${selectedCharacters} 个字，将拆分为单独一行`
+      : "尚未选择部分文字";
   segmentEditSelectionStatus.dataset.ready = String(hasPartialSelection);
+}
+
+function currentSegmentEditRun(target) {
+  const segment = currentEditableSegments[target?.segmentIndex];
+  if (!segment) return null;
+  const deletedRanges = getCommittedTimelineSemanticDeleteRanges();
+  return buildSegmentTextRuns(
+    segment,
+    deletedRanges,
+    target.segmentIndex,
+  ).find((run) =>
+    run.kind === "edit" &&
+    run.characterStart === target.characterStart &&
+    run.characterEnd === target.characterEnd &&
+    run.text === target.displayText &&
+    Number(run.start) === target.displayStart &&
+    Number(run.end) === target.displayEnd &&
+    Number(run.semanticStart) === target.semanticStart &&
+    Number(run.semanticEnd) === target.semanticEnd
+  ) || null;
+}
+
+function resolveSegmentEditTarget(item) {
+  const segmentIndex = Number(item?.dataset?.segmentIndex);
+  const characterStart = Number(item?.dataset?.segmentCharacterStart);
+  const characterEnd = Number(item?.dataset?.segmentCharacterEnd);
+  const displayStart = Number(item?.dataset?.displayStart);
+  const displayEnd = Number(item?.dataset?.displayEnd);
+  const semanticStart = Number(item?.dataset?.semanticStart);
+  const semanticEnd = Number(item?.dataset?.semanticEnd);
+  const displayText = String(item?.dataset?.displayText || "");
+  const segment = currentEditableSegments[segmentIndex];
+  const parentCharacters = Array.from(String(segment?.text || ""));
+  if (
+    !Number.isSafeInteger(segmentIndex) ||
+    !Number.isSafeInteger(characterStart) ||
+    !Number.isSafeInteger(characterEnd) ||
+    characterStart < 0 ||
+    characterEnd <= characterStart ||
+    characterEnd > parentCharacters.length ||
+    !Number.isFinite(displayStart) ||
+    !Number.isFinite(displayEnd) ||
+    displayEnd <= displayStart ||
+    !Number.isFinite(semanticStart) ||
+    !Number.isFinite(semanticEnd) ||
+    semanticEnd <= semanticStart ||
+    parentCharacters.slice(characterStart, characterEnd).join("") !== displayText
+  ) {
+    return null;
+  }
+  const target = {
+    segmentIndex,
+    segmentId: String(segment?.id ?? ""),
+    characterStart,
+    characterEnd,
+    displayStart,
+    displayEnd,
+    semanticStart,
+    semanticEnd,
+    displayText,
+  };
+  return currentSegmentEditRun(target) ? target : null;
+}
+
+function getActiveSegmentEditContext() {
+  const target = activeSegmentEditTarget;
+  if (!target) return null;
+  const segment = currentEditableSegments[target.segmentIndex];
+  if (
+    !segment ||
+    (target.segmentId && String(segment.id ?? "") !== target.segmentId)
+  ) {
+    return null;
+  }
+  const parentCharacters = Array.from(String(segment.text || ""));
+  if (
+    target.characterStart < 0 ||
+    target.characterEnd <= target.characterStart ||
+    target.characterEnd > parentCharacters.length ||
+    parentCharacters
+      .slice(target.characterStart, target.characterEnd)
+      .join("") !== target.displayText
+  ) {
+    return null;
+  }
+  if (!currentSegmentEditRun(target)) return null;
+  return {
+    segment,
+    target,
+    parentCharacterCount: parentCharacters.length,
+    wholeSegment:
+      target.characterStart === 0 &&
+      target.characterEnd === parentCharacters.length,
+  };
+}
+
+function reportStaleSegmentEditTarget() {
+  const message = "当前文案片段已变化，请关闭弹窗后重新选择。";
+  segmentEditSelectionStatus.textContent = message;
+  segmentEditSelectionStatus.dataset.ready = "error";
+  setSegmentStructureStatus(message, "error");
+}
+
+function updateSegmentMergeButtons() {
+  const context = getActiveSegmentEditContext();
+  mergeSegmentUpButton.disabled = Boolean(
+    segmentOperationInFlight ||
+    !context ||
+    context.target.segmentIndex === 0 ||
+    context.target.characterStart !== 0,
+  );
+  mergeSegmentDownButton.disabled = Boolean(
+    segmentOperationInFlight ||
+    !context ||
+    context.target.segmentIndex === currentEditableSegments.length - 1 ||
+    context.target.characterEnd !== context.parentCharacterCount,
+  );
 }
 
 function closeSegmentEditDialog() {
   if (!segmentEditDialog.open || segmentOperationInFlight) return;
   segmentEditDialog.classList.remove("is-visible");
   segmentEditDialog.close();
-  activeSegmentEditIndex = null;
+  activeSegmentEditTarget = null;
 }
 
-function openSegmentEditDialog(segmentIndex) {
+function openSegmentEditDialog(item) {
   if (cutControlsLocked || segmentOperationInFlight) return;
-  const segment = currentEditableSegments[segmentIndex];
-  if (!segment) return;
-  const displayBounds = editableSegmentDisplayBounds(segment, segmentIndex);
+  const target = resolveSegmentEditTarget(item);
+  if (!target) {
+    setSegmentStructureStatus(
+      "当前文案片段与原文不一致，请刷新后重试。",
+      "error",
+    );
+    return;
+  }
   const timing = getLiveEditedSegmentTiming({
-    ...segment,
-    mediaStart: displayBounds.start,
-    mediaEnd: displayBounds.end,
+    start: target.displayStart,
+    end: target.displayEnd,
   });
   if (!timing) {
     setSegmentStructureStatus("该段已从当前剪辑时间轴删除。", "error");
     return;
   }
-  if (selectedRanges.has(rangeKey(segment.start, segment.end))) {
-    setSegmentStructureStatus("该段已删除，当前剪辑方案内不可恢复或调整。", "error");
-    return;
-  }
-  activeSegmentEditIndex = segmentIndex;
-  segmentEditEyebrow.textContent = `段落 ${String(segmentIndex + 1).padStart(2, "0")}`;
+  activeSegmentEditTarget = target;
+  segmentEditEyebrow.textContent =
+    `段落 ${String(target.segmentIndex + 1).padStart(2, "0")}`;
   segmentEditTime.textContent =
     `${formatPreciseTime(timing.start)} — ${formatPreciseTime(timing.end)}`;
-  segmentEditText.value = String(segment.text || "");
+  segmentEditText.value = target.displayText;
   segmentEditText.setSelectionRange(0, 0);
-  mergeSegmentUpButton.disabled = segmentIndex === 0;
-  mergeSegmentDownButton.disabled =
-    segmentIndex === currentEditableSegments.length - 1;
+  updateSegmentMergeButtons();
   splitSegmentButton.disabled = true;
   segmentEditSelectionStatus.textContent = "尚未选择部分文字";
   segmentEditSelectionStatus.dataset.ready = "false";
@@ -1560,24 +1695,45 @@ function setSegmentOperationBusy(busy) {
   segmentOperationInFlight = busy;
   segmentEditDialog.classList.toggle("is-busy", busy);
   segmentEditClose.disabled = busy;
-  mergeSegmentUpButton.disabled =
-    busy || activeSegmentEditIndex === 0;
-  mergeSegmentDownButton.disabled =
-    busy || activeSegmentEditIndex === currentEditableSegments.length - 1;
+  updateSegmentMergeButtons();
   updateSegmentEditSelection();
 }
 
 async function applyEditableSegmentOperation(action) {
-  if (segmentOperationInFlight || activeSegmentEditIndex === null) return;
+  if (segmentOperationInFlight || activeSegmentEditTarget === null) return;
+  const context = getActiveSegmentEditContext();
+  if (!context) {
+    reportStaleSegmentEditTarget();
+    return;
+  }
   const operationJobId = currentJobId;
   const payload = {
-    segmentIndex: activeSegmentEditIndex,
+    segmentIndex: context.target.segmentIndex,
     action,
   };
   if (action === "split") {
+    if (segmentEditText.value !== context.target.displayText) {
+      segmentEditSelectionStatus.textContent = "请先保存修改后的文字，再进行拆分。";
+      segmentEditSelectionStatus.dataset.ready = "error";
+      return;
+    }
     const selection = getSegmentSelectionOffsets();
-    payload.selectionStart = selection.start;
-    payload.selectionEnd = selection.end;
+    payload.selectionStart = context.target.characterStart + selection.start;
+    payload.selectionEnd = context.target.characterStart + selection.end;
+  } else if (action === "merge_up" || action === "merge_down") {
+    const allowed = action === "merge_up"
+      ? context.target.segmentIndex > 0 && context.target.characterStart === 0
+      : context.target.segmentIndex < currentEditableSegments.length - 1 &&
+        context.target.characterEnd === context.parentCharacterCount;
+    if (!allowed) {
+      segmentEditSelectionStatus.textContent = "已删除文字阻隔了这个合并方向。";
+      segmentEditSelectionStatus.dataset.ready = "error";
+      return;
+    }
+    if (!context.wholeSegment) {
+      payload.selectionStart = context.target.characterStart;
+      payload.selectionEnd = context.target.characterEnd;
+    }
   }
 
   setSegmentOperationBusy(true);
@@ -1625,15 +1781,19 @@ async function applyEditableSegmentOperation(action) {
 }
 
 async function saveSegmentText() {
-  if (segmentOperationInFlight || activeSegmentEditIndex === null) return;
+  if (segmentOperationInFlight || activeSegmentEditTarget === null) return;
+  const context = getActiveSegmentEditContext();
+  if (!context) {
+    reportStaleSegmentEditTarget();
+    return;
+  }
   const newText = segmentEditText.value;
-  const original = currentEditableSegments[activeSegmentEditIndex];
   if (!newText.trim()) {
     segmentEditSelectionStatus.textContent = "修改后的文字不能为空。";
     segmentEditSelectionStatus.dataset.ready = "error";
     return;
   }
-  if (original && original.text === newText) {
+  if (context.target.displayText === newText) {
     closeSegmentEditDialog();
     return;
   }
@@ -1647,9 +1807,15 @@ async function saveSegmentText() {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          segmentIndex: activeSegmentEditIndex,
+          segmentIndex: context.target.segmentIndex,
           action: "text",
           text: newText,
+          ...(!context.wholeSegment
+            ? {
+                selectionStart: context.target.characterStart,
+                selectionEnd: context.target.characterEnd,
+              }
+            : {}),
         }),
       },
     );
@@ -7904,7 +8070,10 @@ function handleTranscriptDisplayClick(event) {
   const editButton = event.target.closest(".segment-edit-button");
   if (editButton instanceof HTMLButtonElement) {
     if (!editButton.disabled) {
-      openSegmentEditDialog(Number(editButton.dataset.segmentIndex));
+      const segmentItem = editButton.closest(
+        ".segment-item[data-segment-index]",
+      );
+      if (segmentItem) openSegmentEditDialog(segmentItem);
     }
     return;
   }
@@ -7915,7 +8084,7 @@ function handleTranscriptDisplayClick(event) {
       segmentItem &&
       !["restore", "deleted"].includes(segmentItem.dataset.displayKind)
     ) {
-      openSegmentEditDialog(Number(segmentItem.dataset.segmentIndex));
+      openSegmentEditDialog(segmentItem);
     }
     return;
   }
@@ -7995,7 +8164,7 @@ function handleTranscriptDisplayClick(event) {
   scheduleCutPreviewEffect(() => previewSelectedCutRange(expandedRange));
 }
 
-for (const eventName of ["select", "mouseup", "keyup"]) {
+for (const eventName of ["input", "select", "mouseup", "keyup"]) {
   segmentEditText.addEventListener(eventName, updateSegmentEditSelection);
 }
 segmentEditClose.addEventListener("click", closeSegmentEditDialog);

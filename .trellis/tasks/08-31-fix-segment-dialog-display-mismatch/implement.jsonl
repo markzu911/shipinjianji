@@ -1,0 +1,11 @@
+{"file": ".trellis/spec/guides/project-overview.md", "reason": "项目结构与编辑器权威状态约束"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "前端到 API、Store、艺术字和持久化的跨层数据流"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "复用现有 editable segment 与状态 owner"}
+{"file": ".trellis/spec/frontend/architecture-and-state.md", "reason": "展示片段、Store、cut draft 与 keyed reconciliation 契约"}
+{"file": ".trellis/spec/frontend/ui-and-interactions.md", "reason": "文案列表、弹窗和按钮交互契约"}
+{"file": ".trellis/spec/frontend/api-and-media.md", "reason": "API 请求、媒体 identity 与错误反馈约束"}
+{"file": ".trellis/spec/backend/media-and-timeline.md", "reason": "editable segment、字符边界与 VAD/PCM 不变量"}
+{"file": ".trellis/spec/backend/persistence-and-jobs.md", "reason": "job 原子更新、并发版本和持久化约束"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "HTTP 4xx 与稳定错误反馈"}
+{"file": ".trellis/spec/testing/index.md", "reason": "测试选择与字符守恒回归要求"}
+{"file": ".trellis/spec/testing/browser-workflows.md", "reason": "真实 Chromium 编辑器工作流契约"}

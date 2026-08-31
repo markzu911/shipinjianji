@@ -410,6 +410,75 @@ const mediaRanges = mergeCutRanges(
 
 回归测试必须覆盖独立行的静态契约和 Node 行为契约，并在真实浏览器验证：文字与空白按源时间排序，但可见时间全部按剪后时间单调不降；完整删除的文案/空白显示拼接点而非源时间；连续已删文字跨 range key 只显示一行且一次恢复全部聚合 key；保留文字仍拆分两侧删除组；时间轴删除分组不变；单独重删只影响目标行；空白恢复后不再被文字静音扩展删除；删除空白不使相邻文字出现删除线/恢复按钮且不从预览时间轴消失；小于 `0.12s` 的短保留文字不被两侧自动范围合并；手动范围只删除词的一部分时其余部分仍保留；撤销/重做与刷新持久化正常；播放高亮命中当前片段；375px 无横向溢出。文案列表是用户确认的密度特例：行、圆点、播放目标及内部排版按原值 `50%` 压缩（`64px -> 32px`、`44px -> 22px`），边框仍不少于 1 个设备像素；其他移动操作目标仍遵循通用 44px 规则。
 
+## 场景：展示片段级文案编辑
+
+### 1. Scope / Trigger
+
+一个 editable 父段因已删除文字、时间轴删除或建议边界被 `buildSegmentTextRuns()` 拆成多条可见行时，点击、保存、拆分和方向合并必须以用户点击的可见 `edit` run 为目标。父 `segmentIndex` 只定位权威段，不能独自决定命令范围。
+
+### 2. Signatures
+
+```javascript
+buildSegmentTextRuns(segment, deletedRanges, segmentIndex) -> Array<{
+  characterStart, characterEnd, semanticStart, semanticEnd,
+  start, end, text, kind
+}>
+openSegmentEditDialog(item: HTMLElement)
+```
+
+```text
+PUT /api/transcriptions/{job_id}/editable-segments
+{ segmentIndex, action: "text"|"split"|"merge_up"|"merge_down",
+  selectionStart?, selectionEnd?, text? }
+```
+
+`selectionStart/selectionEnd` 使用父段 Unicode code point 偏移；完整父段的 `text/merge` 请求继续省略这两个字段，保持旧客户端兼容。
+
+### 3. Contracts
+
+- run 偏移按 token 顺序累计 `Array.from(token.text).length`，并写入行 data、稳定 key 和 reconcile signature；禁止用 `indexOf(displayText)`，因为父段可包含多个相同短语。
+- 打开弹窗和执行命令前都要从当前删除状态重新生成父段 runs，联合验证 `kind=edit`、字符范围、文字、语义时间和展示时间。验证失败时拒绝操作并提示重新选择，禁止降级为整个父段。
+- 弹窗文字来自 run `text`，时间由 run `displayStart/displayEnd` 投影到当前剪后时间；局部保存只替换父段 slice，局部拆分把 textarea code point 偏移加到 `characterStart`。
+- `merge_up` 只在 run 贴父段开头时启用，`merge_down` 只在 run 贴父段结尾时启用。服务端在一次请求内隔离另一侧未显示前缀/后缀后再合并；被删除文字继续保留为可恢复段。
+- textarea 内容一旦改变，拆分必须禁用到文字先保存；否则局部 selection 不再能证明对应父段偏移。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 结果 |
+| --- | --- |
+| 字符范围越界、为空或父段 slice 不等于展示文字 | 不打开或不写入，显示“当前文案片段已变化” |
+| 当前 run 的 kind、语义时间或展示时间已变化 | 视为过期目标，拒绝请求 |
+| `text/merge` 只提供一个 selection 端点 | 服务端 400：片段范围必须同时包含开始和结束 |
+| 局部 `merge_up` 的 start 不为 0 | 前端禁用；伪造请求由服务端 400 |
+| 局部 `merge_down` 的 end 不等于父段字符数 | 前端禁用；伪造请求由服务端 400 |
+| 未提供 selection 范围 | 保持旧整段 text/merge 行为 |
+
+### 5. Good / Base / Bad Cases
+
+- Good：父段“重复删除重复保留”的前四字已删除；点击第二处“重复保留”只显示并保存字符 `4..8`，第一处重复文字不变，向下合并后删除前缀仍可恢复。
+- Base：完整父段行打开、保存、拆分和合并的文案及 payload 与历史行为一致。
+- Bad：按 `segmentIndex` 打开整段，或用 `parent.text.indexOf(displayText)` 定位；前者把已删除文字带入弹窗，后者会修改重复短语的第一处。
+
+### 6. Tests Required
+
+- Node 行为：`删/留/删` run 偏移为 `0..1/1..2/2..3`；局部 split 偏移平移；text/merge payload 范围；过期文字和过期展示时间均拒绝；静态禁止模糊 `indexOf`。
+- Python/API：重复短语第二处、emoji code point、跨 source owner、局部上下合并隔离、缺失/越界/非法方向 400，且无范围旧请求兼容。
+- Chromium：弹窗文字和剪后时间与点击行一致；保存和局部 merge 后删除行仍可恢复；Store、艺术字、公共时间轴、preview、compose 字符守恒；基础 video `srcWrites/loadCalls` 和 extractor 增量均为 0。
+
+### 7. Wrong vs Correct
+
+```javascript
+// Wrong: 展示片段只携带父索引，重复文字再靠模糊搜索定位。
+openSegmentEditDialog(Number(item.dataset.segmentIndex));
+const start = parent.text.indexOf(item.dataset.displayText);
+
+// Correct: 使用 render 时产生的 code point 范围，并对当前 run 重新验证。
+const target = resolveSegmentEditTarget(item);
+if (!target || !currentSegmentEditRun(target)) return reportStaleTarget();
+payload.selectionStart = target.characterStart;
+payload.selectionEnd = target.characterEnd;
+```
+
 ### 双层词时间戳状态契约
 
 - `segments[].words` 是 Jieba 展示和编辑层，也是文字删除字符时序的首选来源；`segments[].asrWords` 只保留模型原始时间供声学参考和旧数据回退。

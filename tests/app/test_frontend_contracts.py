@@ -53,7 +53,7 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
 
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
-    assert "/app.js?v=20260831-06" in page_response.text
+    assert "/app.js?v=20260831-07" in page_response.text
     assert "/styles.css?v=20260828-02" in page_response.text
     assert "/transcript-follow-scroll.js?v=20260831-01" in page_response.text
     assert "/timeline-thumbnail-cache.js?v=20260828-01" in page_response.text
@@ -1936,6 +1936,10 @@ console.log(JSON.stringify({{
         "restore",
     ]
     assert [run["text"] for run in payload["split"]] == ["删", "留", "删"]
+    assert [
+        (run["characterStart"], run["characterEnd"])
+        for run in payload["split"]
+    ] == [(0, 1), (1, 2), (2, 3)]
     assert payload["split"][1]["suggestionRangeKeys"] == ["1.000-2.000"]
     assert [run["text"] for run in payload["timelineDeleted"]] == ["甲", "乙"]
     assert all(run["kind"] == "deleted" for run in payload["timelineDeleted"])
@@ -1951,6 +1955,202 @@ console.log(JSON.stringify({{
         {"type": "text", "text": "文案"},
         {"type": "no-speech", "id": "quiet"},
     ]
+
+
+def test_frontend_segment_dialog_targets_visible_fragment_and_scopes_operations():
+    app_source = (Path(__file__).resolve().parents[2] / "web" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    dialog_start = app_source.index("function getSegmentSelectionOffsets")
+    dialog_end = app_source.index("function broadcastTranscriptUpdated", dialog_start)
+    source = app_source[dialog_start:dialog_end]
+    script = f"""
+const source = {json.dumps(source)};
+const requests = [];
+const classList = () => ({{ add() {{}}, remove() {{}}, toggle() {{}} }});
+const button = () => ({{ disabled: false }});
+const status = () => ({{ textContent: "", dataset: {{}} }});
+const functions = new Function(
+  "source",
+  "requests",
+  "button",
+  "status",
+  "classList",
+  `
+let activeSegmentEditTarget = null;
+let segmentOperationInFlight = false;
+let cutControlsLocked = false;
+let currentJobId = "fragment-job";
+let currentEditableSegments = [
+  {{ id: 0, text: "重复删除重复保留" }},
+  {{ id: 1, text: "下段内容" }},
+];
+const getCommittedTimelineSemanticDeleteRanges = () => [];
+const buildSegmentTextRuns = (_segment, _deletedRanges, segmentIndex) =>
+  segmentIndex === 0
+    ? [{{
+        kind: "edit",
+        text: "重复保留",
+        characterStart: 4,
+        characterEnd: 8,
+        start: 0.35,
+        end: 0.65,
+        semanticStart: 0.35,
+        semanticEnd: 0.65,
+      }}]
+    : [];
+const segmentEditText = {{
+  value: "",
+  selectionStart: 0,
+  selectionEnd: 0,
+  setSelectionRange(start, end) {{
+    this.selectionStart = start;
+    this.selectionEnd = end;
+  }},
+  focus() {{}},
+}};
+const splitSegmentButton = button();
+const mergeSegmentUpButton = button();
+const mergeSegmentDownButton = button();
+const saveSegmentTextButton = button();
+const segmentEditClose = button();
+const segmentEditSelectionStatus = status();
+const segmentStructureStatus = status();
+const segmentEditEyebrow = status();
+const segmentEditTime = status();
+const segmentEditDialog = {{
+  open: false,
+  classList: classList(),
+  showModal() {{ this.open = true; }},
+  close() {{ this.open = false; }},
+}};
+const window = {{
+  requestAnimationFrame(callback) {{ callback(); }},
+  EditorSuite: {{ beginProjectEffect() {{ return {{}}; }} }},
+}};
+const formatPreciseTime = value => Number(value).toFixed(3);
+const getLiveEditedSegmentTiming = segment => ({{
+  start: Number(segment.start) - 0.3,
+  end: Number(segment.end) - 0.3,
+}});
+const setSegmentStructureStatus = (message, tone) => {{
+  segmentStructureStatus.textContent = message;
+  segmentStructureStatus.dataset.tone = tone;
+}};
+const fetch = async (_url, options) => {{
+  requests.push(JSON.parse(options.body));
+  return {{
+    ok: false,
+    async json() {{ return {{ detail: "模拟请求结束" }}; }},
+  }};
+}};
+${{source}}
+return {{
+  openSegmentEditDialog,
+  resolveSegmentEditTarget,
+  applyEditableSegmentOperation,
+  saveSegmentText,
+  controls: {{
+    segmentEditDialog,
+    segmentEditEyebrow,
+    segmentEditTime,
+    segmentEditText,
+    mergeSegmentUpButton,
+    mergeSegmentDownButton,
+  }},
+}};
+`)(source, requests, button, status, classList);
+
+const item = {{ dataset: {{
+  segmentIndex: "0",
+  segmentCharacterStart: "4",
+  segmentCharacterEnd: "8",
+  displayStart: "0.35",
+  displayEnd: "0.65",
+  semanticStart: "0.35",
+  semanticEnd: "0.65",
+  displayText: "重复保留",
+}} }};
+functions.openSegmentEditDialog(item);
+const opened = {{
+  open: functions.controls.segmentEditDialog.open,
+  eyebrow: functions.controls.segmentEditEyebrow.textContent,
+  time: functions.controls.segmentEditTime.textContent,
+  text: functions.controls.segmentEditText.value,
+  mergeUpDisabled: functions.controls.mergeSegmentUpButton.disabled,
+  mergeDownDisabled: functions.controls.mergeSegmentDownButton.disabled,
+}};
+
+functions.controls.segmentEditText.setSelectionRange(2, 4);
+await functions.applyEditableSegmentOperation("split");
+await functions.applyEditableSegmentOperation("merge_down");
+functions.controls.segmentEditText.value = "重复改留";
+await functions.saveSegmentText();
+
+const staleTarget = functions.resolveSegmentEditTarget({{ dataset: {{
+  ...item.dataset,
+  displayText: "重复删除",
+}} }});
+const staleTimeTarget = functions.resolveSegmentEditTarget({{ dataset: {{
+  ...item.dataset,
+  displayStart: "0.36",
+}} }});
+console.log(JSON.stringify({{
+  opened,
+  requests,
+  staleRejected: staleTarget === null,
+  staleTimeRejected: staleTimeTarget === null,
+  usesAmbiguousIndexOf: source.includes("indexOf(displayText)"),
+}}));
+"""
+
+    try:
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=Path(__file__).resolve().parents[2],
+            check=True,
+            capture_output=True,
+            encoding="utf-8",
+            timeout=20,
+        )
+    except FileNotFoundError:
+        pytest.skip("Node.js is required for the segment dialog test.")
+    except subprocess.CalledProcessError as exc:
+        pytest.fail(exc.stderr)
+
+    payload = json.loads(result.stdout)
+    assert payload["opened"] == {
+        "open": True,
+        "eyebrow": "段落 01",
+        "time": "0.050 — 0.350",
+        "text": "重复保留",
+        "mergeUpDisabled": True,
+        "mergeDownDisabled": False,
+    }
+    assert payload["requests"] == [
+        {
+            "segmentIndex": 0,
+            "action": "split",
+            "selectionStart": 6,
+            "selectionEnd": 8,
+        },
+        {
+            "segmentIndex": 0,
+            "action": "merge_down",
+            "selectionStart": 4,
+            "selectionEnd": 8,
+        },
+        {
+            "segmentIndex": 0,
+            "action": "text",
+            "text": "重复改留",
+            "selectionStart": 4,
+            "selectionEnd": 8,
+        },
+    ]
+    assert payload["staleRejected"] is True
+    assert payload["staleTimeRejected"] is True
+    assert payload["usesAmbiguousIndexOf"] is False
 
 
 def test_frontend_suggestion_presentation_uses_semantic_original_ranges():
