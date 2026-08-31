@@ -834,3 +834,24 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 38: 修复重新开始被草稿保存阻塞
+
+**Date**: 2026-08-31
+**Task**: 修复重新开始被草稿保存阻塞
+**Branch**: `master`
+
+### Summary
+
+重新开始确认后立即失效前端草稿保存并删除服务端草稿；后端增加写入代次拦截迟到 PUT，补充并发回归测试与跨层持久化规范。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `934e69f` | (see git log) |
+
+### Status
+
+[OK] **Completed**
