@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import os
 import shutil
 import stat
@@ -34,6 +35,15 @@ PROJECT_FILES = [
     "01-产品需求文档-PRD.md",
     "02-技术开发文档.md",
     "03-功能完善建议.md",
+]
+USER_ASSET_FILES = [
+    "白字错落艺术字模板.json",
+    "逐字跃动艺术字模板.json",
+]
+USER_DATA_DIRS = [
+    "fonts",
+    "art-templates",
+    "art-position-presets",
 ]
 
 RUN_MAC_COMMAND = """#!/usr/bin/env bash
@@ -131,13 +141,28 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 exec "${DIR}/run_mac.command"
 """
 
-MAC_README = """# Mac 一键运行说明
+def make_mac_readme(*, include_env: bool, include_user_assets: bool) -> str:
+    included_items = []
+    if include_env:
+        included_items.append("当前打包电脑上的 `.env`，包含已配置的 API Key。")
+    if include_user_assets:
+        included_items.append("当前打包电脑上的 `data/fonts/`、艺术字模板、位置预设和根目录艺术字 JSON。")
+    if not included_items:
+        included_items.append("安装包只包含程序代码、内置字体和空白数据目录。")
+
+    included_text = "\n".join(f"- {item}" for item in included_items)
+
+    return f"""# Mac 一键运行说明
 
 双击 `run_mac.command` 即可启动项目，默认地址是：
 
 http://127.0.0.1:8003/
 
-安装包只包含程序代码、内置字体和空白数据目录，不包含打包电脑上的任务视频、历史记录、模型缓存或自定义模板。
+本包内容：
+
+{included_text}
+
+默认不包含打包电脑上的任务视频、历史记录或模型缓存。
 
 首次在语音附近保存剪辑边界时，程序会按需下载固定版本的 FunASR `fa-zh`（约 159 MB）和 FSMN-VAD `fsmn-vad`（约 1.7 MB）模型到 `data/models`。Python 运行时和依赖还会占用更多磁盘与内存；模型下载、校验、加载或推理失败时会安全降级，不会阻断文案拆分、草稿保存或生成。
 
@@ -186,7 +211,9 @@ def clean_previous_outputs() -> None:
         shutil.rmtree(path)
 
 
-def copy_project_files() -> None:
+def copy_project_files(
+    *, include_env: bool = False, include_user_assets: bool = False
+) -> None:
     if BUILD_DIR.exists():
         ensure_inside(BUILD_DIR, ROOT / "build")
         shutil.rmtree(BUILD_DIR)
@@ -207,15 +234,44 @@ def copy_project_files() -> None:
         else:
             raise FileNotFoundError(source)
 
+    if include_env:
+        source = ROOT / ".env"
+        if not source.is_file():
+            raise FileNotFoundError("Cannot include API keys because .env was not found.")
+        shutil.copy2(source, BUILD_DIR / ".env")
+
+    if include_user_assets:
+        for relative in USER_ASSET_FILES:
+            source = ROOT / relative
+            if source.is_file():
+                shutil.copy2(source, BUILD_DIR / relative)
+
+        for relative in USER_DATA_DIRS:
+            source = ROOT / "data" / relative
+            target = BUILD_DIR / "data" / relative
+            if source.is_dir():
+                shutil.copytree(
+                    source,
+                    target,
+                    dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store"),
+                )
+
     clean_data_files = {
         "jobs/.gitkeep": "\n",
         "history/.gitkeep": "\n",
         "models/.gitkeep": "\n",
-        "fonts/manifest.json": "[]\n",
-        "art-templates/manifest.json": "[]\n",
-        "art-templates/hidden.json": "[]\n",
-        "art-position-presets/manifest.json": "[]\n",
     }
+    if not include_user_assets:
+        clean_data_files.update(
+            {
+                "fonts/manifest.json": "[]\n",
+                "art-templates/manifest.json": "[]\n",
+                "art-templates/hidden.json": "[]\n",
+                "art-position-presets/manifest.json": "[]\n",
+            }
+        )
+
     for relative, content in clean_data_files.items():
         path = BUILD_DIR / "data" / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -223,7 +279,11 @@ def copy_project_files() -> None:
 
     (BUILD_DIR / "run_mac.command").write_text(RUN_MAC_COMMAND, encoding="utf-8", newline="\n")
     (BUILD_DIR / "run_mac.sh").write_text(RUN_MAC_SH, encoding="utf-8", newline="\n")
-    (BUILD_DIR / "README_MAC.md").write_text(MAC_README, encoding="utf-8", newline="\n")
+    (BUILD_DIR / "README_MAC.md").write_text(
+        make_mac_readme(include_env=include_env, include_user_assets=include_user_assets),
+        encoding="utf-8",
+        newline="\n",
+    )
 
     for executable in (BUILD_DIR / "run_mac.command", BUILD_DIR / "run_mac.sh"):
         executable.chmod(executable.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
@@ -288,15 +348,38 @@ def build_font_zip() -> None:
             add_to_zip(zip_file, path, Path("data") / "fonts" / "builtin" / path.name)
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Build a macOS runnable zip package.")
+    parser.add_argument(
+        "--include-env",
+        action="store_true",
+        help="copy the local .env into the package, including configured API keys",
+    )
+    parser.add_argument(
+        "--include-user-assets",
+        action="store_true",
+        help="copy local font manifests, art templates, art position presets, and root art JSON files",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
     clean_previous_outputs()
-    copy_project_files()
+    copy_project_files(
+        include_env=args.include_env,
+        include_user_assets=args.include_user_assets,
+    )
     build_zip()
     build_font_zip()
     size_mb = ZIP_PATH.stat().st_size / (1024 * 1024)
     font_size_mb = FONT_ZIP_PATH.stat().st_size / (1024 * 1024)
     print(f"Built {ZIP_PATH} ({size_mb:.2f} MB)")
     print(f"Built {FONT_ZIP_PATH} ({font_size_mb:.2f} MB)")
+    if args.include_env:
+        print("Included .env with local API keys.")
+    if args.include_user_assets:
+        print("Included local fonts, art templates, and art position presets.")
 
 
 if __name__ == "__main__":
