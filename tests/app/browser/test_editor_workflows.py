@@ -3624,6 +3624,8 @@ def test_tool_switch_keeps_selection_preview_and_playback_position(
     ) == "true"
     assert art_panel.locator('[data-art-panel="selection"]').is_hidden()
     assert art_panel.locator('[data-art-tab="transcript"]').count() == 0
+    assert art_panel.locator('[data-art-field="textAlign"]').count() == 0
+    assert art_panel.locator('[data-art-field="lineSpacing"]').count() == 0
     assert art_panel.locator(
         '[data-art-panel="selection"] [data-art-transcript-section]'
     ).count() == 1

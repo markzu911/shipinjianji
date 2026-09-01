@@ -83,10 +83,8 @@
             <label class="field"><span>字体</span><select data-art-field="font"></select></label>
             <label class="field"><span>字号</span><input type="number" min="20" max="180" step="1" data-art-field="fontSize" /></label>
             <label class="field" data-art-manual-only><span>文字方向</span><select data-art-field="direction"><option value="horizontal">横向排版</option><option value="vertical">竖向排版</option></select></label>
-            <label class="field"><span>对齐方式</span><select data-art-field="textAlign"><option value="left">左对齐</option><option value="center">居中对齐</option><option value="right">右对齐</option></select></label>
             <label class="field" data-art-manual-only><span>每行字数</span><input type="number" min="0" max="20" data-art-field="charsPerLine" /></label>
             <label class="field"><span>字间距</span><input type="number" min="0" max="20" step="1" data-art-field="letterSpacing" /></label>
-            <label class="field"><span>行间距</span><input type="number" min="0" max="40" data-art-field="lineSpacing" /></label>
             <label class="field color-field"><span>文字颜色</span><input type="color" data-art-field="color" /></label>
             <label class="field color-field"><span>描边颜色</span><input type="color" data-art-field="strokeColor" /></label>
             <label class="field"><span>描边</span><input type="number" min="0" max="12" step="1" data-art-field="strokeWidth" /></label>

@@ -66,7 +66,7 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     assert "/editor-art-renderer.js?v=20260819-01" in page_response.text
     assert "/editor-preview-compositor.js?v=20260820-01" in page_response.text
     assert "/editor-timeline-controller.js?v=20260831-01" in page_response.text
-    assert "/editor-art-tool.js?v=20260821-02" in page_response.text
+    assert "/editor-art-tool.js?v=20260901-01" in page_response.text
     assert "/editor-pip-tool.js?v=20260825-01" in page_response.text
     assert "/editor-suite.js?v=20260831-01" in page_response.text
     assert timeline_script_response.status_code == 200
@@ -76,6 +76,8 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     assert project_store_script_response.status_code == 200
     assert project_store_script_response.headers["cache-control"] == "no-store, max-age=0"
     assert "function createStore" in project_store_script_response.text
+    assert 'data-art-field="textAlign"' not in art_tool_response.text
+    assert 'data-art-field="lineSpacing"' not in art_tool_response.text
     for response in (
         media_controller_response,
         art_model_response,
