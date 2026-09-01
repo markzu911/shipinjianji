@@ -855,3 +855,25 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 39: 同步开发与生产版本
+
+**Date**: 2026-09-01
+**Task**: 同步开发与生产版本
+**Branch**: `master`
+
+### Summary
+
+完成 Mac 私有打包能力、预览时间轴紧凑化及窄选区交互修复；完整 503 项测试通过，并同步 master/develop。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `464b8f6` | (see git log) |
+| `3d99851` | (see git log) |
+
+### Status
+
+[OK] **Completed**

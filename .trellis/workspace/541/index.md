@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 38
-- **Last Active**: 2026-08-31
+- **Total Sessions**: 39
+- **Last Active**: 2026-09-01
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~857 | Active |
+| `journal-1.md` | ~879 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 39 | 2026-09-01 | 同步开发与生产版本 | `464b8f6`, `3d99851` | `master` |
 | 38 | 2026-08-31 | 修复重新开始被草稿保存阻塞 | `934e69f` | `master` |
 | 37 | 2026-08-31 | 修复规范化剪辑草稿撤销状态分叉 | `a4b435f` | `master` |
 | 36 | 2026-08-28 | 修复跨源句合并后文字重复 | `bb14d75` | `master` |
