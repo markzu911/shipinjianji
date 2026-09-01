@@ -54,7 +54,7 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
     assert "/app.js?v=20260831-07" in page_response.text
-    assert "/styles.css?v=20260828-02" in page_response.text
+    assert "/styles.css?v=20260901-05" in page_response.text
     assert "/transcript-follow-scroll.js?v=20260831-01" in page_response.text
     assert "/timeline-thumbnail-cache.js?v=20260828-01" in page_response.text
     assert "/ui-feedback.js?v=20260807-03" in page_response.text
@@ -65,7 +65,7 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
     assert "/editor-art-model.js?v=20260827-01" in page_response.text
     assert "/editor-art-renderer.js?v=20260819-01" in page_response.text
     assert "/editor-preview-compositor.js?v=20260820-01" in page_response.text
-    assert "/editor-timeline-controller.js?v=20260825-03" in page_response.text
+    assert "/editor-timeline-controller.js?v=20260831-01" in page_response.text
     assert "/editor-art-tool.js?v=20260821-02" in page_response.text
     assert "/editor-pip-tool.js?v=20260825-01" in page_response.text
     assert "/editor-suite.js?v=20260831-01" in page_response.text
@@ -689,6 +689,9 @@ def test_cut_range_and_segment_frontend_contracts():
     assert 'cancelButton.dataset.timelineRangeAction = "cancel"' in script_response.text
     assert 'cancelIcon.setAttribute("icon", "ph:x-bold")' in script_response.text
     assert 'cancelPendingTimelineRange("已取消时间轴选区。")' in script_response.text
+    assert "const CUT_TIMELINE_CANCEL_HIT_WIDTH = 44;" in script_response.text
+    assert "const CUT_TIMELINE_CANCEL_GAP = 4;" in script_response.text
+    assert "rightCenter + cancelHitHalf <= trackWidth" in script_response.text
     assert ".cut-timeline-range-cancel {" in styles_response.text
     assert ".cut-timeline-range-cancel iconify-icon {" in styles_response.text
     assert ".cut-timeline-delete-range.is-narrow {" in styles_response.text
@@ -696,6 +699,9 @@ def test_cut_range_and_segment_frontend_contracts():
         ".cut-timeline-delete-range.is-narrow .cut-timeline-range-cancel {"
         in styles_response.text
     )
+    assert "top: 50%;" in styles_response.text
+    assert "transform: translate(-50%, -50%);" in styles_response.text
+    assert "inset: -12px;" in styles_response.text
     assert "--cut-timeline-range-cancel-left" in script_response.text
     assert 'rangeElement.dataset.cancelSide' not in script_response.text
     selection_start = script_response.text.index(
@@ -845,10 +851,14 @@ def test_cut_range_and_segment_frontend_contracts():
 
     assert "--editor-timeline-track-height: 112px" in styles_response.text
     assert "--editor-timeline-ruler-height: 28px" in styles_response.text
-    assert "--editor-timeline-track-height: 74px" in styles_response.text
-    assert "--cut-timeline-text-height: 30px" in styles_response.text
+    assert "--editor-timeline-track-height: var(--timeline-layer-track-height-compact)" in (
+        styles_response.text
+    )
+    assert "--cut-timeline-text-height: var(--timeline-row-height-compact)" in (
+        styles_response.text
+    )
     assert ".cut-frame-timeline .frame-timeline-tick-label" in styles_response.text
-    assert "top: -7px" in styles_response.text
+    assert "top: -1px" in styles_response.text
     assert "width: 100% !important" in styles_response.text
     assert "transform: rotate(0.55deg)" not in styles_response.text
     assert "margin-left: 13px" not in styles_response.text
@@ -1421,7 +1431,7 @@ def test_art_template_library_frontend_contracts():
     art_tool_response = responses["/editor-art-tool.js"]
 
     assert template_page_response.status_code == 200
-    assert "/styles.css?v=20260828-02" in template_page_response.text
+    assert "/styles.css?v=20260901-05" in template_page_response.text
     assert "/art-template-library.js?v=20260819-01" in template_page_response.text
     assert "当前模板主色" in template_page_response.text
     assert 'id="templateCardGrid"' in template_page_response.text
@@ -1482,7 +1492,7 @@ def test_font_manager_frontend_contracts():
     font_script_response = responses["/font-manager.js"]
 
     assert font_page_response.status_code == 200
-    assert "/styles.css?v=20260828-02" in font_page_response.text
+    assert "/styles.css?v=20260901-05" in font_page_response.text
     assert "/font-manager.js?v=" in font_page_response.text
     assert 'id="fontUploadForm"' in font_page_response.text
     assert 'id="fontCardGrid"' in font_page_response.text
@@ -4648,9 +4658,9 @@ def test_compact_ui_density_preserves_preview_and_uses_shared_timeline_geometry(
         "font-library.html",
     ):
         page = (root / "web" / page_name).read_text(encoding="utf-8")
-        assert "/styles.css?v=20260828-02" in page
+        assert "/styles.css?v=20260901-05" in page
     index_page = (root / "web" / "index.html").read_text(encoding="utf-8")
-    assert "/editor-timeline-controller.js?v=20260825-03" in index_page
+    assert "/editor-timeline-controller.js?v=20260831-01" in index_page
 
     for token in (
         "--ui-compact-control-height: 36px;",
@@ -4659,10 +4669,10 @@ def test_compact_ui_density_preserves_preview_and_uses_shared_timeline_geometry(
         "--ui-compact-gap: 8px;",
         "--ui-compact-font: 12px;",
         "--ui-compact-font-small: 10px;",
-        "--timeline-ruler-height-compact: 15px;",
-        "--timeline-row-height-compact: 26px;",
-        "--timeline-base-track-height-compact: 78px;",
-        "--timeline-layer-track-height-compact: 63px;",
+        "--timeline-ruler-height-compact: 12px;",
+        "--timeline-row-height-compact: 22px;",
+        "--timeline-base-track-height-compact: 60px;",
+        "--timeline-layer-track-height-compact: 52px;",
     ):
         assert token in styles
 
@@ -4680,6 +4690,46 @@ def test_compact_ui_density_preserves_preview_and_uses_shared_timeline_geometry(
         assert preview_selector not in density_rules
     assert "zoom:" not in density_rules
     assert "transform: scale(" not in density_rules
+    assert ".media-time {\n  min-width: 96px;" in styles
+    assert (
+        ".text-editor-preview-pane #cutPreviewPlayer:not(:fullscreen) "
+        ".external-video-controls {"
+    ) in styles
+    assert "min-height: 24px;" in styles
+    assert (
+        ".text-editor-preview-pane .cut-timeline-action-button {\n"
+        "    width: 22px;\n"
+        "    min-width: 22px;\n"
+        "    height: 22px;\n"
+        "    min-height: 22px;"
+    ) in styles
+    assert (
+        "grid-template-columns: 24px minmax(84px, 1fr) 96px 24px "
+        "minmax(52px, 76px) 24px;"
+    ) in styles
+    assert (
+        ".text-editor-preview-pane #cutPreviewPlayer:not(:fullscreen) "
+        ".media-time {\n  width: 96px;\n  min-width: 96px;"
+    ) in styles
+    assert (
+        ".text-editor-preview-pane #cutPreviewPlayer:not(:fullscreen) "
+        ".media-control-button {\n  width: 24px;\n  height: 24px;"
+    ) in styles
+    assert (
+        ".text-editor-preview-pane #cutPreviewPlayer.media-player-shell.cut-preview-player "
+        ".media-seek.media-seek {\n    min-height: 44px;"
+    ) in styles
+    assert (
+        ".text-editor-preview-pane #cutPreviewPlayer.media-player-shell.cut-preview-player "
+        "#cutPreviewPlay,"
+    ) in styles
+    assert (
+        "#cutPreviewPlayer #cutPreviewPlay,\n"
+        "  #cutPreviewPlayer #cutPreviewMute,"
+    ) in styles
+    assert (
+        "#cutPreviewPlayer #cutPreviewSeek {\n    min-height: 44px;"
+    ) in styles
     assert "/* Compact transcript controls keep half-scale geometry" in styles
     for transcript_type_contract in (
         ".segment-time {",
@@ -4717,11 +4767,11 @@ def test_compact_ui_density_preserves_preview_and_uses_shared_timeline_geometry(
         "--frame-timeline-ruler-height: var(--timeline-ruler-height-compact);",
         "--cut-timeline-text-height: var(--timeline-row-height-compact);",
         "--editor-timeline-track-height: var(--timeline-base-track-height-compact);",
-        "--editor-timeline-track-height: 89px;",
+        "--editor-timeline-track-height: calc(",
         "--editor-timeline-track-height: var(--timeline-layer-track-height-compact);",
     ):
         assert timeline_contract in styles
-    assert "const TIMELINE_ROW_HEIGHT = 26;" in timeline
-    assert "const TIMELINE_EFFECT_BASE_HEIGHT = 63;" in timeline
+    assert "const TIMELINE_ROW_HEIGHT = 22;" in timeline
+    assert "const TIMELINE_EFFECT_BASE_HEIGHT = 52;" in timeline
     assert "rowCount * TIMELINE_ROW_HEIGHT" in timeline
     assert "TIMELINE_EFFECT_BASE_HEIGHT + rowCount * TIMELINE_ROW_HEIGHT" in timeline

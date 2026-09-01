@@ -162,6 +162,8 @@ const CUT_TIMELINE_SPLIT_MIN_RANGE = 0.1;
 const CUT_TIMELINE_SPLIT_EPSILON = 0.001;
 const CUT_TIMELINE_DRAG_THRESHOLD = 5;
 const CUT_TIMELINE_NARROW_HIT_WIDTH = 88;
+const CUT_TIMELINE_CANCEL_HIT_WIDTH = 44;
+const CUT_TIMELINE_CANCEL_GAP = 4;
 const CUT_SPEECH_BOUNDARY_EPSILON = 0.002;
 const CUT_SAFE_NO_SPEECH_MIN_DURATION = 0.45;
 const CUT_TIMELINE_TEXT_GAP_COVERAGE_MAX = 1.5;
@@ -5469,11 +5471,25 @@ function buildCutTimelineRangeDescriptors() {
     const isNarrowRange = rangeWidthPixels < CUT_TIMELINE_NARROW_HIT_WIDTH;
     let cancelLeft = "";
     if (isNarrowRange) {
-      const cancelCenter = clamp(
-        rangeLeftPixels + rangeWidthPixels / 2,
-        22,
-        Math.max(22, trackWidth - 22),
-      );
+      const cancelHitHalf = CUT_TIMELINE_CANCEL_HIT_WIDTH / 2;
+      const rightCenter =
+        rangeLeftPixels +
+        rangeWidthPixels +
+        CUT_TIMELINE_CANCEL_GAP +
+        cancelHitHalf;
+      const leftCenter = rangeLeftPixels - CUT_TIMELINE_CANCEL_GAP - cancelHitHalf;
+      let cancelCenter = rangeLeftPixels + rangeWidthPixels / 2;
+      if (rightCenter + cancelHitHalf <= trackWidth) {
+        cancelCenter = rightCenter;
+      } else if (leftCenter - cancelHitHalf >= 0) {
+        cancelCenter = leftCenter;
+      } else {
+        cancelCenter = clamp(
+          cancelCenter,
+          cancelHitHalf,
+          Math.max(cancelHitHalf, trackWidth - cancelHitHalf),
+        );
+      }
       cancelLeft = `${cancelCenter - rangeLeftPixels}px`;
     }
     const formattedRange = formatCutRange(range.start, range.end);

@@ -36,27 +36,29 @@
   --ui-compact-control-height-small: 30px;
   --ui-compact-panel-padding: 12px;
   --ui-compact-gap: 8px;
-  --timeline-ruler-height-compact: 15px;
-  --timeline-row-height-compact: 26px;
-  --timeline-base-track-height-compact: 78px;
-  --timeline-layer-track-height-compact: 63px;
+  --timeline-ruler-height-compact: 12px;
+  --timeline-row-height-compact: 22px;
+  --timeline-base-track-height-compact: 60px;
+  --timeline-layer-track-height-compact: 52px;
 }
 ```
 
 `.segment-item` 的紧凑行与 22px 控件几何是已确认的局部例外；文字层级固定为正文 12px、时间 10.8px、播放状态 8.4px、删除/空白标题 10.8px、meta 9.6px，图标与勾选字形继续保持 10–11px。短文案行保持约 32px，换行和空白说明行按内容自然增高且不得裁切；放大文字时不得同步放大播放按钮、删除圆圈或其他控件。`.editor-pip-tool-panel { zoom: 0.6 }` 同样不得被新的 compact 规则二次缩放；面板固定使用适合小字号中文 UI 的 `Microsoft YaHei UI / PingFang SC / Noto Sans CJK SC / Source Han Sans SC / system-ui` 字体栈，正文与辅助文字使用 500，标题和 `strong` 使用真实 700，禁止依赖 650/750 合成字重。其缩放前字号下限为 small/time 15px、普通文字与控件 16px、主要选项 strong 17px，使视觉字号约为 9/9.6/10.2px。PiP 文案行的时间列固定为 64px，正文继续 `minmax(0, 1fr)` 和 ellipsis，两列逻辑 gap 为 12px（视觉约 7.2px），最长 `MM:SS.d` 不能与正文重叠。radio/checkbox 必须显式保持等宽等高，外层 label/card 承担命中区域。
 
+主文字编辑预览的外置播放器控制条是桌面密度例外：只在 `.text-editor-preview-pane #cutPreviewPlayer:not(:fullscreen)` 下使用约 24px 高控件和固定 96px 时间列，确保 `MM:SS / MM:SS` 完整可见；`max-width: 720px` 下必须恢复 44px 触控高度，并继续隐藏音量滑杆以避免横向溢出。
+
 以下公共预览矩形及其 contain/cover、pointer mapping 必须保持不变：`.text-editor-preview-pane`、`.cut-preview-panel`、`#cutPreviewPlayer`、`#cutVideoStage`、`#cutPreviewVideo`、`#editorSuitePreviewOverlay`、`.editor-suite-preview-canvas`。紧凑样式区块不得包含这些选择器，也不能通过改变桌面工作区列比例间接缩小预览。
 
-公共时间轴只压缩纵向几何，不改变宽度或时间映射。无效果轨时使用 `15px ruler + 26px 文案轨 + 78px 总高`；有 `n` 行效果时，controller 与 CSS 必须共同满足：
+公共时间轴只压缩纵向几何，不改变宽度或时间映射。无效果轨时使用 `12px ruler + 22px 文案轨 + 60px 总高`；有 `n` 行效果时，controller 与 CSS 必须共同满足：
 
 ```javascript
-const TIMELINE_ROW_HEIGHT = 26;
-const TIMELINE_EFFECT_BASE_HEIGHT = 63;
+const TIMELINE_ROW_HEIGHT = 22;
+const TIMELINE_EFFECT_BASE_HEIGHT = 52;
 const layerHeight = rowCount * TIMELINE_ROW_HEIGHT;
 const trackHeight = TIMELINE_EFFECT_BASE_HEIGHT + layerHeight;
 ```
 
-艺术字/画中画独立图层时间轴总高为 `63px`。修改任一数值时必须同步 CSS token、`editor-timeline-controller.js`、静态契约和真实浏览器多行效果轨断言，不能只改外壳高度造成 clip 或缩略帧裁切。
+艺术字/画中画独立图层时间轴总高为 `52px`。修改任一数值时必须同步 CSS token、`editor-timeline-controller.js`、静态契约和真实浏览器多行效果轨断言，不能只改外壳高度造成 clip 或缩略帧裁切。
 
 浏览器回归至少覆盖：1912px 下预览 panel/stage/video/canvas 的改动前后矩形误差不超过 `1px`；无效果/一行/多行轨道实际高度和所有子层 `height > 0`；375px 无横向溢出、radio 为正方形且主要控件命中高度不低于 `44px`；工具切换期间基础 video identity、`srcWrites/loadCalls` 和 source/edited time 映射不变。
 

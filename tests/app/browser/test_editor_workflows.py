@@ -2416,14 +2416,24 @@ def test_short_timeline_range_delete_confirmation_history_and_mobile_hits(
           const cancelRect = range.querySelector(
             '.cut-timeline-range-cancel'
           ).getBoundingClientRect();
+          const trackRect = document.querySelector(
+            '#cutFrameTimelineTrack'
+          ).getBoundingClientRect();
           const handles = [...range.querySelectorAll(
             '.cut-timeline-range-handle'
           )].map(handle => handle.getBoundingClientRect().width);
           return {
+            rangeLeft: rect.left,
+            rangeRight: rect.right,
             rangeBottom: rect.bottom,
+            trackTop: trackRect.top,
+            trackBottom: trackRect.bottom,
             cancelLeft: cancelRect.left,
             cancelRight: cancelRect.right,
             cancelTop: cancelRect.top,
+            cancelBottom: cancelRect.bottom,
+            cancelWidth: cancelRect.width,
+            cancelHeight: cancelRect.height,
             handles,
             narrow: range.classList.contains('is-narrow'),
             viewportWidth: document.documentElement.clientWidth,
@@ -2433,7 +2443,11 @@ def test_short_timeline_range_delete_confirmation_history_and_mobile_hits(
         }"""
     )
     assert mobile_geometry["narrow"] is True
-    assert mobile_geometry["cancelTop"] >= mobile_geometry["rangeBottom"] - 1.5
+    assert mobile_geometry["cancelWidth"] > 0
+    assert mobile_geometry["cancelHeight"] > 0
+    assert mobile_geometry["cancelTop"] >= mobile_geometry["trackTop"] - 0.75
+    assert mobile_geometry["cancelBottom"] <= mobile_geometry["trackBottom"] + 0.75
+    assert mobile_geometry["cancelLeft"] >= mobile_geometry["rangeRight"] + 3
     assert mobile_geometry["cancelLeft"] >= 0
     assert mobile_geometry["cancelRight"] <= mobile_geometry["viewportWidth"]
     assert mobile_geometry["handles"] == pytest.approx([44, 44], abs=0.75)
@@ -3269,8 +3283,7 @@ def test_transcript_rows_enlarge_type_without_horizontal_overflow(
     assert desktop["rowClipping"] is False
     assert desktop["textOverflow"] is False
     assert desktop["summaryFont"] == "15px"
-    assert desktop["timelineButton"][0] >= 44
-    assert desktop["timelineButton"][1] >= 44
+    assert desktop["timelineButton"] == pytest.approx([22, 22], abs=0.75)
     assert desktop["documentOverflow"] <= 1
 
     # Playback-follow must measure the compact row that is actually rendered.
@@ -5892,41 +5905,125 @@ def test_b1_atomic_timeline_transaction_and_narrow_workspace(
                     preview_geometry[selector][dimension], abs=0.75
                 )
 
+    player_controls = page.evaluate(
+        """() => {
+          const controls = document.querySelector(
+            '.text-editor-preview-pane #cutPreviewPlayer .external-video-controls'
+          );
+          const playButton = document.querySelector('#cutPreviewPlay');
+          const seek = document.querySelector('#cutPreviewSeek');
+          const time = document.querySelector('#cutPreviewTime');
+          time.textContent = '00:32 / 02:23';
+          const controlRect = controls.getBoundingClientRect();
+          const buttonRect = playButton.getBoundingClientRect();
+          const seekRect = seek.getBoundingClientRect();
+          const timeRect = time.getBoundingClientRect();
+          return {
+            controlHeight: controlRect.height,
+            buttonHeight: buttonRect.height,
+            seekHeight: seekRect.height,
+            timeWidth: timeRect.width,
+            timeClientWidth: time.clientWidth,
+            timeScrollWidth: time.scrollWidth,
+          };
+        }"""
+    )
+    assert 22 <= player_controls["controlHeight"] <= 28
+    assert player_controls["buttonHeight"] == pytest.approx(24, abs=0.75)
+    assert player_controls["seekHeight"] == pytest.approx(24, abs=0.75)
+    assert player_controls["timeWidth"] == pytest.approx(96, abs=0.75)
+    assert (
+        player_controls["timeScrollWidth"]
+        <= player_controls["timeClientWidth"] + 1
+    )
+
     timeline_geometry = page.evaluate(
         """() => {
           const track = document.querySelector('#cutFrameTimelineTrack');
           const layer = document.querySelector('#editorSuiteTimelineLayer');
           const thumbnails = document.querySelector('#cutFrameTimelineThumbnails');
           const text = document.querySelector('#cutFrameTimelineText');
+          const ruler = document.querySelector('#cutFrameTimelineRuler');
+          const heading = document.querySelector('.cut-frame-timeline-heading');
+          const splitButton = document.querySelector('#cutTimelineSplitButton');
+          const rulerRect = ruler.getBoundingClientRect();
+          const rulerLabels = [...ruler.querySelectorAll(
+            '.frame-timeline-tick-label'
+          )];
           const visibleThumb = [...thumbnails.children].find(item => !item.hidden);
           const style = getComputedStyle(track);
           return {
             trackHeight: track.getBoundingClientRect().height,
+            headingHeight: heading.getBoundingClientRect().height,
+            splitButtonHeight: splitButton.getBoundingClientRect().height,
+            splitButtonWidth: splitButton.getBoundingClientRect().width,
             layerHeight: layer.getBoundingClientRect().height,
             rulerHeight: Number.parseFloat(
               style.getPropertyValue('--frame-timeline-ruler-height')
             ),
             textHeight: text.getBoundingClientRect().height,
             thumbnailHeight: visibleThumb?.getBoundingClientRect().height || 0,
-            layerRows: Number.parseFloat(layer.style.height) / 26,
+            layerRows: Number.parseFloat(layer.style.height) / 22,
+            rulerLabelCount: rulerLabels.length,
+            rulerLabelTopOverflow: rulerLabels.reduce((overflow, label) => {
+              return Math.max(
+                overflow,
+                rulerRect.top - label.getBoundingClientRect().top
+              );
+            }, 0),
+            rulerLabelBottomOverflow: rulerLabels.reduce((overflow, label) => {
+              return Math.max(
+                overflow,
+                label.getBoundingClientRect().bottom - rulerRect.bottom
+              );
+            }, 0),
           };
         }"""
     )
-    assert timeline_geometry["rulerHeight"] == pytest.approx(15, abs=0.75)
-    assert timeline_geometry["textHeight"] == pytest.approx(26, abs=0.75)
+    assert timeline_geometry["rulerHeight"] == pytest.approx(12, abs=0.75)
+    assert timeline_geometry["headingHeight"] == pytest.approx(22, abs=0.75)
+    assert timeline_geometry["splitButtonHeight"] == pytest.approx(22, abs=0.75)
+    assert timeline_geometry["splitButtonWidth"] == pytest.approx(22, abs=0.75)
+    assert timeline_geometry["rulerLabelCount"] > 0
+    assert timeline_geometry["rulerLabelTopOverflow"] <= 0.75
+    assert timeline_geometry["rulerLabelBottomOverflow"] <= 0.75
+    assert timeline_geometry["textHeight"] == pytest.approx(22, abs=0.75)
     assert timeline_geometry["layerRows"] >= 1
     assert timeline_geometry["layerRows"] == pytest.approx(
         round(timeline_geometry["layerRows"]), abs=0.01
     )
     assert timeline_geometry["layerHeight"] == pytest.approx(
-        timeline_geometry["layerRows"] * 26, abs=0.75
+        timeline_geometry["layerRows"] * 22, abs=0.75
     )
     assert timeline_geometry["trackHeight"] == pytest.approx(
-        63 + timeline_geometry["layerRows"] * 26, abs=0.75
+        52 + timeline_geometry["layerRows"] * 22, abs=0.75
     )
     assert timeline_geometry["thumbnailHeight"] > 0
 
     page.set_viewport_size({"width": 375, "height": 812})
+    mobile_controls = page.evaluate(
+        """() => {
+          const controls = document.querySelector(
+            '.text-editor-preview-pane #cutPreviewPlayer .external-video-controls'
+          );
+          const time = document.querySelector('#cutPreviewTime');
+          const controlRect = controls.getBoundingClientRect();
+          return {
+            mobileMedia: matchMedia('(max-width: 720px)').matches,
+            viewportWidth: document.documentElement.clientWidth,
+            controlHeight: controlRect.height,
+            timeWidth: time.getBoundingClientRect().width,
+            timeClientWidth: time.clientWidth,
+            timeScrollWidth: time.scrollWidth,
+          };
+        }"""
+    )
+    if mobile_controls["mobileMedia"]:
+        assert mobile_controls["viewportWidth"] <= 720
+        assert mobile_controls["controlHeight"] >= 44
+    assert mobile_controls["timeWidth"] == pytest.approx(96, abs=0.75)
+    assert mobile_controls["timeScrollWidth"] <= mobile_controls["timeClientWidth"] + 1
+
     for tool in ("art", "pip", "cut"):
         page.locator(f'[data-editor-tool="{tool}"]').click()
         overflow = page.evaluate(

@@ -8,8 +8,8 @@
   const DEFAULT_STEP = 0.1;
   const DEFAULT_HISTORY_LIMIT = 100;
   const DRAG_THRESHOLD = 3;
-  const TIMELINE_ROW_HEIGHT = 26;
-  const TIMELINE_EFFECT_BASE_HEIGHT = 63;
+  const TIMELINE_ROW_HEIGHT = 22;
+  const TIMELINE_EFFECT_BASE_HEIGHT = 52;
 
   function clone(value) {
     return JSON.parse(JSON.stringify(value));
