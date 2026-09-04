@@ -13,6 +13,8 @@ import weakref
 from pathlib import Path
 from typing import Any, Callable
 
+from .funasr_runtime import load_funasr_auto_model
+
 
 ALIGNMENT_SCHEMA_VERSION = 1
 ALIGNER_NAME = "funasr-fa-zh"
@@ -220,7 +222,7 @@ def _load_model(model_cache_dir: Path) -> Any:
         os.environ["MODELSCOPE_CACHE"] = str(model_cache_dir)
         try:
             import torch
-            from funasr import AutoModel
+            AutoModel = load_funasr_auto_model()
         except (ImportError, OSError) as exc:
             raise AlignmentFailure(
                 "runtime_unavailable",

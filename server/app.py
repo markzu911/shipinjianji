@@ -348,6 +348,7 @@ CUT_CHARACTER_BOUNDARY_WINDOWS_SECONDS = (0.020, 0.040, 0.080)
 CUT_CHARACTER_BOUNDARY_MIN_IMPROVEMENT = 0.82
 CUT_CHARACTER_BOUNDARY_DISTANCE_PENALTY = 0.12
 CUT_CHARACTER_BOUNDARY_SCHEMA_VERSION = 1
+CUT_TIMELINE_BOUNDARY_SNAP_DISTANCE_SECONDS = 0.20
 CUT_VAD_WINDOW_CONTEXT_SECONDS = 0.28
 CUT_VAD_MIN_PCM_FLOOR_SECONDS = 0.015
 CUT_AUDIO_FADE_SECONDS = 0.008
@@ -2767,27 +2768,16 @@ def resolve_cut_draft_delete_ranges(
         return []
     text_ranges = list(draft.get("textRanges") or [])
     timeline_ranges = list(draft.get("timelineRanges") or [])
-    requested_semantic_ranges = [
-        {
-            "start": float(item.get("originalStart", item["start"])),
-            "end": float(item.get("originalEnd", item["end"])),
-        }
-        for item in text_ranges
-    ]
-    semantic_text_ranges = canonicalize_transcript_semantic_ranges(
-        requested_semantic_ranges,
-        segments,
-        duration,
+    semantic_text_ranges, semantic_timeline_ranges = (
+        resolve_cut_draft_transcript_range_sources(
+            draft,
+            segments,
+            duration,
+        )
     )
     explicit_text_delete_ranges = [
         *semantic_text_ranges,
-        *(
-            {
-                "start": float(item.get("originalStart", item["start"])),
-                "end": float(item.get("originalEnd", item["end"])),
-            }
-            for item in timeline_ranges
-        ),
+        *semantic_timeline_ranges,
     ]
     retained_text_ranges = subtract_protected_ranges(
         recognized_text_ranges(segments),
@@ -2848,6 +2838,54 @@ def resolve_cut_draft_delete_ranges(
         duration,
         protected_ranges=retained_media_ranges,
     )
+
+
+def resolve_cut_draft_transcript_range_sources(
+    draft: dict[str, Any] | None,
+    segments: list[dict[str, Any]],
+    duration: float,
+) -> tuple[list[dict[str, float]], list[dict[str, float]]]:
+    """Keep text identity ranges separate from exact manual timeline ranges."""
+    if not draft:
+        return [], []
+    requested_text_ranges = [
+        {
+            "start": float(item.get("originalStart", item["start"])),
+            "end": float(item.get("originalEnd", item["end"])),
+        }
+        for item in draft.get("textRanges") or []
+    ]
+    text_ranges = canonicalize_transcript_semantic_ranges(
+        requested_text_ranges,
+        segments,
+        duration,
+    )
+    timeline_ranges = [
+        {
+            "start": round(
+                max(
+                    0.0,
+                    min(
+                        float(item.get("originalStart", item["start"])),
+                        duration,
+                    ),
+                ),
+                3,
+            ),
+            "end": round(
+                max(
+                    0.0,
+                    min(
+                        float(item.get("originalEnd", item["end"])),
+                        duration,
+                    ),
+                ),
+                3,
+            ),
+        }
+        for item in draft.get("timelineRanges") or []
+    ]
+    return text_ranges, timeline_ranges
 
 
 def decode_cut_audio_samples(media_path: Path) -> array:
@@ -6010,6 +6048,37 @@ def align_cut_draft_text_ranges_to_audio(
     return aligned_ranges
 
 
+def timeline_range_meaningfully_covers_character(
+    start: float,
+    end: float,
+    ranges: list[dict[str, float]],
+) -> bool:
+    minimum_overlap = max(0.001, max(0.0, end - start) / 2)
+    clipped = sorted(
+        (
+            max(start, float(item["start"])),
+            min(end, float(item["end"])),
+        )
+        for item in ranges
+        if min(end, float(item["end"])) > max(start, float(item["start"]))
+    )
+    covered = 0.0
+    cursor_start: float | None = None
+    cursor_end: float | None = None
+    for range_start, range_end in clipped:
+        if cursor_start is None or cursor_end is None:
+            cursor_start, cursor_end = range_start, range_end
+            continue
+        if range_start <= cursor_end:
+            cursor_end = max(cursor_end, range_end)
+            continue
+        covered += cursor_end - cursor_start
+        cursor_start, cursor_end = range_start, range_end
+    if cursor_start is not None and cursor_end is not None:
+        covered += cursor_end - cursor_start
+    return covered > minimum_overlap
+
+
 def align_cut_draft_timeline_ranges_to_audio(
     timeline_ranges: list[dict[str, Any]],
     segments: list[dict[str, Any]],
@@ -6104,12 +6173,32 @@ def align_cut_draft_timeline_ranges_to_audio(
             if entirely_in_non_speech_gap or not intersects_acoustic_core
             else None
         )
-        deleted_units = [
+        semantic_deleted_units = [
             original_start - 0.001
             <= (float(unit["start"]) + float(unit["end"])) / 2
             <= original_end + 0.001
             for unit in units
         ]
+        acoustic_covered_units = [
+            timeline_range_meaningfully_covers_character(
+                acoustic_core_start(unit),
+                acoustic_core_end(unit),
+                [{"start": original_start, "end": original_end}],
+            )
+            for unit in units
+        ]
+        deleted_units = [False] * len(units)
+        run_start = 0
+        while run_start < len(units):
+            if not semantic_deleted_units[run_start]:
+                run_start += 1
+                continue
+            run_end = run_start + 1
+            while run_end < len(units) and semantic_deleted_units[run_end]:
+                run_end += 1
+            if any(acoustic_covered_units[run_start:run_end]):
+                deleted_units[run_start:run_end] = [True] * (run_end - run_start)
+            run_start = run_end
         start_candidates: list[tuple[float, dict[str, Any]]] = []
         end_candidates: list[tuple[float, dict[str, Any]]] = []
         rejected_start_diagnostics: list[dict[str, Any]] = []
@@ -6150,6 +6239,9 @@ def align_cut_draft_timeline_ranges_to_audio(
                         "deleteLeft": record["deleteLeft"],
                         "deleteRight": record["deleteRight"],
                         "boundaryMode": record["mode"],
+                        "forcedBoundaryTrustworthy": bool(
+                            diagnostic.get("boundaryTrustworthy")
+                        ),
                         "boundaryTrustworthy": bool(
                             diagnostic.get("boundaryTrustworthy")
                             or record["mode"] in {"silence", "aggressive"}
@@ -6193,6 +6285,9 @@ def align_cut_draft_timeline_ranges_to_audio(
                         "deleteLeft": record["deleteLeft"],
                         "deleteRight": record["deleteRight"],
                         "boundaryMode": record["mode"],
+                        "forcedBoundaryTrustworthy": bool(
+                            diagnostic.get("boundaryTrustworthy")
+                        ),
                         "boundaryTrustworthy": bool(
                             diagnostic.get("boundaryTrustworthy")
                             or record["mode"] in {"silence", "aggressive"}
@@ -6231,6 +6326,18 @@ def align_cut_draft_timeline_ranges_to_audio(
                     return float("inf")
                 return abs(semantic_transition - requested)
 
+            def physical_distance(candidate: tuple[float, dict[str, Any]]) -> float:
+                return abs(float(candidate[0]) - requested)
+
+            def is_bounded_candidate(candidate: tuple[float, dict[str, Any]]) -> bool:
+                boundary_mode = str(candidate[1].get("boundaryMode") or "")
+                return (
+                    boundary_mode not in {"silence", "aggressive"}
+                    or candidate[1].get("forcedBoundaryTrustworthy") is True
+                    or physical_distance(candidate)
+                    <= CUT_TIMELINE_BOUNDARY_SNAP_DISTANCE_SECONDS + 0.001
+                )
+
             closest_candidate = min(
                 candidates,
                 key=transition_distance,
@@ -6241,7 +6348,9 @@ def align_cut_draft_timeline_ranges_to_audio(
                     candidate
                     for candidate in candidates
                     if candidate[1].get("boundaryTrustworthy")
-                    and transition_distance(candidate) <= 0.20 + 0.001
+                    and transition_distance(candidate)
+                    <= CUT_TIMELINE_BOUNDARY_SNAP_DISTANCE_SECONDS + 0.001
+                    and is_bounded_candidate(candidate)
                 ),
                 key=transition_distance,
                 default=None,
@@ -6261,6 +6370,13 @@ def align_cut_draft_timeline_ranges_to_audio(
                     closest_candidate[1]
                     if closest_candidate is not None
                     else rejected
+                )
+                physical_boundary_outside_snap_distance = bool(
+                    closest_candidate is not None
+                    and closest_candidate[1].get("boundaryTrustworthy")
+                    and transition_distance(closest_candidate)
+                    <= CUT_TIMELINE_BOUNDARY_SNAP_DISTANCE_SECONDS + 0.001
+                    and not is_bounded_candidate(closest_candidate)
                 )
                 endpoint_diagnostics.append(
                     {
@@ -6292,6 +6408,11 @@ def align_cut_draft_timeline_ranges_to_audio(
                             (source_diagnostic or {}).get("pcmAdjustment") or 0.0
                         ),
                         "fallbackReason": preserve_exact_reason
+                        or (
+                            "physical_boundary_outside_snap_distance"
+                            if physical_boundary_outside_snap_distance
+                            else None
+                        )
                         or (source_diagnostic or {}).get("fallbackReason")
                         or "no_transition_within_snap_distance",
                     }
@@ -6313,7 +6434,13 @@ def align_cut_draft_timeline_ranges_to_audio(
                     "final": round(resolved, 3),
                 }
             )
-        if final_end <= final_start + 0.01:
+        snapped_overlap = min(final_end, original_end) - max(
+            final_start,
+            original_start,
+        )
+        snapped_range_would_be_empty = final_end <= final_start + 0.01
+        snapped_range_left_requested_interval = snapped_overlap <= 0.001
+        if snapped_range_would_be_empty or snapped_range_left_requested_interval:
             final_start = original_start
             final_end = original_end
             for diagnostic in endpoint_diagnostics:
@@ -6323,7 +6450,11 @@ def align_cut_draft_timeline_ranges_to_audio(
                     else original_end,
                     3,
                 )
-                diagnostic["fallbackReason"] = "snapped_range_would_be_empty"
+                diagnostic["fallbackReason"] = (
+                    "snapped_range_would_be_empty"
+                    if snapped_range_would_be_empty
+                    else "snapped_range_left_requested_interval"
+                )
         diagnostics.extend(endpoint_diagnostics)
         aligned_ranges.append(
             {
@@ -6434,6 +6565,7 @@ def build_retained_transcript(
     delete_ranges: list[dict[str, float]],
     output_duration: float,
     timeline_delete_ranges: list[dict[str, float]] | None = None,
+    timeline_semantic_delete_ranges: list[dict[str, float]] | None = None,
     audio_quiet_ranges: list[dict[str, float]] | None = None,
     alignment_cache: dict[str, Any] | None = None,
     editable_segments: list[dict[str, Any]] | None = None,
@@ -6444,10 +6576,14 @@ def build_retained_transcript(
         else delete_ranges
     )
 
-    def is_deleted(start: float, end: float) -> bool:
+    def intersects_delete_range(
+        start: float,
+        end: float,
+        ranges: list[dict[str, float]],
+    ) -> bool:
         return any(
             start < item["end"] - 0.001 and end > item["start"] + 0.001
-            for item in delete_ranges
+            for item in ranges
         )
 
     acoustic_units = transcript_acoustic_character_units(segments, alignment_cache)
@@ -6571,11 +6707,21 @@ def build_retained_transcript(
     for unit in acoustic_units:
         semantic_start = float(unit["start"])
         semantic_end = float(unit["end"])
-        if is_deleted(semantic_start, semantic_end):
-            continue
         use_forced = int(unit["_segmentIndex"]) in forced_projection_segments
         source_start = float(unit["_forcedStart"] if use_forced else semantic_start)
         source_end = float(unit["_forcedEnd"] if use_forced else semantic_end)
+        if intersects_delete_range(semantic_start, semantic_end, delete_ranges):
+            continue
+        if (
+            timeline_semantic_delete_ranges is not None
+            and use_forced
+            and timeline_range_meaningfully_covers_character(
+                source_start,
+                source_end,
+                timeline_semantic_delete_ranges,
+            )
+        ):
+            continue
         preferred_start = max(
             0.0,
             min(output_duration, timeline_after_deletions(source_start, timeline_ranges)),
@@ -6822,11 +6968,20 @@ def build_existing_edit_retained_transcript(
         transcript_ranges = (
             edit.get("requestedRanges") or edit.get("ranges") or []
         )
+    text_transcript_ranges = edit.get("textTranscriptRanges")
+    timeline_transcript_ranges = edit.get("timelineTranscriptRanges")
+    has_range_sources = isinstance(text_transcript_ranges, list) and isinstance(
+        timeline_transcript_ranges,
+        list,
+    )
     return build_retained_transcript(
         segments,
-        transcript_ranges,
+        text_transcript_ranges if has_range_sources else transcript_ranges,
         float(edit.get("outputDuration") or 0),
         timeline_delete_ranges=edit.get("ranges") or [],
+        timeline_semantic_delete_ranges=(
+            timeline_transcript_ranges if has_range_sources else None
+        ),
         audio_quiet_ranges=audio_quiet_ranges,
         alignment_cache=alignment_cache,
         editable_segments=editable_segments,
@@ -6847,12 +7002,12 @@ def build_cut_draft_retained_transcript(
         segments,
         duration,
     )
-    semantic_ranges = resolve_cut_draft_delete_ranges(
-        draft,
-        suggestions,
-        segments,
-        duration,
-        use_text_semantic_boundaries=True,
+    text_semantic_ranges, timeline_semantic_ranges = (
+        resolve_cut_draft_transcript_range_sources(
+            draft,
+            segments,
+            duration,
+        )
     )
     output_duration = round(
         duration
@@ -6861,9 +7016,10 @@ def build_cut_draft_retained_transcript(
     )
     return build_retained_transcript(
         segments,
-        semantic_ranges,
+        text_semantic_ranges,
         output_duration,
         timeline_delete_ranges=media_ranges,
+        timeline_semantic_delete_ranges=timeline_semantic_ranges,
         alignment_cache=load_existing_job_acoustic_alignment(media_path, segments),
         editable_segments=editable_segments,
     )
@@ -13581,6 +13737,10 @@ def process_cut_job(
             attempt_id = edit.get("attemptId")
         elif edit.get("attemptId") != attempt_id:
             return
+        text_transcript_ranges = copy.deepcopy(edit.get("textTranscriptRanges"))
+        timeline_transcript_ranges = copy.deepcopy(
+            edit.get("timelineTranscriptRanges")
+        )
     output_path = video_path.parent / "edited.mp4"
     attempt_output_path = video_path.parent / f".edited-{attempt_id or 'initial'}.tmp.mp4"
 
@@ -13602,6 +13762,10 @@ def process_cut_job(
             if transcript_delete_ranges is not None
             else delete_ranges
         )
+        has_range_sources = isinstance(text_transcript_ranges, list) and isinstance(
+            timeline_transcript_ranges,
+            list,
+        )
         media_ranges = copy.deepcopy(delete_ranges)
         if not update_edit_job(
             job_id,
@@ -13619,9 +13783,12 @@ def process_cut_job(
         output_duration = round(duration - deleted_duration, 3)
         transcript = build_retained_transcript(
             source_segments,
-            requested_ranges,
+            text_transcript_ranges if has_range_sources else requested_ranges,
             output_duration,
             timeline_delete_ranges=media_ranges,
+            timeline_semantic_delete_ranges=(
+                timeline_transcript_ranges if has_range_sources else None
+            ),
             audio_quiet_ranges=source_result.get("audioQuietRanges") or [],
             alignment_cache=load_existing_job_acoustic_alignment(
                 video_path,
@@ -13839,6 +14006,12 @@ def process_preview_composition_job(
         duration = float(job["duration"])
         source_result = copy.deepcopy(job.get("result") or {})
         source_segments = source_result.get("segments") or []
+        text_transcript_ranges = copy.deepcopy(
+            (job.get("edit") or {}).get("textTranscriptRanges")
+        )
+        timeline_transcript_ranges = copy.deepcopy(
+            (job.get("edit") or {}).get("timelineTranscriptRanges")
+        )
 
     attempt_label = attempt_id or "initial"
     edited_path = video_path.parent / "edited.mp4"
@@ -13905,9 +14078,20 @@ def process_preview_composition_job(
         )
         transcript = build_retained_transcript(
             source_segments,
-            transcript_delete_ranges,
+            (
+                text_transcript_ranges
+                if isinstance(text_transcript_ranges, list)
+                and isinstance(timeline_transcript_ranges, list)
+                else transcript_delete_ranges
+            ),
             output_duration,
             timeline_delete_ranges=media_ranges,
+            timeline_semantic_delete_ranges=(
+                timeline_transcript_ranges
+                if isinstance(text_transcript_ranges, list)
+                and isinstance(timeline_transcript_ranges, list)
+                else None
+            ),
             audio_quiet_ranges=source_result.get("audioQuietRanges") or [],
             alignment_cache=load_existing_job_acoustic_alignment(
                 video_path,
@@ -15827,6 +16011,18 @@ def create_cut(
                     cut_draft_revision=request.cutDraftRevision,
                 )
             )
+            text_transcript_ranges = None
+            timeline_transcript_ranges = None
+            # A matching numeric range does not prove that a legacy request owns
+            # this draft's text/timeline source split. The revision does.
+            if draft is not None and request.cutDraftRevision is not None:
+                text_transcript_ranges, timeline_transcript_ranges = (
+                    resolve_cut_draft_transcript_range_sources(
+                        draft,
+                        source_result.get("segments") or [],
+                        duration,
+                    )
+                )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -15840,6 +16036,17 @@ def create_cut(
             "ranges": copy.deepcopy(requested_ranges),
             "requestedRanges": copy.deepcopy(requested_ranges),
             "transcriptRanges": copy.deepcopy(transcript_delete_ranges),
+            **(
+                {
+                    "textTranscriptRanges": copy.deepcopy(text_transcript_ranges),
+                    "timelineTranscriptRanges": copy.deepcopy(
+                        timeline_transcript_ranges
+                    ),
+                }
+                if isinstance(text_transcript_ranges, list)
+                and isinstance(timeline_transcript_ranges, list)
+                else {}
+            ),
             "outputUrl": None,
             "outputDuration": None,
             "transcript": None,
@@ -16860,6 +17067,18 @@ def create_preview_composition(
             cut_draft_revision=request.cutDraftRevision,
             allow_empty_request=True,
         )
+        text_transcript_ranges = None
+        timeline_transcript_ranges = None
+        # Preserve source identity only when the caller explicitly consumes this
+        # draft revision; range equality alone is ambiguous for legacy requests.
+        if draft is not None and request.cutDraftRevision is not None:
+            text_transcript_ranges, timeline_transcript_ranges = (
+                resolve_cut_draft_transcript_range_sources(
+                    draft,
+                    source_result.get("segments") or [],
+                    duration,
+                )
+            )
         preview_duration = round(
             duration
             - sum(item["end"] - item["start"] for item in requested_ranges),
@@ -16910,6 +17129,17 @@ def create_preview_composition(
         "ranges": copy.deepcopy(requested_ranges),
         "requestedRanges": copy.deepcopy(requested_ranges),
         "transcriptRanges": copy.deepcopy(transcript_delete_ranges),
+        **(
+            {
+                "textTranscriptRanges": copy.deepcopy(text_transcript_ranges),
+                "timelineTranscriptRanges": copy.deepcopy(
+                    timeline_transcript_ranges
+                ),
+            }
+            if isinstance(text_transcript_ranges, list)
+            and isinstance(timeline_transcript_ranges, list)
+            else {}
+        ),
         "outputUrl": None,
         "outputDuration": None,
         "transcript": None,

@@ -66,7 +66,7 @@ x = clamp(main_w * center_x - overlay_w / 2, min_x, max_x)
 
 ### 2. Signatures
 
-- 后端：`build_retained_transcript(segments, delete_ranges, output_duration, timeline_delete_ranges=None, audio_quiet_ranges=None, alignment_cache=None, editable_segments=None)`。
+- 后端：`build_retained_transcript(segments, delete_ranges, output_duration, timeline_delete_ranges=None, timeline_semantic_delete_ranges=None, audio_quiet_ranges=None, alignment_cache=None, editable_segments=None)`。
 - 后端：`load_acoustic_alignment_cache(media_path, segments, job_directory)` 只读并复验已有 sidecar，不运行模型。
 - API：`GET|PUT /api/transcriptions/{job_id}/cut-draft -> {cutDraft, retainedTranscript}`。
 - 前端：`getCurrentRetainedProjection()`、`applyServerRetainedProjection(transcript, {jobId, signature, revision})`、`loadServerRetainedProjection(jobId, signature, revision)`。
@@ -74,7 +74,9 @@ x = clamp(main_w * center_x - overlay_w / 2, min_x, max_x)
 
 ### 3. Contracts
 
-- `delete_ranges` 使用 `originalStart/originalEnd` 归一化后的文字和手动时间轴语义范围，只决定字符身份；`timeline_delete_ranges` 使用物理 `start/end`，只执行 `timeline_after_deletions()` 时间扭曲。显式空列表不得按 truthy fallback 回退到另一层范围。
+- `delete_ranges` 只使用 `textRanges[].originalStart/originalEnd` 归一化后的文字语义范围，并按展示字符时间决定字符身份；`timeline_semantic_delete_ranges` 只使用 `timelineRanges[].originalStart/originalEnd`，且仅与完整句段复验有效的 forced 字符区间比较。两种来源不得先合并再按粗 ASR 时间统一判删。
+- `timeline_delete_ranges` 使用所有物理 `start/end`，只执行 `timeline_after_deletions()` 时间扭曲。forced 缺失或无效时，timeline-only 删除保守保留不确定字符，但不得缩小、扩大或取消已经确认的媒体物理删除范围。显式空列表不得按 truthy fallback 回退到另一层范围。
+- timeline-only 字符身份要求 forced 区间与手动语义范围的重叠量严格大于半个字符时长。小于等于半字的边缘擦碰不得整字删除，超过半字的明确覆盖仍按用户意图删除。
 - 已有 sidecar 只有在字符顺序、finite 单调区间和 segment 包络复验全部通过时才提供 forced timing；无效或缺失时使用粗时间，但不得删除语义保留字符，也不得调用 FunASR 或写 sidecar。
 - `segments/words/asrWords` 输出 edited `start/end` 和成对 `sourceStart/sourceEnd`；segment 还携带 `sourceSegmentIndex`。edited 时间必须有限、正时长、单调且不越过 `duration`。
 - `editable_segments` 只有在 spoken-character identity 构成完整、按 source 顺序排列的 source transcript 分区时才启用；每个 retained segment 携带当前数组索引对应的 `editableSegmentId`。缺失、非法、错序或不完整的历史数据必须整体回退 source-segment 分组，不能部分安装或使 API 失败。
@@ -82,12 +84,18 @@ x = clamp(main_w * center_x - overlay_w / 2, min_x, max_x)
 - `retainedTranscript` 是 source transcript、草稿 revision 和既有 alignment 的派生响应，不属于 `CutDraftRequest`，不写入 `cut-draft.json`。旧草稿在 GET 时只读重建，不迁移。
 - 浏览器只在 job id、语义 signature 和 revision 同时匹配时安装服务端投影；过期或旧服务响应保持本地语义投影。文字保存应在一次 `transcriptTextChanged` 中原子安装当前投影，不改变 cut ranges、split track、art/PiP source anchors 或 `timingRevision`。
 - `/cuts`、`/compose`、完成 edit 恢复与后续文案修正使用同一 helper；历史 edit 只有在 `transcriptRanges` 字段缺失/无效时才回退 `requestedRanges/ranges`，显式 `transcriptRanges=[]` 表示不删文字。
+- `transcriptRanges` 保持文字与手动时间轴语义范围合并后的公开兼容形状；消费当前草稿的新 edit 同时保存 `textTranscriptRanges` 和 `timelineTranscriptRanges`。后台剪辑、组合生成和 completed edit 重建优先使用来源字段，历史 edit 缺失任一来源字段时整体回退旧扁平语义，不能部分安装。
+- 只有请求携带并通过校验的 `cutDraftRevision` 才证明它消费当前草稿，进而允许保存上述来源字段。旧请求即使 ranges 数值恰好等于草稿结果，也只能保留扁平 `transcriptRanges` 兼容语义，禁止按秒数相等猜测范围来源。
 
 ### 4. Validation & Error Matrix
 
 | 条件 | 结果 |
 | --- | --- |
 | semantic range 删除字符，物理 range 更宽或覆盖下一个粗 token | 仍按 semantic range 保留字符，再用 forced/coarse timing 映射 |
+| timeline range 与粗字符时间重叠，但结束于有效 forced 起音之前 | 媒体范围保持不变，字符保留并从 forced 起音投影 |
+| timeline range 与有效 forced 字符区间相交 | 删除该字符；文字选区的判定方式不受影响 |
+| timeline range 只擦到 forced 字符 `22ms` 或 `60ms`，字符时长 `180ms` | 未超过半字，保留字符；媒体范围保持精确 |
+| timeline range 命中粗时间，但 forced 缺失或整段复验失败 | timeline-only 字符保守保留，媒体仍按原物理范围裁切 |
 | 物理映射使一个或多个保留字符坍缩 | 保留全部字符，并在输出时长内分配最小正时长 |
 | sidecar 缺失、文字错序、时间非单调或越出包络 | 整个受影响 segment 回退粗时间，不运行模型 |
 | cut-draft GET/PUT 的 job、signature 或 revision 过期 | 前端拒绝服务端投影，不覆盖当前编辑 |
@@ -98,14 +106,17 @@ x = clamp(main_w * center_x - overlay_w / 2, min_x, max_x)
 ### 5. Good / Base / Bad Cases
 
 - Good：语义只删第一处“一起给”，即使物理范围覆盖下一处“一起”的粗时间，输出仍为“所有人一起给你画”，并优先使用下一处“一起”的有效 forced 起音。
-- Base：无 sidecar 的旧 job 使用粗时间重建相同字符；旧客户端仍可省略新增响应字段。
-- Bad：先与物理 keep span 相交再决定字符身份，或在 mapped end 等于 mapped start 时 `continue`，都会重新造成时间轴丢首字。
+- Good：手动空白选区 `32.053-39.829s` 虽与下一字粗时间 `37.120-37.480s` 重叠，但下一字 forced 起音为 `39.850s`，因此物理空白被删除而下一字保留。
+- Good：跨既有删除洞的选区保存为多个源 `timelineRanges`；右段与 `39.850-40.030s` 字符只重叠 `22ms` 或 `60ms` 时字符保留，而 `39.860-40.000s` 的明确覆盖超过半字并删除该字符。
+- Base：无 sidecar 的旧 job 对 timeline-only 字符使用保守保留；旧客户端和历史 edit 仍可省略新增来源字段并走旧兼容读取。
+- Bad：把文字范围与 timeline 范围先压成一份 `delete_ranges`，再统一与粗 ASR 字符时间相交，会把真实起音仍在选区外的后文误删。
 
 ### 6. Tests Required
 
-- 后端纯函数：语义/物理范围错位、显式空物理范围、单个与多个坍缩字符、forced 正常/错序/非单调/越包络、跨自然词和 ASR token、source anchors 与 segment identity；另覆盖重复短语、标点、跨 source editable 分区、非法 legacy fallback 和同 editable id 的内部删除多 run。
+- 后端纯函数：语义/物理范围错位、显式空物理范围、timeline 仅命中粗时间/forced 边缘擦碰/超过有效覆盖阈值/forced 缺失四种字符身份、单个与多个坍缩字符、forced 正常/错序/非单调/越包络、跨自然词和 ASR token、source anchors 与 segment identity；另覆盖重复短语、标点、跨 source editable 分区、非法 legacy fallback 和同 editable id 的内部删除多 run。
 - API：cut-draft GET/PUT 同 revision 返回派生投影，请求模型和 JSON 文件不包含派生字段，旧草稿/无 sidecar 兼容，过期 revision 冲突。
 - 生成与恢复：`/cuts`、`/compose`、completed edit 文案修正和 history 使用一致文字；显式空 `transcriptRanges` 不回退物理范围。
+- 来源持久化：带有效 revision 的 `/cuts`、`/compose` 保存两类来源；未带 revision 的相同数值请求不保存来源字段并继续走旧扁平兼容路径。
 - 前端/Store：本地降级不丢字，stale job/signature/revision 被拒绝，文字保存原子更新 cut transcript 且不改变 ranges、split、art/PiP anchors 或 `timingRevision`。
 - 声学回归：物理 ranges、transition resolver、FFmpeg 输入和首字残音边界保持不变。
 
@@ -119,6 +130,20 @@ semantic_ranges = edit.get("transcriptRanges") or edit.get("ranges") or []
 semantic_ranges = edit.get("transcriptRanges")
 if not isinstance(semantic_ranges, list):
     semantic_ranges = edit.get("requestedRanges") or edit.get("ranges") or []
+```
+
+```python
+# Wrong: 合并来源后只能用粗字符时间统一判删。
+semantic_ranges = [*text_ranges, *timeline_ranges]
+
+# Correct: 文字范围按语义字符判删；timeline 范围只按有效 forced 字符判删。
+build_retained_transcript(
+    segments,
+    text_ranges,
+    output_duration,
+    timeline_delete_ranges=media_ranges,
+    timeline_semantic_delete_ranges=timeline_ranges,
+)
 ```
 
 ```javascript
@@ -317,7 +342,8 @@ body = { count, existingOverlays, draftTranscript, draftDuration };
 ### 3. Contracts
 
 - `textRanges[].originalStart/originalEnd` 表示删除哪些文字，不因波形吸附而改变。
-- `timelineRanges[].originalStart/originalEnd` 表示用户确认的精确时间语义；物理 `start/end` 只有在距离可靠字符状态转换不超过 `0.20s` 且不跨保留语音核心时才能独立吸附。完全位于强制对齐 quiet gap 的范围保持精确。
+- `timelineRanges[].originalStart/originalEnd` 表示用户确认的精确时间语义；物理 `start/end` 只有在距离可靠字符状态转换不超过 `0.20s` 且不跨保留语音核心时才能独立吸附。coarse midpoint 判定出的连续删除 run 必须至少有一个 forced/acoustic 字符被选区覆盖超过一半，才能参与吸附。完全位于强制对齐 quiet gap 的范围保持精确。
+- 仅由 VAD `silence/aggressive` 授权的最终物理端点也必须距用户端点不超过 `0.20s`；forced/PCM 已证明的尾音边界可继续超距。任意吸附结果如果与用户原选区完全失去交集，则整体回退精确原范围。
 - `splitPoints[].sourceTime` 是播放头分割的源媒体锚点。`boundaryMode="split_exact"` 只允许完整匹配两个相邻 source anchors 及其 `splitClipKey`；验证成功后物理 `start/end` 严格等于 `original*`，不得加载 forced alignment、解码 PCM 或执行任何声学移动。缺少 mode 的历史/普通手动范围按 `speech_safe`。
 - `textRanges[].start/end` 表示真实媒体删除范围；草稿 PUT 响应可以在上一保留文字结束与下一保留文字开始之间扩大，禁止为草稿对齐传入 head/tail guard 穿越保留文字。
 - `adjacentSilenceBefore/After` 必须按校准后的物理边界重新计算。
@@ -558,6 +584,7 @@ boundary, diagnostic = forced_alignment_transition_boundary(
 - 后端：`resolve_adjacent_character_boundary(media_path, media_fingerprint, left, right, samples, sample_rate, *, directional_transition_contexts=None, forced_boundary_cache=None, adjacent_boundary_cache=None, vad_cache=None) -> boundary record`。
 - 后端：`enrich_editable_segment_boundaries(media_path, source_segments, editable_segments, *, alignment_cache=None, existing_boundaries=None, samples=None) -> (editableSegments, editableSegmentBoundaries)`。
 - VAD：`analyze_local_voice_activity(audio_path, duration, model_cache_dir) -> {status, reason, speechRanges, vad, modelId, modelRevision}`。
+- 运行时：`load_funasr_auto_model() -> funasr.AutoModel`，是 FA 与 VAD 唯一允许使用的 FunASR 导入入口。
 - API：`PUT /api/transcriptions/{job_id}/editable-segments` additive 返回 `editableSegments` 和 `editableSegmentBoundaries`；`PUT /api/transcriptions/{job_id}/cut-draft` 持久化最终物理范围及 `boundaryDiagnostics`。
 
 ### 3. Contracts
@@ -569,6 +596,8 @@ boundary, diagnostic = forced_alignment_transition_boundary(
 - cut draft 是物理删除范围权威。公共预览、`/cuts`、`/compose` 与 FFmpeg 只消费匹配 revision 的已保存 `start/end`，生成阶段不得再次调用 FA、VAD 或 PCM。播放帧回调必须先执行删除区间 seek，再更新旧 source time 对应的视觉状态。
 - `boundaryMode=split_exact` 在解码或声学解析前直接保持精确原始锚点，FA/VAD/PCM 调用数必须为零。
 - VAD 固定使用 `fsmn-vad` / `v2.0.4`、16 kHz 单声道 PCM WAV、CPU 单例和串行推理。局部 WAV 位于 job 目录并在所有退出路径清理；动态 VAD/PCM trust 不写入 `acoustic-alignment.json`。
+- FA 与 VAD 必须通过共享 FunASR 运行时入口加载 `AutoModel`。初始化期间只允许 `funasr.*` 使用直接子模块枚举，避免递归导入无关可选模型及其原生依赖；非 FunASR 枚举仍委托标准 `pkgutil.walk_packages`。该临时替换必须由进程级锁串行化，并在成功或异常后无条件恢复，不能永久改变全局 Python 导入行为。
+- “模型可用”必须以目标 Windows 运行环境中的真实 FA/VAD 初始化和至少一个真实媒体样本为发布门禁。mock 返回 `AutoModel` 只能验证导入隔离与降级契约，不能证明 Windows App Control、DLL 加载和模型推理实际可用。
 
 ### 4. Validation & Error Matrix
 
@@ -577,6 +606,8 @@ boundary, diagnostic = forced_alignment_transition_boundary(
 | VAD 与 PCM 同时确认持续无声走廊 | `mode=silence`，三个 final 相同且位于交集内 |
 | VAD 成功但字符连续发音或 PCM 不确认静音 | `mode=aggressive`，按删除方向选择不同 final，优先清除被删语音 |
 | 模型下载、校验、加载、推理或局部 WAV 失败 | `mode=fallback`，公开稳定 reason，分段/保存/生成继续；`nonSpeechRanges=[]` |
+| Windows App Control 阻止无关可选依赖的 DLL | 安全导入不得递归加载该依赖；FA/VAD 仍可初始化，不得误报 `runtime_unavailable` |
+| FunASR 导入成功或抛出异常 | `pkgutil.walk_packages` 均恢复为调用前对象，其他包枚举行为不变 |
 | 边界 key 或方向上下文不匹配 | 禁止复用旧 aggressive/fallback 记录，重新解析或安全降级 |
 | 历史 job 缺少新增字段 | 继续按语义时间显示，首次相关操作惰性解析，不批量迁移 |
 | 方向物理点造成 `mediaEnd <= mediaStart` | 两个展示端点一起回退语义范围，不混用一个物理端点和一个语义端点 |
@@ -585,8 +616,10 @@ boundary, diagnostic = forced_alignment_transition_boundary(
 ### 5. Good / Base / Bad Cases
 
 - Good：删除第一处“一起给”时，重复上下文命中正确字符实例；无静音则用 aggressive 起止点完整覆盖被删语音，保留第二处“一起给你”，文案列表、时间轴、预览和 FFmpeg 使用同一拼接点。
+- Good：目标 Windows 环境阻止未签名 `llvmlite.dll`，但该依赖属于未使用的可选模型；安全导入跳过递归扫描后，FA 与 FSMN-VAD 仍完成初始化，“你身边人人都觉得”的物理结束点使用真实 forced/VAD/PCM 证据。
 - Base：历史 job 或 VAD 不可用时仍能拆分、保存和生成，诊断明确标记 fallback，且不把未知窗口伪报为静音。
 - Bad：按相同文字复用另一处“一起给”的缓存、把 VAD padding 直接当采样切点、删除后相邻保留段仍显示 neutral，都会重新造成残音或显示与成片不一致。
+- Bad：mock 测试中能取得 `AutoModel` 就认定运行时可用，或让 FA/VAD 各自修改全局包遍历器；前者会漏掉目标机 DLL 拦截，后者会留下竞态和全局状态污染。
 
 ### 6. Tests Required
 
@@ -595,6 +628,7 @@ boundary, diagnostic = forced_alignment_transition_boundary(
 - API/草稿：用户拆分后立即返回中性边界；删除中段后两个相邻保留段同步使用方向点；刷新不漂移，生成阶段 FA/VAD/PCM 新增调用数为零。
 - 浏览器：真实点击“拆分”再删除中段，断言文案、编辑弹窗和公共时间轴端点一致，基础 video `srcWrites/loadCalls` 为零；帧时钟先 seek 再渲染。
 - 精确分割：`split_exact` 的 FA/VAD/PCM/音频解码调用数全部为零。
+- FunASR 运行时：单元测试覆盖 FunASR 直接子模块枚举、非 FunASR 委托、成功/异常后的全局恢复；目标 Windows 环境用真实模型初始化并对真实媒体断言 alignment 至少有有效 segment、VAD 为 `completed`，不能只验证 mocked success。
 - 打包：模型、jobs、history 和任务试听媒体不进入产物或 Git。
 
 ### 7. Wrong vs Correct
@@ -609,6 +643,16 @@ non_speech_ranges = (
     if vad_result.get("status") == "completed"
     else []
 )
+```
+
+```python
+# Wrong: FunASR 顶层导入会递归扫描并加载未使用模型的可选原生依赖。
+from funasr import AutoModel
+
+# Correct: FA 和 VAD 共享受锁保护、异常后恢复全局状态的安全入口。
+from .funasr_runtime import load_funasr_auto_model
+
+AutoModel = load_funasr_auto_model()
 ```
 
 ```javascript

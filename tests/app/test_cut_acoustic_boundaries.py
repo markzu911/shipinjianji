@@ -2450,9 +2450,9 @@ def test_timeline_cross_segment_snap_uses_trusted_transition_not_final_distance(
             {
                 "key": "near-semantic-transition",
                 "start": 0.0,
-                "end": 0.42,
+                "end": 0.48,
                 "originalStart": 0.0,
-                "originalEnd": 0.42,
+                "originalEnd": 0.48,
             }
         ],
         segments,
@@ -2490,6 +2490,138 @@ def test_timeline_cross_segment_snap_uses_trusted_transition_not_final_distance(
     assert near_end["transitionScope"] == "cross_segment"
     assert near_end["fallbackReason"] is None
     assert far_end["fallbackReason"] == "no_transition_within_snap_distance"
+
+
+def test_timeline_blank_selection_stays_exact_when_forced_speech_is_outside():
+    segments = _repeated_de_ni_segments()
+    alignment_cache = copy.deepcopy(_repeated_de_ni_alignment_cache())
+    alignment_cache["segments"][0]["characters"][11].update(
+        {"start": 39.87, "end": 40.01}
+    )
+    timeline_range = {
+        "key": "production-blank-fragment",
+        "start": 37.81,
+        "end": 39.93,
+        "originalStart": 37.81,
+        "originalEnd": 39.93,
+    }
+    diagnostics: list[dict[str, object]] = []
+
+    aligned = app_module.align_cut_draft_timeline_ranges_to_audio(
+        [timeline_range],
+        segments,
+        47.5,
+        alignment_cache=alignment_cache,
+        samples=_repeated_de_ni_gap_samples(),
+        diagnostics=diagnostics,
+    )[0]
+    retained = app_module.build_retained_transcript(
+        segments,
+        [],
+        45.38,
+        timeline_delete_ranges=[aligned],
+        timeline_semantic_delete_ranges=[timeline_range],
+        alignment_cache=alignment_cache,
+    )
+
+    assert aligned == timeline_range
+    assert retained["text"] == "".join(segment["text"] for segment in segments)
+    first_retained_repeat = next(
+        word
+        for segment in retained["segments"]
+        for word in segment["words"]
+        if word["sourceStart"] == pytest.approx(39.87)
+    )
+    assert first_retained_repeat["text"].startswith("你")
+
+
+def test_timeline_character_identity_uses_strict_union_majority_overlap():
+    character_start = 39.85
+    character_end = 40.03
+
+    assert not app_module.timeline_range_meaningfully_covers_character(
+        character_start,
+        character_end,
+        [{"start": 39.85, "end": 39.94}],
+    )
+    assert app_module.timeline_range_meaningfully_covers_character(
+        character_start,
+        character_end,
+        [
+            {"start": 39.85, "end": 39.90},
+            {"start": 39.96, "end": 40.01},
+        ],
+    )
+    assert not app_module.timeline_range_meaningfully_covers_character(
+        character_start,
+        character_end,
+        [
+            {"start": 39.85, "end": 39.90},
+            {"start": 39.87, "end": 39.92},
+        ],
+    )
+
+
+def test_timeline_vad_only_snap_must_keep_physical_endpoint_near_request(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def aggressive_boundary(*_args, **_kwargs):
+        return {
+            "key": "vad-only-far-boundary",
+            "neutral": 0.8,
+            "deleteLeft": 0.82,
+            "deleteRight": 0.78,
+            "mode": "aggressive",
+            "diagnostic": {
+                "forced": {
+                    "deleteLeft": {
+                        "fallback": 0.4,
+                        "boundaryTrustworthy": False,
+                        "trustReason": "alignment_missing",
+                    },
+                    "deleteRight": {
+                        "fallback": 0.4,
+                        "boundaryTrustworthy": False,
+                        "trustReason": "alignment_missing",
+                    },
+                },
+                "vad": {"status": "completed"},
+                "pcmFloorRanges": [],
+            },
+        }
+
+    monkeypatch.setattr(
+        app_module,
+        "resolve_adjacent_character_boundary",
+        aggressive_boundary,
+    )
+    diagnostics: list[dict[str, object]] = []
+    aligned = app_module.align_cut_draft_timeline_ranges_to_audio(
+        [
+            {
+                "key": "vad-only-request",
+                "start": 0.0,
+                "end": 0.42,
+                "originalStart": 0.0,
+                "originalEnd": 0.42,
+            }
+        ],
+        _de_ni_segments(),
+        1.0,
+        alignment_cache=_forced_de_ni_alignment_cache(),
+        samples=array("h", [4_000]) * app_module.CUT_BOUNDARY_SAMPLE_RATE,
+        diagnostics=diagnostics,
+    )[0]
+
+    assert aligned["end"] == aligned["originalEnd"] == 0.42
+    end_diagnostic = next(
+        item for item in diagnostics if item.get("endpoint") == "end"
+    )
+    assert end_diagnostic["trustReason"] == "vad_directional_aggressive"
+    assert end_diagnostic["forcedBoundaryTrustworthy"] is False
+    assert end_diagnostic["fallbackReason"] == (
+        "physical_boundary_outside_snap_distance"
+    )
 
 
 def test_timeline_does_not_snap_when_only_physical_final_is_nearby():

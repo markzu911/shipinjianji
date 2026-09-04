@@ -53,7 +53,7 @@ def test_shared_frontend_assets_are_versioned_and_not_cached():
 
     assert page_response.status_code == 200
     assert styles_response.status_code == 200
-    assert "/app.js?v=20260831-07" in page_response.text
+    assert "/app.js?v=20260904-01" in page_response.text
     assert "/styles.css?v=20260901-05" in page_response.text
     assert "/transcript-follow-scroll.js?v=20260831-01" in page_response.text
     assert "/timeline-thumbnail-cache.js?v=20260828-01" in page_response.text
@@ -734,14 +734,14 @@ def test_cut_range_and_segment_frontend_contracts():
         confirmation_start:confirmation_end
     ]
     assert "cancelPendingTimelineRange();" not in confirmation_script
-    assert "已保留待确认区间" in confirmation_script
+    assert "已保留待确认剪后区间" in confirmation_script
     assert 'eyebrow: "时间轴滑动删除"' in script_response.text
     assert 'title: "删除这个时间轴区间？"' in script_response.text
     assert 'confirmText: "确认删除"' in script_response.text
     assert "已取消时间轴选区。" in script_response.text
     assert "hasPendingRange || !hasMergedSelection" in script_response.text
     assert 'typeof options.hasMergedSelection === "boolean"' in script_response.text
-    assert "已调整待确认区间" in script_response.text
+    assert "已调整待确认剪后区间" in script_response.text
     assert "const CUT_TIMELINE_MANUAL_MIN_RANGE = CUT_TIMELINE_STEP;" in (
         script_response.text
     )
@@ -760,6 +760,7 @@ def test_cut_range_and_segment_frontend_contracts():
     assert "CUT_TIMELINE_SPLIT_MIN_RANGE" in split_normalization
     assert "CUT_TIMELINE_MANUAL_MIN_RANGE" not in split_normalization
     assert "CUT_TIMELINE_MANUAL_MIN_RANGE" in selection_script
+    assert "timelineSelectionDuration(safeRange)" in selection_script
     assert "CUT_TIMELINE_MANUAL_MIN_RANGE" in keyboard_source
     assert "activateTextEditorPanel" not in script_response.text
     assert "splitTextIntoCharacterTokens" in script_response.text
@@ -828,7 +829,15 @@ def test_cut_range_and_segment_frontend_contracts():
     assert "/editable-segments`" in script_response.text
     assert ".segment-edit-dialog {" in styles_response.text
     assert ".cut-timeline-text-segment-label {" in styles_response.text
-    assert "text-align-last: justify" in styles_response.text
+    timeline_label_start = styles_response.text.index(
+        ".cut-timeline-text-segment-label {"
+    )
+    timeline_label_end = styles_response.text.index("}", timeline_label_start)
+    timeline_label_styles = styles_response.text[
+        timeline_label_start:timeline_label_end
+    ]
+    assert "text-align: center" in timeline_label_styles
+    assert "text-align-last: justify" not in timeline_label_styles
     assert ".timeline-range-confirm-actions {" not in styles_response.text
     assert ".cut-timeline-delete-range.is-pending {" in styles_response.text
     assert "transcript-segment-text" not in script_response.text
@@ -957,6 +966,491 @@ process.stdout.write(JSON.stringify({{
     assert payload["exactThreshold"][0]["layoutEnd"] == pytest.approx(1001.6)
     assert payload["overThreshold"][0]["layoutEnd"] == pytest.approx(2000.1)
     assert payload["tinyPositiveGap"][0]["layoutEnd"] == pytest.approx(3000.101)
+
+
+def test_edited_timeline_selection_is_committed_as_disjoint_source_ranges():
+    root = Path(__file__).resolve().parents[2]
+    app_source = (root / "web" / "app.js").read_text(encoding="utf-8")
+    mapping_start = app_source.index("function editedCutTimelineDuration")
+    mapping_end = app_source.index("function deriveCutSplitClips", mapping_start)
+    commit_start = app_source.index("function commitPendingTimelineRange")
+    commit_end = app_source.index("function confirmPendingTimelineRange", commit_start)
+    helpers = app_source[mapping_start:mapping_end] + app_source[
+        commit_start:commit_end
+    ]
+    script = f"""
+const clamp = (value, minimum, maximum) =>
+  Math.min(maximum, Math.max(minimum, value));
+const cutTimelineDuration = () => 50;
+const timelineSemanticDeleteRange = range => ({{
+  start: Number(range.originalStart ?? range.start),
+  end: Number(range.originalEnd ?? range.end),
+}});
+const spans = [
+  {{ sourceStart: 0, sourceEnd: 32.73, editedStart: 0, editedEnd: 32.73 }},
+  {{ sourceStart: 39.68, sourceEnd: 50, editedStart: 32.73, editedEnd: 43.05 }},
+];
+const getEditedTimelineSpans = () => spans;
+let nextTimelineRangeId = 8;
+let timelineDeleteRanges = [{{
+  id: 7,
+  key: "timeline-7",
+  start: 32.096,
+  end: 39.872,
+  editedSelectionStart: 32.096,
+  editedSelectionEnd: 32.922,
+}}];
+{helpers}
+const committed = commitPendingTimelineRange(timelineDeleteRanges[0]);
+const durations = {{
+  acrossExistingHole: timelineSelectionDuration({{
+    start: 32.729,
+    end: 39.681,
+    editedSelectionStart: 32.729,
+    editedSelectionEnd: 32.731,
+  }}),
+  legacySourceRange: timelineSelectionDuration({{ start: 5, end: 5.1 }}),
+}};
+process.stdout.write(JSON.stringify({{
+  committed,
+  timelineDeleteRanges,
+  durations,
+}}));
+"""
+    result = subprocess.run(
+        ["node", "-e", script],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert payload["committed"] == payload["timelineDeleteRanges"]
+    assert payload["committed"] == [
+        {
+            "id": 7,
+            "key": "timeline-7",
+            "start": pytest.approx(32.096),
+            "end": pytest.approx(32.73),
+            "originalStart": pytest.approx(32.096),
+            "originalEnd": pytest.approx(32.73),
+        },
+        {
+            "id": 8,
+            "key": "timeline-7-span-2",
+            "start": pytest.approx(39.68),
+            "end": pytest.approx(39.872),
+            "originalStart": pytest.approx(39.68),
+            "originalEnd": pytest.approx(39.872),
+        },
+    ]
+    assert all(
+        item["end"] <= 32.73 or item["start"] >= 39.68
+        for item in payload["committed"]
+    )
+    assert payload["durations"]["acrossExistingHole"] == pytest.approx(0.002)
+    assert payload["durations"]["legacySourceRange"] == pytest.approx(0.1)
+
+
+def test_pending_timeline_adjustment_stays_in_edited_coordinate_space():
+    root = Path(__file__).resolve().parents[2]
+    app_source = (root / "web" / "app.js").read_text(encoding="utf-8")
+    mapping_start = app_source.index("function editedCutTimelineDuration")
+    mapping_end = app_source.index("function deriveCutSplitClips", mapping_start)
+    mapping_source = app_source[mapping_start:mapping_end]
+    script = f"""
+const clamp = (value, minimum, maximum) =>
+  Math.min(maximum, Math.max(minimum, value));
+const cutTimelineDuration = () => 50;
+const timelineSemanticDeleteRange = range => ({{
+  start: Number(range.originalStart ?? range.start),
+  end: Number(range.originalEnd ?? range.end),
+}});
+const spans = [
+  {{ sourceStart: 0, sourceEnd: 32.73, editedStart: 0, editedEnd: 32.73 }},
+  {{ sourceStart: 39.68, sourceEnd: 50, editedStart: 32.73, editedEnd: 43.05 }},
+];
+const getEditedTimelineSpans = () => spans;
+{mapping_source}
+const range = {{
+  start: 32.096,
+  end: 39.872,
+  editedSelectionStart: 32.096,
+  editedSelectionEnd: 32.922,
+}};
+applyTimelineEditedSelection(range, 32.196, 33.022, spans);
+process.stdout.write(JSON.stringify(range));
+"""
+    result = subprocess.run(
+        ["node", "-e", script],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        encoding="utf-8",
+    )
+
+    assert json.loads(result.stdout) == {
+        "start": pytest.approx(32.196),
+        "end": pytest.approx(39.972),
+        "editedSelectionStart": pytest.approx(32.196),
+        "editedSelectionEnd": pytest.approx(33.022),
+    }
+    adjustment_start = app_source.index("function beginTimelineRangeAdjustment")
+    adjustment_end = app_source.index(
+        "function cancelPendingTimelineRange", adjustment_start
+    )
+    keyboard_start = app_source.index("function adjustTimelineRangeWithKeyboard")
+    keyboard_end = app_source.index("function resetCutPlaybackCursors", keyboard_start)
+    assert "duration: editedTotal" in app_source[adjustment_start:adjustment_end]
+    assert "applyTimelineEditedSelection(" in app_source[
+        adjustment_start:adjustment_end
+    ]
+    assert "applyTimelineEditedSelection(" in app_source[keyboard_start:keyboard_end]
+
+
+def test_pending_timeline_pointer_adjustment_restores_both_time_domains_on_cancel():
+    root = Path(__file__).resolve().parents[2]
+    app_source = (root / "web" / "app.js").read_text(encoding="utf-8")
+    mapping_start = app_source.index("function editedCutTimelineDuration")
+    mapping_end = app_source.index("function deriveCutSplitClips", mapping_start)
+    adjustment_start = app_source.index("function beginTimelineRangeAdjustment")
+    adjustment_end = app_source.index(
+        "function cancelPendingTimelineRange", adjustment_start
+    )
+    helpers = app_source[mapping_start:mapping_end] + app_source[
+        adjustment_start:adjustment_end
+    ]
+    script = f"""
+const EditorTimeline = require("./web/timeline-model.js");
+const clamp = (value, minimum, maximum) =>
+  Math.min(maximum, Math.max(minimum, value));
+const cutTimelineDuration = () => 50;
+const timelineSemanticDeleteRange = range => ({{
+  start: Number(range.originalStart ?? range.start),
+  end: Number(range.originalEnd ?? range.end),
+}});
+const spans = [
+  {{ sourceStart: 0, sourceEnd: 32.73, editedStart: 0, editedEnd: 32.73 }},
+  {{ sourceStart: 39.68, sourceEnd: 50, editedStart: 32.73, editedEnd: 43.05 }},
+];
+const getEditedTimelineSpans = () => spans;
+const CUT_TIMELINE_DRAG_THRESHOLD = 5;
+const CUT_TIMELINE_MANUAL_MIN_RANGE = 1 / 30;
+const cutTimelineClipId = id => `cut:${{id}}`;
+const cutFrameTimelineTrack = {{
+  getBoundingClientRect: () => ({{ width: 1000 }}),
+}};
+const listeners = new Map();
+const window = {{
+  EditorTimeline,
+  addEventListener: (type, listener) => listeners.set(type, listener),
+  removeEventListener: (type, listener) => {{
+    if (listeners.get(type) === listener) listeners.delete(type);
+  }},
+}};
+const control = {{ dataset: {{ dragMode: "move" }} }};
+const rangeElement = {{
+  classList: {{ contains: () => false }},
+  dataset: {{ rangeId: "7" }},
+  getBoundingClientRect: () => ({{ left: 0, top: 0, width: 20, height: 20 }}),
+}};
+const target = {{
+  closest: selector => selector === "[data-drag-mode]" ? control : rangeElement,
+}};
+const event = {{
+  button: 0,
+  clientX: 100,
+  clientY: 10,
+  target,
+  preventDefault() {{}},
+  stopPropagation() {{}},
+}};
+const original = {{
+  id: 7,
+  key: "timeline-7",
+  start: 32.096,
+  end: 39.872,
+  editedSelectionStart: 32.096,
+  editedSelectionEnd: 32.922,
+}};
+let range = {{ ...original }};
+let timelineDeleteRanges = [range];
+let selectedTimelineRangeId = 7;
+let timelineRangeInProgress = true;
+const cutControlsLocked = false;
+const cloneCutHistorySnapshot = () => ({{}});
+const pauseCutPreview = () => {{}};
+const renderCutTimelineRanges = () => {{}};
+const updateCutTimelineStatus = () => {{}};
+const formatCutRange = () => "";
+const seekCutPreview = () => {{}};
+const syncCutTimelineModel = () => ({{}});
+const stageCutHistoryOperation = () => {{}};
+const updateSelectionSummary = () => {{}};
+const alignManualRangeToTranscript = value => ({{
+  ...value,
+  originalStart: value.start,
+  originalEnd: value.end,
+}});
+{helpers}
+
+beginTimelineRangeAdjustment(event);
+listeners.get("pointermove")({{ clientX: 200 }});
+const dragged = {{ ...range }};
+listeners.get("pointercancel")({{ type: "pointercancel" }});
+const cancelled = {{ ...range }};
+process.stdout.write(JSON.stringify({{ dragged, cancelled, original }}));
+"""
+    result = subprocess.run(
+        ["node", "-e", script],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        encoding="utf-8",
+    )
+    payload = json.loads(result.stdout)
+
+    assert payload["dragged"] == {
+        "id": 7,
+        "key": "timeline-7",
+        "start": pytest.approx(43.351),
+        "end": pytest.approx(44.177),
+        "editedSelectionStart": pytest.approx(36.401),
+        "editedSelectionEnd": pytest.approx(37.227),
+    }
+    assert payload["cancelled"] == payload["original"]
+
+
+def test_pending_timeline_range_displays_edited_time_on_track_and_in_dialog():
+    root = Path(__file__).resolve().parents[2]
+    app_source = (root / "web" / "app.js").read_text(encoding="utf-8")
+    format_start = app_source.index("function formatTime")
+    format_end = app_source.index("function syncCorrectedWords", format_start)
+    mapping_start = app_source.index("function editedCutTimelineDuration")
+    mapping_end = app_source.index(
+        "function editedTimelineSelectionToSourceRanges", mapping_start
+    )
+    descriptor_start = app_source.index("function buildCutTimelineRangeDescriptors")
+    descriptor_end = app_source.index(
+        "function createCutTimelineRangeElement", descriptor_start
+    )
+    confirmation_start = app_source.index(
+        "async function requestTimelineRangeConfirmation"
+    )
+    confirmation_end = app_source.index(
+        "function adjustTimelineRangeWithKeyboard", confirmation_start
+    )
+    helpers = "\n".join(
+        [
+            app_source[format_start:format_end],
+            app_source[mapping_start:mapping_end],
+            app_source[descriptor_start:descriptor_end],
+            app_source[confirmation_start:confirmation_end],
+        ]
+    )
+    script = f"""
+const spans = [
+  {{ sourceStart: 0, sourceEnd: 32.73, editedStart: 0, editedEnd: 32.73 }},
+  {{ sourceStart: 39.68, sourceEnd: 50, editedStart: 32.73, editedEnd: 43.05 }},
+];
+const range = {{
+  id: 7,
+  key: "timeline-7",
+  start: 32.096,
+  end: 39.872,
+  editedSelectionStart: 32.096,
+  editedSelectionEnd: 32.922,
+}};
+const cutTimelineDuration = () => 50;
+const getEditedTimelineSpans = () => spans;
+const timelineSemanticDeleteRange = item => ({{
+  start: Number(item.originalStart ?? item.start),
+  end: Number(item.originalEnd ?? item.end),
+}});
+const cutFrameTimelineTrack = {{
+  getBoundingClientRect: () => ({{ width: 1000 }}),
+}};
+const CUT_TIMELINE_NARROW_HIT_WIDTH = 88;
+const CUT_TIMELINE_CANCEL_HIT_WIDTH = 44;
+const CUT_TIMELINE_CANCEL_GAP = 4;
+let selectedTimelineRangeId = 7;
+let timelineDeleteRanges = [range];
+let timelineRangeInProgress = true;
+let timelineRangeConfirmationOpen = false;
+let cutControlsLocked = false;
+let dialog = null;
+let status = null;
+const syncCutTimelineModel = () => null;
+const confirmPendingTimelineRange = () => {{}};
+const updateCutTimelineStatus = message => {{ status = message; }};
+const window = {{
+  appConfirm: async options => {{ dialog = options; return false; }},
+}};
+{helpers}
+(async () => {{
+  const descriptor = buildCutTimelineRangeDescriptors()[0];
+  await requestTimelineRangeConfirmation(range);
+  process.stdout.write(JSON.stringify({{ descriptor, dialog, status }}));
+}})().catch(error => {{
+  console.error(error?.stack || error);
+  process.exitCode = 1;
+}});
+"""
+    result = subprocess.run(
+        ["node", "-e", script],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        encoding="utf-8",
+    )
+    payload = json.loads(result.stdout)
+
+    edited_range = "00:32.096–00:32.922"
+    assert payload["descriptor"]["bodyText"] == edited_range
+    assert "剪后时间" in payload["descriptor"]["bodyAriaLabel"]
+    assert edited_range in payload["dialog"]["message"]
+    assert "00:39.872" not in payload["dialog"]["message"]
+    assert edited_range in payload["status"]
+
+
+def test_cut_timeline_scale_caps_collapsed_text_without_changing_normal_scale():
+    root = Path(__file__).resolve().parents[2]
+    app_source = (root / "web" / "app.js").read_text(encoding="utf-8")
+    helper_start = app_source.index("function cutTimelinePixelsPerSecond")
+    helper_end = app_source.index("function updateCutTimelineScale", helper_start)
+    helper_source = app_source[helper_start:helper_end]
+    script = f"""
+const CUT_TIMELINE_MIN_PIXELS_PER_SECOND = 22;
+const CUT_TIMELINE_MAX_PIXELS_PER_SECOND = 72;
+const CUT_TIMELINE_TEXT_CHAR_WIDTH = 10;
+const CUT_TIMELINE_TEXT_LINES = 2;
+const currentEditableSegments = [{{}}];
+const getEditedTimelineSpans = () => [];
+const getSelectedTextSemanticDeleteRanges = () => [];
+let parts = [];
+let cutTimelinePixelsPerSecondCache = null;
+const getRetainedSegmentParts = () => parts;
+{helper_source}
+const calculate = nextParts => {{
+  parts = nextParts;
+  cutTimelinePixelsPerSecondCache = null;
+  return cutTimelinePixelsPerSecond();
+}};
+process.stdout.write(JSON.stringify({{
+  normal: calculate([{{
+    text: "正常文案",
+    editedStart: 1,
+    editedEnd: 2,
+  }}]),
+  collapsed: calculate([{{
+    text: "身边人人都觉得",
+    editedStart: 21.592,
+    editedEnd: 21.592007,
+  }}]),
+}}));
+"""
+    result = subprocess.run(
+        ["node", "-e", script],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        encoding="utf-8",
+    )
+
+    assert json.loads(result.stdout) == {"normal": 36, "collapsed": 72}
+
+
+def test_timeline_text_projection_keeps_partially_overlapped_adjacent_words():
+    root = Path(__file__).resolve().parents[2]
+    app_source = (root / "web" / "app.js").read_text(encoding="utf-8")
+    token_start = app_source.index("function splitTextIntoCharacterTokens")
+    token_end = app_source.index("function getTranscriptCharacterUnits", token_start)
+    run_start = app_source.index("function selectedTextRangeKeysAtTime")
+    run_end = app_source.index("function renderSegmentTextRun", run_start)
+    helpers = app_source[token_start:token_end] + app_source[run_start:run_end]
+    script = f"""
+const CUT_SPEECH_BOUNDARY_EPSILON = 0.002;
+const selectedRanges = new Map();
+const currentSuggestions = [];
+const rangeKey = (start, end) =>
+  Number(start).toFixed(3) + "-" + Number(end).toFixed(3);
+const getSuggestionRanges = suggestion => suggestion.ranges || [];
+const editableSegmentDisplayBounds = segment => ({{
+  start: segment.start,
+  end: segment.end,
+}});
+{helpers}
+const segment = {{
+  start: 31.77,
+  end: 40,
+  text: "线删你",
+  words: [
+    {{ text: "线", start: 31.77, end: 32.12 }},
+    {{ text: "删", start: 32.1, end: 32.5 }},
+    {{ text: "你", start: 39.7, end: 40 }},
+  ],
+}};
+const deletedRanges = [
+  {{ start: 32.096, end: 32.73 }},
+  {{ start: 39.68, end: 39.872 }},
+];
+const pendingRuns = buildSegmentTextRuns(segment, deletedRanges, 0);
+const unavailableOwnerRuns = buildSegmentTextRuns(segment, deletedRanges, 0, {{
+  segments: [{{
+    text: "线你",
+    sourceStart: 31.77,
+    sourceEnd: 40.01,
+    words: [{{ text: "线你", sourceStart: 31.77, sourceEnd: 40.01 }}],
+  }}],
+}});
+const confirmedRuns = buildSegmentTextRuns(segment, deletedRanges, 0, {{
+  segments: [
+    {{
+      editableSegmentId: 0,
+      text: "线",
+      sourceStart: 31.77,
+      sourceEnd: 32.06,
+      words: [{{
+        text: "线", sourceStart: 31.77, sourceEnd: 32.06,
+      }}],
+    }},
+    {{
+      editableSegmentId: 0,
+      text: "你",
+      sourceStart: 39.87,
+      sourceEnd: 40.01,
+      words: [{{
+        text: "你", sourceStart: 39.87, sourceEnd: 40.01,
+      }}],
+    }},
+  ],
+}});
+process.stdout.write(JSON.stringify({{
+  pendingRuns,
+  unavailableOwnerRuns,
+  confirmedRuns,
+}}));
+"""
+    result = subprocess.run(
+        ["node", "-e", script],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        encoding="utf-8",
+    )
+
+    payload = json.loads(result.stdout)
+    assert [(run["text"], run["kind"]) for run in payload["pendingRuns"]] == [
+        ("线删你", "edit")
+    ]
+    assert [
+        (run["text"], run["kind"])
+        for run in payload["unavailableOwnerRuns"]
+    ] == [("线删你", "edit")]
+    assert [
+        (run["text"], run["kind"]) for run in payload["confirmedRuns"]
+    ] == [("线", "edit"), ("删", "deleted"), ("你", "edit")]
 
 
 def test_cut_commit_render_plan_preserves_replace_across_mid_phase_cancel():
@@ -1756,6 +2250,7 @@ def test_frontend_merges_adjacent_deleted_text_across_range_keys():
     script = f"""
 const source = {json.dumps(source)};
 const functions = new Function(`
+const CUT_SPEECH_BOUNDARY_EPSILON = 0.002;
 const selectedRanges = new Map();
 const selectedNoSpeechRanges = new Map();
 const currentSuggestions = [];
@@ -1776,6 +2271,7 @@ const rangeKey = (start, end) =>
 const getSuggestionRanges = (suggestion) => suggestion.ranges || [];
 const getCommittedTimelineDeleteRanges = () => [];
 const getCommittedTimelineSemanticDeleteRanges = () => [];
+const getCurrentServerRetainedProjection = () => null;
 const getNoSpeechRange = (suggestion) => suggestion;
 const noSpeechKindLabel = () => "quiet";
 const noSpeechAudioLabel = () => "silent";
@@ -1901,7 +2397,15 @@ const timelineDeleted = functions.buildSegmentTextRuns({{
 }}, [
   {{ start: 0, end: 1 }},
   {{ start: 1, end: 2 }},
-]);
+], 0, {{
+  segments: [{{
+    editableSegmentId: 1,
+    text: "保留段",
+    sourceStart: 2,
+    sourceEnd: 3,
+    words: [{{ text: "保留段", sourceStart: 2, sourceEnd: 3 }}],
+  }}],
+}});
 
 functions.currentEditableSegments.push({{
   start: 0,
@@ -1998,6 +2502,7 @@ let currentEditableSegments = [
   {{ id: 1, text: "下段内容" }},
 ];
 const getCommittedTimelineSemanticDeleteRanges = () => [];
+const getCurrentServerRetainedProjection = () => null;
 const buildSegmentTextRuns = (_segment, _deletedRanges, segmentIndex) =>
   segmentIndex === 0
     ? [{{
@@ -2302,26 +2807,59 @@ let transcriptPlaybackLastTime = 0;
 let cutTimelineTextPlaybackFloorCursor = 0;
 let cutTimelineTextPlaybackCursor = 0;
 let cutTimelineTextPlaybackLastTime = 0;
-const cutPreviewVideo = {{ paused: false, currentTime: 0.5 }};
-const transcriptPreviewRange = null;
-const CUT_SPEECH_BOUNDARY_EPSILON = 0.001;
-const getMergedSelection = () => [{{ start: 0.5, end: 0.8 }}];
+const cutPreviewVideo = {{ paused: false, currentTime: 0.95 }};
+let transcriptPreviewRange = {{ start: 0.2, end: 1, displayKey: "current" }};
+const CUT_SPEECH_BOUNDARY_EPSILON = 0.002;
+const getMergedSelection = () => [{{ start: 0.9, end: 1.8 }}];
 const clamp = (value, minimum, maximum) =>
   Math.min(maximum, Math.max(minimum, value));
 const cutTimelineDuration = () => 2;
 const cutMediaController = () => ({{
   seekSource(value, settings) {{
-    events.push("seek:" + value.toFixed(1) + ":" + settings.sync);
+    cutPreviewVideo.currentTime = value;
+    events.push(
+      "seek:" + value.toFixed(1) + ":" +
+        (settings?.sync === false ? "async" : "sync")
+    );
   }},
 }});
-const updateCutTimelineStatus = () => events.push("status");
+const pauseCutPreview = () => {{
+  events.push("pause:" + (transcriptPreviewRange === null));
+  cutPreviewVideo.paused = true;
+}};
+const updateCutTimelineStatus = (_message, _tone, scope) =>
+  events.push("status:" + scope);
 const formatCutRange = () => "range";
-const updateCutPlaybackVisualFrame = () => events.push("visual");
+const updateCutPlaybackVisualFrame = value =>
+  events.push("visual:" + value.toFixed(2));
 ${{source}}
-return {{ handleCutPlaybackMediaFrame }};
+return {{
+  handleCutPlaybackMediaFrame,
+  previewRange: () => transcriptPreviewRange,
+  resumePublicPlayback: () => {{ cutPreviewVideo.paused = false; }},
+}};
 `)(events);
-const result = functions.handleCutPlaybackMediaFrame(0.5);
-console.log(JSON.stringify({{ result, events }}));
+const withinResult = functions.handleCutPlaybackMediaFrame(0.95);
+const withinEvents = [...events];
+events.length = 0;
+const previewResult = functions.handleCutPlaybackMediaFrame(0.999);
+const previewEvents = [...events];
+const previewRange = functions.previewRange();
+functions.handleCutPlaybackMediaFrame(1);
+const repeatEvents = events.slice(previewEvents.length);
+events.length = 0;
+functions.resumePublicPlayback();
+const publicResult = functions.handleCutPlaybackMediaFrame(0.95);
+console.log(JSON.stringify({{
+  withinResult,
+  withinEvents,
+  previewResult,
+  previewEvents,
+  previewRange,
+  publicResult,
+  publicEvents: events,
+  repeatEvents,
+}}));
 """
     try:
         result = subprocess.run(
@@ -2338,8 +2876,26 @@ console.log(JSON.stringify({{ result, events }}));
         pytest.fail(exc.stderr)
 
     payload = json.loads(result.stdout)
-    assert payload["result"] == {"skipped": True}
-    assert payload["events"] == ["seek:0.8:false", "status"]
+    assert payload["withinResult"] == {"skipped": False}
+    assert payload["withinEvents"] == ["visual:0.95"]
+    assert payload["previewResult"] == {"skipped": False}
+    assert payload["previewEvents"] == [
+        "pause:true",
+        "seek:1.0:sync",
+        "status:transcript",
+    ]
+    assert payload["previewRange"] is None
+    assert payload["repeatEvents"] == ["visual:1.00"]
+    assert payload["publicResult"] == {"skipped": True}
+    assert payload["publicEvents"] == ["seek:1.8:async", "status:preview"]
+
+    controls_start = app_source.index("function setupCutPreviewControls")
+    controls_end = app_source.index(
+        "function scheduleCutTimelineResize", controls_start
+    )
+    controls_source = app_source[controls_start:controls_end]
+    assert "finishTranscriptPreviewIfNeeded(current)" in controls_source
+    assert "当前段落播放结束。" not in controls_source
 
 
 def test_split_into_three_projects_neutral_and_directional_timeline_boundaries() -> None:
@@ -2669,19 +3225,33 @@ let cutSplitPoints = [{{ key: "split-a", sourceTime: 0.8 }}];
 let cutSplitClipsCache = {{ stale: true }};
 let timelineRangeInProgress = true;
 let selectedTimelineRangeId = 2;
+let currentJobId = "job-current";
 let cutDraftRevision = 3;
 let automaticNoSpeechInitialized = true;
 let cutDraftLastSignature = "";
 let cutHistoryReplaying = false;
 let selectionUpdates = 0;
 let historyReconciles = 0;
+let serverRetainedProjection = null;
+const renderUpdates = [];
 const rangeKey = (start, end) =>
   Number(start).toFixed(3) + ":" + Number(end).toFixed(3);
 const CUT_TIMELINE_SPLIT_MIN_RANGE = 0.001;
 const cutTimelineDuration = () => 1;
 const clamp = (value, minimum, maximum) =>
   Math.min(maximum, Math.max(minimum, value));
-const updateSelectionSummary = () => {{ selectionUpdates += 1; }};
+const updateSelectionSummary = (renderOptions, runtimeOptions) => {{
+  selectionUpdates += 1;
+  renderUpdates.push({{
+    renderOptions,
+    runtimeOptions,
+    projectionText: serverRetainedProjection?.transcript?.text || null,
+  }});
+}};
+const applyServerRetainedProjection = (transcript, metadata) => {{
+  serverRetainedProjection = {{ transcript, ...metadata }};
+  return true;
+}};
 const reconcileCurrentCutHistorySnapshot = () => {{ historyReconciles += 1; }};
 ${{source}}
 return {{
@@ -2695,6 +3265,12 @@ return {{
     splitCache: cutSplitClipsCache,
     selectionUpdates,
     historyReconciles,
+  }}),
+  projectionSnapshot: () => ({{
+    selectionUpdates,
+    historyReconciles,
+    renderUpdates,
+    serverProjectionText: serverRetainedProjection?.transcript?.text || null,
   }}),
 }};
 `)();
@@ -2747,6 +3323,8 @@ const rejectedChangedText = functions.applyPersistedCutDraftAlignment({{
   splitPoints: [{{ key: "split-a", sourceTime: 0.801 }}],
   automaticNoSpeechInitialized: true,
 }}, functions.expectedSignature());
+const unchangedAfterChangedText =
+  JSON.stringify(afterApplied) === JSON.stringify(functions.snapshot());
 const rejectedUnknownBoundaryMode = functions.applyPersistedCutDraftAlignment({{
   textRanges: [{{
     key: "text-a", start: 0, end: 0.4,
@@ -2763,6 +3341,8 @@ const rejectedUnknownBoundaryMode = functions.applyPersistedCutDraftAlignment({{
   splitPoints: [{{ key: "split-a", sourceTime: 0.801 }}],
   automaticNoSpeechInitialized: true,
 }}, functions.expectedSignature());
+const unchangedAfterUnknownBoundaryMode =
+  JSON.stringify(afterApplied) === JSON.stringify(functions.snapshot());
 const rejectedDuplicateKey = functions.applyPersistedCutDraftAlignment({{
   ...normalizedDraft,
   textRanges: [
@@ -2788,23 +3368,31 @@ const rejectedSplitOwnership = functions.applyPersistedCutDraftAlignment({{
     splitClipKey: "split-clip:split-a:source-end",
   }}],
 }}, functions.expectedSignature());
+const unchangedAfterStructuralRejections =
+  JSON.stringify(afterApplied) === JSON.stringify(functions.snapshot());
+const projectionApplied = functions.applyPersistedCutDraftAlignment(
+  {{ ...normalizedDraft, revision: 4 }},
+  functions.expectedSignature(),
+  {{ text: "保留后缀", segments: [] }},
+  "job-current",
+);
+const afterProjection = functions.projectionSnapshot();
 console.log(JSON.stringify({{
   rejected,
   unchangedAfterRejected: JSON.stringify(before) === JSON.stringify(afterRejected),
   applied,
   afterApplied,
   rejectedChangedText,
-  unchangedAfterChangedText:
-    JSON.stringify(afterApplied) === JSON.stringify(functions.snapshot()),
+  unchangedAfterChangedText,
   rejectedUnknownBoundaryMode,
-  unchangedAfterUnknownBoundaryMode:
-    JSON.stringify(afterApplied) === JSON.stringify(functions.snapshot()),
+  unchangedAfterUnknownBoundaryMode,
   rejectedDuplicateKey,
   rejectedExtraKey,
   rejectedMissingKey,
   rejectedSplitOwnership,
-  unchangedAfterStructuralRejections:
-    JSON.stringify(afterApplied) === JSON.stringify(functions.snapshot()),
+  unchangedAfterStructuralRejections,
+  projectionApplied,
+  afterProjection,
 }}));
 """
 
@@ -2867,6 +3455,18 @@ console.log(JSON.stringify({{
     assert payload["rejectedMissingKey"] is False
     assert payload["rejectedSplitOwnership"] is False
     assert payload["unchangedAfterStructuralRejections"] is True
+    assert payload["projectionApplied"] is True
+    assert payload["afterProjection"]["selectionUpdates"] == 2
+    assert payload["afterProjection"]["historyReconciles"] == 1
+    assert payload["afterProjection"]["serverProjectionText"] == "保留后缀"
+    assert payload["afterProjection"]["renderUpdates"][-1] == {
+        "renderOptions": {
+            "transcript": "replace",
+            "timelineText": "replace",
+        },
+        "runtimeOptions": {"preserveServerRetainedProjection": True},
+        "projectionText": "保留后缀",
+    }
 
 
 def test_frontend_normalized_cut_draft_ack_undo_redo_and_invalid_rebase():
@@ -3324,15 +3924,25 @@ def test_frontend_server_projection_rejects_stale_job_signature_and_revision():
     app_source = (Path(__file__).resolve().parents[2] / "web" / "app.js").read_text(
         encoding="utf-8"
     )
-    guard_start = app_source.index("function applyServerRetainedProjection")
+    token_start = app_source.index("function splitTextIntoCharacterTokens")
+    token_end = app_source.index("function getTranscriptCharacterUnits", token_start)
+    guard_start = app_source.index("function serverRetainedPartTokens")
     guard_end = app_source.index("function syncEditorSuiteCutDraftState", guard_start)
-    source = app_source[guard_start:guard_end]
+    source = "\n".join(
+        [app_source[token_start:token_end], app_source[guard_start:guard_end]]
+    )
     script = f"""
 const source = {json.dumps(source)};
 const functions = new Function(`
 let serverRetainedProjection = null;
 let currentJobId = "job-current";
 let cutDraftRevision = 4;
+const currentEditableSegments = [{{
+  text: "所有人一起给你画",
+  start: 0,
+  end: 1,
+  words: [{{ text: "所有人一起给你画", start: 0, end: 1 }}],
+}}];
 const buildPersistedCutDraftPayload = () => ({{ signature: "sig-current" }});
 const cutDraftSemanticSignature = (payload) => payload.signature;
 ${{source}}
@@ -3354,8 +3964,35 @@ const staleRevision = functions.applyServerRetainedProjection(transcript, {{
 const accepted = functions.applyServerRetainedProjection(transcript, {{
   jobId: "job-current", signature: "sig-current", revision: 4,
 }});
+const invalidOwner = functions.applyServerRetainedProjection({{
+  text: "所有人一起给你画",
+  segments: [{{
+    editableSegmentId: 9,
+    text: "所有人一起给你画",
+    start: 0,
+    end: 1,
+    sourceStart: 0,
+    sourceEnd: 1,
+  }}],
+}}, {{
+  jobId: "job-current", signature: "sig-current", revision: 4,
+}});
+const invalidCharacterIdentity = functions.applyServerRetainedProjection({{
+  text: "错误投影",
+  segments: [{{
+    editableSegmentId: 0,
+    text: "错误投影",
+    start: 0,
+    end: 1,
+    sourceStart: 0,
+    sourceEnd: 1,
+  }}],
+}}, {{
+  jobId: "job-current", signature: "sig-current", revision: 4,
+}});
 console.log(JSON.stringify({{
   staleJob, staleSignature, staleRevision, accepted,
+  invalidOwner, invalidCharacterIdentity,
   current: functions.current(),
 }}));
 """
@@ -3379,6 +4016,8 @@ console.log(JSON.stringify({{
     assert payload["staleSignature"] is False
     assert payload["staleRevision"] is False
     assert payload["accepted"] is True
+    assert payload["invalidOwner"] is False
+    assert payload["invalidCharacterIdentity"] is False
     assert payload["current"]["transcript"]["text"] == "所有人一起给你画"
 
 
@@ -3403,7 +4042,7 @@ const currentEditableSegments = [
 ];
 const spans = [{{ sourceStart: 0, sourceEnd: 2, editedStart: 0, editedEnd: 2 }}];
 const getEditedTimelineSpans = () => spans;
-const getCurrentSemanticDeleteRanges = () => [];
+const getSelectedTextSemanticDeleteRanges = () => [];
 const getEditableSegmentCoverageEnd = (index) => currentEditableSegments[index].end;
 const editedCutTimelineDuration = () => 2;
 const cutDraftSemanticSignature = () => "signature";

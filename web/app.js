@@ -172,6 +172,7 @@ const CUT_TIMELINE_THUMB_MAX = 180;
 const CUT_TIMELINE_THUMB_CACHE_VERSION = 1;
 const CUT_TIMELINE_MAJOR_TICK_WIDTH = 72;
 const CUT_TIMELINE_MIN_PIXELS_PER_SECOND = 22;
+const CUT_TIMELINE_MAX_PIXELS_PER_SECOND = 72;
 const CUT_TIMELINE_TEXT_CHAR_WIDTH = 10;
 const CUT_TIMELINE_TEXT_LINES = 2;
 const CUT_HISTORY_LIMIT = 40;
@@ -236,7 +237,6 @@ let cutPlaybackFrameClock = null;
 let transcriptCharacterUnitsCache = null;
 let editedTimelineSpansCache = null;
 let mergedCutSelectionCache = null;
-let semanticCutDeleteRangesCache = null;
 let cutSplitClipsCache = null;
 let cutTimelinePixelsPerSecondCache = null;
 let cutTimelineScaleSignature = "";
@@ -736,8 +736,147 @@ function suggestionTextRangeKeysAtTime(sourceTime) {
   );
 }
 
-function buildSegmentTextRuns(segment, deletedRanges, segmentIndex) {
+function serverRetainedPartTokens(part) {
+  const timedItems = (Array.isArray(part?.words) ? part.words : [])
+    .flatMap((word) => {
+      const start = Number(word?.sourceStart);
+      const end = Number(word?.sourceEnd);
+      return String(word?.text || "").trim() &&
+        Number.isFinite(start) &&
+        Number.isFinite(end) &&
+        end > start
+        ? [{ text: word.text, start, end }]
+        : [];
+    });
+  if (timedItems.length === 0) {
+    const start = Number(part?.sourceStart);
+    const end = Number(part?.sourceEnd);
+    if (
+      !String(part?.text || "").trim() ||
+      !Number.isFinite(start) ||
+      !Number.isFinite(end) ||
+      end <= start
+    ) {
+      return null;
+    }
+    timedItems.push({ text: part.text, start, end });
+  }
+  const tokens = timedItems.flatMap((item) =>
+    splitTextIntoCharacterTokens(item.text, item.start, item.end),
+  );
+  return tokens.length > 0 ? tokens : null;
+}
+
+function serverRetainedTokenIndexes(tokens, segmentIndex, projection) {
+  if (!projection || !Array.isArray(projection.segments)) return null;
+  const projectedParts = projection.segments.map((part) => ({
+    part,
+    owner: Number(part?.editableSegmentId),
+  }));
+  if (!projectedParts.every(({ owner }) =>
+    Number.isSafeInteger(owner) && owner >= 0
+  )) {
+    return null;
+  }
+  const retainedTokens = [];
+  for (const { owner, part } of projectedParts) {
+    if (owner !== segmentIndex) continue;
+    const partTokens = serverRetainedPartTokens(part);
+    if (partTokens === null) return null;
+    retainedTokens.push(...partTokens);
+  }
+  if (retainedTokens.length === 0) return new Set();
+  if (retainedTokens.length > tokens.length) return null;
+
+  const costs = Array.from(
+    { length: retainedTokens.length + 1 },
+    () => Array(tokens.length + 1).fill(Number.POSITIVE_INFINITY),
+  );
+  const take = Array.from(
+    { length: retainedTokens.length + 1 },
+    () => Array(tokens.length + 1).fill(false),
+  );
+  costs[0].fill(0);
+  for (let retainedIndex = 1; retainedIndex <= retainedTokens.length; retainedIndex += 1) {
+    const retained = retainedTokens[retainedIndex - 1];
+    const retainedMidpoint = (Number(retained.start) + Number(retained.end)) / 2;
+    if (!Number.isFinite(retainedMidpoint)) return null;
+    for (let sourceIndex = 1; sourceIndex <= tokens.length; sourceIndex += 1) {
+      costs[retainedIndex][sourceIndex] = costs[retainedIndex][sourceIndex - 1];
+      const source = tokens[sourceIndex - 1];
+      const sourceMidpoint = (Number(source.start) + Number(source.end)) / 2;
+      if (
+        String(source.text || "") !== String(retained.text || "") ||
+        !Number.isFinite(sourceMidpoint) ||
+        !Number.isFinite(costs[retainedIndex - 1][sourceIndex - 1])
+      ) {
+        continue;
+      }
+      const candidate =
+        costs[retainedIndex - 1][sourceIndex - 1] +
+        Math.abs(sourceMidpoint - retainedMidpoint);
+      if (candidate <= costs[retainedIndex][sourceIndex]) {
+        costs[retainedIndex][sourceIndex] = candidate;
+        take[retainedIndex][sourceIndex] = true;
+      }
+    }
+  }
+  if (!Number.isFinite(costs[retainedTokens.length][tokens.length])) return null;
+
+  const retainedIndexes = new Set();
+  let retainedIndex = retainedTokens.length;
+  let sourceIndex = tokens.length;
+  while (retainedIndex > 0 && sourceIndex > 0) {
+    if (take[retainedIndex][sourceIndex]) {
+      retainedIndexes.add(sourceIndex - 1);
+      retainedIndex -= 1;
+    }
+    sourceIndex -= 1;
+  }
+  return retainedIndex === 0 ? retainedIndexes : null;
+}
+
+function serverRetainedProjectionMatchesEditableSegments(projection) {
+  if (!projection || !Array.isArray(projection.segments)) return false;
+  if (projection.segments.some((part) => {
+    const owner = Number(part?.editableSegmentId);
+    const start = Number(part?.start);
+    const end = Number(part?.end);
+    const sourceStart = Number(part?.sourceStart);
+    const sourceEnd = Number(part?.sourceEnd);
+    return !Number.isSafeInteger(owner) ||
+      owner < 0 ||
+      owner >= currentEditableSegments.length ||
+      !Number.isFinite(start) ||
+      !Number.isFinite(end) ||
+      end <= start ||
+      !Number.isFinite(sourceStart) ||
+      !Number.isFinite(sourceEnd) ||
+      sourceEnd <= sourceStart;
+  })) {
+    return false;
+  }
+  return currentEditableSegments.every((segment, segmentIndex) =>
+    serverRetainedTokenIndexes(
+      getSegmentTokens(segment),
+      segmentIndex,
+      projection,
+    ) !== null
+  );
+}
+
+function buildSegmentTextRuns(
+  segment,
+  deletedRanges,
+  segmentIndex,
+  retainedProjection = null,
+) {
   const tokens = getSegmentTokens(segment);
+  const retainedTokenIndexes = serverRetainedTokenIndexes(
+    tokens,
+    segmentIndex,
+    retainedProjection,
+  );
   const displayBounds = typeof editableSegmentDisplayBounds === "function"
     ? editableSegmentDisplayBounds(segment, segmentIndex)
     : {
@@ -777,10 +916,17 @@ function buildSegmentTextRuns(segment, deletedRanges, segmentIndex) {
     const suggestionRangeKeys = Number.isFinite(midpoint)
       ? suggestionTextRangeKeysAtTime(midpoint)
       : [];
-    const deletedRange = Number.isFinite(midpoint) && deletedRanges.find(
-      (range) =>
-        midpoint >= Number(range.start) && midpoint < Number(range.end),
-    );
+    const timelinePresentationRange = Number.isFinite(midpoint)
+      ? deletedRanges.find((range) =>
+          midpoint >= Number(range.start) && midpoint < Number(range.end),
+        )
+      : null;
+    const deletedRange =
+      retainedTokenIndexes !== null &&
+      deletedRanges.length > 0 &&
+      !retainedTokenIndexes.has(wordIndex)
+        ? timelinePresentationRange || deletedRanges[0]
+        : null;
     const kind = rangeKeys.length > 0
       ? "restore"
       : deletedRange
@@ -1051,9 +1197,15 @@ function renderNoSpeechSegmentItem(suggestion, displayIndex) {
 
 function buildCutSegmentDisplayItems() {
   const deletedRanges = getCommittedTimelineSemanticDeleteRanges();
+  const retainedProjection = getCurrentServerRetainedProjection();
   const displayItems = [];
   currentEditableSegments.forEach((segment, segmentIndex) => {
-    for (const run of buildSegmentTextRuns(segment, deletedRanges, segmentIndex)) {
+    for (const run of buildSegmentTextRuns(
+      segment,
+      deletedRanges,
+      segmentIndex,
+      retainedProjection,
+    )) {
       displayItems.push({
         type: "text",
         start: Number(run.start),
@@ -1541,6 +1693,7 @@ function currentSegmentEditRun(target) {
     segment,
     deletedRanges,
     target.segmentIndex,
+    getCurrentServerRetainedProjection(),
   ).find((run) =>
     run.kind === "edit" &&
     run.characterStart === target.characterStart &&
@@ -1851,7 +2004,10 @@ async function saveSegmentText() {
         projectionRevision,
       )
     ) {
-      renderCutTimelineTextSegments();
+      updateSelectionSummary(
+        { transcript: "replace", timelineText: "replace" },
+        { preserveServerRetainedProjection: true },
+      );
     }
     const readProject = async () => {
       const jobResponse = await fetch(
@@ -2312,18 +2468,11 @@ function getSelectedTextDeleteRanges() {
   });
 }
 
-function getCurrentSemanticDeleteRanges() {
-  if (semanticCutDeleteRangesCache !== null) {
-    return semanticCutDeleteRangesCache;
-  }
-  semanticCutDeleteRangesCache = [
-    ...getSelectedTextDeleteRanges().map((range) => ({
+function getSelectedTextSemanticDeleteRanges() {
+  return getSelectedTextDeleteRanges().map((range) => ({
       start: range.originalStart,
       end: range.originalEnd,
-    })),
-    ...getCommittedTimelineSemanticDeleteRanges(),
-  ];
-  return semanticCutDeleteRangesCache;
+    }));
 }
 
 function protectRecognizedSpeechFromQuietRanges(quietRanges) {
@@ -2452,11 +2601,12 @@ function invalidateCutTimelineScale({ geometry = false } = {}) {
   if (geometry) cutTimelineViewportWidthCache = 0;
 }
 
-function invalidateCutPlaybackStructure() {
-  serverRetainedProjection = null;
+function invalidateCutPlaybackStructure(
+  { preserveServerRetainedProjection = false } = {},
+) {
+  if (!preserveServerRetainedProjection) serverRetainedProjection = null;
   editedTimelineSpansCache = null;
   mergedCutSelectionCache = null;
-  semanticCutDeleteRangesCache = null;
   cutSplitClipsCache = null;
   invalidateCutTimelineScale();
   cutTimelineTextPlaybackEntries = [];
@@ -2541,6 +2691,91 @@ function editedTimeToSourceTime(seconds, spans = getEditedTimelineSpans()) {
     }
   }
   return spans.at(-1)?.sourceEnd || 0;
+}
+
+function timelineSelectionDuration(range) {
+  const editedStart = Number(range?.editedSelectionStart);
+  const editedEnd = Number(range?.editedSelectionEnd);
+  if (Number.isFinite(editedStart) && Number.isFinite(editedEnd)) {
+    return Math.max(0, editedEnd - editedStart);
+  }
+  const semanticRange = timelineSemanticDeleteRange(range);
+  return Math.max(0, semanticRange.end - semanticRange.start);
+}
+
+function timelineSelectionEditedRange(
+  range,
+  spans = getEditedTimelineSpans(),
+) {
+  const total = editedCutTimelineDuration(spans);
+  const semanticRange = timelineSemanticDeleteRange(range);
+  const storedStart = Number(range?.editedSelectionStart);
+  const storedEnd = Number(range?.editedSelectionEnd);
+  const start = Number.isFinite(storedStart)
+    ? storedStart
+    : sourceTimeToEditedTime(semanticRange.start, spans);
+  const end = Number.isFinite(storedEnd)
+    ? storedEnd
+    : sourceTimeToEditedTime(semanticRange.end, spans);
+  const editedStart = clamp(start, 0, total);
+  return {
+    start: editedStart,
+    end: clamp(end, editedStart, total),
+  };
+}
+
+function formatTimelineSelectionRange(range, spans = getEditedTimelineSpans()) {
+  const editedRange = timelineSelectionEditedRange(range, spans);
+  return formatCutRange(editedRange.start, editedRange.end);
+}
+
+function applyTimelineEditedSelection(
+  range,
+  editedStart,
+  editedEnd,
+  spans = getEditedTimelineSpans(),
+) {
+  const total = editedCutTimelineDuration(spans);
+  const start = clamp(Number(editedStart) || 0, 0, total);
+  const end = clamp(Number(editedEnd) || start, start, total);
+  range.start = editedTimeToSourceTime(start, spans);
+  range.end = editedTimeToSourceTime(end, spans);
+  range.editedSelectionStart = start;
+  range.editedSelectionEnd = end;
+  return range;
+}
+
+function editedTimelineSelectionToSourceRanges(
+  range,
+  spans = getEditedTimelineSpans(),
+) {
+  const editedTotal = editedCutTimelineDuration(spans);
+  const semanticRange = timelineSemanticDeleteRange(range);
+  const fallbackStart = sourceTimeToEditedTime(semanticRange.start, spans);
+  const fallbackEnd = sourceTimeToEditedTime(semanticRange.end, spans);
+  const editedStart = clamp(
+    Number.isFinite(Number(range?.editedSelectionStart))
+      ? Number(range.editedSelectionStart)
+      : fallbackStart,
+    0,
+    editedTotal,
+  );
+  const editedEnd = clamp(
+    Number.isFinite(Number(range?.editedSelectionEnd))
+      ? Number(range.editedSelectionEnd)
+      : fallbackEnd,
+    editedStart,
+    editedTotal,
+  );
+  return spans.flatMap((span) => {
+    const overlapStart = Math.max(editedStart, span.editedStart);
+    const overlapEnd = Math.min(editedEnd, span.editedEnd);
+    if (overlapEnd <= overlapStart) return [];
+    return [{
+      start: span.sourceStart + overlapStart - span.editedStart,
+      end: span.sourceStart + overlapEnd - span.editedStart,
+    }];
+  });
 }
 
 function deriveCutSplitClips() {
@@ -2671,7 +2906,7 @@ function getEditedAudioQuietRanges(spans = getEditedTimelineSpans()) {
 function getRetainedSegmentParts(
   segment,
   spans = getEditedTimelineSpans(),
-  semanticDeleteRanges = getCurrentSemanticDeleteRanges(),
+  semanticDeleteRanges = getSelectedTextSemanticDeleteRanges(),
 ) {
   const segmentStart = Number(segment.start) || 0;
   const segmentEnd = Number(segment.end) || segmentStart;
@@ -2901,7 +3136,7 @@ function buildLiveCutDraftState() {
 
 function buildLocalRetainedProjection() {
   const spans = getEditedTimelineSpans();
-  const semanticDeleteRanges = getCurrentSemanticDeleteRanges();
+  const semanticDeleteRanges = getSelectedTextSemanticDeleteRanges();
   const segments = currentEditableSegments.flatMap((segment, segmentIndex) =>
     getRetainedSegmentParts(
       segment,
@@ -2928,7 +3163,7 @@ function buildLocalRetainedProjection() {
   };
 }
 
-function getCurrentRetainedProjection() {
+function getCurrentServerRetainedProjection() {
   const signature = cutDraftSemanticSignature(buildPersistedCutDraftPayload());
   if (
     serverRetainedProjection?.jobId === currentJobId &&
@@ -2937,7 +3172,11 @@ function getCurrentRetainedProjection() {
   ) {
     return serverRetainedProjection.transcript;
   }
-  return buildLocalRetainedProjection();
+  return null;
+}
+
+function getCurrentRetainedProjection() {
+  return getCurrentServerRetainedProjection() || buildLocalRetainedProjection();
 }
 
 function applyServerRetainedProjection(
@@ -2948,6 +3187,7 @@ function applyServerRetainedProjection(
   if (
     !transcript ||
     !Array.isArray(transcript.segments) ||
+    !serverRetainedProjectionMatchesEditableSegments(transcript) ||
     jobId !== currentJobId ||
     numericRevision !== cutDraftRevision ||
     signature !== cutDraftSemanticSignature(buildPersistedCutDraftPayload())
@@ -3571,7 +3811,7 @@ function applyPersistedCutDraftAlignment(
   const alignedSplitPoints = normalizeCutSplitPoints(draft.splitPoints);
   const rangeChanged = (left, right, fields) =>
     fields.some((field) => left?.[field] !== right?.[field]);
-  const changed =
+  const stateChanged =
     [...selectedRanges.entries()].some(([key, currentRange]) =>
       rangeChanged(currentRange, alignedTextRanges.get(key), [
         "start",
@@ -3623,24 +3863,27 @@ function applyPersistedCutDraftAlignment(
   cutSplitPoints = alignedSplitPoints;
   cutSplitClipsCache = null;
 
-  if (changed) {
+  const projectionApplied = retainedTranscript
+    ? applyServerRetainedProjection(retainedTranscript, {
+        jobId: expectedJobId,
+        signature: cutDraftSemanticSignature(buildPersistedCutDraftPayload()),
+        revision: draft.revision,
+      })
+    : false;
+
+  if (stateChanged || projectionApplied) {
     cutHistoryReplaying = true;
     try {
-      updateSelectionSummary({
-        transcript: "replace",
-        timelineText: "replace",
-      });
+      updateSelectionSummary(
+        { transcript: "replace", timelineText: "replace" },
+        { preserveServerRetainedProjection: projectionApplied },
+      );
     } finally {
       cutHistoryReplaying = false;
     }
-    reconcileCurrentCutHistorySnapshot();
   }
-  if (retainedTranscript) {
-    applyServerRetainedProjection(retainedTranscript, {
-      jobId: expectedJobId,
-      signature: cutDraftSemanticSignature(buildPersistedCutDraftPayload()),
-      revision: draft.revision,
-    });
+  if (stateChanged) {
+    reconcileCurrentCutHistorySnapshot();
   }
   return true;
 }
@@ -3779,7 +4022,6 @@ async function persistCutDraft() {
         const normalizedDesired = captureDesiredCutDraft();
         saveLocalCutDraft(serverDraft, request.jobId);
         syncEditorSuiteCutDraftState();
-        renderCutTimelineTextSegments("reconcile");
         cutCommitExternallySynced = true;
         cutDraftLastSignature = normalizedDesired.signature;
         cutDraftAcknowledged = {
@@ -3933,8 +4175,10 @@ async function refreshServerRetainedProjection(
     expectedRevision,
   );
   if (applied) {
-    syncEditorSuiteCutDraftState();
-    renderCutTimelineTextSegments();
+    updateSelectionSummary(
+      { transcript: "replace", timelineText: "replace" },
+      { preserveServerRetainedProjection: true },
+    );
   }
   return applied;
 }
@@ -4612,10 +4856,13 @@ function flushPendingCutCommitEffects() {
   return true;
 }
 
-function updateSelectionSummary(renderOptions = {}) {
+function updateSelectionSummary(
+  renderOptions = {},
+  { preserveServerRetainedProjection = false } = {},
+) {
   requestCutCommitRender(renderOptions);
   cancelPendingCutCommitEffects();
-  invalidateCutPlaybackStructure();
+  invalidateCutPlaybackStructure({ preserveServerRetainedProjection });
   recordCutHistoryIfChanged();
   if (!suppressEditorSuiteCutSync) {
     cutCommitNeedsEditorSuiteSync = true;
@@ -4680,7 +4927,7 @@ function cutTimelinePixelsPerSecond() {
   }
   let pixelsPerSecond = CUT_TIMELINE_MIN_PIXELS_PER_SECOND;
   const spans = getEditedTimelineSpans();
-  const semanticDeleteRanges = getCurrentSemanticDeleteRanges();
+  const semanticDeleteRanges = getSelectedTextSemanticDeleteRanges();
   for (const segment of currentEditableSegments) {
     for (const part of getRetainedSegmentParts(
       segment,
@@ -4695,7 +4942,13 @@ function cutTimelinePixelsPerSecond() {
         Math.ceil(characterCount / CUT_TIMELINE_TEXT_LINES) *
           CUT_TIMELINE_TEXT_CHAR_WIDTH +
         16;
-      pixelsPerSecond = Math.max(pixelsPerSecond, requiredWidth / duration);
+      pixelsPerSecond = Math.max(
+        pixelsPerSecond,
+        Math.min(
+          CUT_TIMELINE_MAX_PIXELS_PER_SECOND,
+          requiredWidth / duration,
+        ),
+      );
     }
   }
   cutTimelinePixelsPerSecondCache = Math.ceil(pixelsPerSecond);
@@ -5457,8 +5710,8 @@ function buildCutTimelineRangeDescriptors() {
   return timelineDeleteRanges.filter(
     ({ id }) => id === selectedTimelineRangeId,
   ).map((range) => {
-    const editedStart = sourceTimeToEditedTime(range.start, spans);
-    const editedEnd = sourceTimeToEditedTime(range.end, spans);
+    const { start: editedStart, end: editedEnd } =
+      timelineSelectionEditedRange(range, spans);
     const rangeWidthPercent = Math.max(
       0.25,
       ((editedEnd - editedStart) / total) * 100,
@@ -5492,20 +5745,20 @@ function buildCutTimelineRangeDescriptors() {
       }
       cancelLeft = `${cancelCenter - rangeLeftPixels}px`;
     }
-    const formattedRange = formatCutRange(range.start, range.end);
+    const formattedRange = formatCutRange(editedStart, editedEnd);
     return {
       bodyAriaLabel:
-        `待确认删除区间 ${formattedRange}，可拖动调整，再次点击或按 Enter 确认删除`,
+        `待确认删除剪后时间 ${formattedRange}，可拖动调整，再次点击或按 Enter 确认删除`,
       bodyText: formattedRange,
-      cancelAriaLabel: `取消待确认删除区间 ${formattedRange}`,
+      cancelAriaLabel: `取消待确认删除剪后时间 ${formattedRange}`,
       cancelLeft,
-      endAriaLabel: `调整删除区间结束时间，当前 ${formatTime(range.end)}`,
+      endAriaLabel: `调整删除区间结束时间，当前剪后时间 ${formatTime(editedEnd)}`,
       id: String(range.id),
       isNarrowRange,
       left: `${(editedStart / total) * 100}%`,
       pending: timelineRangeInProgress && range.id === selectedTimelineRangeId,
       selected: range.id === selectedTimelineRangeId,
-      startAriaLabel: `调整删除区间开始时间，当前 ${formatTime(range.start)}`,
+      startAriaLabel: `调整删除区间开始时间，当前剪后时间 ${formatTime(editedStart)}`,
       width: `${rangeWidthPercent}%`,
     };
   });
@@ -6382,11 +6635,18 @@ function beginCutTimelineSelection(event) {
     renderCutSplitClips();
   }
   pauseCutPreview();
+  const selectionSpans = getEditedTimelineSpans();
   const anchorSeconds = cutTimelineSecondsFromClientX(event.clientX);
+  const anchorEditedSeconds = sourceTimeToEditedTime(
+    anchorSeconds,
+    selectionSpans,
+  );
   const startClientX = event.clientX;
   let draftRange = null;
   let rawDraftStart = anchorSeconds;
   let rawDraftEnd = anchorSeconds;
+  let rawDraftEditedStart = anchorEditedSeconds;
+  let rawDraftEditedEnd = anchorEditedSeconds;
   seekCutPreview(anchorSeconds);
 
   const move = (moveEvent) => {
@@ -6397,6 +6657,7 @@ function beginCutTimelineSelection(event) {
       return;
     }
     const current = cutTimelineSecondsFromClientX(moveEvent.clientX);
+    const currentEdited = sourceTimeToEditedTime(current, selectionSpans);
     if (!draftRange) {
       const id = nextTimelineRangeId++;
       draftRange = {
@@ -6404,6 +6665,8 @@ function beginCutTimelineSelection(event) {
         key: `timeline-${id}`,
         start: anchorSeconds,
         end: anchorSeconds,
+        editedSelectionStart: anchorEditedSeconds,
+        editedSelectionEnd: anchorEditedSeconds,
       };
       timelineDeleteRanges.push(draftRange);
       selectedTimelineRangeId = draftRange.id;
@@ -6411,18 +6674,24 @@ function beginCutTimelineSelection(event) {
     }
     rawDraftStart = Math.min(anchorSeconds, current);
     rawDraftEnd = Math.max(anchorSeconds, current);
+    rawDraftEditedStart = Math.min(anchorEditedSeconds, currentEdited);
+    rawDraftEditedEnd = Math.max(anchorEditedSeconds, currentEdited);
     const safeRange = alignManualRangeToTranscript({
       ...draftRange,
       start: rawDraftStart,
       end: rawDraftEnd,
+      editedSelectionStart: rawDraftEditedStart,
+      editedSelectionEnd: rawDraftEditedEnd,
     });
     draftRange.start = safeRange?.start ?? rawDraftStart;
     draftRange.end = safeRange?.end ?? rawDraftEnd;
+    draftRange.editedSelectionStart = rawDraftEditedStart;
+    draftRange.editedSelectionEnd = rawDraftEditedEnd;
     seekCutPreview(current);
     renderCutTimelineRanges();
     updateCutTimelineStatus(
       safeRange
-        ? `将删除 ${formatCutRange(draftRange.start, draftRange.end)}；确认后语音附近会对齐安全剪辑点`
+        ? `将删除剪后时间 ${formatTimelineSelectionRange(draftRange, selectionSpans)}；确认后语音附近会对齐安全剪辑点`
         : "当前拖动范围无效，松开后不会删除。",
       safeRange ? "neutral" : "error",
       "selection",
@@ -6450,10 +6719,12 @@ function beginCutTimelineSelection(event) {
       ...draftRange,
       start: rawDraftStart,
       end: rawDraftEnd,
+      editedSelectionStart: rawDraftEditedStart,
+      editedSelectionEnd: rawDraftEditedEnd,
     });
     if (
       !safeRange ||
-      safeRange.end - safeRange.start < CUT_TIMELINE_MANUAL_MIN_RANGE
+      timelineSelectionDuration(safeRange) < CUT_TIMELINE_MANUAL_MIN_RANGE
     ) {
       timelineDeleteRanges = timelineDeleteRanges.filter(
         ({ id }) => id !== draftRange.id,
@@ -6472,7 +6743,7 @@ function beginCutTimelineSelection(event) {
     renderCutTimelineRanges();
     updateTimelineRangeConfirmation();
     updateCutTimelineStatus(
-      `已选择 ${formatCutRange(draftRange.start, draftRange.end)}，可拖动微调，再次点击选区确认删除。`,
+      `已选择剪后时间 ${formatTimelineSelectionRange(draftRange, selectionSpans)}，可拖动微调，再次点击选区确认删除。`,
       "neutral",
       "selection",
     );
@@ -6492,12 +6763,20 @@ function beginTimelineRangeAdjustment(event) {
   const range = timelineDeleteRanges.find(({ id }) => id === rangeId);
   if (!range) return;
   const historyBefore = cloneCutHistorySnapshot();
-  const originalRange = { start: range.start, end: range.end };
+  const originalRange = {
+    start: range.start,
+    end: range.end,
+    editedSelectionStart: range.editedSelectionStart,
+    editedSelectionEnd: range.editedSelectionEnd,
+  };
   const previousSelectedRangeId = selectedTimelineRangeId;
   event.preventDefault();
   event.stopPropagation();
   pauseCutPreview();
   selectedTimelineRangeId = rangeId;
+  const selectionSpans = getEditedTimelineSpans();
+  const editedTotal = editedCutTimelineDuration(selectionSpans);
+  const editedRange = timelineSelectionEditedRange(range, selectionSpans);
   let mode = control.dataset.dragMode;
   if (mode !== "move" && rangeElement.classList.contains("is-narrow")) {
     const rangeBounds = rangeElement.getBoundingClientRect();
@@ -6512,9 +6791,26 @@ function beginTimelineRangeAdjustment(event) {
   }
   const startClientX = event.clientX;
   let hasDragged = false;
-  const total = cutTimelineDuration();
   const transientTimelineStore = window.EditorTimeline.createStore(
-    syncCutTimelineModel(),
+    {
+      duration: editedTotal,
+      tracks: [{
+        id: "cut:pending-adjustment",
+        kind: "cut",
+        name: "待确认删除区间",
+        clips: [{
+          id: cutTimelineClipId(range.id),
+          sourceId: range.id,
+          name: "删除区间",
+          start: editedRange.start,
+          end: editedRange.end,
+          minDuration: CUT_TIMELINE_MANUAL_MIN_RANGE,
+          editable: true,
+          payload: {},
+        }],
+      }],
+      selection: { clipId: cutTimelineClipId(range.id) },
+    },
   );
   transientTimelineStore.selectClip(cutTimelineClipId(range.id), { silent: true });
   const pointerSession = window.EditorTimeline.createPointerSession(
@@ -6524,10 +6820,14 @@ function beginTimelineRangeAdjustment(event) {
       mode,
       startClientX,
       trackWidth: cutFrameTimelineTrack.getBoundingClientRect().width,
-      duration: total,
+      duration: editedTotal,
       onUpdate: (clip) => {
-        range.start = clip.start;
-        range.end = clip.end;
+        applyTimelineEditedSelection(
+          range,
+          clip.start,
+          clip.end,
+          selectionSpans,
+        );
       },
     },
   );
@@ -6543,10 +6843,15 @@ function beginTimelineRangeAdjustment(event) {
     }
     hasDragged = true;
     const clip = pointerSession.update(moveEvent.clientX);
-    seekCutPreview(mode === "end" ? clip.end : clip.start);
+    seekCutPreview(
+      editedTimeToSourceTime(
+        mode === "end" ? clip.end : clip.start,
+        selectionSpans,
+      ),
+    );
     renderCutTimelineRanges();
     updateCutTimelineStatus(
-      `正在调整删除区间 ${formatCutRange(range.start, range.end)}`,
+      `正在调整剪后删除区间 ${formatTimelineSelectionRange(range)}`,
       "neutral",
       "selection",
     );
@@ -6583,7 +6888,7 @@ function beginTimelineRangeAdjustment(event) {
       before: historyBefore,
     });
     updateCutTimelineStatus(
-      `已调整待确认区间 ${formatCutRange(range.start, range.end)}，再次点击选区确认删除。`,
+      `已调整待确认剪后区间 ${formatTimelineSelectionRange(range)}，再次点击选区确认删除。`,
       "neutral",
       "selection",
     );
@@ -6605,6 +6910,34 @@ function cancelPendingTimelineRange(message = "") {
   updateCutTimelineStatus(message);
 }
 
+function commitPendingTimelineRange(range) {
+  const sourceRanges = editedTimelineSelectionToSourceRanges(range);
+  if (sourceRanges.length === 0) return [];
+  const {
+    editedSelectionStart: _editedSelectionStart,
+    editedSelectionEnd: _editedSelectionEnd,
+    ...baseRange
+  } = range;
+  const baseKey = String(baseRange.key || `timeline-${baseRange.id}`);
+  const committedRanges = sourceRanges.map((sourceRange, index) => {
+    const id = index === 0 ? baseRange.id : nextTimelineRangeId++;
+    return {
+      ...baseRange,
+      id,
+      key: index === 0 ? baseKey : `${baseKey}-span-${index + 1}`,
+      ...sourceRange,
+      originalStart: sourceRange.start,
+      originalEnd: sourceRange.end,
+    };
+  });
+  const rangeIndex = timelineDeleteRanges.findIndex(
+    ({ id }) => id === range.id,
+  );
+  if (rangeIndex < 0) return [];
+  timelineDeleteRanges.splice(rangeIndex, 1, ...committedRanges);
+  return committedRanges;
+}
+
 function confirmPendingTimelineRange() {
   if (selectedTimelineRangeId === null || cutControlsLocked) return;
   const range = timelineDeleteRanges.find(
@@ -6612,10 +6945,18 @@ function confirmPendingTimelineRange() {
   );
   if (!range || !timelineRangeInProgress) return;
   stageCutHistoryOperation("删除时间轴区间");
+  const committedRanges = commitPendingTimelineRange(range);
+  if (committedRanges.length === 0) {
+    cancelPendingTimelineRange("未删除：区间没有覆盖可保留的视频。");
+    return;
+  }
   timelineRangeInProgress = false;
   selectedTimelineRangeId = null;
   updateSelectionSummary();
-  scheduleCutPreviewEffect(() => previewSelectedCutRange(range));
+  scheduleCutPreviewEffect(() => previewSelectedCutRange({
+    start: committedRanges[0].start,
+    end: committedRanges.at(-1).end,
+  }));
 }
 
 async function requestTimelineRangeConfirmation(range) {
@@ -6635,7 +6976,7 @@ async function requestTimelineRangeConfirmation(range) {
       eyebrow: "时间轴滑动删除",
       title: "删除这个时间轴区间？",
       message:
-        `将删除 ${formatCutRange(range.start, range.end)}，并自动拼接前后画面。` +
+        `将删除剪后时间 ${formatTimelineSelectionRange(range)}，并自动拼接前后画面。` +
         "语音附近会对齐安全剪辑点；删除后可通过全局撤销恢复，原视频仍会保留。",
       confirmText: "确认删除",
       cancelText: "取消",
@@ -6655,7 +6996,7 @@ async function requestTimelineRangeConfirmation(range) {
     confirmPendingTimelineRange();
   } else {
     updateCutTimelineStatus(
-      `已保留待确认区间 ${formatCutRange(range.start, range.end)}，可继续调整或再次点击确认。`,
+      `已保留待确认剪后区间 ${formatTimelineSelectionRange(range)}，可继续调整或再次点击确认。`,
       "neutral",
       "selection",
     );
@@ -6687,31 +7028,39 @@ function adjustTimelineRangeWithKeyboard(event) {
   event.preventDefault();
   const direction = event.key === "ArrowLeft" ? -1 : 1;
   const delta = direction * (event.shiftKey ? 1 : 0.1);
-  const total = cutTimelineDuration();
+  const spans = getEditedTimelineSpans();
+  const total = editedCutTimelineDuration(spans);
+  const editedRange = timelineSelectionEditedRange(range, spans);
   const mode = control.dataset.dragMode;
   stageCutHistoryOperation("调整时间轴删除区间", {
     coalesceKey: `timeline-adjust:${rangeId}:${mode}`,
   });
   if (mode === "start") {
-    range.start = clamp(
-      range.start + delta,
+    editedRange.start = clamp(
+      editedRange.start + delta,
       0,
-      range.end - CUT_TIMELINE_MANUAL_MIN_RANGE,
+      editedRange.end - CUT_TIMELINE_MANUAL_MIN_RANGE,
     );
-    seekCutPreview(range.start);
   } else if (mode === "end") {
-    range.end = clamp(
-      range.end + delta,
-      range.start + CUT_TIMELINE_MANUAL_MIN_RANGE,
+    editedRange.end = clamp(
+      editedRange.end + delta,
+      editedRange.start + CUT_TIMELINE_MANUAL_MIN_RANGE,
       total,
     );
-    seekCutPreview(range.end);
   } else {
-    const length = range.end - range.start;
-    range.start = clamp(range.start + delta, 0, total - length);
-    range.end = range.start + length;
-    seekCutPreview(range.start);
+    const length = editedRange.end - editedRange.start;
+    editedRange.start = clamp(editedRange.start + delta, 0, total - length);
+    editedRange.end = editedRange.start + length;
   }
+  applyTimelineEditedSelection(
+    range,
+    editedRange.start,
+    editedRange.end,
+    spans,
+  );
+  seekCutPreview(
+    mode === "end" ? range.end : range.start,
+  );
   const semanticRange = alignManualRangeToTranscript(range);
   if (semanticRange) Object.assign(range, semanticRange);
   renderCutTimelineRanges();
@@ -6724,7 +7073,7 @@ function adjustTimelineRangeWithKeyboard(event) {
       ?.focus({ preventScroll: true });
   });
   updateCutTimelineStatus(
-    `已调整待确认区间 ${formatCutRange(range.start, range.end)}，再次点击选区确认删除。`,
+    `已调整待确认剪后区间 ${formatTimelineSelectionRange(range)}，再次点击选区确认删除。`,
     "neutral",
     "selection",
   );
@@ -6738,6 +7087,29 @@ function resetCutPlaybackCursors() {
   cutTimelineTextPlaybackFloorCursor = -1;
   cutTimelineTextPlaybackCursor = -1;
   cutTimelineTextPlaybackLastTime = Number.NEGATIVE_INFINITY;
+}
+
+function finishTranscriptPreviewIfNeeded(
+  sourceTime = cutPreviewVideo.currentTime || 0,
+) {
+  if (!transcriptPreviewRange) return false;
+  const current = Number(sourceTime) || 0;
+  if (
+    current < transcriptPreviewRange.end - CUT_SPEECH_BOUNDARY_EPSILON
+  ) {
+    return false;
+  }
+  const previewEnd = transcriptPreviewRange.end;
+  transcriptPreviewRange = null;
+  pauseCutPreview();
+  cutMediaController()?.seekSource(previewEnd) ??
+    (cutPreviewVideo.currentTime = previewEnd);
+  updateCutTimelineStatus(
+    "当前段落播放结束。",
+    "success",
+    "transcript",
+  );
+  return true;
 }
 
 function skipSelectedRangeDuringPlayback(
@@ -6769,6 +7141,9 @@ function skipSelectedRangeDuringPlayback(
 }
 
 function handleCutPlaybackMediaFrame(sourceTime) {
+  if (finishTranscriptPreviewIfNeeded(sourceTime)) {
+    return { skipped: false };
+  }
   if (skipSelectedRangeDuringPlayback(sourceTime) !== null) {
     resetCutPlaybackCursors();
     return { skipped: true };
@@ -6815,20 +7190,11 @@ function setupCutPreviewControls() {
       0,
       sourceTotal || 0,
     );
-    if (
-      transcriptPreviewRange &&
-      current >=
-        transcriptPreviewRange.end - CUT_SPEECH_BOUNDARY_EPSILON
-    ) {
-      const previewEnd = transcriptPreviewRange.end;
-      pauseCutPreview();
-      transcriptPreviewRange = null;
-      cutMediaController()?.seekSource(previewEnd) ?? (cutPreviewVideo.currentTime = previewEnd);
-      current = previewEnd;
-      updateCutTimelineStatus(
-        "当前段落播放结束。",
-        "success",
-        "transcript",
+    if (finishTranscriptPreviewIfNeeded(current)) {
+      current = clamp(
+        cutPreviewVideo.currentTime || 0,
+        0,
+        sourceTotal || 0,
       );
     }
     if (

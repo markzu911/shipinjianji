@@ -3052,6 +3052,177 @@ def test_retained_transcript_uses_valid_forced_timing_and_rejects_bad_order():
     )
 
 
+def test_timeline_silence_delete_uses_forced_timing_for_character_identity(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    segments = [
+        {
+            "start": 30.0,
+            "end": 40.1,
+            "text": "前文你",
+            "words": [
+                {"text": "前文", "start": 30.0, "end": 37.12},
+                {"text": "你", "start": 37.12, "end": 37.48},
+            ],
+        }
+    ]
+    alignment_cache = {
+        "segments": [
+            {
+                "segmentIndex": 0,
+                "validation": {"valid": True},
+                "characters": [
+                    {"text": "前", "start": 30.0, "end": 30.5},
+                    {"text": "文", "start": 31.5, "end": 32.0},
+                    {"text": "你", "start": 39.85, "end": 40.03},
+                ],
+            }
+        ]
+    }
+    draft = {
+        "textRanges": [],
+        "noSpeechRanges": [],
+        "timelineRanges": [
+            {
+                "start": 32.053,
+                "end": 39.829,
+                "originalStart": 32.053,
+                "originalEnd": 39.829,
+            }
+        ],
+    }
+
+    media_ranges = app_module.resolve_cut_draft_delete_ranges(
+        draft,
+        [],
+        segments,
+        40.1,
+    )
+    assert media_ranges == [{"start": 32.053, "end": 39.829}]
+
+    monkeypatch.setattr(
+        app_module,
+        "load_existing_job_acoustic_alignment",
+        lambda _path, _segments: alignment_cache,
+    )
+    retained = app_module.build_cut_draft_retained_transcript(
+        segments,
+        [],
+        40.1,
+        draft,
+        None,
+    )
+    assert retained["text"] == "前文你"
+    assert retained["segments"][0]["words"][-1]["sourceStart"] == pytest.approx(
+        39.85
+    )
+
+    edge_touch_draft = {
+        "textRanges": [],
+        "noSpeechRanges": [],
+        "timelineRanges": [
+            {
+                "start": 32.096,
+                "end": 32.73,
+                "originalStart": 32.096,
+                "originalEnd": 32.73,
+            },
+            {
+                "start": 39.68,
+                "end": 39.872,
+                "originalStart": 39.68,
+                "originalEnd": 39.872,
+            },
+        ],
+    }
+    edge_touch_retained = app_module.build_cut_draft_retained_transcript(
+        segments,
+        [],
+        40.1,
+        edge_touch_draft,
+        None,
+    )
+    assert edge_touch_retained["text"] == "前文你"
+
+    speech_draft = copy.deepcopy(draft)
+    speech_draft["timelineRanges"][0].update(
+        {
+            "start": 39.86,
+            "end": 40.0,
+            "originalStart": 39.86,
+            "originalEnd": 40.0,
+        }
+    )
+    speech_deleted = app_module.build_cut_draft_retained_transcript(
+        segments,
+        [],
+        40.1,
+        speech_draft,
+        None,
+    )
+    assert speech_deleted["text"] == "前文"
+
+    invalid_alignment = copy.deepcopy(alignment_cache)
+    invalid_alignment["segments"][0]["characters"][1].update(
+        {"start": 29.0, "end": 29.5}
+    )
+    invalid_forced = app_module.build_retained_transcript(
+        segments,
+        [],
+        39.96,
+        timeline_delete_ranges=[{"start": 39.86, "end": 40.0}],
+        timeline_semantic_delete_ranges=[{"start": 39.86, "end": 40.0}],
+        alignment_cache=invalid_alignment,
+    )
+    assert invalid_forced["text"] == "前文你"
+    assert invalid_forced["segments"][0]["words"][-1][
+        "sourceStart"
+    ] == pytest.approx(37.12)
+
+    monkeypatch.setattr(
+        app_module,
+        "load_existing_job_acoustic_alignment",
+        lambda _path, _segments: None,
+    )
+    conservative_fallback = app_module.build_cut_draft_retained_transcript(
+        segments,
+        [],
+        40.1,
+        draft,
+        None,
+    )
+    assert conservative_fallback["text"] == "前文你"
+
+    completed_edit = {
+        "status": "completed",
+        "ranges": [{"start": 32.053, "end": 39.829}],
+        "transcriptRanges": [{"start": 32.053, "end": 39.829}],
+        "textTranscriptRanges": [],
+        "timelineTranscriptRanges": [{"start": 32.053, "end": 39.829}],
+        "outputDuration": 32.324,
+    }
+    completed = app_module.build_existing_edit_retained_transcript(
+        segments,
+        completed_edit,
+        [],
+        alignment_cache,
+    )
+    assert completed is not None
+    assert completed["text"] == "前文你"
+
+    legacy_edit = copy.deepcopy(completed_edit)
+    legacy_edit.pop("textTranscriptRanges")
+    legacy_edit.pop("timelineTranscriptRanges")
+    legacy = app_module.build_existing_edit_retained_transcript(
+        segments,
+        legacy_edit,
+        [],
+        alignment_cache,
+    )
+    assert legacy is not None
+    assert "你" not in legacy["text"]
+
+
 def test_retained_transcript_distributes_multiple_collapsed_tail_characters():
     retained = app_module.build_retained_transcript(
         [

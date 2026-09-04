@@ -36,6 +36,23 @@
 
 每帧更新只消费预先缓存的剪后区间、时间轴宽度/比例和文案元素索引，不得调用 `updateTime()`、重建区间、全量查询 DOM 或重建时间轴结构。文案与时间轴高亮都要分别保存“最新开始项 floor cursor”和“当前命中 active cursor”：向前播放时复用当前命中项，重叠短项结束后允许恢复仍有效的长项；向后 seek 时通过二分重新定位 floor，再重算 active，不能把两个游标合并。
 
+有限文案试听的终点 gate 必须是每帧业务处理的第一优先级，顺序固定为“结束当前段试听 -> 跳过删除区间 -> 更新视觉”。展示段尾可能落入相邻文字的物理删除范围；如果先执行删除跳转，播放头会越过删除尾并泄露下一段声音，即使后续 `timeupdate` 又把 UI 校准回展示段尾。逐帧路径和 `timeupdate` 降级路径必须调用同一个幂等结束 helper，禁止维护两份停止逻辑或新增计时器。
+
+结束 helper 必须先快照展示段尾并清空活动试听状态，再 pause、精确 seek 到展示段尾并发布一次完成反馈。pause/seek 可能同步触发 frame、`seeking`、`seeked` 或 `timeupdate`；清空后的重入必须为 no-op，且原 frame 命中终点后必须立即返回，不得继续用旧 source time 跳过删除范围或更新视觉。
+
+```javascript
+// Wrong: the physical delete range can overlap the display end.
+skipSelectedRangeDuringPlayback(sourceTime);
+finishTranscriptPreviewIfNeeded(sourceTime);
+
+// Correct: the finite preview owns the boundary before continuous playback.
+if (finishTranscriptPreviewIfNeeded(sourceTime)) return;
+if (skipSelectedRangeDuringPlayback(sourceTime) !== null) return;
+updateCutPlaybackVisualFrame(sourceTime);
+```
+
+行为测试必须构造“展示段尾位于物理删除范围内部”的状态，断言只发生一次 pause、展示段尾 seek 和完成反馈，重复回调幂等，段内仍允许试听且无活动范围时继续跳过删除。真实 Chromium 还必须点击实际“播放当前段落”按钮，逐帧记录最大 `currentTime`，验证一个 30fps 帧预算内暂停、未到达删除尾/下一保留段、最终时间等于 `displayEnd`，并断言基础 video `src/load()` 均为零。
+
 ## 状态所有权
 
 - 轨道结构优先经 `EditorTimeline.createStore` 归一化和修改，不直接散改复制对象。
@@ -119,6 +136,7 @@ buildCutTimelineThumbnails({ force?: boolean }) -> Promise<void>
 - in-flight identity 必须在调用 `fetch()` 前登记，保证同步抛错和异步拒绝都由同一 `finally` 释放队列；新命令取消旧 commit effect 时必须同时丢弃旧预览，服务端校准已直接同步 Store 时后续 effect 不得重复提交等价状态。
 - HTTP 2xx 表示服务端已经持久化草稿。响应 revision 必须是正安全整数且严格大于请求 revision；一旦通过此门槛，前端必须先单调推进 `cutDraftRevision`，后续结构/对齐错误不得让下一请求继续使用旧 revision。
 - 规范化响应使用结构命令身份校验：text/no-speech/timeline/split 各集合必须 key 非空且唯一、数量和 key 集合一致；文字、`automaticNoSpeechInitialized`、`boundaryMode` 和 `splitClipKey` 必须一致。所有合法时间数值以服务端响应为权威，未知 mode、缺失/重复/额外 key 或 split ownership 变化必须拒绝。
+- `retainedTranscript` 是独立于范围数值的字符身份权威。安装前必须整体验证 job/signature/revision、`editableSegmentId`、有效源/剪后锚点和每个 owner 内的字符子序列；任一部分无效时拒绝整份投影并保守回退。即使 text/no-speech/timeline/split 数值完全未变，成功安装投影本身也必须先发生，再让右侧文案和底部时间轴在同一批次执行 `replace`；该批结构失效只能保留刚验证的投影，普通编辑、job/signature/revision 变化仍必须清空它。刷新和文字保存后的投影重载必须复用同一路径，禁止只重绘其中一个表面。
 - 只有请求仍等于当前 desired 时才能原子安装完整服务端 text/no-speech/timeline/split snapshot；先完成全部校验和构造，再一次性替换已提交状态，并保留用户尚未提交的时间轴 pending 选区。安装后必须重建 post-normalization payload/signature，用它更新 desired、ack、history endpoint、retained projection、本地草稿和 Store，最后才显示“已保存”。
 - 旧响应可以推进 acknowledged revision，但不得安装其规范化 snapshot 或覆盖较新的 desired/pending 状态；后续请求必须使用最新 revision 重放一次 latest-state PUT。
 - `flushCutDraftSave()` 必须先提交待处理 frame/effect、同步落盘 dirty history、取消 debounce、排空 in-flight，并且只在当前 job 的 desired signature 已由当前 revision 确认后返回。
@@ -133,6 +151,7 @@ buildCutTimelineThumbnails({ force?: boolean }) -> Promise<void>
 | 新 source 或缩略图密度 | cancel 旧 owner，只允许新 generation 写缓存和 DOM |
 | 首个 PUT 在途时继续编辑 | 不并发发送；首个响应推进 revision，随后发送一个 latest-state PUT |
 | 合法规范化改变任意时间数值 | 完整安装服务端 snapshot，重建 post-normalization desired/ack/history/projection |
+| 范围数值未变但 retained 字符身份变化 | 先安装通过整体校验的投影，再同批 `replace` 右侧文案与时间轴；不得停留在 optimistic DOM |
 | 旧响应不是当前 desired | 只推进 revision，不覆盖当前已提交或 pending 状态；用新 revision 重放 latest desired |
 | 2xx 响应结构缺失/重复/额外 key，或文字/mode/split ownership 变化 | 不安装、不显示成功；保留已提交 revision，使下一不同签名可补偿保存 |
 | revision 非正安全整数、未递增或缺失 | 拒绝响应，不推进本地 revision，不显示成功 |
@@ -154,6 +173,7 @@ buildCutTimelineThumbnails({ force?: boolean }) -> Promise<void>
 - 覆盖 burst、在途编辑、revision rebase、服务端文字/静音/timeline/split 规范化、失败重试、生成前 flush、刷新恢复，以及同帧两命令两次撤销。
 - 结构校验必须覆盖缺失/重复/额外 key、文字变化、未知 `boundaryMode`、split ownership 变化和非法 revision；拒绝后下一不同签名必须使用已提交的新 revision 恢复同步。
 - 真实浏览器必须覆盖 `规范化删除 -> undo 服务端清空 -> refresh 保持空 -> redo 用最新 revision 恢复 -> refresh`，并同时断言 API、localStorage、history 和 Store；规范化旧响应还要证明不会覆盖在途新编辑或 pending 时间轴选区。
+- 手动时间轴删除的真实浏览器回归必须逐字符比较右侧文案与底部时间轴，并覆盖“范围数值不变、服务端 forced retained 字符身份变化”、刷新、文字保存、undo/redo；全过程基础 video `src/load()` 增量为 0。Node 契约还必须拒绝非法 owner、无效锚点和不属于 owner 原文字符子序列的整份投影。
 - cut frame 前后保持 ArtTool tab、模板 listbox、selection、document/video/tool root identity。
 
 #### 7. Wrong vs Correct
@@ -369,7 +389,7 @@ split_range["end"] = split_range["originalEnd"]
 
 - `selectedRanges` 与 `selectedNoSpeechRanges` 分别是文字和长空白删除的主状态；保存、生成和撤销/重做只消费这两个现有集合，不新增“自动删除”副本；
 - AI 建议的原始词级范围可以作为稳定展示边界，但不能作为第二套删除状态；
-- `buildSegmentTextRuns` 按单词中点投影删除状态和展示边界；普通文字与“时间轴已删除”只合并 `kind`、`presentationKey` 均相同的相邻词，连续“恢复”文字则允许跨 `presentationKey` 合并为一行并聚合全部 `rangeKeys`；“恢复”状态只来自 `selectedRanges` 的 `originalStart/originalEnd`，“时间轴已删除”只来自已提交的 `timelineRanges`，文字静音扩展和 `noSpeechRanges` 不得改变文案样式；
+- `buildSegmentTextRuns` 逐字符投影删除状态和展示边界；普通文字与“时间轴已删除”只合并 `kind`、`presentationKey` 均相同的相邻字符，连续“恢复”文字则允许跨 `presentationKey` 合并为一行并聚合全部 `rangeKeys`；“恢复”状态只来自 `selectedRanges` 的 `originalStart/originalEnd`。“时间轴已删除”的字符身份来自与当前 job/signature/revision 匹配的服务端 retained projection，通过 `editableSegmentId`、字符顺序和 source anchors 对齐；投影缺失、过期或 owner 无效时保守保留。文字静音扩展和 `noSpeechRanges` 不得改变文案样式；
 - `suggestionTextRangeKeysAtTime()` 同样必须逐 range 优先读取 `originalStart/originalEnd`，只有历史 suggestion 缺少字段时才回退物理 `start/end`。声学扩展可以越过相邻未选字符的时间中点，但不得改变其 `presentationKey` 或把“人”“你身”拆成孤立行；
 - `currentNoSpeechSuggestions` 同样只提供稳定展示边界；文字片段与空白建议按源时间排序，每个片段独立渲染为 `li[data-display-key][data-display-start][data-display-end]`；
 - 空白行用 `data-no-speech-id` 连接 `selectedNoSpeechRanges`，不伪造可编辑文字段 index；播放高亮同时比较片段时间和稳定 key。
@@ -406,7 +426,7 @@ const mediaRanges = mergeCutRanges(
 );
 ```
 
-前后端的保护顺序都是：按来源组装自动范围 -> 从识别文字中精确扣除语义文字删除和已提交手动删除 -> 从自动范围扣除余下保留片段 -> 在感知保留片段的前提下合并。禁止只根据“某个手动范围与词相交”就使整个词失去保护。
+前后端的保护顺序都是：按来源组装自动范围 -> 从识别文字中精确扣除语义文字删除和服务端确认的手动字符删除 -> 从自动范围扣除余下保留片段 -> 在感知保留片段的前提下合并。禁止只根据“某个手动范围与粗 ASR 字符相交”就使整个字符失去保护；前端本地 retained projection 只处理文字语义范围，不猜测 timeline-only 字符身份。
 
 回归测试必须覆盖独立行的静态契约和 Node 行为契约，并在真实浏览器验证：文字与空白按源时间排序，但可见时间全部按剪后时间单调不降；完整删除的文案/空白显示拼接点而非源时间；连续已删文字跨 range key 只显示一行且一次恢复全部聚合 key；保留文字仍拆分两侧删除组；时间轴删除分组不变；单独重删只影响目标行；空白恢复后不再被文字静音扩展删除；删除空白不使相邻文字出现删除线/恢复按钮且不从预览时间轴消失；小于 `0.12s` 的短保留文字不被两侧自动范围合并；手动范围只删除词的一部分时其余部分仍保留；撤销/重做与刷新持久化正常；播放高亮命中当前片段；375px 无横向溢出。文案列表是用户确认的密度特例：行、圆点、播放目标及内部排版按原值 `50%` 压缩（`64px -> 32px`、`44px -> 22px`），边框仍不少于 1 个设备像素；其他移动操作目标仍遵循通用 44px 规则。
 
@@ -487,6 +507,10 @@ payload.selectionEnd = target.characterEnd;
 - 文案点击、AI 建议初始化、草稿恢复和撤销/重做都必须经 `canonicalizeTextSelectionRange` / `normalizeRestoredTextDeleteRange` 扩展到相交字符，并用规范后的边界重建 map key。
 - `buildSegmentTextRuns` 继续逐字符投影删除状态；文字静音扩展和空白范围不能使未选字符进入恢复态。手动 `timelineRanges` 不使用字符扩展。
 - 手动时间轴范围的 `originalStart/originalEnd` 只 clamp 到媒体时长并保留用户选择的精确起止；二次确认后仍可只覆盖字符的一部分。服务端可以把物理 `start/end` 在 `0.20s` 内吸附到可靠的字符声学转换，前端必须原子应用草稿响应，同时保留 `original*` 供文字删除态、撤销/重做和 retained transcript 使用。
+- 时间轴拖选发生在剪后连续坐标中。pending range 必须保存 `editedSelectionStart/editedSelectionEnd`；确认时遍历 `getEditedTimelineSpans()`，将每个交集映射为独立源 `timelineRanges` 并原子替换 pending range。禁止把跨既有删除洞的剪后选区仅用两个源端点扁平化。
+- pending range 的轨道标签、状态文字和确认弹窗必须显示 `editedSelectionStart/editedSelectionEnd` 对应的剪后时间；字段缺失时才把源语义端点映射到剪后时间。持久化仍只保存拆分后的源坐标，界面不得把源时间伪装成当前 ruler 时间。
+- 文案宽度可以在正常语速下提高时间轴每秒像素，但全局比例不得超过 `72px/s`；物理/语义错位产生的微秒级或其他坍缩 retained span 不能把整条时间轴放大到数百像素每秒。
+- 拆分后的首个源范围保留 pending 的 `id/key`，后续范围使用递增 id 和稳定派生 key；最短选区校验使用剪后选择时长，不能被源时间删除洞虚增。
 - `generateCut()` 与统一 compose 必须先等待草稿保存队列完成，再携带当前 `cutDraftRevision`；revision 只是服务端权威草稿的并发令牌，不得增加 ProjectStore 的用户编辑 revision。旧响应只有在 job、请求签名和 revision 仍匹配时才能更新预览。
 
 具体字段、回退矩阵和跨层测试见后端规格 `media-and-timeline.md` 的“ASR 原始 word 与展示分词使用双层时间契约”。

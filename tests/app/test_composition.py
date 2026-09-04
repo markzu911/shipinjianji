@@ -330,6 +330,8 @@ def test_preview_composition_revision_uses_authoritative_cut_draft(
         edit = app_module.JOBS[job_id]["edit"]
     assert edit["ranges"] == [{"start": 0.82, "end": 2.14}]
     assert edit["transcriptRanges"] == [{"start": 1.0, "end": 2.0}]
+    assert edit["textTranscriptRanges"] == [{"start": 1.0, "end": 2.0}]
+    assert edit["timelineTranscriptRanges"] == []
 
 
 def test_preview_composition_allows_unchanged_timeline(

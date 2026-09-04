@@ -2009,7 +2009,7 @@ h1 {
   font-weight: 700;
   line-height: 10px;
   overflow-wrap: anywhere;
-  text-align: justify;
+  text-align: center;
   white-space: normal;
 }
 
@@ -2018,8 +2018,7 @@ h1 {
   width: 100%;
   max-height: 18px;
   overflow: hidden;
-  text-align: justify;
-  text-align-last: justify;
+  text-align: center;
   word-break: break-all;
 }
 

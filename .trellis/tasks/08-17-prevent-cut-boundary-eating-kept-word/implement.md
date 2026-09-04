@@ -10,6 +10,9 @@
 8. 前端逐段从 `words -> asrWords -> segment` 派生字符 token，使文字选择只规范到相交字符，同时保留逐字显示、播放与文字修正能力。
 9. 在后端草稿解析和生成入口统一规范文字语义范围到安全字符单元；原始 `asrWords` 不参与不可分割删除，手动时间轴范围保持精确语义。
 10. 增加 `一起/给/一起/给` 对 `一起/给一/起给`、`觉得/你` 对 `得你` 的建议吸附、PUT、预览/生成、retained transcript、恢复/撤销投影回归，并保留仅 `asrWords`/segment timing 的逐段兼容测试。
+11. 保留文字与手动时间轴的 transcript 删除来源；手动范围按复验有效的 forced 字符区间判断身份，缺失证据时保守保留，并增加 `32.053–39.829s` 空白选区不误删 `39.850s` 起音后文的草稿与生成回归。
+12. 将跨既有删除洞的剪后连续选区拆成不连续源 `timelineRanges`；使用服务端 retained projection 统一前端文字身份，并为 forced 字符加入有效覆盖阈值及 Node、后端和 Chromium 回归。
+13. 将 timeline forced 字符身份收紧为严格多数覆盖，以同一证据门控 coarse 删除 run；限制 VAD-only 远端吸附、异常坍缩文案对全局时间轴缩放的放大，并让待确认轨道标签、状态和弹窗统一显示剪后时间。
 
 ## Risk And Rollback Points
 

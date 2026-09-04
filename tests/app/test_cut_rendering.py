@@ -401,6 +401,8 @@ def test_cut_endpoint_uses_saved_shared_media_range_and_semantic_transcript(
     assert job["edit"]["ranges"] == [{"start": 0.82, "end": 2.14}]
     assert job["edit"]["requestedRanges"] == [{"start": 0.82, "end": 2.14}]
     assert job["edit"]["transcriptRanges"] == [{"start": 1.0, "end": 2.0}]
+    assert "textTranscriptRanges" not in job["edit"]
+    assert "timelineTranscriptRanges" not in job["edit"]
     assert job["edit"]["transcript"]["text"] == "保留保留"
 
 
@@ -493,6 +495,10 @@ def test_cut_endpoint_revision_uses_authoritative_persisted_draft(
     ]
     assert current.json()["ranges"] == [{"start": 0.82, "end": 2.14}]
     assert current.json()["transcriptRanges"] == [{"start": 1.0, "end": 2.0}]
+    with app_module.JOBS_LOCK:
+        edit = app_module.JOBS[job_id]["edit"]
+    assert edit["textTranscriptRanges"] == [{"start": 1.0, "end": 2.0}]
+    assert edit["timelineTranscriptRanges"] == []
 
 
 def test_cut_revision_rejects_authoritative_draft_without_delete_ranges():
@@ -613,6 +619,108 @@ def test_cut_endpoint_keeps_ni_when_raw_asr_token_crosses_text_boundary(
             "sourceEnd": 0.6,
         }
     ]
+
+
+def test_cut_endpoint_keeps_following_text_after_timeline_silence_delete(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    job_id = "58585858-5858-4858-8858-585858585858"
+    job_dir = app_module.jobs_directory() / job_id
+    job_dir.mkdir(parents=True)
+    video_path = job_dir / "source.mp4"
+    video_path.write_bytes(b"source")
+    segments = [
+        {
+            "start": 30.0,
+            "end": 40.1,
+            "text": "前文你",
+            "words": [
+                {"text": "前文", "start": 30.0, "end": 37.12},
+                {"text": "你", "start": 37.12, "end": 37.48},
+            ],
+        }
+    ]
+    alignment_cache = {
+        "segments": [
+            {
+                "segmentIndex": 0,
+                "validation": {"valid": True},
+                "characters": [
+                    {"text": "前", "start": 30.0, "end": 30.5},
+                    {"text": "文", "start": 31.5, "end": 32.0},
+                    {"text": "你", "start": 39.85, "end": 40.03},
+                ],
+            }
+        ]
+    }
+    timeline_range = {
+        "key": "timeline-silence",
+        "start": 32.053,
+        "end": 39.829,
+        "originalStart": 32.053,
+        "originalEnd": 39.829,
+    }
+    draft = {
+        "schemaVersion": 1,
+        "revision": 1,
+        "automaticNoSpeechInitialized": True,
+        "textRanges": [],
+        "noSpeechRanges": [],
+        "timelineRanges": [timeline_range],
+    }
+    with app_module.JOBS_LOCK:
+        app_module.JOBS[job_id] = {
+            "id": job_id,
+            "filename": "source.mp4",
+            "status": "completed",
+            "duration": 40.1,
+            "result": {"segments": segments, "suggestions": []},
+            "cutDraft": draft,
+            "edit": None,
+        }
+        app_module.JOB_FILES[job_id] = video_path
+
+    def fake_render_cut_video(
+        _input_path: Path,
+        output_path: Path,
+        ranges: list[dict[str, float]],
+        _duration: float,
+    ) -> None:
+        assert ranges == [{"start": 32.053, "end": 39.829}]
+        output_path.write_bytes(b"edited")
+
+    monkeypatch.setattr(app_module, "render_cut_video", fake_render_cut_video)
+    monkeypatch.setattr(
+        app_module,
+        "load_existing_job_acoustic_alignment",
+        lambda _path, _segments: alignment_cache,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "decode_cut_audio_samples",
+        lambda _path: (_ for _ in ()).throw(RuntimeError("no decoded audio")),
+    )
+
+    with TestClient(app_module.app) as client:
+        response = client.post(
+            f"/api/transcriptions/{job_id}/cuts",
+            json={
+                "ranges": [{"start": 32.053, "end": 39.829}],
+                "cutDraftRevision": 1,
+            },
+        )
+        job = client.get(f"/api/transcriptions/{job_id}").json()
+
+    assert response.status_code == 202, response.text
+    assert job["edit"]["ranges"] == [{"start": 32.053, "end": 39.829}]
+    assert job["edit"]["transcriptRanges"] == [
+        {"start": 32.053, "end": 39.829}
+    ]
+    assert job["edit"]["textTranscriptRanges"] == []
+    assert job["edit"]["timelineTranscriptRanges"] == [
+        {"start": 32.053, "end": 39.829}
+    ]
+    assert job["edit"]["transcript"]["text"] == "前文你"
 
 
 def test_probe_video_dimensions(sample_video: Path):

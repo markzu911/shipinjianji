@@ -26,6 +26,17 @@
 - 时间轴缩略帧可以继续按源视频时间缓存，但投影到剪后时间轴时只能使用保留区采样帧，并按相邻可见帧的剪后时间中点从 `0%` 到 `100%` 连续铺设；开头删除、交错删除和结尾删除都不得留下空白。删除或恢复只重算投影，不能因此重新创建 extractor 或增加抽帧次数。
 - 不新增解释功能的营销文案；状态文字只说明当前结果、错误和可执行下一步。
 
+### 文案轨标签排版
+
+文案轨片段的宽度只表达剪后时间范围，不能参与字符间距分配。`.cut-timeline-text-segment-label` 使用自然居中排版并保留 `word-break: break-all`；禁止使用 `text-align-last: justify`，否则删除后重绘产生的宽片段会把中文末行逐字拉满。修改该规则时，真实浏览器测试必须在删除片段后同时断言标签文本不变、`textAlign === "center"` 且 `textAlignLast !== "justify"`。
+
+```css
+.cut-timeline-text-segment-label {
+  text-align: center;
+  word-break: break-all;
+}
+```
+
 ### 全应用紧凑密度与预览锁定
 
 应用操作界面的紧凑密度由 `styles.css` 根级 token 和限定作用域的组件规则统一投影；禁止对 `html`、`body`、工作区或预览祖先使用全局 `zoom` / `transform: scale()`。紧凑化优先减少 padding、margin、gap 和次级字号，移动端主要输入与按钮仍保持约 `44px` 命中高度。

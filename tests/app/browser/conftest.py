@@ -642,6 +642,103 @@ def seeded_playback_performance_editor_job(
 
 
 @pytest.fixture
+def seeded_segment_preview_spillover_editor_job(
+    seeded_editor_job: SeededEditorJob,
+) -> SeededEditorJob:
+    media_duration = 3.0
+    playback_path = seeded_editor_job.video_path.with_name(
+        "browser-segment-preview-spillover.mp4"
+    )
+    subprocess.run(
+        [
+            app_module.get_ffmpeg_binary("ffmpeg"),
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=#152433:s=640x360:r=30:d={media_duration}",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=440:sample_rate=48000:duration={media_duration}",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-movflags",
+            "+faststart",
+            "-shortest",
+            str(playback_path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    segment = {
+        "id": 0,
+        "start": 0.2,
+        "end": 2.4,
+        "text": "当前段落删除文字下一段落",
+        "words": [
+            {"text": "当前段落", "start": 0.2, "end": 1.0},
+            {"text": "删除文字", "start": 1.0, "end": 1.4},
+            {"text": "下一段落", "start": 1.4, "end": 2.4},
+        ],
+    }
+    with app_module.JOBS_LOCK:
+        job = app_module.JOBS[seeded_editor_job.job_id]
+        job["filename"] = playback_path.name
+        job["duration"] = media_duration
+        job["result"].update(
+            {
+                "text": str(segment["text"]),
+                "duration": media_duration,
+                "mediaDuration": media_duration,
+                "segments": [segment],
+                "editableSegments": [copy.deepcopy(segment)],
+                "suggestions": [],
+                "noSpeechSuggestions": [],
+                "audioQuietRanges": [],
+            }
+        )
+        job["cutDraft"] = {
+            "schemaVersion": 1,
+            "revision": 1,
+            "automaticNoSpeechInitialized": True,
+            "textRanges": [
+                {
+                    "key": "1.000-1.400",
+                    "start": 0.9,
+                    "end": 1.8,
+                    "originalStart": 1.0,
+                    "originalEnd": 1.4,
+                    "text": "删除文字",
+                    "adjacentSilenceBefore": 0.1,
+                    "adjacentSilenceAfter": 0.4,
+                }
+            ],
+            "noSpeechRanges": [],
+            "timelineRanges": [],
+            "boundaryDiagnostics": [],
+            "acousticAlignment": {"status": "unavailable"},
+            "updatedAt": "2026-09-03T00:00:00+00:00",
+        }
+        app_module.JOB_FILES[seeded_editor_job.job_id] = playback_path
+    app_module.persist_job_snapshot(
+        seeded_editor_job.job_id,
+        raise_on_error=True,
+    )
+    return seeded_editor_job
+
+
+@pytest.fixture
 def seeded_portrait_editor_job(
     seeded_editor_job: SeededEditorJob,
 ) -> SeededEditorJob:

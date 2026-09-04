@@ -8,6 +8,8 @@ import wave
 from pathlib import Path
 from typing import Any
 
+from .funasr_runtime import load_funasr_auto_model
+
 
 VAD_NAME = "funasr-fsmn-vad"
 MODEL_ALIAS = "fsmn-vad"
@@ -115,7 +117,7 @@ def _load_model(model_cache_dir: Path) -> Any:
             os.environ["MODELSCOPE_CACHE"] = str(model_cache_dir)
             try:
                 import torch
-                from funasr import AutoModel
+                AutoModel = load_funasr_auto_model()
             except (ImportError, OSError) as exc:
                 raise VoiceActivityFailure(
                     "runtime_unavailable",

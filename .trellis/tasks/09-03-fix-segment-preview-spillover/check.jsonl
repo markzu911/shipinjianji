@@ -1,0 +1,5 @@
+{"file":".trellis/spec/frontend/architecture-and-state.md","reason":"核对唯一帧时钟、状态所有权和回调顺序没有漂移。"}
+{"file":".trellis/spec/frontend/api-and-media.md","reason":"核对媒体元素不被重载且播放控制边界保持兼容。"}
+{"file":".trellis/spec/testing/index.md","reason":"核对单元/契约/浏览器测试覆盖与质量门。"}
+{"file":".trellis/spec/testing/browser-workflows.md","reason":"核对真实浏览器回归的交互路径、时序和资源断言。"}
+{"file":".trellis/tasks/09-03-fix-segment-preview-spillover/research/bug-analysis.md","reason":"核对根因对应的实现顺序、幂等性和回归覆盖。"}
