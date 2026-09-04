@@ -877,3 +877,24 @@
 ### Status
 
 [OK] **Completed**
+
+
+## Session 40: 修复裁剪边界与文案播放一致性
+
+**Date**: 2026-09-04
+**Task**: 修复裁剪边界与文案播放一致性
+**Branch**: `develop`
+
+### Summary
+
+统一手动裁剪、forced 字符边界、retained transcript 与前端双表面投影，修复空白误删、试听越界、时间轴缩放及裁剪后文案不一致；全量测试 518 passed, 1 skipped。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `b326d70` | (see git log) |
+
+### Status
+
+[OK] **Completed**

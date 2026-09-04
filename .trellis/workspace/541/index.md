@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 39
-- **Last Active**: 2026-09-01
+- **Total Sessions**: 40
+- **Last Active**: 2026-09-04
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~879 | Active |
+| `journal-1.md` | ~900 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 40 | 2026-09-04 | 修复裁剪边界与文案播放一致性 | `b326d70` | `develop` |
 | 39 | 2026-09-01 | 同步开发与生产版本 | `464b8f6`, `3d99851` | `master` |
 | 38 | 2026-08-31 | 修复重新开始被草稿保存阻塞 | `934e69f` | `master` |
 | 37 | 2026-08-31 | 修复规范化剪辑草稿撤销状态分叉 | `a4b435f` | `master` |
